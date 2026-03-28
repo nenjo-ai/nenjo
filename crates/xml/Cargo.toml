@@ -1,0 +1,19 @@
+[package]
+name = "nenjo-xml"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "XML serialization and template rendering for structured LLM prompt context"
+readme = "README.md"
+keywords = ["ai-agents", "xml", "templates", "prompts", "context-engineering"]
+categories = ["template-engine", "encoding"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+tracing = "0.1"
+minijinja = "2"
+quick-xml = { version = "0.39.2", features = ["serialize"] }

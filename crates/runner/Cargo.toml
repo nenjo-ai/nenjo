@@ -1,0 +1,20 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Agent worker runner for the Nenjo platform"
+
+[dependencies]
+harness = { workspace = true }
+nenjo-eventbus = { workspace = true, features = ["nats"] }
+nenjo-events = { workspace = true }
+tokio = { version = "1.49", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1.0"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-util = "0.7"

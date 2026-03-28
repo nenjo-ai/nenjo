@@ -1,0 +1,691 @@
+use crate::providers::ModelProviders;
+use anyhow::{Context, Result};
+use directories::UserDirs;
+use nenjo::AgentConfig;
+use nenjo_events::Capability;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+
+use std::path::{Path, PathBuf};
+use toml;
+
+// ── Top-level config ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// The `.nenjo/` directory (e.g. `~/.nenjo/`) — computed, not serialized.
+    #[serde(skip)]
+    pub config_dir: PathBuf,
+    /// Workspace directory (e.g. `~/.nenjo/workspace/`) — computed, not serialized.
+    #[serde(skip)]
+    pub workspace_dir: PathBuf,
+    /// Directory for cached bootstrap data (`~/.nenjo/data/`) — computed, not serialized.
+    #[serde(skip)]
+    pub data_dir: PathBuf,
+
+    /// Base URL for the backend API.
+    #[serde(default = "default_backend_api_url")]
+    pub backend_api_url: String,
+    /// API key attached to every request to the backend.
+    pub api_key: String,
+    /// NATS server URL for direct backend↔worker communication.
+    #[serde(default = "default_nats_url")]
+    pub nats_url: String,
+
+    /// Api keys for the llm model providers
+    pub model_provider_api_keys: HashMap<ModelProviders, String>,
+
+    #[serde(default)]
+    pub autonomy: AutonomyConfig,
+
+    #[serde(default)]
+    pub reliability: ReliabilityConfig,
+
+    #[serde(default)]
+    pub agent: AgentConfig,
+
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
+    #[serde(default)]
+    pub browser: BrowserConfig,
+
+    #[serde(default)]
+    pub http_request: HttpRequestConfig,
+
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+
+    #[serde(default)]
+    pub web_fetch: WebFetchConfig,
+
+    /// Worker capabilities — which command types this worker handles.
+    /// Empty means all capabilities (full runner mode).
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
+}
+
+fn default_backend_api_url() -> String {
+    "https://api.nenjo.ai".to_string()
+}
+
+fn default_nats_url() -> String {
+    "tls://nats.nenjo.ai".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ── Browser (friendly-service browsing only) ───────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrowserConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+// ── Web search ───────────────────────────────────────────────────
+
+/// Web search tool configuration (`[web_search]` section).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// Enable `web_search_tool` for web searches (default: true, uses DuckDuckGo)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Search provider: "duckduckgo" (free, no API key) or "brave" (requires API key)
+    #[serde(default = "default_web_search_provider")]
+    pub provider: String,
+    /// Brave Search API key (required if provider is "brave")
+    #[serde(default)]
+    pub brave_api_key: Option<String>,
+    /// Maximum results per search (1-10)
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: usize,
+    /// Request timeout in seconds
+    #[serde(default = "default_web_search_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_web_search_provider() -> String {
+    "duckduckgo".into()
+}
+
+fn default_web_search_max_results() -> usize {
+    5
+}
+
+fn default_web_search_timeout_secs() -> u64 {
+    15
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: default_web_search_provider(),
+            brave_api_key: None,
+            max_results: default_web_search_max_results(),
+            timeout_secs: default_web_search_timeout_secs(),
+        }
+    }
+}
+
+// ── Web fetch ────────────────────────────────────────────────────
+
+/// Web fetch tool configuration (`[web_fetch]` section).
+///
+/// Fetches web pages and converts HTML to plain text for LLM consumption.
+/// Domain filtering: `allowed_domains` controls which hosts are reachable (use `["*"]`
+/// for all public hosts). `blocked_domains` takes priority over `allowed_domains`.
+/// If `allowed_domains` is empty, all requests are rejected (deny-by-default).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebFetchConfig {
+    /// Enable `web_fetch` tool for fetching web page content
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allowed domains for web fetch (exact or subdomain match; `["*"]` = all public hosts)
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Blocked domains (exact or subdomain match; always takes priority over allowed_domains)
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    /// Maximum response size in bytes (default: 500KB, plain text is much smaller than raw HTML)
+    #[serde(default = "default_web_fetch_max_response_size")]
+    pub max_response_size: usize,
+    /// Request timeout in seconds (default: 30)
+    #[serde(default = "default_web_fetch_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_web_fetch_max_response_size() -> usize {
+    500_000 // 500KB
+}
+
+fn default_web_fetch_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for WebFetchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_domains: vec!["*".into()],
+            blocked_domains: vec![],
+            max_response_size: default_web_fetch_max_response_size(),
+            timeout_secs: default_web_fetch_timeout_secs(),
+        }
+    }
+}
+
+// ── HTTP request tool ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HttpRequestConfig {
+    /// Enable `http_request` tool for API interactions
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allowed domains for HTTP requests (exact or subdomain match)
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Maximum response size in bytes (default: 1MB)
+    #[serde(default = "default_http_max_response_size")]
+    pub max_response_size: usize,
+    /// Request timeout in seconds (default: 30)
+    #[serde(default = "default_http_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_http_max_response_size() -> usize {
+    1_000_000 // 1MB
+}
+
+fn default_http_timeout_secs() -> u64 {
+    30
+}
+
+// ── Memory ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+}
+
+fn default_memory_backend() -> String {
+    "markdown".into()
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_memory_backend(),
+        }
+    }
+}
+
+// ── Autonomy / Security ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomyConfig {
+    pub workspace_only: bool,
+    pub blocked_commands: Vec<String>,
+    pub forbidden_paths: Vec<String>,
+    pub max_actions_per_hour: u32,
+    pub max_cost_per_day_cents: u32,
+
+    /// Require explicit approval for medium-risk shell commands.
+    #[serde(default = "default_true")]
+    pub require_approval_for_medium_risk: bool,
+
+    /// Block high-risk shell commands even if not on the blocklist.
+    #[serde(default = "default_true")]
+    pub block_high_risk_commands: bool,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            workspace_only: true,
+            blocked_commands: vec![
+                // Destructive / filesystem
+                "rm".into(),
+                "mkfs".into(),
+                "dd".into(),
+                // System power
+                "shutdown".into(),
+                "reboot".into(),
+                "halt".into(),
+                "poweroff".into(),
+                // Privilege escalation
+                "sudo".into(),
+                "su".into(),
+                // Permissions / user management
+                "chown".into(),
+                "chmod".into(),
+                "useradd".into(),
+                "userdel".into(),
+                "usermod".into(),
+                "passwd".into(),
+                // Mount / unmount
+                "mount".into(),
+                "umount".into(),
+                // Firewall
+                "iptables".into(),
+                "ufw".into(),
+                "firewall-cmd".into(),
+                // Network / data exfiltration
+                "curl".into(),
+                "wget".into(),
+                "nc".into(),
+                "ncat".into(),
+                "netcat".into(),
+                "scp".into(),
+                "ssh".into(),
+                "ftp".into(),
+                "telnet".into(),
+                // Process / service management
+                "killall".into(),
+                "kill".into(),
+                "pkill".into(),
+                "crontab".into(),
+                "at".into(),
+                "systemctl".into(),
+                "service".into(),
+            ],
+            forbidden_paths: vec![
+                "/etc".into(),
+                "/root".into(),
+                "/home".into(),
+                "/usr".into(),
+                "/bin".into(),
+                "/sbin".into(),
+                "/lib".into(),
+                "/opt".into(),
+                "/boot".into(),
+                "/dev".into(),
+                "/proc".into(),
+                "/sys".into(),
+                "/var".into(),
+                "/tmp".into(),
+                "~/.ssh".into(),
+                "~/.gnupg".into(),
+                "~/.aws".into(),
+                "~/.config".into(),
+            ],
+            max_actions_per_hour: 1000,
+            max_cost_per_day_cents: 500,
+            require_approval_for_medium_risk: true,
+            block_high_risk_commands: true,
+        }
+    }
+}
+
+// ── Reliability / supervision ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReliabilityConfig {
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_backoff_ms")]
+    pub backoff_ms: u64,
+    #[serde(default)]
+    pub fallback_providers: Vec<String>,
+    #[serde(default)]
+    pub model_fallbacks: std::collections::HashMap<String, Vec<String>>,
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+
+fn default_backoff_ms() -> u64 {
+    500
+}
+
+impl Default for ReliabilityConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(),
+            backoff_ms: default_backoff_ms(),
+            fallback_providers: Vec::new(),
+            model_fallbacks: std::collections::HashMap::new(),
+        }
+    }
+}
+
+// ── Security Config ─────────────────────────────────────────────────
+
+/// Security configuration for sandboxing and audit logging
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SecurityConfig {
+    /// Sandbox configuration
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+
+    /// Audit logging configuration
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+/// Sandbox configuration for OS-level isolation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Enable sandboxing (None = auto-detect, Some = explicit)
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// Sandbox backend to use
+    #[serde(default)]
+    pub backend: SandboxBackend,
+
+    /// Custom Firejail arguments (when backend = firejail)
+    #[serde(default)]
+    pub firejail_args: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None, // Auto-detect
+            backend: SandboxBackend::Auto,
+            firejail_args: Vec::new(),
+        }
+    }
+}
+
+/// Sandbox backend selection
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxBackend {
+    /// Auto-detect best available (default)
+    #[default]
+    Auto,
+    /// Landlock (Linux kernel LSM, native)
+    Landlock,
+    /// Firejail (user-space sandbox)
+    Firejail,
+    /// Bubblewrap (user namespaces)
+    Bubblewrap,
+    /// Docker container isolation
+    Docker,
+    /// No sandboxing (application-layer only)
+    None,
+}
+
+/// Audit logging configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Enable audit logging
+    #[serde(default = "default_audit_enabled")]
+    pub enabled: bool,
+
+    /// Path to audit log file (relative to nenjo dir)
+    #[serde(default = "default_audit_log_path")]
+    pub log_path: String,
+
+    /// Maximum log size in MB before rotation
+    #[serde(default = "default_audit_max_size_mb")]
+    pub max_size_mb: u32,
+
+    /// Sign events with HMAC for tamper evidence
+    #[serde(default)]
+    pub sign_events: bool,
+}
+
+fn default_audit_enabled() -> bool {
+    true
+}
+
+fn default_audit_log_path() -> String {
+    "audit.log".to_string()
+}
+
+fn default_audit_max_size_mb() -> u32 {
+    100
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_audit_enabled(),
+            log_path: default_audit_log_path(),
+            max_size_mb: default_audit_max_size_mb(),
+            sign_events: false,
+        }
+    }
+}
+
+// ── Skills config ─────────────────────────────────────────────────
+
+// ── Git credential helper setup ──────────────────────────────────
+
+/// Write an isolated git config for all worker git operations.
+///
+/// Sets `GIT_CONFIG_GLOBAL` in the process environment so every git command
+/// run by the worker (and any lambda subprocess that inherits the env) uses
+/// `~/.nenjo/gitconfig` instead of `~/.gitconfig`.  This prevents system
+/// credential helpers (e.g. osxkeychain) from interfering.
+///
+/// The only required user configuration is the `GITHUB_TOKEN` environment
+/// variable — no `gh` CLI installation or manual auth steps needed.
+///
+/// **Step A** — Write `~/.nenjo/git-credential-helper.sh`.
+/// **Step B** — Write `~/.nenjo/gitconfig` pointing at the helper.
+/// **Step C** — Set `GIT_CONFIG_GLOBAL=~/.nenjo/gitconfig` in the process env.
+fn setup_git_credential_helper(home: &Path) {
+    let nenjo_dir = home.join(".nenjo");
+    let nenjo_gitconfig = nenjo_dir.join("gitconfig");
+    let helper_script = nenjo_dir.join("git-credential-helper.sh");
+
+    // Step A: write the credential helper script
+    //
+    // Git calls credential helpers with a single argument ("get", "store", or
+    // "erase"). We only need to handle "get" — output the token as a
+    // username/password pair and exit 0 for all other invocations.
+    let script = r#"#!/bin/sh
+# Nenjo git credential helper — reads GITHUB_TOKEN from the environment.
+# Git calls this script with one argument: get | store | erase
+case "$1" in
+  get)
+    echo "username=x-access-token"
+    echo "password=${GITHUB_TOKEN}"
+    ;;
+esac
+"#;
+
+    if let Err(e) = fs::write(&helper_script, script) {
+        tracing::warn!(error = %e, path = %helper_script.display(), "Failed to write git credential helper script");
+    } else {
+        // Make executable (unix only — Windows is unsupported for now)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&helper_script, fs::Permissions::from_mode(0o755)) {
+                tracing::warn!(error = %e, "Failed to chmod git credential helper script");
+            }
+        }
+        tracing::debug!(path = %helper_script.display(), "Git credential helper script written");
+    }
+
+    // Step B: write ~/.nenjo/gitconfig
+    let git_name = std::env::var("GIT_USER_NAME").unwrap_or_default();
+    let git_email = std::env::var("GIT_USER_EMAIL").unwrap_or_default();
+    let helper_path = helper_script.to_string_lossy();
+
+    let contents = format!(
+        r#"[credential "https://github.com"]
+    helper = {helper_path}
+[user]
+    name = {git_name}
+    email = {git_email}
+"#
+    );
+
+    if let Err(e) = fs::write(&nenjo_gitconfig, &contents) {
+        tracing::warn!(error = %e, path = %nenjo_gitconfig.display(), "Failed to write ~/.nenjo/gitconfig");
+    }
+
+    // Step C: set GIT_CONFIG_GLOBAL so all git commands in this process (and
+    // any subprocess that inherits the environment, including lambda scripts)
+    // use our isolated config instead of ~/.gitconfig.
+    //
+    // Also set GIT_CONFIG_NOSYSTEM=1 so git ignores the system-level gitconfig
+    // (e.g. /etc/gitconfig or the Xcode CLT git config on macOS), which often
+    // sets `credential.helper = osxkeychain`. Without this, osxkeychain is
+    // called first and may return stale credentials, overriding our helper.
+    //
+    // SAFETY: called once at startup before any threads are spawned.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("GIT_CONFIG_GLOBAL", &nenjo_gitconfig);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    }
+}
+
+// ── Config impl ──────────────────────────────────────────────────
+
+impl Default for Config {
+    fn default() -> Self {
+        let home =
+            UserDirs::new().map_or_else(|| PathBuf::from("."), |u| u.home_dir().to_path_buf());
+        let nenjo_dir = home.join(".nenjo");
+
+        Self {
+            config_dir: nenjo_dir.clone(),
+            workspace_dir: nenjo_dir.join("workspace"),
+            data_dir: nenjo_dir.join("data"),
+            model_provider_api_keys: HashMap::new(),
+            api_key: String::new(),
+            backend_api_url: default_backend_api_url(),
+            nats_url: default_nats_url(),
+            autonomy: AutonomyConfig::default(),
+            reliability: ReliabilityConfig::default(),
+            agent: AgentConfig::default(),
+            memory: MemoryConfig::default(),
+            browser: BrowserConfig::default(),
+            http_request: HttpRequestConfig::default(),
+            web_search: WebSearchConfig::default(),
+            web_fetch: WebFetchConfig::default(),
+            capabilities: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    pub fn load_or_init() -> Result<Self> {
+        let home = UserDirs::new()
+            .map(|u| u.home_dir().to_path_buf())
+            .context("Could not find home directory")?;
+        let nenjo_dir = home.join(".nenjo");
+        let config_path = nenjo_dir.join("config.toml");
+
+        if !nenjo_dir.exists() {
+            fs::create_dir_all(&nenjo_dir).context("Failed to create .nenjo directory")?;
+            fs::create_dir_all(nenjo_dir.join("workspace"))
+                .context("Failed to create workspace directory")?;
+        }
+
+        // Configure git to use `gh` CLI for GitHub auth under ~/.nenjo/workspace/
+        setup_git_credential_helper(&home);
+
+        let mut config = if config_path.exists() {
+            let contents =
+                fs::read_to_string(&config_path).context("Failed to read config file")?;
+            let mut config: Config =
+                toml::from_str(&contents).context("Failed to parse config file")?;
+            // Set computed paths that are skipped during serialization
+            config.config_dir = nenjo_dir.clone();
+            config.workspace_dir = nenjo_dir.join("workspace");
+            config.data_dir = nenjo_dir.join("data");
+            config
+        } else {
+            let config = Config {
+                config_dir: nenjo_dir.clone(),
+                workspace_dir: nenjo_dir.join("workspace"),
+                data_dir: nenjo_dir.join("data"),
+                ..Config::default()
+            };
+            config.save()?;
+            config
+        };
+
+        config.apply_env_overrides();
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Apply environment variable overrides to config.
+    ///
+    /// Environment variables take precedence over values from config.toml.
+    /// For model provider API keys, each provider has one or more candidate
+    /// env vars (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). The first
+    /// non-empty match wins and is inserted into `model_provider_api_keys`,
+    /// overriding any value from the config file.
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("NENJO_API_URL") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.backend_api_url = val;
+            }
+        }
+
+        if let Ok(val) = std::env::var("NENJO_API_KEY") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.api_key = val;
+            }
+        }
+
+        if let Ok(val) = std::env::var("NATS_URL") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.nats_url = val;
+            }
+        }
+
+        // ── Model provider API key overrides ─────────────────
+        let provider_vars = crate::providers::provider_env_vars();
+        for (provider, env_var_candidates) in &provider_vars {
+            for env_var in env_var_candidates {
+                if let Ok(val) = std::env::var(env_var) {
+                    let val = val.trim().to_string();
+                    if !val.is_empty() {
+                        self.model_provider_api_keys.insert(provider.clone(), val);
+                        break; // first non-empty candidate wins
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write the config to `{config_dir}/config.toml`.
+    pub fn save(&self) -> Result<()> {
+        if self.config_dir.as_os_str().is_empty() {
+            return Ok(()); // no config dir set (e.g. tests)
+        }
+        let path = self.config_dir.join("config.toml");
+        let toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
+        fs::write(&path, toml)
+            .with_context(|| format!("Failed to write config to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Validate that required fields are present.
+    pub fn validate(&self) -> Result<()> {
+        if self.api_key.is_empty() {
+            anyhow::bail!(
+                "NENJO_API_KEY is required. Set it via --api-key, NENJO_API_KEY env var, or api_key in ~/.nenjo/config.toml"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn can_run_routine(&self) -> bool {
+        !self.model_provider_api_keys.is_empty()
+    }
+}

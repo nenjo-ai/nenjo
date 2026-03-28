@@ -1,0 +1,29 @@
+[package]
+name = "nenjo-eventbus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport-agnostic event bus for routing agentic AI workflow commands over NATS or custom transports"
+readme = "README.md"
+keywords = ["ai-agents", "eventbus", "nats", "orchestration", "transport"]
+categories = ["asynchronous", "network-programming"]
+
+[dependencies]
+nenjo-events = { workspace = true }
+serde_json = "1.0"
+uuid = { version = "1.21", features = ["v4", "serde"] }
+tracing = "0.1"
+thiserror = "2.0"
+tokio = { version = "1.49", features = ["sync"] }
+
+# NATS transport (optional)
+async-nats = { version = "0.39", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+
+[features]
+default = []
+nats = ["dep:async-nats", "dep:bytes", "dep:futures-util", "dep:rustls"]

@@ -1,0 +1,17 @@
+[package]
+name = "nenjo-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI for the Nenjo agent platform"
+
+[[bin]]
+name = "nenjo"
+path = "src/main.rs"
+
+[dependencies]
+runner = { workspace = true }
+tokio = { version = "1.49", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
