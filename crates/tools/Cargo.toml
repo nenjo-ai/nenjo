@@ -1,0 +1,50 @@
+[package]
+name = "nenjo-tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool trait, types, and built-in tool implementations for the Nenjo agent platform"
+readme = "README.md"
+keywords = ["ai-agents", "tools", "llm", "function-calling", "agentic"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+# Async runtime (process, fs, time)
+tokio = { version = "1.49", features = ["process", "fs", "time", "sync", "macros", "rt-multi-thread"] }
+
+# HTTP client
+reqwest = { version = "0.13", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# Search / pattern matching
+regex = "1.12"
+which = "7"
+glob = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Concurrency
+parking_lot = "0.12.5"
+
+# Logging
+tracing = "0.1"
+
+# HTML to text
+nanohtml2text = "0.1"
+
+# URL encoding
+urlencoding = "2.1"
+
+# Base64 encoding
+base64 = "0.22.1"
+
+# Temp files (for tests)
+tempfile = "3.25.0"

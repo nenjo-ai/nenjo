@@ -1,0 +1,25 @@
+[package]
+name = "nenjo-models"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM provider trait and implementations — OpenAI, Anthropic, Gemini, OpenRouter, Ollama, and any OpenAI-compatible API"
+readme = "README.md"
+keywords = ["ai-agents", "llm", "openai", "anthropic", "model-provider"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+nenjo-tools = { workspace = true }
+async-trait = "0.1"
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+anyhow = "1.0"
+directories = "5.0"
+base64 = "0.22.1"
+tokio = { version = "1.49", features = ["time"] }
+uuid = { version = "1.21", features = ["v4"] }
+chrono = "0.4"

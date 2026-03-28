@@ -1,0 +1,81 @@
+[package]
+name = "harness"
+resolver = "2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.49", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Web framework
+axum = { version = "0.8.8", features = ["ws"] }
+tower = "0.5.3"
+tower-http = { version = "0.6", features = ["cors", "compression-full", "trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Shared prompt rendering
+nenjo = { workspace = true }
+nenjo-xml = { workspace = true }
+nenjo-tools = { workspace = true }
+nenjo-models = { workspace = true }
+
+
+# WebSocket client
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2.5"
+
+# HTTP client
+reqwest = { version = "0.13", features = ["json", "stream"] }
+
+# Configuration
+config = "0.15"
+dotenvy = "0.15"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Utilities
+uuid = { version = "1.21", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+regex = "1.12"
+
+# Event types
+nenjo-events = { workspace = true }
+
+# Testing
+tokio-test = "0.4"
+axum-test = "18.7"
+
+# Config
+directories = "5.0"
+toml = "1.0"
+shellexpand = "3.1"
+tempfile = "3.25.0"
+parking_lot = "0.12.5"
+arc-swap = "1.9.0"
+dashmap = "6.1.0"
+base64 = "0.22.1"
+rusqlite = "0.38.0"
+sqlite-vec = "0.1"
+sha2 = "0.10.9"
+glob = "0.3"
+cron = "0.15"
+nanohtml2text = "0.1"
+urlencoding = "2.1"
+nenjo-eventbus = { workspace = true, features = ["nats"] }
+which = "7"
