@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, XmlError>;
 /// # Examples
 ///
 /// ```
-/// use prompt_render::parse::extract_tag_content;
+/// use nenjo_xml::xml::parse::extract_tag_content;
 ///
 /// let xml = "<task><title>Fix bug</title><priority>high</priority></task>";
 /// assert_eq!(extract_tag_content(xml, "title").unwrap(), "Fix bug");
@@ -39,7 +39,7 @@ pub type Result<T> = std::result::Result<T, XmlError>;
 /// Handles XML entities:
 ///
 /// ```
-/// use prompt_render::parse::extract_tag_content;
+/// use nenjo_xml::xml::parse::extract_tag_content;
 ///
 /// let xml = "<msg>a &lt; b &amp; c</msg>";
 /// assert_eq!(extract_tag_content(xml, "msg").unwrap(), "a < b & c");
@@ -82,7 +82,7 @@ pub fn extract_tag_content(xml: &str, tag_name: &str) -> Result<String> {
 /// # Examples
 ///
 /// ```
-/// use prompt_render::parse::extract_all_tag_contents;
+/// use nenjo_xml::xml::parse::extract_all_tag_contents;
 ///
 /// let xml = "<list><item>A</item><item>B</item><item>C</item></list>";
 /// let items = extract_all_tag_contents(xml, "item").unwrap();
@@ -149,7 +149,7 @@ pub fn extract_all_tag_contents(xml: &str, tag_name: &str) -> Result<Vec<String>
 /// # Examples
 ///
 /// ```
-/// use prompt_render::parse::extract_attr;
+/// use nenjo_xml::xml::parse::extract_attr;
 ///
 /// let xml = r#"<task id="42" status="open">Fix bug</task>"#;
 /// assert_eq!(extract_attr(xml, "task", "id").unwrap(), "42");
@@ -194,7 +194,7 @@ pub fn extract_attr(xml: &str, tag_name: &str, attr_name: &str) -> Result<String
 /// # Examples
 ///
 /// ```
-/// use prompt_render::parse::has_tag;
+/// use nenjo_xml::xml::parse::has_tag;
 ///
 /// let xml = "<root><name>Alice</name></root>";
 /// assert!(has_tag(xml, "name"));
@@ -220,7 +220,7 @@ pub fn has_tag(xml: &str, tag_name: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use prompt_render::parse::extract_raw_inner_xml;
+/// use nenjo_xml::xml::parse::extract_raw_inner_xml;
 ///
 /// let xml = "<root><child>text</child></root>";
 /// assert_eq!(extract_raw_inner_xml(xml, "root").unwrap(), "<child>text</child>");
