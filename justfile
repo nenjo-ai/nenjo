@@ -23,11 +23,11 @@ test-crate crate:
 
 # Run clippy lints
 lint:
-    cargo clippy --workspace -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Run clippy with auto-fix
 lint-fix:
-    cargo clippy --workspace --fix --allow-dirty -- -D warnings
+    cargo clippy --workspace --fix --allow-dirty --all-targets -- -D warnings
 
 # Format code
 fmt:

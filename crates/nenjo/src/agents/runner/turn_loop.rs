@@ -709,7 +709,7 @@ mod tests {
             "content": "I'll delegate this.",
             "tool_calls": tool_calls,
         });
-        let msg = ChatMessage::assistant(&assistant_content.to_string());
+        let msg = ChatMessage::assistant(assistant_content.to_string());
 
         // OpenAI/Anthropic providers parse from the content field
         let parsed: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
@@ -726,7 +726,7 @@ mod tests {
             "tool_call_id": "call_123",
             "content": "Task completed successfully",
         });
-        let msg = ChatMessage::tool(&tool_content.to_string());
+        let msg = ChatMessage::tool(tool_content.to_string());
 
         let parsed: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
         assert_eq!(parsed["tool_call_id"], "call_123");
@@ -823,7 +823,7 @@ mod tests {
                 "tool_call_id": id,
                 "content": content,
             });
-            ChatMessage::tool(&json.to_string())
+            ChatMessage::tool(json.to_string())
         };
         let assistant_tool_call = |id: &str, name: &str| -> ChatMessage {
             let json = serde_json::json!({
@@ -834,7 +834,7 @@ mod tests {
                     "arguments": r#"{"path":"src/main.rs"}"#,
                 }],
             });
-            ChatMessage::assistant(&json.to_string())
+            ChatMessage::assistant(json.to_string())
         };
 
         vec![
@@ -893,7 +893,7 @@ mod tests {
                 "tool_call_id": id,
                 "content": "ok",
             });
-            ChatMessage::tool(&json.to_string())
+            ChatMessage::tool(json.to_string())
         };
         // Assistant messages with big arguments — these are the heavy ones.
         let big_assistant = |id: &str, name: &str| -> ChatMessage {
@@ -906,7 +906,7 @@ mod tests {
                     "arguments": big_args,
                 }],
             });
-            ChatMessage::assistant(&json.to_string())
+            ChatMessage::assistant(json.to_string())
         };
 
         let mut msgs = vec![
@@ -1051,14 +1051,14 @@ mod tests {
                     "arguments": args.to_string(),
                 }],
             });
-            ChatMessage::assistant(&json.to_string())
+            ChatMessage::assistant(json.to_string())
         };
         let tool_result = |id: &str| -> ChatMessage {
             let json = serde_json::json!({
                 "tool_call_id": id,
                 "content": "ok",
             });
-            ChatMessage::tool(&json.to_string())
+            ChatMessage::tool(json.to_string())
         };
 
         let mut msgs = vec![ChatMessage::system("system prompt")];
@@ -1097,7 +1097,7 @@ mod tests {
         });
         let mut msgs = vec![
             ChatMessage::system("sys"),
-            ChatMessage::assistant(&json.to_string()),
+            ChatMessage::assistant(json.to_string()),
             ChatMessage::tool(r#"{"tool_call_id":"c1","content":"ok"}"#),
             ChatMessage::user("next"),
         ];

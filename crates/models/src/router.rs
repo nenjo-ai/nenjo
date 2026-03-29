@@ -138,7 +138,7 @@ impl ModelProvider for RouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{ChatMessage, ChatRequest, ChatResponse, TokenUsage, one_shot};
+    use crate::traits::{ChatRequest, ChatResponse, TokenUsage, one_shot};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

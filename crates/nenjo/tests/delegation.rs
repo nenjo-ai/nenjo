@@ -77,6 +77,7 @@ impl ModelProviderFactory for MockFactory {
 }
 
 /// Mock LLM that returns different responses on sequential calls.
+#[allow(dead_code)]
 struct SequentialMockLlm {
     responses: Vec<String>,
     index: Arc<AtomicUsize>,
@@ -119,12 +120,14 @@ impl ModelProvider for SequentialMockLlm {
     }
 }
 
+#[allow(dead_code)]
 struct SequentialMockFactory {
     responses: Vec<String>,
     index: Arc<AtomicUsize>,
 }
 
 impl SequentialMockFactory {
+    #[allow(dead_code)]
     fn new(responses: Vec<&str>) -> Self {
         Self {
             responses: responses.into_iter().map(|s| s.to_string()).collect(),
@@ -450,8 +453,10 @@ async fn delegate_to_depth_limit() {
 
     // Set max_delegation_depth to 0 — should still inject the tool (depth check is at call time)
     // Actually, with depth 0 the tool won't be injected at all.
-    let mut config = nenjo::AgentConfig::default();
-    config.max_delegation_depth = 0;
+    let config = nenjo::AgentConfig {
+        max_delegation_depth: 0,
+        ..Default::default()
+    };
 
     let provider = Provider::builder()
         .with_manifest(manifest)
