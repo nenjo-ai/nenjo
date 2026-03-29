@@ -60,7 +60,7 @@ jobs:
         run: cargo test --workspace
 
   build-release:
-    name: Build release (${{ matrix.target }})
+    name: "Build release (${{ matrix.target }})"
     needs: [fmt, clippy, build, test]
     runs-on: ${{ matrix.os }}
     strategy:
