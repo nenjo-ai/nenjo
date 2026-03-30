@@ -171,7 +171,7 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
             "system_prompt": format!("You are the {name} agent."),
             "templates": {
                 "task_execution": "Execute: {{ task.title }}",
-                "chat_task": "{{ message }}",
+                "chat_task": "{{ chat.message }}",
                 "gate_eval": "",
                 "cron_task": ""
             }

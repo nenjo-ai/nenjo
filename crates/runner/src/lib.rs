@@ -28,10 +28,6 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// CLI arguments for `nenjo run`.
 #[derive(Args, Debug, Default)]
 pub struct RunArgs {
-    /// Nenjo API key for authentication
-    #[arg(long, env = "NENJO_API_KEY")]
-    pub api_key: Option<String>,
-
     /// NATS server URL (e.g. tls://nats.nenjo.ai, only override for development reasons)
     #[arg(long, env = "NATS_URL")]
     pub nats_url: Option<String>,
@@ -77,14 +73,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let mut config = Config::load_or_init()?;
 
     // CLI args override config + env values
-    if let Some(ref key) = args.api_key {
-        config.api_key = key.clone();
-    }
     if let Some(ref url) = args.nats_url {
-        config.nats_url = url.clone();
+        config.nats_url = Some(url.clone());
     }
     if let Some(ref url) = args.backend_url {
-        config.backend_api_url = url.clone();
+        config.backend_api_url = Some(url.clone());
     }
     if let Some(ref caps) = args.capabilities {
         let mut parsed = Vec::new();
@@ -98,8 +91,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     info!(
-        backend = %config.backend_api_url,
-        nats = %config.nats_url,
+        backend = %config.backend_api_url(),
+        nats = %config.nats_url(),
         "Configuration loaded"
     );
 
@@ -172,14 +165,14 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     info!(%api_key_id, "Using API key ID as stable worker identifier");
 
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
-        .url(&config.nats_url)
+        .url(config.nats_url())
         .token(&config.api_key)
         .worker_id(api_key_id)
         .build()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))?;
 
-    info!(nats_url = %config.nats_url, "NATS transport connected");
+    info!(nats_url = %config.nats_url(), "NATS transport connected");
 
     // Wire up the harness's own shutdown to the global one.
     let harness_shutdown = harness.shutdown_token();

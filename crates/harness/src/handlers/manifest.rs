@@ -43,7 +43,7 @@ pub async fn handle_manifest_changed(
             let manifest = ctx.provider().manifest().clone();
             let servers = crate::harness::override_platform_mcp_url(
                 manifest.mcp_servers,
-                &ctx.config.backend_api_url,
+                ctx.config.backend_api_url(),
             );
             ctx.external_mcp.reconcile(&servers).await;
         }
@@ -165,7 +165,7 @@ async fn full_refresh(ctx: &CommandContext) -> Result<()> {
 
     let servers = crate::harness::override_platform_mcp_url(
         manifest.mcp_servers.clone(),
-        &ctx.config.backend_api_url,
+        ctx.config.backend_api_url(),
     );
     ctx.external_mcp.reconcile(&servers).await;
 

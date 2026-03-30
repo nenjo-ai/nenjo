@@ -94,7 +94,7 @@ impl ToolFactory for HarnessToolFactory {
         // Add platform MCP tools (backend /mcp endpoint) filtered by agent's scopes.
         if !agent.platform_scopes.is_empty() {
             let platform_tools = crate::mcp_client::mcp_tools_for_agent(
-                &self.config.backend_api_url,
+                self.config.backend_api_url(),
                 &self.config.api_key,
                 &agent.platform_scopes,
             )

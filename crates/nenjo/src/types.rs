@@ -470,7 +470,7 @@ mod tests {
             "system_prompt": "You are a helpful assistant.",
             "templates": {
                 "task_execution": "Implement: {{ title }}",
-                "chat_task": "Respond to: {{ message }}",
+                "chat_task": "Respond to: {{ chat.message }}",
                 "gate_eval": "Evaluate: {{ criteria }}"
             },
             "output_templates": {

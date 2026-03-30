@@ -83,7 +83,7 @@ fn test_manifest() -> Manifest {
         prompt_config: serde_json::json!({
             "system_prompt": "You are a helpful assistant with persistent memory.",
             "templates": {
-                "chat_task": "{{ message }}",
+                "chat_task": "{{ chat.message }}",
                 "task_execution": "",
                 "gate_eval": "",
                 "cron_task": ""

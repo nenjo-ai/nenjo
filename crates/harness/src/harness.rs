@@ -105,7 +105,7 @@ pub struct Harness {
 impl Harness {
     /// Create a new Harness.
     pub async fn new(config: Config) -> Result<Self> {
-        let api = Arc::new(NenjoClient::new(&config.backend_api_url, &config.api_key));
+        let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
 
         crate::manifest::sync(&api, &config.data_dir, &config.workspace_dir).await?;
 
@@ -113,7 +113,7 @@ impl Harness {
         let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
         let mcp_servers =
-            override_platform_mcp_url(manifest.mcp_servers.clone(), &config.backend_api_url);
+            override_platform_mcp_url(manifest.mcp_servers.clone(), config.backend_api_url());
 
         let external_mcp = Arc::new(ExternalMcpPool::new());
         external_mcp.reconcile(&mcp_servers).await;
