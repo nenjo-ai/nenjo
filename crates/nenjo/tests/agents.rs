@@ -200,7 +200,7 @@ async fn runner_chat() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("test-coder").await.unwrap().build();
+    let runner = provider.agent_by_name("test-coder").await.unwrap().build().unwrap();
     let output = runner.chat("Hi there").await.expect("chat should succeed");
 
     assert_eq!(output.text, "Hello from the mock LLM!");
@@ -225,7 +225,7 @@ async fn runner_chat_with_history() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("test-coder").await.unwrap().build();
+    let runner = provider.agent_by_name("test-coder").await.unwrap().build().unwrap();
 
     let history = vec![
         ChatMessage::user("What's 2+2?"),
@@ -255,7 +255,8 @@ async fn runner_with_custom_tool() {
         .await
         .unwrap()
         .with_tool(EchoTool)
-        .build();
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     assert_eq!(specs.len(), 1);
@@ -275,7 +276,7 @@ async fn runner_with_tool_factory() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("test-coder").await.unwrap().build();
+    let runner = provider.agent_by_name("test-coder").await.unwrap().build().unwrap();
 
     let specs = runner.instance().tool_specs();
     assert_eq!(specs.len(), 1);
@@ -300,7 +301,8 @@ async fn instance_builds_prompts() {
         .await
         .unwrap()
         .with_memory_xml("<memory>test memory</memory>")
-        .build();
+        .build()
+        .unwrap();
 
     let task = nenjo::types::TaskType::Chat {
         user_message: "Hello!".into(),

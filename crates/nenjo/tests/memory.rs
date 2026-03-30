@@ -140,7 +140,8 @@ async fn provider_with_memory_adds_tools() {
         .agent_by_name("memory-agent")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     // Memory tools should be auto-added
     let specs = runner.instance().tool_specs();
@@ -176,7 +177,8 @@ async fn provider_without_memory_has_no_memory_tools() {
         .agent_by_name("memory-agent")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -212,7 +214,8 @@ async fn builder_with_memory_adds_tools() {
         .await
         .unwrap()
         .with_memory(Arc::new(memory), scope)
-        .build();
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -530,7 +533,8 @@ async fn runner_with_memory_injects_xml() {
         .agent_by_name("memory-agent")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     // The runner should inject memory XML and run successfully
     let output = runner

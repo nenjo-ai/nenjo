@@ -101,6 +101,7 @@ pub struct AgentRunner {
     instance: Arc<AgentInstance>,
     memory: Option<Arc<dyn Memory>>,
     memory_scope: Option<MemoryScope>,
+    manifest: Option<Arc<Manifest>>,
 }
 
 impl AgentRunner {
@@ -109,7 +110,7 @@ impl AgentRunner {
         memory: Option<Arc<dyn Memory>>,
         memory_scope: Option<MemoryScope>,
         delegation: Option<DelegationSupport>,
-    ) -> Self {
+    ) -> Result<Self, super::error::AgentError> {
         // Pre-compute documents XML (sync, from disk).
         if instance.documents_xml.is_empty() {
             if let Some(ref dir) = instance.prompt_context.docs_base_dir {
@@ -118,15 +119,21 @@ impl AgentRunner {
             }
         }
 
+        // Extract the manifest before delegation is consumed — stored on the
+        // runner so domain_expansion can pass it through to sub-runners.
+        let manifest = delegation.as_ref().map(|ds| ds.manifest.clone());
+
         let has_abilities = !instance.prompt_context.available_abilities.is_empty();
 
         // If the agent has abilities, add the use_ability tool.
-        // The tool holds an Arc to the instance *without* use_ability in its
-        // tool set — this is correct because ability sub-executions explicitly
-        // filter out use_ability to prevent recursion.
+        // Uses the manifest from DelegationSupport to resolve the ability's
+        // skills and MCP servers the same way the Provider does for the base agent.
         if has_abilities {
+            let m = manifest
+                .clone()
+                .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name.clone()))?;
             let base_instance = Arc::new(instance.clone());
-            let ability_tool = UseAbilityTool::new(base_instance);
+            let ability_tool = UseAbilityTool::new(base_instance, m);
             instance.tools.push(Arc::new(ability_tool));
         }
 
@@ -161,11 +168,12 @@ impl AgentRunner {
 
         let instance = Arc::new(instance);
 
-        Self {
+        Ok(Self {
             instance,
             memory,
             memory_scope,
-        }
+            manifest,
+        })
     }
 
     /// Read-only access to the underlying agent instance.
@@ -192,6 +200,7 @@ impl AgentRunner {
             instance: Arc::new(instance),
             memory: None,
             memory_scope: None,
+            manifest: None,
         }
     }
 
@@ -246,12 +255,12 @@ impl AgentRunner {
         let mut instance = (*self.instance).clone();
         instance.prompt_context.active_domain = Some(active_domain);
 
-        Ok(AgentRunner::new(
-            instance,
-            self.memory.clone(),
-            self.memory_scope.clone(),
-            None,
-        ))
+        Ok(Self {
+            instance: Arc::new(instance),
+            memory: self.memory.clone(),
+            memory_scope: self.memory_scope.clone(),
+            manifest: self.manifest.clone(),
+        })
     }
 
     /// Send a chat message and stream events as the agent works.

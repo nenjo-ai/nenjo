@@ -177,7 +177,8 @@ async fn tool_call_round_trip() {
         .agent_by_name("weather-agent")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     assert_eq!(specs.len(), 1);
@@ -256,7 +257,8 @@ async fn memory_store_recall_with_real_llm() {
         .agent_by_name("memory-agent")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     // Verify memory tools are present
     let specs = runner.instance().tool_specs();
@@ -393,7 +395,7 @@ async fn use_ability_with_real_llm() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("developer").await.unwrap().build();
+    let runner = provider.agent_by_name("developer").await.unwrap().build().unwrap();
 
     // Verify use_ability tool is present
     let specs = runner.instance().tool_specs();
@@ -503,7 +505,8 @@ async fn domain_expansion_with_real_llm() {
         .agent_by_name("product-manager")
         .await
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
     // Activate the PRD domain
     let prd_runner = runner
@@ -568,7 +571,7 @@ async fn domain_expansion_unknown_domain_fails() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("agent").await.unwrap().build();
+    let runner = provider.agent_by_name("agent").await.unwrap().build().unwrap();
 
     let result = runner.domain_expansion("nonexistent");
     assert!(result.is_err());

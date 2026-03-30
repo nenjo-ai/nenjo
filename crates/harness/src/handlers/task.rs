@@ -215,7 +215,7 @@ async fn execute_direct_task(
     task_id: Uuid,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let runner = ctx.provider().agent_by_id(agent_id).await?.build();
+    let runner = ctx.provider().agent_by_id(agent_id).await?.build()?;
     let provider = ctx.provider();
     let aname = agent_name(provider.manifest(), agent_id);
 
