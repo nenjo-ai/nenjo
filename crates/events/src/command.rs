@@ -158,6 +158,17 @@ pub enum Command {
     // -----------------------------------------------------------------
     // Bootstrap
     // -----------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // Health check
+    // -----------------------------------------------------------------
+    /// Lightweight ping from the frontend to verify the worker is alive.
+    /// The worker should respond with `Response::WorkerPong`.
+    #[serde(rename = "worker.ping")]
+    WorkerPing,
+
+    // -----------------------------------------------------------------
+    // Bootstrap
+    // -----------------------------------------------------------------
     /// Notifies the harness that a backend resource was created, updated,
     /// or deleted. The harness should re-fetch the affected resource.
     #[serde(rename = "manifest.changed")]
@@ -209,6 +220,7 @@ impl std::fmt::Display for Command {
                 write!(f, "cron.disable(assignment={assignment_id})")
             }
             Self::CronTrigger { routine_id, .. } => write!(f, "cron.trigger(routine={routine_id})"),
+            Self::WorkerPing => write!(f, "worker.ping"),
             Self::ManifestChanged {
                 resource_type,
                 action,
@@ -239,6 +251,8 @@ impl Command {
             Command::CronEnable { .. }
             | Command::CronDisable { .. }
             | Command::CronTrigger { .. } => Capability::Cron,
+
+            Command::WorkerPing => Capability::Ping,
 
             Command::ManifestChanged { .. } => Capability::Manifest,
 

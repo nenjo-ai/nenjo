@@ -1,8 +1,16 @@
 # Nenjo
 
+> **Beta** — Nenjo is under active development. APIs may change between releases.
+
 An open-source Rust SDK for building portable, provider-agnostic agentic AI workflows.
 
 Nenjo gives you a programmable agent engine with tool use, persistent memory, multi-agent delegation, and routine orchestration — all decoupled from any single LLM provider.
+
+## Install
+
+```bash
+curl -fsSL https://nenjo.ai/install | bash
+```
 
 ## Crates
 
@@ -20,14 +28,11 @@ Nenjo gives you a programmable agent engine with tool use, persistent memory, mu
 The `nenjo` CLI connects your agents to the Nenjo platform over NATS, processing chat messages, tasks, cron schedules, and manifest updates in real time.
 
 ```bash
-# Start the worker (uses NENJO_API_KEY from env or config)
+# Start the worker (uses NENJO_API_KEY from env or ~/.nenjo/config.toml)
 nenjo run
 
-# With explicit options
-nenjo run --api-key sk-... --log-level debug
-
-# Scoped to specific capabilities
-nenjo run --capabilities chat,task,manifest
+# With verbose logging
+nenjo run --log-level debug
 ```
 
 The runner is resilient to outages — startup and the event loop use exponential backoff so the worker automatically recovers when services come back online.

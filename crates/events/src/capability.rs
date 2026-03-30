@@ -28,6 +28,8 @@ pub enum Capability {
     Manifest,
     /// Repository operations: sync, unsync.
     Repo,
+    /// Health check ping — non-exclusive, all workers respond.
+    Ping,
 }
 
 impl Capability {
@@ -38,6 +40,7 @@ impl Capability {
         Capability::Cron,
         Capability::Manifest,
         Capability::Repo,
+        Capability::Ping,
     ];
 
     /// The NATS subject segment for this capability.
@@ -48,6 +51,7 @@ impl Capability {
             Capability::Cron => "cron",
             Capability::Manifest => "manifest",
             Capability::Repo => "repo",
+            Capability::Ping => "ping",
         }
     }
 
@@ -62,6 +66,7 @@ impl Capability {
             "cron" => Some(Capability::Cron),
             "manifest" => Some(Capability::Manifest),
             "repo" => Some(Capability::Repo),
+            "worker" => Some(Capability::Ping),
             _ => None,
         }
     }
@@ -83,6 +88,7 @@ impl FromStr for Capability {
             "cron" => Ok(Capability::Cron),
             "manifest" => Ok(Capability::Manifest),
             "repo" => Ok(Capability::Repo),
+            "ping" => Ok(Capability::Ping),
             _ => Err(format!("unknown capability: {s}")),
         }
     }
