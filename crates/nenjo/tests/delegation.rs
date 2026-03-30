@@ -226,7 +226,7 @@ async fn delegate_to_injected_with_multiple_agents() {
         .build()
         .await
         .unwrap();
-    let runner = provider.agent_by_name("coder").await.unwrap().build();
+    let runner = provider.agent_by_name("coder").await.unwrap().build().unwrap();
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
@@ -252,7 +252,7 @@ async fn delegate_to_not_injected_for_single_agent() {
         .build()
         .await
         .unwrap();
-    let runner = provider.agent_by_name("solo").await.unwrap().build();
+    let runner = provider.agent_by_name("solo").await.unwrap().build().unwrap();
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
@@ -285,7 +285,7 @@ async fn delegate_to_schema_lists_agents() {
         .build()
         .await
         .unwrap();
-    let runner = provider.agent_by_name("coder").await.unwrap().build();
+    let runner = provider.agent_by_name("coder").await.unwrap().build().unwrap();
 
     let specs = runner.instance().tool_specs();
     let delegate_spec = specs.iter().find(|s| s.name == "delegate_to").unwrap();
@@ -328,7 +328,7 @@ async fn delegate_to_tool_executes() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("coder").await.unwrap().build();
+    let runner = provider.agent_by_name("coder").await.unwrap().build().unwrap();
 
     // Find the delegate_to tool and call it directly
     let delegate_tool = runner
@@ -372,7 +372,7 @@ async fn delegate_to_unknown_agent() {
         .build()
         .await
         .unwrap();
-    let runner = provider.agent_by_name("coder").await.unwrap().build();
+    let runner = provider.agent_by_name("coder").await.unwrap().build().unwrap();
 
     let delegate_tool = runner
         .instance()
@@ -419,7 +419,7 @@ async fn delegate_to_empty_agent_name() {
         .build()
         .await
         .unwrap();
-    let runner = provider.agent_by_name("a").await.unwrap().build();
+    let runner = provider.agent_by_name("a").await.unwrap().build().unwrap();
 
     let delegate_tool = runner
         .instance()
@@ -470,7 +470,8 @@ async fn delegate_to_depth_limit() {
         .await
         .unwrap()
         .with_config(config)
-        .build();
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();

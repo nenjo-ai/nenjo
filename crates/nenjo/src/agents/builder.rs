@@ -201,7 +201,7 @@ impl AgentBuilder {
     }
 
     /// Build the [`AgentRunner`].
-    pub fn build(self) -> AgentRunner {
+    pub fn build(self) -> Result<AgentRunner, super::error::AgentError> {
         let security = Arc::new(SecurityPolicy::default());
 
         let delegation_support = match (self.manifest, self.model_factory, self.tool_factory) {
@@ -237,4 +237,5 @@ impl AgentBuilder {
 
         AgentRunner::new(instance, self.memory, self.memory_scope, delegation_support)
     }
+
 }

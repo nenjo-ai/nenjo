@@ -227,7 +227,22 @@ impl Tool for DelegateToTool {
         // decrements correctly across nested delegations.
         builder = builder.with_child_delegation_ctx(child_ctx);
 
-        let runner = builder.build();
+        let runner = builder.build()?;
+
+        let tool_specs = runner.instance().tool_specs();
+        let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();
+        debug!(
+            target_agent = %agent_name,
+            caller = %self.caller_agent_id,
+            tool_count = tool_specs.len(),
+            tools = ?tool_names,
+            "Delegated agent prompt"
+        );
+        debug!("{}", runner.instance().build_prompts(&crate::types::TaskType::Chat {
+            user_message: task.clone(),
+            history: vec![],
+            project_id: uuid::Uuid::nil(),
+        }));
 
         // Execute the delegation (simple API, no streaming for nested calls).
         match runner.chat(&task).await {
