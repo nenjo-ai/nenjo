@@ -300,7 +300,7 @@ async fn execute_agent_step(
         builder = builder.with_step_metadata(metadata);
     }
 
-    let runner = builder.build();
+    let runner = builder.build()?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -378,7 +378,7 @@ async fn execute_gate_step(
             state.routine_name.as_deref().unwrap_or(""),
             &execution_id,
         )
-        .build();
+        .build()?;
 
     let criteria = step
         .config
@@ -537,7 +537,7 @@ async fn execute_cron_step(
                         state.routine_name.as_deref().unwrap_or(""),
                         &cron_exec_id,
                     )
-                    .build();
+                    .build()?;
                 // Use TaskType::Cron so the agent's cron_task template is selected.
                 let inner_task = state
                     .input

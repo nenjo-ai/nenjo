@@ -135,7 +135,7 @@ async fn delegate_to_real_llm() {
         .unwrap();
 
     // Verify delegate_to is available
-    let runner = provider.agent_by_name("leader").await.unwrap().build();
+    let runner = provider.agent_by_name("leader").await.unwrap().build().unwrap();
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
@@ -200,7 +200,7 @@ async fn delegate_to_schema_includes_agent_names() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("alpha").await.unwrap().build();
+    let runner = provider.agent_by_name("alpha").await.unwrap().build().unwrap();
     let specs = runner.instance().tool_specs();
     let delegate_spec = specs
         .iter()

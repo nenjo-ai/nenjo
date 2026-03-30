@@ -85,7 +85,7 @@ pub async fn handle_chat(
             }
         }
     } else {
-        ctx.provider().agent_by_id(agent_id).await?.build()
+        ctx.provider().agent_by_id(agent_id).await?.build()?
     };
 
     // Start streaming execution

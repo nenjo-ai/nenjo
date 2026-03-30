@@ -26,7 +26,7 @@ pub async fn handle_domain_enter(
     let aname = agent_name(manifest, agent_id);
 
     // First do the domain expansion to get the session config + filtered tools.
-    let base_runner = provider.agent_by_id(agent_id).await?.build();
+    let base_runner = provider.agent_by_id(agent_id).await?.build()?;
 
     match base_runner.domain_expansion(domain_command) {
         Ok(domain_runner) => {

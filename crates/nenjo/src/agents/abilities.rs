@@ -10,7 +10,7 @@ use nenjo_tools::{Tool, ToolCategory, ToolResult};
 use super::instance::AgentInstance;
 use super::prompts::PromptConfig;
 use super::runner::turn_loop;
-use crate::manifest::AbilityManifest;
+use crate::manifest::{AbilityManifest, Manifest};
 use crate::types::TaskType;
 
 /// Tool that executes a named ability as a sub-agent turn loop.
@@ -19,11 +19,12 @@ use crate::types::TaskType;
 /// but uses the ability's own developer prompt and scoped tools.
 pub struct UseAbilityTool {
     instance: Arc<AgentInstance>,
+    manifest: Arc<Manifest>,
 }
 
 impl UseAbilityTool {
-    pub fn new(instance: Arc<AgentInstance>) -> Self {
-        Self { instance }
+    pub fn new(instance: Arc<AgentInstance>, manifest: Arc<Manifest>) -> Self {
+        Self { instance, manifest }
     }
 }
 
@@ -116,7 +117,7 @@ impl Tool for UseAbilityTool {
         );
 
         // Build the sub-execution instance.
-        let sub_instance = build_ability_instance(&self.instance, ability);
+        let sub_instance = build_ability_instance(&self.instance, ability, &self.manifest);
 
         let task = TaskType::Chat {
             user_message: task_description.to_string(),
@@ -125,6 +126,16 @@ impl Tool for UseAbilityTool {
         };
 
         let prompts = sub_instance.build_prompts(&task);
+
+        let tool_names: Vec<&str> = sub_instance.tools.iter().map(|t| t.name()).collect();
+        debug!(
+            ability = ability_name,
+            agent = self.instance.name,
+            tool_count = sub_instance.tools.len(),
+            tools = ?tool_names,
+            "Ability sub-agent prompt"
+        );
+        debug!("{prompts}");
 
         // Build messages for the sub-execution.
         let mut messages = Vec::new();
@@ -169,7 +180,15 @@ impl Tool for UseAbilityTool {
 }
 
 /// Build a temporary AgentInstance for the ability sub-execution.
-fn build_ability_instance(caller: &AgentInstance, ability: &AbilityManifest) -> AgentInstance {
+///
+/// Resolves the ability's `skill_ids`, `mcp_server_ids`, and `platform_scopes`
+/// from the manifest and merges them into the sub-instance's prompt context,
+/// the same way the Provider resolves them for the base agent.
+fn build_ability_instance(
+    caller: &AgentInstance,
+    ability: &AbilityManifest,
+    manifest: &Manifest,
+) -> AgentInstance {
     // Inherit system prompt, override developer prompt.
     let prompt_config = PromptConfig {
         system_prompt: caller.prompt_config.system_prompt.clone(),
@@ -191,6 +210,40 @@ fn build_ability_instance(caller: &AgentInstance, ability: &AbilityManifest) -> 
     let mut prompt_context = caller.prompt_context.clone();
     prompt_context.available_abilities = vec![];
     prompt_context.agent_name = format!("{}:{}", caller.name, ability.name);
+
+    // Merge the ability's platform_scopes into the sub-instance so scope-gated
+    // tools and MCP integration rendering see the expanded set.
+    for scope in &ability.platform_scopes {
+        if !prompt_context.platform_scopes.contains(scope) {
+            prompt_context.platform_scopes.push(scope.clone());
+        }
+    }
+
+    // Resolve and merge the ability's skills from the manifest.
+    for skill in manifest
+        .skills
+        .iter()
+        .filter(|s| ability.skill_ids.contains(&s.id))
+    {
+        if !prompt_context.skills.iter().any(|s| s.id == skill.id) {
+            prompt_context.skills.push(skill.clone());
+        }
+    }
+
+    // Resolve and merge the ability's MCP server info from the manifest.
+    for server in manifest
+        .mcp_servers
+        .iter()
+        .filter(|s| ability.mcp_server_ids.contains(&s.id))
+    {
+        let entry = (
+            server.display_name.clone(),
+            server.description.clone().unwrap_or_default(),
+        );
+        if !prompt_context.mcp_server_info.iter().any(|e| e.0 == entry.0) {
+            prompt_context.mcp_server_info.push(entry);
+        }
+    }
 
     AgentInstance {
         name: format!("{}:{}", caller.name, ability.name),
