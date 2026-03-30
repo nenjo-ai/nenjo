@@ -107,6 +107,10 @@ pub enum Response {
         version: Option<String>,
     },
 
+    /// Response to a `worker.ping` command — proves the worker is alive.
+    #[serde(rename = "worker.pong")]
+    WorkerPong,
+
     /// Sent once on initial connection to register the worker with the backend.
     #[serde(rename = "worker.registered")]
     WorkerRegistered {
@@ -168,6 +172,7 @@ impl std::fmt::Display for Response {
                 )
             }
             Self::DeliveryReceipt { message_id } => write!(f, "delivery_receipt({message_id})"),
+            Self::WorkerPong => write!(f, "worker.pong"),
             Self::WorkerHeartbeat { worker_id, .. } => {
                 write!(f, "worker.heartbeat(worker={worker_id})")
             }

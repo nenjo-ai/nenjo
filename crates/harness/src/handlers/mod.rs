@@ -10,7 +10,7 @@ pub mod task;
 
 use anyhow::Result;
 
-use nenjo_events::Command;
+use nenjo_events::{Command, Response};
 
 pub use crate::harness::CommandContext;
 
@@ -136,6 +136,11 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         } => repo::handle_repo_sync(&ctx, project_id, &repo_url).await,
 
         Command::RepoUnsync { project_id } => repo::handle_repo_unsync(&ctx, project_id).await,
+
+        Command::WorkerPing => {
+            let _ = ctx.response_tx.send(Response::WorkerPong);
+            Ok(())
+        }
 
         Command::ManifestChanged {
             resource_type,

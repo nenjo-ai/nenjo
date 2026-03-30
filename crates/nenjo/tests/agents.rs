@@ -147,7 +147,7 @@ fn test_manifest() -> Manifest {
             "developer_prompt": "Focus on writing clean, idiomatic Rust.",
             "templates": {
                 "task_execution": "Execute the following task:\n\nTitle: {{ task.title }}\nDescription: {{ task.description }}",
-                "chat_task": "{{ message }}",
+                "chat_task": "{{ chat.message }}",
                 "gate_eval": "Evaluate: {{ gate.criteria }}",
                 "cron_task": ""
             }

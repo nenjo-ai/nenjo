@@ -24,14 +24,14 @@ pub struct Config {
     #[serde(skip)]
     pub data_dir: PathBuf,
 
-    /// Base URL for the backend API.
-    #[serde(default = "default_backend_api_url")]
-    pub backend_api_url: String,
+    /// Base URL for the backend API. Defaults to `https://api.nenjo.ai`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_api_url: Option<String>,
     /// API key attached to every request to the backend.
     pub api_key: String,
-    /// NATS server URL for direct backend↔worker communication.
-    #[serde(default = "default_nats_url")]
-    pub nats_url: String,
+    /// NATS server URL for direct backend↔worker communication. Defaults to `tls://nats.nenjo.ai`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nats_url: Option<String>,
 
     /// Api keys for the llm model providers
     pub model_provider_api_keys: HashMap<ModelProviders, String>,
@@ -66,13 +66,8 @@ pub struct Config {
     pub capabilities: Vec<Capability>,
 }
 
-fn default_backend_api_url() -> String {
-    "https://api.nenjo.ai".to_string()
-}
-
-fn default_nats_url() -> String {
-    "tls://nats.nenjo.ai".to_string()
-}
+const DEFAULT_BACKEND_API_URL: &str = "https://api.nenjo.ai";
+const DEFAULT_NATS_URL: &str = "tls://nats.nenjo.ai";
 
 fn default_true() -> bool {
     true
@@ -560,8 +555,8 @@ impl Default for Config {
             data_dir: nenjo_dir.join("data"),
             model_provider_api_keys: HashMap::new(),
             api_key: String::new(),
-            backend_api_url: default_backend_api_url(),
-            nats_url: default_nats_url(),
+            backend_api_url: None,
+            nats_url: None,
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
             agent: AgentConfig::default(),
@@ -576,6 +571,22 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Resolved backend API URL (falls back to production default).
+    pub fn backend_api_url(&self) -> &str {
+        self.backend_api_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_BACKEND_API_URL)
+    }
+
+    /// Resolved NATS URL (falls back to production default).
+    pub fn nats_url(&self) -> &str {
+        self.nats_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_NATS_URL)
+    }
+
     pub fn load_or_init() -> Result<Self> {
         let home = UserDirs::new()
             .map(|u| u.home_dir().to_path_buf())
@@ -630,7 +641,7 @@ impl Config {
         if let Ok(val) = std::env::var("NENJO_API_URL") {
             let val = val.trim().to_string();
             if !val.is_empty() {
-                self.backend_api_url = val;
+                self.backend_api_url = Some(val);
             }
         }
 
@@ -644,7 +655,7 @@ impl Config {
         if let Ok(val) = std::env::var("NATS_URL") {
             let val = val.trim().to_string();
             if !val.is_empty() {
-                self.nats_url = val;
+                self.nats_url = Some(val);
             }
         }
 

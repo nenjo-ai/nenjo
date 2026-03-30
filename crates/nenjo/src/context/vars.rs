@@ -158,6 +158,8 @@ impl RenderContextVars {
             ("task.type", &self.task.task_type),
             ("task.slug", &self.task.slug),
             ("task.complexity", &self.task.complexity),
+            // Chat
+            ("chat.message", &self.chat_message),
             // Gate
             ("gate.criteria", &self.gate_criteria),
             ("gate.previous_output", &self.gate_previous_output),
