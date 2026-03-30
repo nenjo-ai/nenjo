@@ -143,14 +143,14 @@ main() {
 
   echo "Installing ${BINARY_NAME} ${version} for ${platform}..."
 
-  artifact_name="${BINARY_NAME}-${platform}"
+  artifact_name="${BINARY_NAME}-${platform}.tar.gz"
   download_url="https://github.com/${REPO}/releases/download/${version}/${artifact_name}"
 
   # Download to temp directory
   TMP_DIR=$(mktemp -d)
 
   echo "Downloading ${download_url}..."
-  if ! curl -fSL -o "${TMP_DIR}/${BINARY_NAME}" "$download_url"; then
+  if ! curl -fSL -o "${TMP_DIR}/${artifact_name}" "$download_url"; then
     echo ""
     echo "Error: failed to download ${artifact_name}"
     echo ""
@@ -160,7 +160,8 @@ main() {
     exit 1
   fi
 
-  # Install
+  # Extract and install
+  tar -xzf "${TMP_DIR}/${artifact_name}" -C "${TMP_DIR}"
   mkdir -p "$INSTALL_DIR"
   chmod +x "${TMP_DIR}/${BINARY_NAME}"
   mv "${TMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
