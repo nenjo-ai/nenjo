@@ -395,7 +395,12 @@ async fn use_ability_with_real_llm() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("developer").await.unwrap().build().unwrap();
+    let runner = provider
+        .agent_by_name("developer")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
 
     // Verify use_ability tool is present
     let specs = runner.instance().tool_specs();
@@ -511,6 +516,7 @@ async fn domain_expansion_with_real_llm() {
     // Activate the PRD domain
     let prd_runner = runner
         .domain_expansion("prd")
+        .await
         .expect("should activate prd domain");
 
     // Verify the domain is active on the instance
@@ -571,9 +577,14 @@ async fn domain_expansion_unknown_domain_fails() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("agent").await.unwrap().build().unwrap();
+    let runner = provider
+        .agent_by_name("agent")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
 
-    let result = runner.domain_expansion("nonexistent");
+    let result = runner.domain_expansion("nonexistent").await;
     assert!(result.is_err());
     let msg = result.err().unwrap().to_string();
     assert!(

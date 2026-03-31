@@ -76,6 +76,7 @@ pub struct Provider {
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
 }
 
 impl Provider {
@@ -92,6 +93,7 @@ impl Provider {
         memory: Option<Arc<dyn Memory>>,
         agent_config: AgentConfig,
         lambda_runner: Option<Arc<dyn LambdaRunner>>,
+        platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     ) -> Self {
         Self {
             manifest,
@@ -100,6 +102,7 @@ impl Provider {
             memory,
             agent_config,
             lambda_runner,
+            platform_resolver,
         }
     }
 
@@ -148,6 +151,7 @@ impl Provider {
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
             lambda_runner: self.lambda_runner.clone(),
+            platform_resolver: self.platform_resolver.clone(),
         }
     }
 
@@ -169,6 +173,11 @@ impl Provider {
     /// Access the lambda runner, if configured.
     pub fn lambda_runner(&self) -> Option<&Arc<dyn LambdaRunner>> {
         self.lambda_runner.as_ref()
+    }
+
+    /// Access the platform tool resolver, if configured.
+    pub fn platform_resolver(&self) -> Option<&Arc<dyn crate::mcp::PlatformToolResolver>> {
+        self.platform_resolver.as_ref()
     }
 
     // -----------------------------------------------------------------------
@@ -291,6 +300,7 @@ impl Provider {
             self.model_factory.clone(),
             self.tool_factory.clone(),
             self.lambda_runner.clone(),
+            self.platform_resolver.clone(),
         );
 
         Ok(builder)

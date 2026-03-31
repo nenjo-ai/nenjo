@@ -122,8 +122,16 @@ impl Harness {
             ProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
         let security = Arc::new(nenjo_tools::security::SecurityPolicy::default());
         let runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter> = Arc::new(NativeRuntime);
-        let tool_factory =
-            HarnessToolFactory::new(security, runtime, config.clone(), external_mcp.clone());
+        let platform_resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(
+            nenjo::PlatformMcpResolver::new(config.backend_api_url(), &config.api_key),
+        );
+        let tool_factory = HarnessToolFactory::new(
+            security,
+            runtime,
+            config.clone(),
+            external_mcp.clone(),
+            platform_resolver.clone(),
+        );
 
         let home = directories::UserDirs::new()
             .map(|u| u.home_dir().to_path_buf())
@@ -139,6 +147,7 @@ impl Harness {
             .with_tool_factory(tool_factory)
             .with_memory(mem)
             .with_agent_config(agent_config)
+            .with_platform_resolver(platform_resolver)
             .build()
             .await
             .context("Failed to build Provider")?;
