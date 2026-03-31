@@ -390,6 +390,7 @@ impl AgentRunner {
         };
 
         if !user_message.is_empty() {
+            debug!(agent = self.instance.name, user_message = %user_message, "Agent user message");
             messages.push(ChatMessage::user(&user_message));
         }
 

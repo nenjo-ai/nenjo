@@ -66,6 +66,7 @@ pub fn try_render_template(
         return Ok(String::new());
     }
 
+    let template = &escape_backslash_braces(template);
     let context_value = vars_to_value(vars);
 
     let mut env = Environment::new();
@@ -77,6 +78,52 @@ pub fn try_render_template(
             message: e.to_string(),
             detail: e.display_debug_info().to_string(),
         })
+}
+
+// ---------------------------------------------------------------------------
+// Backslash escape pre-processing
+// ---------------------------------------------------------------------------
+
+/// Convert `\{{` and `\{%` sequences into MiniJinja raw blocks so that
+/// backslash works as an escape character for template delimiters.
+///
+/// - `\{{`  → literal `{{` (escape prevents variable interpolation)
+/// - `\{%`  → literal `{%` (escape prevents block tag interpretation)
+/// - `\\{{` → literal `\` + variable interpolation (escaped backslash)
+/// - `\\{%` → literal `\` + block tag interpretation (escaped backslash)
+fn escape_backslash_braces(template: &str) -> String {
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match (chars.peek().copied(), chars.clone().nth(1)) {
+                // \\  → consume both, emit one literal backslash.
+                (Some('\\'), _) => {
+                    chars.next();
+                    result.push('\\');
+                }
+                // \{{ → emit a raw block that outputs literal {{
+                (Some('{'), Some('{')) => {
+                    chars.next();
+                    chars.next();
+                    result.push_str("{% raw %}{{{% endraw %}");
+                }
+                // \{% → emit a raw block that outputs literal {%
+                (Some('{'), Some('%')) => {
+                    chars.next();
+                    chars.next();
+                    result.push_str("{% raw %}{%{% endraw %}");
+                }
+                // Lone backslash — pass through.
+                _ => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -387,5 +434,465 @@ Task: {{ task.title }}"#;
     fn render_deeply_nested_keys() {
         let v = vars(&[("a.b.c.d", "deep")]);
         assert_eq!(render_template("{{ a.b.c.d }}", &v), "deep");
+    }
+
+    // -----------------------------------------------------------------------
+    // MiniJinja escaping behaviour
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_escape_is_disabled() {
+        // HTML/XML special characters pass through unescaped because
+        // auto-escape is set to None — variables containing pre-built XML
+        // must be injected verbatim.
+        let v = vars(&[("val", "<b>bold & \"quoted\"</b>")]);
+        assert_eq!(
+            render_template("{{ val }}", &v),
+            "<b>bold & \"quoted\"</b>"
+        );
+    }
+
+    #[test]
+    fn escape_filter_html_escapes() {
+        // The |e (|escape) filter explicitly applies HTML escaping even
+        // though auto-escape is off. Useful for user-supplied values that
+        // must be safe inside XML attributes or content.
+        let v = vars(&[("val", "<script>alert('xss')</script>")]);
+        assert_eq!(
+            render_template("{{ val|e }}", &v),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;&#x2f;script&gt;"
+        );
+    }
+
+    #[test]
+    fn escape_filter_ampersand_and_quotes() {
+        let v = vars(&[("val", "a & b \"c\" 'd'")]);
+        assert_eq!(
+            render_template("{{ val|escape }}", &v),
+            "a &amp; b &quot;c&quot; &#x27;d&#x27;"
+        );
+    }
+
+    #[test]
+    fn escape_filter_preserves_safe_text() {
+        let v = vars(&[("val", "plain text 123")]);
+        assert_eq!(render_template("{{ val|e }}", &v), "plain text 123");
+    }
+
+    #[test]
+    fn backslash_in_plain_text_passes_through() {
+        // A backslash NOT followed by {{ is left as-is.
+        let v = vars(&[("val", "hello")]);
+        assert_eq!(
+            render_template("before\\nafter {{ val }}", &v),
+            "before\\nafter hello"
+        );
+    }
+
+    #[test]
+    fn raw_block_preserves_delimiters() {
+        // {% raw %} prevents MiniJinja from interpreting {{ }} delimiters.
+        let v = vars(&[("val", "ignored")]);
+        assert_eq!(
+            render_template("{% raw %}{{ val }}{% endraw %}", &v),
+            "{{ val }}"
+        );
+    }
+
+    #[test]
+    fn literal_braces_via_string_expression() {
+        // To output a literal {{ in MiniJinja, use a string expression.
+        assert_eq!(
+            render_template("{{ '{{' }} content {{ '}}' }}", &HashMap::new()),
+            "{{ content }}"
+        );
+    }
+
+    #[test]
+    fn escape_filter_on_xml_fragment() {
+        // Applying |e to an XML fragment escapes all tags — useful when
+        // the value should appear as visible text, not parsed XML.
+        let v = vars(&[("xml", "<agent name=\"dev\"/>")]);
+        assert_eq!(
+            render_template("{{ xml|e }}", &v),
+            "&lt;agent name=&quot;dev&quot;&#x2f;&gt;"
+        );
+    }
+
+    #[test]
+    fn no_filter_preserves_xml_fragment() {
+        // Without |e, XML passes through raw (the default behaviour).
+        let v = vars(&[("xml", "<agent name=\"dev\"/>")]);
+        assert_eq!(
+            render_template("{{ xml }}", &v),
+            "<agent name=\"dev\"/>"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Backslash escape pre-processor (unit tests on escape_backslash_braces)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn esc_plain_text_unchanged() {
+        assert_eq!(escape_backslash_braces("no braces here"), "no braces here");
+    }
+
+    #[test]
+    fn esc_normal_braces_unchanged() {
+        assert_eq!(escape_backslash_braces("{{ val }}"), "{{ val }}");
+    }
+
+    #[test]
+    fn esc_backslash_braces_converted() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{ val }}"),
+            "{% raw %}{{{% endraw %} val }}"
+        );
+    }
+
+    #[test]
+    fn esc_double_backslash_then_braces() {
+        // \\{{ → literal \ followed by normal {{ (variable expression)
+        assert_eq!(escape_backslash_braces(r"\\{{ val }}"), r"\{{ val }}");
+    }
+
+    #[test]
+    fn esc_triple_backslash_then_braces() {
+        // \\\{{ → \\ consumes to \, then \{{ escapes the braces
+        assert_eq!(
+            escape_backslash_braces(r"\\\{{ val }}"),
+            "\\{% raw %}{{{% endraw %} val }}"
+        );
+    }
+
+    #[test]
+    fn esc_quadruple_backslash_then_braces() {
+        // \\\\{{ → two \\ pairs → two literal backslashes + normal {{
+        assert_eq!(escape_backslash_braces(r"\\\\{{ val }}"), r"\\{{ val }}");
+    }
+
+    #[test]
+    fn esc_lone_backslash_at_end() {
+        assert_eq!(escape_backslash_braces("text\\"), "text\\");
+    }
+
+    #[test]
+    fn esc_backslash_before_single_brace() {
+        // \{ is not \{{ — left as-is
+        assert_eq!(escape_backslash_braces(r"\{ nope"), r"\{ nope");
+    }
+
+    #[test]
+    fn esc_backslash_before_non_brace() {
+        assert_eq!(escape_backslash_braces(r"\n\t"), r"\n\t");
+    }
+
+    #[test]
+    fn esc_multiple_escaped_braces() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{ a }} and \{{ b }}"),
+            "{% raw %}{{{% endraw %} a }} and {% raw %}{{{% endraw %} b }}"
+        );
+    }
+
+    #[test]
+    fn esc_at_start_of_string() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{ start }}"),
+            "{% raw %}{{{% endraw %} start }}"
+        );
+    }
+
+    #[test]
+    fn esc_adjacent_escaped_braces() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{\{{"),
+            "{% raw %}{{{% endraw %}{% raw %}{{{% endraw %}"
+        );
+    }
+
+    #[test]
+    fn esc_empty_string() {
+        assert_eq!(escape_backslash_braces(""), "");
+    }
+
+    #[test]
+    fn esc_only_backslash() {
+        assert_eq!(escape_backslash_braces("\\"), "\\");
+    }
+
+    #[test]
+    fn esc_only_double_backslash() {
+        assert_eq!(escape_backslash_braces("\\\\"), "\\");
+    }
+
+    #[test]
+    fn esc_mixed_escaped_and_normal() {
+        assert_eq!(
+            escape_backslash_braces(r"{{ a }} \{{ b }} {{ c }}"),
+            "{{ a }} {% raw %}{{{% endraw %} b }} {{ c }}"
+        );
+    }
+
+    #[test]
+    fn esc_backslash_far_from_braces() {
+        assert_eq!(
+            escape_backslash_braces(r"path\to\file {{ val }}"),
+            r"path\to\file {{ val }}"
+        );
+    }
+
+    #[test]
+    fn esc_double_backslash_without_braces() {
+        // \\ not followed by {{ → literal backslash
+        assert_eq!(escape_backslash_braces(r"a\\b"), r"a\b");
+    }
+
+    // -----------------------------------------------------------------------
+    // Backslash escape end-to-end (through render_template)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_backslash_escapes_braces() {
+        let v = vars(&[("val", "replaced")]);
+        assert_eq!(
+            render_template(r"text \{{ val }}", &v),
+            "text {{ val }}"
+        );
+    }
+
+    #[test]
+    fn render_backslash_escape_mixed_with_variable() {
+        let v = vars(&[("name", "dev")]);
+        assert_eq!(
+            render_template(r"hello {{ name }}, use \{{ var }} for literals", &v),
+            "hello dev, use {{ var }} for literals"
+        );
+    }
+
+    #[test]
+    fn render_backslash_escape_multiple() {
+        assert_eq!(
+            render_template(r"\{{ a }} and \{{ b }}", &HashMap::new()),
+            "{{ a }} and {{ b }}"
+        );
+    }
+
+    #[test]
+    fn render_double_backslash_renders_variable() {
+        // \\{{ → literal \ + render variable
+        let v = vars(&[("val", "hello")]);
+        assert_eq!(render_template(r"\\{{ val }}", &v), r"\hello");
+    }
+
+    #[test]
+    fn render_triple_backslash_escapes_braces() {
+        // \\\{{ → literal \ + literal {{
+        assert_eq!(
+            render_template(r"\\\{{ val }}", &HashMap::new()),
+            r"\{{ val }}"
+        );
+    }
+
+    #[test]
+    fn render_no_backslash_renders_variable() {
+        let v = vars(&[("val", "hello")]);
+        assert_eq!(render_template("{{ val }}", &v), "hello");
+    }
+
+    #[test]
+    fn render_backslash_in_json_prompt() {
+        // Real-world case: prompt contains JSON with escaped braces
+        let v = vars(&[("format", "ignored")]);
+        assert_eq!(
+            render_template(
+                r#"Respond in JSON: \{{ "key": "value" }}"#,
+                &v,
+            ),
+            r#"Respond in JSON: {{ "key": "value" }}"#
+        );
+    }
+
+    #[test]
+    fn render_backslash_with_jinja_block() {
+        // \{{ inside a conditional block
+        let v = vars(&[("show", "yes")]);
+        assert_eq!(
+            render_template(r"{% if show %}literal: \{{ x }}{% endif %}", &v),
+            "literal: {{ x }}"
+        );
+    }
+
+    #[test]
+    fn render_backslash_only_escapes_double_brace() {
+        // \{ alone (single brace) is not special
+        let v = vars(&[("val", "hi")]);
+        assert_eq!(
+            render_template(r"\{ not escaped {{ val }}", &v),
+            r"\{ not escaped hi"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // \{% block tag escaping — pre-processor unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn esc_block_tag_converted() {
+        assert_eq!(
+            escape_backslash_braces(r"\{% if x %}"),
+            "{% raw %}{%{% endraw %} if x %}"
+        );
+    }
+
+    #[test]
+    fn esc_block_tag_normal_unchanged() {
+        assert_eq!(
+            escape_backslash_braces("{% if x %}"),
+            "{% if x %}"
+        );
+    }
+
+    #[test]
+    fn esc_double_backslash_block_tag() {
+        // \\{% → literal \ + real block tag
+        assert_eq!(
+            escape_backslash_braces(r"\\{% if x %}"),
+            r"\{% if x %}"
+        );
+    }
+
+    #[test]
+    fn esc_mixed_var_and_block_escapes() {
+        assert_eq!(
+            escape_backslash_braces(r"\{% if ok %}\{{ val }}\{% endif %}"),
+            "{% raw %}{%{% endraw %} if ok %}{% raw %}{{{% endraw %} val }}{% raw %}{%{% endraw %} endif %}"
+        );
+    }
+
+    #[test]
+    fn esc_block_tag_at_start() {
+        assert_eq!(
+            escape_backslash_braces(r"\{% raw %}"),
+            "{% raw %}{%{% endraw %} raw %}"
+        );
+    }
+
+    #[test]
+    fn esc_block_tag_adjacent() {
+        assert_eq!(
+            escape_backslash_braces(r"\{%\{%"),
+            "{% raw %}{%{% endraw %}{% raw %}{%{% endraw %}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // \{% block tag escaping — end-to-end through render_template
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_escaped_block_tags_literal() {
+        // \{% if %} should output literal {% if %}, not be interpreted
+        assert_eq!(
+            render_template(r"\{% if task.id %}\{{ task.title }}\{% endif %}", &HashMap::new()),
+            "{% if task.id %}{{ task.title }}{% endif %}"
+        );
+    }
+
+    #[test]
+    fn render_escaped_block_mixed_with_real_block() {
+        // Real {% if %} block + escaped \{{ inside it
+        let v = vars(&[("show", "yes")]);
+        assert_eq!(
+            render_template(r"{% if show %}use \{{ var }} syntax{% endif %}", &v),
+            "use {{ var }} syntax"
+        );
+    }
+
+    #[test]
+    fn render_escaped_conditional_example() {
+        // The exact pattern from the template_vars_guide conditional_rendering section
+        assert_eq!(
+            render_template(
+                r"\{% if task.id %}Task: \{{ task.title }}\{% endif %}",
+                &HashMap::new(),
+            ),
+            "{% if task.id %}Task: {{ task.title }}{% endif %}"
+        );
+    }
+
+    #[test]
+    fn render_escaped_if_else_example() {
+        assert_eq!(
+            render_template(
+                r"\{% if task.id %}...\{% else %}No task context\{% endif %}",
+                &HashMap::new(),
+            ),
+            "{% if task.id %}...{% else %}No task context{% endif %}"
+        );
+    }
+
+    #[test]
+    fn render_double_backslash_block_tag() {
+        // \\{% → literal \ + real block tag executed
+        let v = vars(&[("x", "yes")]);
+        assert_eq!(
+            render_template(r"\\{% if x %}ok{% endif %}", &v),
+            r"\ok"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-byte UTF-8 preservation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn esc_preserves_em_dash() {
+        assert_eq!(
+            escape_backslash_braces("hello — world"),
+            "hello — world"
+        );
+    }
+
+    #[test]
+    fn esc_preserves_emoji() {
+        assert_eq!(
+            escape_backslash_braces("status: ✅ done"),
+            "status: ✅ done"
+        );
+    }
+
+    #[test]
+    fn esc_preserves_multibyte_with_escapes() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{ val }} — description"),
+            "{% raw %}{{{% endraw %} val }} — description"
+        );
+    }
+
+    #[test]
+    fn render_preserves_em_dash() {
+        let v = vars(&[("name", "dev")]);
+        assert_eq!(
+            render_template(r"\{{ self }} — Full XML {{ name }}", &v),
+            "{{ self }} — Full XML dev"
+        );
+    }
+
+    #[test]
+    fn render_preserves_cjk() {
+        assert_eq!(
+            render_template("日本語テスト", &HashMap::new()),
+            "日本語テスト"
+        );
+    }
+
+    #[test]
+    fn esc_preserves_mixed_unicode_and_escapes() {
+        assert_eq!(
+            escape_backslash_braces(r"\{{ agent.id }} — UUID • \{{ agent.name }} — Name"),
+            "{% raw %}{{{% endraw %} agent.id }} — UUID • {% raw %}{{{% endraw %} agent.name }} — Name"
+        );
     }
 }
