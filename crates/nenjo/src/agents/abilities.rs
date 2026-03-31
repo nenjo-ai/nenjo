@@ -161,6 +161,11 @@ impl Tool for UseAbilityTool {
         } else {
             prompts.user_message
         };
+        debug!(
+            ability = ability_name,
+            user_message = %user_message,
+            "Ability sub-agent user message"
+        );
         messages.push(nenjo_models::ChatMessage::user(&user_message));
 
         // Run the sub turn loop (no events — nested execution).
