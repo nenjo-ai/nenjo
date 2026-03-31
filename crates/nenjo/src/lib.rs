@@ -23,6 +23,7 @@ pub mod client;
 pub mod config;
 pub mod context;
 pub mod manifest;
+pub mod mcp;
 pub mod memory;
 pub mod provider;
 pub mod routines;
@@ -39,6 +40,9 @@ pub use provider::{
 
 // Re-export the Tool trait for custom tool implementations.
 pub use nenjo_tools::{Tool, ToolCategory, ToolResult, ToolSpec};
+
+// Re-export MCP types.
+pub use mcp::{NoopPlatformResolver, PlatformMcpResolver, PlatformToolResolver};
 
 // Re-export Provider for convenience.
 pub use nenjo_models::ModelProvider;

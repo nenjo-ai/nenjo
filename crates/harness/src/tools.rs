@@ -33,6 +33,7 @@ pub struct HarnessToolFactory {
     runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter>,
     config: crate::config::Config,
     external_mcp: Arc<crate::external_mcp::ExternalMcpPool>,
+    platform_resolver: Arc<dyn nenjo::PlatformToolResolver>,
 }
 
 impl HarnessToolFactory {
@@ -41,12 +42,14 @@ impl HarnessToolFactory {
         runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter>,
         config: crate::config::Config,
         external_mcp: Arc<crate::external_mcp::ExternalMcpPool>,
+        platform_resolver: Arc<dyn nenjo::PlatformToolResolver>,
     ) -> Self {
         Self {
             security,
             runtime,
             config,
             external_mcp,
+            platform_resolver,
         }
     }
 
@@ -91,17 +94,13 @@ impl ToolFactory for HarnessToolFactory {
             }
         }
 
-        // Add platform MCP tools (backend /mcp endpoint) filtered by agent's scopes.
+        // Add platform MCP tools resolved by scope.
         if !agent.platform_scopes.is_empty() {
-            let platform_tools = crate::mcp_client::mcp_tools_for_agent(
-                self.config.backend_api_url(),
-                &self.config.api_key,
-                &agent.platform_scopes,
-            )
-            .await;
-            for t in platform_tools {
-                tools.push(Arc::from(t));
-            }
+            let platform_tools = self
+                .platform_resolver
+                .resolve_tools(&agent.platform_scopes)
+                .await;
+            tools.extend(platform_tools);
         }
 
         // Web fetch (always included with config, deny-by-default via allowed_domains)
@@ -232,7 +231,15 @@ pub fn all_tools(
 ) -> Vec<Box<dyn Tool>> {
     let runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter> = Arc::new(NativeRuntime);
     let mcp_pool = Arc::new(crate::external_mcp::ExternalMcpPool::new());
-    let factory = HarnessToolFactory::new(security.clone(), runtime, config.clone(), mcp_pool);
+    let noop_resolver: Arc<dyn nenjo::PlatformToolResolver> =
+        Arc::new(nenjo::mcp::NoopPlatformResolver);
+    let factory = HarnessToolFactory::new(
+        security.clone(),
+        runtime,
+        config.clone(),
+        mcp_pool,
+        noop_resolver,
+    );
     factory
         .base_tools()
         .into_iter()

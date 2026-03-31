@@ -11,20 +11,32 @@ use super::instance::AgentInstance;
 use super::prompts::PromptConfig;
 use super::runner::turn_loop;
 use crate::manifest::{AbilityManifest, Manifest};
+use crate::mcp::PlatformToolResolver;
 use crate::types::TaskType;
 
 /// Tool that executes a named ability as a sub-agent turn loop.
 ///
 /// The ability inherits the caller's identity (system prompt, model, memory)
-/// but uses the ability's own developer prompt and scoped tools.
+/// but uses the ability's own developer prompt and scoped tools. When a
+/// platform resolver is available, the ability's `platform_scopes` are used
+/// to resolve additional scope-gated tools for the sub-execution.
 pub struct UseAbilityTool {
     instance: Arc<AgentInstance>,
     manifest: Arc<Manifest>,
+    platform_resolver: Option<Arc<dyn PlatformToolResolver>>,
 }
 
 impl UseAbilityTool {
-    pub fn new(instance: Arc<AgentInstance>, manifest: Arc<Manifest>) -> Self {
-        Self { instance, manifest }
+    pub fn new(
+        instance: Arc<AgentInstance>,
+        manifest: Arc<Manifest>,
+        platform_resolver: Option<Arc<dyn PlatformToolResolver>>,
+    ) -> Self {
+        Self {
+            instance,
+            manifest,
+            platform_resolver,
+        }
     }
 }
 
@@ -116,8 +128,24 @@ impl Tool for UseAbilityTool {
             "Activating ability"
         );
 
+        // Resolve platform tools for the ability's scopes.
+        let ability_tools = if !ability.platform_scopes.is_empty() {
+            if let Some(ref resolver) = self.platform_resolver {
+                resolver.resolve_tools(&ability.platform_scopes).await
+            } else {
+                debug!(
+                    ability = ability_name,
+                    "No platform resolver — ability scopes will not resolve to tools"
+                );
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         // Build the sub-execution instance.
-        let sub_instance = build_ability_instance(&self.instance, ability, &self.manifest);
+        let sub_instance =
+            build_ability_instance(&self.instance, ability, &self.manifest, ability_tools);
 
         let task = TaskType::Chat {
             user_message: task_description.to_string(),
@@ -187,12 +215,15 @@ impl Tool for UseAbilityTool {
 /// Build a temporary AgentInstance for the ability sub-execution.
 ///
 /// Resolves the ability's `skill_ids`, `mcp_server_ids`, and `platform_scopes`
-/// from the manifest and merges them into the sub-instance's prompt context,
-/// the same way the Provider resolves them for the base agent.
+/// from the manifest and merges them into the sub-instance's prompt context.
+/// The `ability_tools` are platform tools resolved from the ability's scopes
+/// via the `PlatformToolResolver` — they are merged into the parent's base
+/// tools (deduped by name).
 fn build_ability_instance(
     caller: &AgentInstance,
     ability: &AbilityManifest,
     manifest: &Manifest,
+    ability_tools: Vec<Arc<dyn Tool>>,
 ) -> AgentInstance {
     // Inherit system prompt, override developer prompt.
     let prompt_config = PromptConfig {
@@ -202,14 +233,18 @@ fn build_ability_instance(
         memory_profile: caller.prompt_config.memory_profile.clone(),
     };
 
-    // Abilities are additive — inherit all parent tools, just remove
-    // use_ability to prevent recursion.
-    let tools: Vec<Arc<dyn Tool>> = caller
+    // Inherit the parent's base tools (file_edit, shell, etc.) but strip
+    // platform MCP tools — the ability's own scopes determine which platform
+    // tools are available. Also remove use_ability to prevent recursion.
+    let mut tools: Vec<Arc<dyn Tool>> = caller
         .tools
         .iter()
-        .filter(|t| t.name() != "use_ability")
+        .filter(|t| t.name() != "use_ability" && !t.name().starts_with("app.nenjo.platform/"))
         .cloned()
         .collect();
+
+    // Add the ability's scope-resolved platform tools.
+    tools.extend(ability_tools);
 
     // Build a prompt context without abilities (no recursion).
     let mut prompt_context = caller.prompt_context.clone();
@@ -245,7 +280,11 @@ fn build_ability_instance(
             server.display_name.clone(),
             server.description.clone().unwrap_or_default(),
         );
-        if !prompt_context.mcp_server_info.iter().any(|e| e.0 == entry.0) {
+        if !prompt_context
+            .mcp_server_info
+            .iter()
+            .any(|e| e.0 == entry.0)
+        {
             prompt_context.mcp_server_info.push(entry);
         }
     }

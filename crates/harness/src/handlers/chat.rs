@@ -145,10 +145,20 @@ pub async fn handle_chat(
     if !cancel.is_cancelled() {
         let output = handle.output().await?;
         if !output.messages.is_empty() {
-            let max_turns = ctx.provider().agent_config().max_history_messages;
-            let _ = ctx
-                .chat_history
-                .write(&slug, &aname, session_id, &output.messages, max_turns);
+            // Strip system/developer messages — they are rebuilt each turn from
+            // the agent's prompt config. Only persist the conversation turns.
+            let conversation: Vec<_> = output
+                .messages
+                .iter()
+                .filter(|m| m.role != "system" && m.role != "developer")
+                .cloned()
+                .collect();
+            if !conversation.is_empty() {
+                let max_turns = ctx.provider().agent_config().max_history_messages;
+                let _ = ctx
+                    .chat_history
+                    .write(&slug, &aname, session_id, &conversation, max_turns);
+            }
         }
     }
 

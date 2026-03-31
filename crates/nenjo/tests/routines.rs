@@ -1207,7 +1207,12 @@ async fn delegation_basic() {
         .unwrap();
 
     // Build the coder agent — it should have delegate_to since reviewer exists.
-    let runner = provider.agent_by_name("coder").await.unwrap().build().unwrap();
+    let runner = provider
+        .agent_by_name("coder")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -1240,7 +1245,12 @@ async fn delegation_not_injected_for_single_agent() {
         .await
         .unwrap();
 
-    let runner = provider.agent_by_name("solo").await.unwrap().build().unwrap();
+    let runner = provider
+        .agent_by_name("solo")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();

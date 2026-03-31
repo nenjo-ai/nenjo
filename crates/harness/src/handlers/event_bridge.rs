@@ -127,12 +127,14 @@ pub fn routine_event_to_response(
 
 /// Get project slug from manifest, falling back to UUID string.
 pub fn project_slug(manifest: &Manifest, project_id: Uuid) -> String {
-    manifest
-        .projects
-        .iter()
-        .find(|p| p.id == project_id)
-        .map(|p| p.slug.clone())
-        .unwrap_or_else(|| project_id.to_string())
+    if project_id.is_nil() {
+        return String::new();
+    }
+    match manifest.projects.iter().find(|p| p.id == project_id) {
+        Some(p) if p.is_system => String::new(),
+        Some(p) => p.slug.clone(),
+        None => project_id.to_string(),
+    }
 }
 
 /// Get agent name from manifest, falling back to UUID string.
