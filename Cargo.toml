@@ -14,18 +14,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Boon Labs"]
 license = "Apache-2.0"
 repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
-nenjo = { path = "crates/nenjo", version = "0.2.0" }
-nenjo-xml = { path = "crates/xml", version = "0.2.0" }
-nenjo-models = { path = "crates/models", version = "0.2.0" }
-nenjo-tools = { path = "crates/tools", version = "0.2.0" }
-nenjo-events = { path = "crates/events", version = "0.2.0" }
+nenjo = { path = "crates/nenjo", version = "0.2.1" }
+nenjo-xml = { path = "crates/xml", version = "0.2.1" }
+nenjo-models = { path = "crates/models", version = "0.2.1" }
+nenjo-tools = { path = "crates/tools", version = "0.2.1" }
+nenjo-events = { path = "crates/events", version = "0.2.1" }
 harness = { path = "crates/harness" }
-nenjo-eventbus = { path = "crates/eventbus", version = "0.2.0" }
+nenjo-eventbus = { path = "crates/eventbus", version = "0.2.1" }
 runner = { path = "crates/runner" }
