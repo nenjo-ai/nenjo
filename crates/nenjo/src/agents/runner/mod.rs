@@ -88,6 +88,7 @@ pub struct DelegationSupport {
     pub memory: Option<Arc<dyn Memory>>,
     pub agent_config: AgentConfig,
     pub lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    pub platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     /// Pre-built delegation context from a parent delegation. When set,
     /// the runner uses this instead of creating a fresh one — this is how
     /// depth decrements across nested delegations.
@@ -102,6 +103,7 @@ pub struct AgentRunner {
     memory: Option<Arc<dyn Memory>>,
     memory_scope: Option<MemoryScope>,
     manifest: Option<Arc<Manifest>>,
+    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
 }
 
 impl AgentRunner {
@@ -119,9 +121,12 @@ impl AgentRunner {
             }
         }
 
-        // Extract the manifest before delegation is consumed — stored on the
-        // runner so domain_expansion can pass it through to sub-runners.
+        // Extract manifest and platform resolver before delegation is consumed —
+        // stored on the runner so domain_expansion can pass them to sub-runners.
         let manifest = delegation.as_ref().map(|ds| ds.manifest.clone());
+        let platform_resolver = delegation
+            .as_ref()
+            .and_then(|ds| ds.platform_resolver.clone());
 
         let has_abilities = !instance.prompt_context.available_abilities.is_empty();
 
@@ -133,7 +138,7 @@ impl AgentRunner {
                 .clone()
                 .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name.clone()))?;
             let base_instance = Arc::new(instance.clone());
-            let ability_tool = UseAbilityTool::new(base_instance, m);
+            let ability_tool = UseAbilityTool::new(base_instance, m, platform_resolver.clone());
             instance.tools.push(Arc::new(ability_tool));
         }
 
@@ -159,6 +164,7 @@ impl AgentRunner {
                     memory: ds.memory,
                     agent_config: ds.agent_config,
                     lambda_runner: ds.lambda_runner,
+                    platform_resolver: ds.platform_resolver,
                     caller_agent_id: instance.agent_id.unwrap_or_else(Uuid::nil),
                     delegation_ctx: ctx,
                 });
@@ -173,6 +179,7 @@ impl AgentRunner {
             memory,
             memory_scope,
             manifest,
+            platform_resolver,
         })
     }
 
@@ -201,6 +208,7 @@ impl AgentRunner {
             memory: None,
             memory_scope: None,
             manifest: None,
+            platform_resolver: None,
         }
     }
 
@@ -217,7 +225,7 @@ impl AgentRunner {
     /// let domain_runner = runner.domain_expansion("prd")?;
     /// let output = domain_runner.chat("Create a PRD for auth").await?;
     /// ```
-    pub fn domain_expansion(&self, domain_name: &str) -> Result<AgentRunner> {
+    pub async fn domain_expansion(&self, domain_name: &str) -> Result<AgentRunner> {
         let domain = self
             .instance
             .prompt_context
@@ -251,15 +259,74 @@ impl AgentRunner {
         };
 
         // Clone the instance and apply domain expansion.
-        // Domains are additive — they don't filter existing tools, only add context.
+        // Domains are additive — they add context, scopes, tools, and abilities.
         let mut instance = (*self.instance).clone();
         instance.prompt_context.active_domain = Some(active_domain);
+
+        let tool_config = &session_manifest.tools;
+
+        // Merge additional_scopes into the agent's platform_scopes.
+        for scope in &tool_config.additional_scopes {
+            if !instance.prompt_context.platform_scopes.contains(scope) {
+                instance.prompt_context.platform_scopes.push(scope.clone());
+            }
+        }
+
+        // Resolve and add platform tools for the expanded scopes.
+        if !tool_config.additional_scopes.is_empty() {
+            if let Some(ref resolver) = self.platform_resolver {
+                let scope_tools = resolver.resolve_tools(&tool_config.additional_scopes).await;
+                for tool in scope_tools {
+                    let name = tool.name().to_string();
+                    if !instance.tools.iter().any(|t| t.name() == name) {
+                        instance.tools.push(tool);
+                    }
+                }
+            }
+        }
+
+        // Activate abilities listed in the domain config.
+        if !tool_config.activate_abilities.is_empty() {
+            if let Some(ref manifest) = self.manifest {
+                for ability_name in &tool_config.activate_abilities {
+                    if let Some(ability) =
+                        manifest.abilities.iter().find(|a| a.name == *ability_name)
+                    {
+                        if !instance
+                            .prompt_context
+                            .available_abilities
+                            .iter()
+                            .any(|a| a.id == ability.id)
+                        {
+                            instance
+                                .prompt_context
+                                .available_abilities
+                                .push(ability.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // If abilities are now available (either pre-existing or domain-activated)
+        // and the use_ability tool isn't already present, inject it.
+        let has_abilities = !instance.prompt_context.available_abilities.is_empty();
+        let has_ability_tool = instance.tools.iter().any(|t| t.name() == "use_ability");
+        if has_abilities && !has_ability_tool {
+            if let Some(ref m) = self.manifest {
+                let base_instance = Arc::new(instance.clone());
+                let ability_tool =
+                    UseAbilityTool::new(base_instance, m.clone(), self.platform_resolver.clone());
+                instance.tools.push(Arc::new(ability_tool));
+            }
+        }
 
         Ok(Self {
             instance: Arc::new(instance),
             memory: self.memory.clone(),
             memory_scope: self.memory_scope.clone(),
             manifest: self.manifest.clone(),
+            platform_resolver: self.platform_resolver.clone(),
         })
     }
 

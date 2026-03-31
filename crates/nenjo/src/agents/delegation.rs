@@ -26,6 +26,7 @@ pub(crate) struct DelegateToToolParams {
     pub memory: Option<Arc<dyn Memory>>,
     pub agent_config: AgentConfig,
     pub lambda_runner: Option<Arc<dyn crate::routines::LambdaRunner>>,
+    pub platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     pub caller_agent_id: Uuid,
     pub delegation_ctx: DelegationContext,
 }
@@ -45,6 +46,7 @@ pub struct DelegateToTool {
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn crate::routines::LambdaRunner>>,
+    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     caller_agent_id: Uuid,
     delegation_ctx: DelegationContext,
 }
@@ -61,6 +63,7 @@ impl DelegateToTool {
             memory: params.memory,
             agent_config: params.agent_config,
             lambda_runner: params.lambda_runner,
+            platform_resolver: params.platform_resolver,
             caller_agent_id: params.caller_agent_id,
             delegation_ctx: params.delegation_ctx,
         }
@@ -76,6 +79,7 @@ impl DelegateToTool {
             self.memory.clone(),
             self.agent_config.clone(),
             self.lambda_runner.clone(),
+            self.platform_resolver.clone(),
         )
     }
 }
@@ -238,11 +242,16 @@ impl Tool for DelegateToTool {
             tools = ?tool_names,
             "Delegated agent prompt"
         );
-        debug!("{}", runner.instance().build_prompts(&crate::types::TaskType::Chat {
-            user_message: task.clone(),
-            history: vec![],
-            project_id: uuid::Uuid::nil(),
-        }));
+        debug!(
+            "{}",
+            runner
+                .instance()
+                .build_prompts(&crate::types::TaskType::Chat {
+                    user_message: task.clone(),
+                    history: vec![],
+                    project_id: uuid::Uuid::nil(),
+                })
+        );
 
         // Execute the delegation (simple API, no streaming for nested calls).
         match runner.chat(&task).await {

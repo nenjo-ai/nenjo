@@ -50,6 +50,7 @@ pub struct AgentBuilder {
     model_factory: Option<Arc<dyn ModelProviderFactory>>,
     tool_factory: Option<Arc<dyn ToolFactory>>,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
 }
 
@@ -72,6 +73,7 @@ impl AgentBuilder {
             model_factory: None,
             tool_factory: None,
             lambda_runner: None,
+            platform_resolver: None,
             child_delegation_ctx: None,
         }
     }
@@ -180,11 +182,13 @@ impl AgentBuilder {
         model_factory: Arc<dyn ModelProviderFactory>,
         tool_factory: Arc<dyn ToolFactory>,
         lambda_runner: Option<Arc<dyn LambdaRunner>>,
+        platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     ) -> Self {
         self.manifest = Some(manifest);
         self.model_factory = Some(model_factory);
         self.tool_factory = Some(tool_factory);
         self.lambda_runner = lambda_runner;
+        self.platform_resolver = platform_resolver;
         self
     }
 
@@ -212,6 +216,7 @@ impl AgentBuilder {
                 memory: self.memory.clone(),
                 agent_config: self.agent_config.clone(),
                 lambda_runner: self.lambda_runner,
+                platform_resolver: self.platform_resolver,
                 delegation_ctx: self.child_delegation_ctx,
             }),
             _ => None,
@@ -237,5 +242,4 @@ impl AgentBuilder {
 
         AgentRunner::new(instance, self.memory, self.memory_scope, delegation_support)
     }
-
 }

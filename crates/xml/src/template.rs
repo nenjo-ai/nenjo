@@ -446,10 +446,7 @@ Task: {{ task.title }}"#;
         // auto-escape is set to None — variables containing pre-built XML
         // must be injected verbatim.
         let v = vars(&[("val", "<b>bold & \"quoted\"</b>")]);
-        assert_eq!(
-            render_template("{{ val }}", &v),
-            "<b>bold & \"quoted\"</b>"
-        );
+        assert_eq!(render_template("{{ val }}", &v), "<b>bold & \"quoted\"</b>");
     }
 
     #[test]
@@ -523,10 +520,7 @@ Task: {{ task.title }}"#;
     fn no_filter_preserves_xml_fragment() {
         // Without |e, XML passes through raw (the default behaviour).
         let v = vars(&[("xml", "<agent name=\"dev\"/>")]);
-        assert_eq!(
-            render_template("{{ xml }}", &v),
-            "<agent name=\"dev\"/>"
-        );
+        assert_eq!(render_template("{{ xml }}", &v), "<agent name=\"dev\"/>");
     }
 
     // -----------------------------------------------------------------------
@@ -656,10 +650,7 @@ Task: {{ task.title }}"#;
     #[test]
     fn render_backslash_escapes_braces() {
         let v = vars(&[("val", "replaced")]);
-        assert_eq!(
-            render_template(r"text \{{ val }}", &v),
-            "text {{ val }}"
-        );
+        assert_eq!(render_template(r"text \{{ val }}", &v), "text {{ val }}");
     }
 
     #[test]
@@ -706,10 +697,7 @@ Task: {{ task.title }}"#;
         // Real-world case: prompt contains JSON with escaped braces
         let v = vars(&[("format", "ignored")]);
         assert_eq!(
-            render_template(
-                r#"Respond in JSON: \{{ "key": "value" }}"#,
-                &v,
-            ),
+            render_template(r#"Respond in JSON: \{{ "key": "value" }}"#, &v,),
             r#"Respond in JSON: {{ "key": "value" }}"#
         );
     }
@@ -748,19 +736,13 @@ Task: {{ task.title }}"#;
 
     #[test]
     fn esc_block_tag_normal_unchanged() {
-        assert_eq!(
-            escape_backslash_braces("{% if x %}"),
-            "{% if x %}"
-        );
+        assert_eq!(escape_backslash_braces("{% if x %}"), "{% if x %}");
     }
 
     #[test]
     fn esc_double_backslash_block_tag() {
         // \\{% → literal \ + real block tag
-        assert_eq!(
-            escape_backslash_braces(r"\\{% if x %}"),
-            r"\{% if x %}"
-        );
+        assert_eq!(escape_backslash_braces(r"\\{% if x %}"), r"\{% if x %}");
     }
 
     #[test]
@@ -795,7 +777,10 @@ Task: {{ task.title }}"#;
     fn render_escaped_block_tags_literal() {
         // \{% if %} should output literal {% if %}, not be interpreted
         assert_eq!(
-            render_template(r"\{% if task.id %}\{{ task.title }}\{% endif %}", &HashMap::new()),
+            render_template(
+                r"\{% if task.id %}\{{ task.title }}\{% endif %}",
+                &HashMap::new()
+            ),
             "{% if task.id %}{{ task.title }}{% endif %}"
         );
     }
@@ -837,10 +822,7 @@ Task: {{ task.title }}"#;
     fn render_double_backslash_block_tag() {
         // \\{% → literal \ + real block tag executed
         let v = vars(&[("x", "yes")]);
-        assert_eq!(
-            render_template(r"\\{% if x %}ok{% endif %}", &v),
-            r"\ok"
-        );
+        assert_eq!(render_template(r"\\{% if x %}ok{% endif %}", &v), r"\ok");
     }
 
     // -----------------------------------------------------------------------
@@ -849,10 +831,7 @@ Task: {{ task.title }}"#;
 
     #[test]
     fn esc_preserves_em_dash() {
-        assert_eq!(
-            escape_backslash_braces("hello — world"),
-            "hello — world"
-        );
+        assert_eq!(escape_backslash_braces("hello — world"), "hello — world");
     }
 
     #[test]

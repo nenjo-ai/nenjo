@@ -33,9 +33,14 @@ impl ChatHistory {
 
     /// Path to the history file for a given project/agent/session.
     ///
-    /// `{workspace}/{project_slug}/chat_history/{agent_name}_{session_id}.json`
+    /// With a project: `{workspace}/{project_slug}/chat_history/{agent_name}_{session_id}.json`
+    /// Without a project: `{workspace}/chat_history/{agent_name}_{session_id}.json`
     fn history_path(&self, project_slug: &str, agent_name: &str, session_id: Uuid) -> PathBuf {
-        let dir = self.workspace_dir.join(project_slug).join("chat_history");
+        let dir = if project_slug.is_empty() {
+            self.workspace_dir.join("chat_history")
+        } else {
+            self.workspace_dir.join(project_slug).join("chat_history")
+        };
         let safe_name = agent_name
             .chars()
             .map(|c| {

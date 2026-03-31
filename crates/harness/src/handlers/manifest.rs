@@ -70,9 +70,13 @@ pub async fn handle_manifest_changed(
             }
         }
         ResourceType::Project => {
-            // New or updated project — sync its documents.
+            // New or updated project — sync its documents (skip system projects).
             let manifest = ctx.provider().manifest().clone();
-            if let Some(project) = manifest.projects.iter().find(|p| p.id == resource_id) {
+            if let Some(project) = manifest
+                .projects
+                .iter()
+                .find(|p| p.id == resource_id && !p.is_system)
+            {
                 let project_dir = ctx.config.workspace_dir.join(&project.slug);
                 if let Err(e) =
                     crate::doc_sync::sync_project(&ctx.api, &project_dir, project.id).await
@@ -209,6 +213,7 @@ fn atomic_write<T: serde::Serialize>(
     filename: &str,
     value: &T,
 ) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
     let target = dir.join(filename);
     let tmp = dir.join(format!(".{filename}.tmp"));
     let json = serde_json::to_string_pretty(value)?;

@@ -129,7 +129,7 @@ pub async fn sync_all(
     workspace_dir: &Path,
     projects: &[nenjo::manifest::ProjectManifest],
 ) -> Result<()> {
-    for project in projects {
+    for project in projects.iter().filter(|p| !p.is_system) {
         let project_dir = workspace_dir.join(&project.slug);
         std::fs::create_dir_all(&project_dir).with_context(|| {
             format!(
