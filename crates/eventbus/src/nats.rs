@@ -21,7 +21,7 @@ use crate::transport::{AckHandle, Message, Transport};
 
 const DEFAULT_URL: &str = "nats://localhost:4222";
 const DEFAULT_STREAM_NAME: &str = "AGENT_EVENTS";
-const DEFAULT_STREAM_SUBJECT: &str = "agent.>";
+const DEFAULT_STREAM_SUBJECTS: &[&str] = &["requests.>", "responses.>"];
 const DEFAULT_MAX_AGE_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_DELIVER: i64 = 3;
 const DEFAULT_ACK_WAIT_SECS: u64 = 10;
@@ -88,28 +88,18 @@ impl Transport for NatsTransport {
         let ack_wait = self.ack_wait;
         let buffer = self.message_buffer;
         Box::pin(async move {
-            // Consumer naming convention:
-            //   worker-v2-<user_id>  (shared by all workers for the same user —
-            //                         NATS round-robins messages between active
-            //                         pull subscribers on a WorkQueue stream)
-            //   frontend-<user_id>   (for frontend response consumers)
+            // Consumer naming convention (per-user account subjects):
+            //   worker-requests  (shared by all workers in this user's account —
+            //                     NATS round-robins messages between active
+            //                     pull subscribers on a WorkQueue stream)
+            //   worker-responses (for response consumers)
             //
-            // WorkQueue retention only allows one consumer per filter subject,
-            // so the consumer name is derived from the user_id (in the subject),
-            // not the worker_id. Multiple workers share the consumer and NATS
-            // distributes messages between them automatically.
-            //
-            // The "v2" suffix distinguishes from the legacy consumer that used
-            // filter `agent.requests.<user_id>` (without capability wildcard).
-            let consumer_name = if subject.starts_with("agent.requests.") {
-                let user_part = subject
-                    .strip_prefix("agent.requests.")
-                    .unwrap_or(&subject)
-                    .trim_end_matches(".*");
-                format!("worker-v2-{user_part}")
-            } else if subject.starts_with("agent.responses.") {
-                let suffix = subject.strip_prefix("agent.responses.").unwrap_or(&subject);
-                format!("frontend-{suffix}")
+            // Since each user has their own NATS account, the consumer name
+            // doesn't need user_id — the account provides the namespace.
+            let consumer_name = if subject.starts_with("requests.") {
+                "worker-requests".to_string()
+            } else if subject == "responses" || subject.starts_with("responses.") {
+                "worker-responses".to_string()
             } else {
                 subject.replace('.', "-")
             };
@@ -265,7 +255,10 @@ impl NatsTransport {
             url: DEFAULT_URL.to_string(),
             token: None,
             stream_name: DEFAULT_STREAM_NAME.to_string(),
-            stream_subjects: vec![DEFAULT_STREAM_SUBJECT.to_string()],
+            stream_subjects: DEFAULT_STREAM_SUBJECTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             max_age: Duration::from_secs(DEFAULT_MAX_AGE_SECS),
             max_deliver: DEFAULT_MAX_DELIVER,
             ack_wait: Duration::from_secs(DEFAULT_ACK_WAIT_SECS),
@@ -396,7 +389,7 @@ impl NatsTransportBuilder {
             subjects: self.stream_subjects,
             retention: stream::RetentionPolicy::WorkQueue,
             max_age: self.max_age,
-            storage: stream::StorageType::File,
+            storage: stream::StorageType::Memory,
             ..Default::default()
         };
 

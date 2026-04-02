@@ -1,4 +1,4 @@
-//! Commands sent from the backend to the harness (`agent.requests.<user_id>`).
+//! Commands sent from the backend to the harness (`requests.<capability>`).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -180,6 +180,10 @@ pub enum Command {
         /// so the harness can scope operations to the correct project.
         #[serde(default)]
         project_id: Option<Uuid>,
+        /// Inline resource payload — avoids a round-trip fetch to the backend API.
+        /// `None` means the harness should fetch from the detail endpoint (fallback).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
     },
 }
 

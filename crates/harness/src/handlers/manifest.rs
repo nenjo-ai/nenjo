@@ -19,21 +19,31 @@ pub async fn handle_manifest_changed(
     resource_id: Uuid,
     action: ResourceAction,
     project_id: Option<Uuid>,
+    payload: Option<serde_json::Value>,
 ) -> Result<()> {
-    info!(%resource_type, %resource_id, ?action, "Manifest resource changed");
+    info!(%resource_type, %resource_id, ?action, inline = payload.is_some(), "Manifest resource changed");
 
     if action == ResourceAction::Deleted {
         apply_delete(ctx, resource_type, resource_id);
     } else {
-        if let Err(e) = apply_upsert(ctx, resource_type, resource_id).await {
-            warn!(
-                error = %e,
-                %resource_type,
-                %resource_id,
-                "Incremental fetch failed, falling back to full refresh"
-            );
-            full_refresh(ctx).await?;
-            return Ok(());
+        // Try inline payload first, fall back to API fetch.
+        let applied = if let Some(ref data) = payload {
+            apply_inline_upsert(ctx, resource_type, resource_id, data)
+        } else {
+            false
+        };
+
+        if !applied {
+            if let Err(e) = apply_upsert(ctx, resource_type, resource_id).await {
+                warn!(
+                    error = %e,
+                    %resource_type,
+                    %resource_id,
+                    "Incremental fetch failed, falling back to full refresh"
+                );
+                full_refresh(ctx).await?;
+                return Ok(());
+            }
         }
     }
 
@@ -92,6 +102,60 @@ pub async fn handle_manifest_changed(
     persist_cache(ctx, resource_type);
 
     Ok(())
+}
+
+/// Apply an inline payload directly to the manifest without an API fetch.
+/// Returns `true` if the payload was successfully applied, `false` if
+/// deserialization failed (caller should fall back to API fetch).
+fn apply_inline_upsert(
+    ctx: &CommandContext,
+    rt: ResourceType,
+    id: Uuid,
+    data: &serde_json::Value,
+) -> bool {
+    let mut manifest = ctx.provider().manifest().clone();
+
+    macro_rules! inline_upsert {
+        ($field:ident, $ty:ty) => {{
+            match serde_json::from_value::<$ty>(data.clone()) {
+                Ok(item) => {
+                    if let Some(pos) = manifest.$field.iter().position(|r| r.id == id) {
+                        manifest.$field[pos] = item;
+                    } else {
+                        manifest.$field.push(item);
+                    }
+                    debug!(%rt, %id, "Applied inline resource payload");
+                    true
+                }
+                Err(e) => {
+                    warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                    false
+                }
+            }
+        }};
+    }
+
+    let ok = match rt {
+        ResourceType::Agent => inline_upsert!(agents, nenjo::manifest::AgentManifest),
+        ResourceType::Model => inline_upsert!(models, nenjo::manifest::ModelManifest),
+        ResourceType::Routine => inline_upsert!(routines, nenjo::manifest::RoutineManifest),
+        ResourceType::Project => inline_upsert!(projects, nenjo::manifest::ProjectManifest),
+        ResourceType::Skill => inline_upsert!(skills, nenjo::manifest::SkillManifest),
+        ResourceType::Council => inline_upsert!(councils, nenjo::manifest::CouncilManifest),
+        ResourceType::Lambda => inline_upsert!(lambdas, nenjo::manifest::LambdaManifest),
+        ResourceType::Ability => inline_upsert!(abilities, nenjo::manifest::AbilityManifest),
+        ResourceType::ContextBlock => {
+            inline_upsert!(context_blocks, nenjo::manifest::ContextBlockManifest)
+        }
+        ResourceType::McpServer => inline_upsert!(mcp_servers, nenjo::manifest::McpServerManifest),
+        ResourceType::Domain => inline_upsert!(domains, nenjo::manifest::DomainManifest),
+        ResourceType::Document => return false, // documents don't live in manifest
+    };
+
+    if ok {
+        ctx.swap_provider(ctx.provider().with_manifest(manifest));
+    }
+    ok
 }
 
 /// Remove a deleted resource from the in-memory manifest.

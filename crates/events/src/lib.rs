@@ -9,10 +9,10 @@
 //!
 //! ## Event directions
 //!
-//! | Direction | NATS subject pattern | Rust type |
-//! |-----------|---------------------|-----------|
-//! | Backend → Harness | `agent.requests.<user_id>.<capability>` | [`Command`] |
-//! | Harness → Backend | `agent.responses.<user_id>` | [`Response`] |
+//! | Direction | Worker local subject | PLATFORM subject | Rust type |
+//! |-----------|---------------------|------------------|-----------|
+//! | Backend → Harness | `requests.<capability>` | `requests.<user_id>.<capability>` | [`Command`] |
+//! | Harness → Backend | `responses` | `responses.<user_id>` | [`Response`] |
 //!
 //! ## Wire format
 //!

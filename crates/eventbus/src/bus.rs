@@ -40,7 +40,7 @@ impl<T: Transport> EventBus<T> {
     /// Send a command to the harness.
     ///
     /// The command is wrapped in an [`Envelope`] and published to
-    /// `agent.requests.<user_id>.<capability>`.
+    /// `requests.<capability>` (local subject, mapped to PLATFORM via account import).
     pub async fn send_command(&self, command: Command) -> Result<(), EventBusError> {
         let capability = command.capability();
         let payload = serde_json::to_value(&command)?;
@@ -56,7 +56,7 @@ impl<T: Transport> EventBus<T> {
     /// Send a response back to the backend.
     ///
     /// The response is wrapped in an [`Envelope`] and published to
-    /// `agent.responses.<user_id>`.
+    /// `responses` (local subject, mapped to PLATFORM via account import).
     pub async fn send_response(&self, response: Response) -> Result<(), EventBusError> {
         let payload = serde_json::to_value(&response)?;
         let envelope = Envelope::new(self.user_id, payload);
@@ -214,7 +214,7 @@ impl ReceivedResponse {
 pub struct EventBusBuilder<T: Transport> {
     transport: Option<T>,
     user_id: Option<Uuid>,
-    /// Which subject to subscribe to. Defaults to `agent.requests.<user_id>`.
+    /// Which subject to subscribe to. Defaults to `requests.*`.
     subscribe_subject: Option<String>,
 }
 
@@ -253,9 +253,8 @@ impl<T: Transport> EventBusBuilder<T> {
 
     /// Override the subject to subscribe to.
     ///
-    /// By default, the bus subscribes to `agent.requests.<user_id>` (for
-    /// harnesses receiving commands) or `agent.responses.<user_id>` (for
-    /// clients receiving responses). Use this to pick the direction.
+    /// By default, the bus subscribes to `requests.*` (for harnesses
+    /// receiving commands). Use this to override with a specific subject.
     pub fn subscribe_subject(mut self, subject: impl Into<String>) -> Self {
         self.subscribe_subject = Some(subject.into());
         self
