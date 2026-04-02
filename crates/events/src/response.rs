@@ -1,4 +1,4 @@
-//! Responses sent from the harness to the backend (`agent.responses.<user_id>`).
+//! Responses sent from the harness to the backend (`responses`).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -682,6 +682,7 @@ mod tests {
             resource_id: Uuid::nil(),
             action: crate::ResourceAction::Updated,
             project_id: None,
+            payload: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"manifest.changed""#));

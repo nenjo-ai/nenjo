@@ -147,9 +147,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             resource_id,
             action,
             project_id,
+            payload,
         } => {
-            manifest::handle_manifest_changed(&ctx, resource_type, resource_id, action, project_id)
-                .await
+            manifest::handle_manifest_changed(
+                &ctx,
+                resource_type,
+                resource_id,
+                action,
+                project_id,
+                payload,
+            )
+            .await
         }
     }
 }
