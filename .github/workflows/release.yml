@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    name: Release-plz release
+    name: Release
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'nenjo-ai' }}
     outputs:
@@ -42,6 +42,7 @@ jobs:
     name: "Build release binary (${{ matrix.target }})"
     runs-on: ${{ matrix.os }}
     needs: release
+    fail-fast: true
     strategy:
       matrix:
         include:
@@ -99,30 +100,3 @@ jobs:
           gh release upload ${{ needs.release.outputs.tag }} \
             linux/nenjo \
             macos/nenjo
-
-  release-pr:
-    name: Release-plz PR
-    runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'nenjo-ai' }}
-    permissions:
-      contents: write
-      pull-requests: write
-    concurrency:
-      group: release-${{ github.ref }}
-      cancel-in-progress: false
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
-        with:
-          command: release-pr
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
