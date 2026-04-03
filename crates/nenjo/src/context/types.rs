@@ -244,6 +244,7 @@ pub struct CronContext {
 }
 
 impl CronContext {
+    /// Create a new CronContext from a HashMap of variables.
     pub fn from_vars(vars: &HashMap<String, String>) -> Self {
         let task = TaskContext::from_vars(vars);
         Self {
