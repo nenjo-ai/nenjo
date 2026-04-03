@@ -57,3 +57,11 @@ dev:
 # Clean all build artifacts
 clean:
     cargo clean
+
+# Install release-plz
+release-plz-install:
+    cargo install release-plz --locked
+
+# Dry-run release (local - shows what would change)
+release-dry-run: 
+    release-plz release --dry-run --allow-dirty --git-token $(gh auth token)
