@@ -117,6 +117,7 @@ pub fn render_routine(r: &RoutineManifest) -> RoutineContext {
         name: r.name.clone(),
         execution_id: String::new(),
         description: r.description.clone(),
+        step: Default::default(),
     }
 }
 

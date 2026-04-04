@@ -133,8 +133,8 @@ impl RoutineInput {
         self
     }
 
-    pub fn with_git(mut self, git: crate::types::GitContext) -> Self {
-        self.git = Some(git);
+    pub fn with_git(mut self, git: Option<crate::types::GitContext>) -> Self {
+        self.git = git;
         self
     }
 
@@ -168,6 +168,8 @@ pub(crate) struct RoutineState {
     pub input: RoutineInput,
     pub routine_name: Option<String>,
     pub current_step_name: Option<String>,
+    pub current_step_type: Option<String>,
+    pub current_agent_id: Option<Uuid>,
     pub gate_feedback: Option<String>,
     pub step_metadata: Option<String>,
     pub metrics: RoutineMetrics,
@@ -184,6 +186,8 @@ impl RoutineState {
             input,
             routine_name: None,
             current_step_name: None,
+            current_step_type: None,
+            current_agent_id: None,
             gate_feedback: None,
             step_metadata: None,
             metrics: RoutineMetrics::new(),
@@ -206,6 +210,7 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
                 .with_task_type(&t.task_type)
                 .with_slug(&t.slug)
                 .with_complexity(&t.complexity)
+                .with_git(t.git.clone())
         }
         crate::types::TaskType::Cron {
             task: Some(t),
@@ -215,6 +220,7 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
             .with_task_id(t.task_id)
             .with_tags(t.tags.clone())
             .with_source(&t.source)
+            .with_git(t.git.clone())
             .with_cron_trigger(),
         crate::types::TaskType::Cron {
             task: None,
@@ -581,6 +587,72 @@ mod tests {
     fn cron_config_missing_both() {
         let config = serde_json::json!({});
         assert!(CronStepConfig::from_config(&config, None, None).is_err());
+    }
+
+    #[test]
+    fn routine_input_from_task_propagates_git_context() {
+        let git = crate::types::GitContext {
+            branch: "agent/abc123/fix-auth".to_string(),
+            target_branch: "main".to_string(),
+            work_dir: "/tmp/worktrees/fix-auth/abc123".to_string(),
+            repo_url: "https://github.com/org/repo.git".to_string(),
+        };
+        let task = crate::types::TaskType::Task(crate::types::Task {
+            task_id: Uuid::new_v4(),
+            title: "Fix auth".to_string(),
+            description: "Fix authentication".to_string(),
+            acceptance_criteria: None,
+            tags: vec![],
+            source: "task".to_string(),
+            project_id: Uuid::new_v4(),
+            status: String::new(),
+            priority: String::new(),
+            task_type: String::new(),
+            slug: "fix-auth".to_string(),
+            complexity: String::new(),
+            git: Some(git),
+        });
+        let input = routine_input_from_task(&task);
+        let git_ctx = input.git.expect("git context should be propagated");
+        assert_eq!(git_ctx.branch, "agent/abc123/fix-auth");
+        assert_eq!(git_ctx.target_branch, "main");
+        assert_eq!(git_ctx.work_dir, "/tmp/worktrees/fix-auth/abc123");
+        assert_eq!(git_ctx.repo_url, "https://github.com/org/repo.git");
+    }
+
+    #[test]
+    fn routine_input_from_cron_task_propagates_git_context() {
+        let git = crate::types::GitContext {
+            branch: "agent/def456/cron-task".to_string(),
+            target_branch: "main".to_string(),
+            work_dir: "/tmp/worktrees/cron-task/def456".to_string(),
+            repo_url: "https://github.com/org/repo.git".to_string(),
+        };
+        let task = crate::types::TaskType::Cron {
+            task: Some(crate::types::Task {
+                task_id: Uuid::new_v4(),
+                title: "Cron task".to_string(),
+                description: "Cron description".to_string(),
+                acceptance_criteria: None,
+                tags: vec![],
+                source: "cron".to_string(),
+                project_id: Uuid::new_v4(),
+                status: String::new(),
+                priority: String::new(),
+                task_type: String::new(),
+                slug: "cron-task".to_string(),
+                complexity: String::new(),
+                git: Some(git),
+            }),
+            project_id: Uuid::new_v4(),
+            interval: Duration::from_secs(60),
+            timeout: Duration::from_secs(300),
+        };
+        let input = routine_input_from_task(&task);
+        let git_ctx = input
+            .git
+            .expect("git context should be propagated for cron tasks");
+        assert_eq!(git_ctx.branch, "agent/def456/cron-task");
     }
 
     #[test]

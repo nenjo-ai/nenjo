@@ -231,7 +231,7 @@ impl Tool for DelegateToTool {
         // decrements correctly across nested delegations.
         builder = builder.with_child_delegation_ctx(child_ctx);
 
-        let runner = builder.build()?;
+        let runner = builder.build().await?;
 
         let tool_specs = runner.instance().tool_specs();
         let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();

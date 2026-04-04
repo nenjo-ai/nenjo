@@ -88,7 +88,7 @@ async fn git_clone(repo_url: &str, target: &Path) -> Result<()> {
     }
 
     let output = tokio::process::Command::new("git")
-        .args(["clone", "--depth", "1", repo_url])
+        .args(["clone", repo_url])
         .arg(target)
         .output()
         .await

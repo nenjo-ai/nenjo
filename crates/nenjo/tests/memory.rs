@@ -141,6 +141,7 @@ async fn provider_with_memory_adds_tools() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -186,6 +187,7 @@ async fn provider_without_memory_has_no_memory_tools() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -680,6 +682,7 @@ async fn ability_inherits_memory_vars() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // The agent should have use_ability tool
@@ -798,6 +801,7 @@ async fn domain_expansion_preserves_memory() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Expand into domain
@@ -852,6 +856,7 @@ async fn runner_with_memory_executes() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let output = runner

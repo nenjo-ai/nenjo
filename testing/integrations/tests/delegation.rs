@@ -140,6 +140,7 @@ async fn delegate_to_real_llm() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -210,6 +211,7 @@ async fn delegate_to_schema_includes_agent_names() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
     let specs = runner.instance().tool_specs();
     let delegate_spec = specs

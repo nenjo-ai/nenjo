@@ -142,6 +142,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Project",
                 },
                 TemplateVarDef {
+                    name: "project.slug",
+                    description: "URL-safe project identifier",
+                    group: "Project",
+                },
+                TemplateVarDef {
                     name: "project.description",
                     description: "Project overview and goals",
                     group: "Project",
@@ -168,12 +173,12 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             variables: vec![
                 TemplateVarDef {
                     name: "routine",
-                    description: "Full XML of the active routine (id, name, execution_id)",
+                    description: "Full XML of the active routine (id, name, execution_id, step)",
                     group: "Routine",
                 },
                 TemplateVarDef {
                     name: "routine.id",
-                    description: "Id of the active routine",
+                    description: "UUID of the active routine",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -187,7 +192,17 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Routine",
                 },
                 TemplateVarDef {
-                    name: "step.metadata",
+                    name: "routine.step.name",
+                    description: "Name of the currently executing routine step",
+                    group: "Routine",
+                },
+                TemplateVarDef {
+                    name: "routine.step.type",
+                    description: "Type of the current step (agent, gate, council, lambda, terminal, cron)",
+                    group: "Routine",
+                },
+                TemplateVarDef {
+                    name: "routine.step.metadata",
                     description: "Arbitrary JSON metadata from the current step's config",
                     group: "Routine",
                 },

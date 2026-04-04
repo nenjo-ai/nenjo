@@ -47,6 +47,16 @@ pub trait ModelProviderFactory: Send + Sync {
 #[async_trait::async_trait]
 pub trait ToolFactory: Send + Sync {
     async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>>;
+
+    /// Create tools with a custom security policy (e.g. scoped to a worktree).
+    /// Default implementation delegates to `create_tools` (ignores the override).
+    async fn create_tools_with_security(
+        &self,
+        agent: &AgentManifest,
+        _security: Arc<nenjo_tools::security::SecurityPolicy>,
+    ) -> Vec<Arc<dyn Tool>> {
+        self.create_tools(agent).await
+    }
 }
 
 /// A no-op tool factory that returns an empty tool set.

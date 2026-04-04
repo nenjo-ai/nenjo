@@ -41,6 +41,7 @@ pub enum ExecutionKind {
 /// Tracks an active execution so it can be cancelled or paused.
 pub struct ActiveExecution {
     pub kind: ExecutionKind,
+    pub execution_run_id: Option<uuid::Uuid>,
     pub cancel: CancellationToken,
     pub pause: Option<nenjo::agents::runner::types::PauseToken>,
 }
@@ -59,6 +60,10 @@ pub struct DomainSession {
 /// Thread-safe registry of active domain sessions, keyed by `domain_session_id`.
 pub type DomainRegistry = Arc<DashMap<Uuid, DomainSession>>;
 
+/// Per-repo mutex to serialize git worktree operations (add/remove).
+/// Git's `.git/config` lock does not support concurrent writes.
+pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+
 /// Shared context passed to each command handler.
 ///
 /// Handlers load the current Provider from `provider` (lock-free via ArcSwap).
@@ -72,6 +77,7 @@ pub struct CommandContext {
     pub external_mcp: Arc<ExternalMcpPool>,
     pub executions: ExecutionRegistry,
     pub domains: DomainRegistry,
+    pub git_locks: GitLocks,
 }
 
 impl CommandContext {
@@ -99,6 +105,7 @@ pub struct Harness {
     external_mcp: Arc<ExternalMcpPool>,
     executions: ExecutionRegistry,
     domains: DomainRegistry,
+    git_locks: GitLocks,
     shutdown: CancellationToken,
 }
 
@@ -156,6 +163,7 @@ impl Harness {
         let chat_history = Arc::new(ChatHistory::new(&config.workspace_dir));
         let executions = Arc::new(DashMap::new());
         let domains = Arc::new(DashMap::new());
+        let git_locks = Arc::new(DashMap::new());
         let shutdown = CancellationToken::new();
 
         Ok(Self {
@@ -166,6 +174,7 @@ impl Harness {
             external_mcp,
             executions,
             domains,
+            git_locks,
             shutdown,
         })
     }
@@ -311,6 +320,7 @@ impl Harness {
                 external_mcp: self.external_mcp.clone(),
                 executions: self.executions.clone(),
                 domains: self.domains.clone(),
+                git_locks: self.git_locks.clone(),
             };
 
             tokio::spawn(async move {

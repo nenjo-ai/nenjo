@@ -61,7 +61,8 @@ async fn execute_dynamic(
         .agent_by_id(leader_agent_id)
         .await?
         .with_tool(gate::GateVerdictTool::new())
-        .build()?;
+        .build()
+        .await?;
 
     let task = TaskType::Chat {
         user_message: state.initial_input.clone(),
@@ -128,7 +129,7 @@ async fn execute_decompose(
     );
 
     // Step 1: Leader decomposes
-    let leader = provider.agent_by_id(leader_agent_id).await?.build()?;
+    let leader = provider.agent_by_id(leader_agent_id).await?.build().await?;
 
     let decompose_message = format!(
         "You are the leader of a team of {} agents. Decompose the following work \
@@ -166,7 +167,7 @@ async fn execute_decompose(
         );
 
         let member_runner = match provider.agent_by_id(*agent_id).await {
-            Ok(builder) => builder.build()?,
+            Ok(builder) => builder.build().await?,
             Err(e) => {
                 warn!(agent_id = %agent_id, error = %e, "Failed to build member agent");
                 member_results.push(StepResult {
@@ -256,7 +257,8 @@ async fn execute_decompose(
         .agent_by_id(leader_agent_id)
         .await?
         .with_tool(gate::GateVerdictTool::new())
-        .build()?;
+        .build()
+        .await?;
 
     let aggregate_task = TaskType::Chat {
         user_message: aggregation_prompt,

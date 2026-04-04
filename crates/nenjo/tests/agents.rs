@@ -207,6 +207,7 @@ async fn runner_chat() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
     let output = runner.chat("Hi there").await.expect("chat should succeed");
 
@@ -237,6 +238,7 @@ async fn runner_chat_with_history() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let history = vec![
@@ -268,6 +270,7 @@ async fn runner_with_custom_tool() {
         .unwrap()
         .with_tool(EchoTool)
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -293,6 +296,7 @@ async fn runner_with_tool_factory() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -322,6 +326,7 @@ async fn instance_builds_prompts() {
             "<memories>test memory</memories>".to_string(),
         )]))
         .build()
+        .await
         .unwrap();
 
     let task = nenjo::types::TaskType::Chat {
@@ -545,6 +550,7 @@ async fn ability_agent_has_use_ability_and_platform_tools() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -581,6 +587,7 @@ async fn agent_without_abilities_has_no_use_ability() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -623,6 +630,7 @@ async fn domain_expansion_adds_scopes_and_tools() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Before: only tasks_list
@@ -681,6 +689,7 @@ async fn domain_expansion_activates_abilities_and_injects_use_ability() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Before: no abilities, no use_ability
@@ -745,6 +754,7 @@ async fn domain_expansion_with_scopes_and_abilities() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let domain_runner = runner.domain_expansion("ops").await.unwrap();
@@ -793,6 +803,7 @@ async fn domain_expansion_does_not_duplicate_existing_abilities() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let domain_runner = runner.domain_expansion("creator").await.unwrap();
