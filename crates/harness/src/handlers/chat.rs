@@ -89,7 +89,7 @@ pub async fn handle_chat(
             }
         }
     } else {
-        ctx.provider().agent_by_id(agent_id).await?.build()?
+        ctx.provider().agent_by_id(agent_id).await?.build().await?
     };
 
     // Start streaming execution
@@ -110,6 +110,7 @@ pub async fn handle_chat(
         session_id,
         ActiveExecution {
             kind: ExecutionKind::Chat,
+            execution_run_id: None,
             cancel: cancel.clone(),
             pause: None,
         },

@@ -55,25 +55,29 @@ impl HarnessToolFactory {
 
     /// Build the base tool set (always included).
     pub fn base_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.base_tools_with(&self.security)
+    }
+
+    /// Build the base tool set with a given security policy.
+    fn base_tools_with(&self, security: &Arc<SecurityPolicy>) -> Vec<Arc<dyn Tool>> {
         vec![
-            Arc::new(ShellTool::new(self.security.clone(), self.runtime.clone())),
-            Arc::new(FileReadTool::new(self.security.clone())),
-            Arc::new(FileWriteTool::new(self.security.clone())),
-            Arc::new(FileEditTool::new(self.security.clone())),
-            Arc::new(GitOperationsTool::new(
-                self.security.clone(),
-                self.config.workspace_dir.clone(),
-            )),
-            Arc::new(ContentSearchTool::new(self.security.clone())),
-            Arc::new(GlobSearchTool::new(self.security.clone())),
+            Arc::new(ShellTool::new(security.clone(), self.runtime.clone())),
+            Arc::new(FileReadTool::new(security.clone())),
+            Arc::new(FileWriteTool::new(security.clone())),
+            Arc::new(FileEditTool::new(security.clone())),
+            Arc::new(GitOperationsTool::new(security.clone())),
+            Arc::new(ContentSearchTool::new(security.clone())),
+            Arc::new(GlobSearchTool::new(security.clone())),
         ]
     }
-}
 
-#[async_trait]
-impl ToolFactory for HarnessToolFactory {
-    async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
-        let mut tools = self.base_tools();
+    /// Build all tools for an agent with a given security policy.
+    async fn build_tools(
+        &self,
+        agent: &AgentManifest,
+        security: &Arc<SecurityPolicy>,
+    ) -> Vec<Arc<dyn Tool>> {
+        let mut tools = self.base_tools_with(security);
 
         // Add MCP tools scoped to this agent's server assignments and platform scopes.
         if !agent.mcp_server_ids.is_empty() {
@@ -106,7 +110,7 @@ impl ToolFactory for HarnessToolFactory {
         // Web fetch (always included with config, deny-by-default via allowed_domains)
         if self.config.web_fetch.enabled {
             tools.push(Arc::new(WebFetchTool::new(
-                self.security.clone(),
+                security.clone(),
                 self.config.web_fetch.allowed_domains.clone(),
                 self.config.web_fetch.blocked_domains.clone(),
                 self.config.web_fetch.max_response_size,
@@ -127,7 +131,7 @@ impl ToolFactory for HarnessToolFactory {
         // HTTP request
         if self.config.http_request.enabled {
             tools.push(Arc::new(HttpRequestTool::new(
-                self.security.clone(),
+                security.clone(),
                 self.config.http_request.allowed_domains.clone(),
                 self.config.http_request.max_response_size,
                 self.config.http_request.timeout_secs,
@@ -137,13 +141,28 @@ impl ToolFactory for HarnessToolFactory {
         // Browser
         if self.config.browser.enabled {
             tools.push(Arc::new(BrowserOpenTool::new(
-                self.security.clone(),
+                security.clone(),
                 self.config.browser.allowed_domains.clone(),
             )));
-            tools.push(Arc::new(ScreenshotTool::new(self.security.clone())));
+            tools.push(Arc::new(ScreenshotTool::new(security.clone())));
         }
 
         tools
+    }
+}
+
+#[async_trait]
+impl ToolFactory for HarnessToolFactory {
+    async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+        self.build_tools(agent, &self.security).await
+    }
+
+    async fn create_tools_with_security(
+        &self,
+        agent: &AgentManifest,
+        security: Arc<SecurityPolicy>,
+    ) -> Vec<Arc<dyn Tool>> {
+        self.build_tools(agent, &security).await
     }
 }
 

@@ -45,6 +45,11 @@ impl ExecutionHandle {
         &mut self.events_rx
     }
 
+    /// Get a clone of the pause token for external control (e.g. execution registry).
+    pub fn pause_token(&self) -> types::PauseToken {
+        self.pause_token.clone()
+    }
+
     /// Abort the running execution. The spawned task is cancelled immediately.
     pub fn abort(&self) {
         self.join.abort();

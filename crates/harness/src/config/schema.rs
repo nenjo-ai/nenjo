@@ -60,6 +60,9 @@ pub struct Config {
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
 
+    #[serde(default)]
+    pub git: GitConfig,
+
     /// Worker capabilities — which command types this worker handles.
     /// Empty means all capabilities (full runner mode).
     #[serde(default)]
@@ -456,6 +459,37 @@ impl Default for AuditConfig {
 
 // ── Skills config ─────────────────────────────────────────────────
 
+// ── Git configuration ───────────────────────────────────────────
+
+/// Git identity and signing configuration (`[git]` section).
+///
+/// ```toml
+/// [git]
+/// user_name = "neni-nenjo"
+/// user_email = "gitops@boonlabs.co"
+/// signing_key = "~/.ssh/id_ed25519.pub"
+/// ```
+///
+/// The signing key path supports `~` expansion. When set, all agent commits
+/// are signed with SSH and will show as "Verified" on GitHub (provided the
+/// public key is added to the GitHub account's SSH signing keys).
+///
+/// Environment variable overrides: `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+/// `GIT_SIGNING_KEY`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitConfig {
+    /// Git author/committer name (e.g. "neni-nenjo")
+    #[serde(default)]
+    pub user_name: Option<String>,
+    /// Git author/committer email (e.g. "gitops@boonlabs.co")
+    #[serde(default)]
+    pub user_email: Option<String>,
+    /// Path to SSH signing key (e.g. "~/.ssh/id_ed25519.pub").
+    /// When set, commits are signed with SSH (`gpg.format = ssh`).
+    #[serde(default)]
+    pub signing_key: Option<String>,
+}
+
 // ── Git credential helper setup ──────────────────────────────────
 
 /// Write an isolated git config for all worker git operations.
@@ -471,7 +505,35 @@ impl Default for AuditConfig {
 /// **Step A** — Write `~/.nenjo/git-credential-helper.sh`.
 /// **Step B** — Write `~/.nenjo/gitconfig` pointing at the helper.
 /// **Step C** — Set `GIT_CONFIG_GLOBAL=~/.nenjo/gitconfig` in the process env.
-fn setup_git_credential_helper(home: &Path) {
+fn setup_git_credential_helper(home: &Path, git_config: &GitConfig) {
+    // If GITHUB_TOKEN is not set, skip the entire git setup so the system's
+    // native git credentials (e.g. osxkeychain, credential-manager) are used.
+    let has_github_token = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
+
+    if !has_github_token {
+        tracing::debug!("GITHUB_TOKEN not set — using system git credentials");
+
+        // Still set identity env vars if configured, so they survive env_clear()
+        // in the tools. The gitconfig and credential helper are skipped.
+        let git_name = git_config.user_name.as_deref().unwrap_or("");
+        let git_email = git_config.user_email.as_deref().unwrap_or("");
+        #[allow(unsafe_code)]
+        unsafe {
+            if !git_name.is_empty() {
+                std::env::set_var("GIT_AUTHOR_NAME", git_name);
+                std::env::set_var("GIT_COMMITTER_NAME", git_name);
+            }
+            if !git_email.is_empty() {
+                std::env::set_var("GIT_AUTHOR_EMAIL", git_email);
+                std::env::set_var("GIT_COMMITTER_EMAIL", git_email);
+            }
+        }
+        return;
+    }
+
     let nenjo_dir = home.join(".nenjo");
     let nenjo_gitconfig = nenjo_dir.join("gitconfig");
     let helper_script = nenjo_dir.join("git-credential-helper.sh");
@@ -507,11 +569,32 @@ esac
     }
 
     // Step B: write ~/.nenjo/gitconfig
-    let git_name = std::env::var("GIT_USER_NAME").unwrap_or_default();
-    let git_email = std::env::var("GIT_USER_EMAIL").unwrap_or_default();
+    // Priority: env var > config.toml > empty
+    let git_name = std::env::var("GIT_AUTHOR_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| git_config.user_name.clone())
+        .unwrap_or_default();
+    let git_email = std::env::var("GIT_AUTHOR_EMAIL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| git_config.user_email.clone())
+        .unwrap_or_default();
+    let signing_key = std::env::var("GIT_SIGNING_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| git_config.signing_key.clone())
+        .map(|k| {
+            // Expand ~ to home directory
+            if let Some(rest) = k.strip_prefix("~/") {
+                home.join(rest).to_string_lossy().to_string()
+            } else {
+                k
+            }
+        });
     let helper_path = helper_script.to_string_lossy();
 
-    let contents = format!(
+    let mut contents = format!(
         r#"[credential "https://github.com"]
     helper = {helper_path}
 [user]
@@ -519,6 +602,20 @@ esac
     email = {git_email}
 "#
     );
+
+    if let Some(ref key) = signing_key {
+        contents.push_str(&format!(
+            r#"    signingkey = {key}
+[commit]
+    gpgsign = true
+[tag]
+    gpgsign = true
+[gpg]
+    format = ssh
+"#
+        ));
+        tracing::info!(signing_key = %key, "Git commit signing enabled (SSH)");
+    }
 
     if let Err(e) = fs::write(&nenjo_gitconfig, &contents) {
         tracing::warn!(error = %e, path = %nenjo_gitconfig.display(), "Failed to write ~/.nenjo/gitconfig");
@@ -534,10 +631,20 @@ esac
     // called first and may return stale credentials, overriding our helper.
     //
     // SAFETY: called once at startup before any threads are spawned.
+    // Also set GIT_AUTHOR_*/GIT_COMMITTER_* env vars so they survive
+    // env_clear() in the git and shell tools (they're on the safe list).
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("GIT_CONFIG_GLOBAL", &nenjo_gitconfig);
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        if !git_name.is_empty() {
+            std::env::set_var("GIT_AUTHOR_NAME", &git_name);
+            std::env::set_var("GIT_COMMITTER_NAME", &git_name);
+        }
+        if !git_email.is_empty() {
+            std::env::set_var("GIT_AUTHOR_EMAIL", &git_email);
+            std::env::set_var("GIT_COMMITTER_EMAIL", &git_email);
+        }
     }
 }
 
@@ -565,6 +672,7 @@ impl Default for Config {
             http_request: HttpRequestConfig::default(),
             web_search: WebSearchConfig::default(),
             web_fetch: WebFetchConfig::default(),
+            git: GitConfig::default(),
             capabilities: Vec::new(),
         }
     }
@@ -600,9 +708,6 @@ impl Config {
                 .context("Failed to create workspace directory")?;
         }
 
-        // Configure git to use `gh` CLI for GitHub auth under ~/.nenjo/workspace/
-        setup_git_credential_helper(&home);
-
         let mut config = if config_path.exists() {
             let contents =
                 fs::read_to_string(&config_path).context("Failed to read config file")?;
@@ -626,6 +731,10 @@ impl Config {
 
         config.apply_env_overrides();
         config.validate()?;
+
+        // Configure git credentials, identity, and signing.
+        // Must happen after config is loaded so [git] values are available.
+        setup_git_credential_helper(&home, &config.git);
 
         Ok(config)
     }

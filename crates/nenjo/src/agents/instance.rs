@@ -91,11 +91,11 @@ impl AgentInstance {
         if !ex.project.name.is_empty() {
             ctx.project = ex.project.clone();
         }
-        if !ex.project_slug.is_empty() {
+        if !ex.project.slug.is_empty() {
             ctx.project.working_dir = self
                 .security
                 .workspace_dir
-                .join(&ex.project_slug)
+                .join(&ex.project.slug)
                 .to_string_lossy()
                 .to_string();
         }
@@ -111,8 +111,8 @@ impl AgentInstance {
         if !ex.routine.name.is_empty() {
             ctx.routine = ex.routine.clone();
         }
-        if !ex.step_metadata.is_empty() {
-            ctx.step_metadata = ex.step_metadata.clone();
+        if !ex.routine.step.is_empty() {
+            ctx.routine.step = ex.routine.step.clone();
         }
 
         // Agent (self)

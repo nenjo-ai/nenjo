@@ -18,6 +18,28 @@ use super::RoutineEvent;
 use super::types::{
     CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineState, StepType,
 };
+use crate::context::{RoutineContext, RoutineStepContext};
+
+/// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
+fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContext) {
+    let routine = RoutineContext {
+        id: state.routine_id,
+        name: state.routine_name.clone().unwrap_or_default(),
+        execution_id: state
+            .input
+            .execution_run_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        description: None,
+        step: Default::default(),
+    };
+    let step = RoutineStepContext {
+        name: state.current_step_name.clone().unwrap_or_default(),
+        step_type: state.current_step_type.clone().unwrap_or_default(),
+        metadata: state.step_metadata.clone().unwrap_or_default(),
+    };
+    (routine, step)
+}
 
 /// Execute a routine once (one-shot). For cron execution, the Provider
 /// wraps this in the cron poll loop.
@@ -89,17 +111,36 @@ pub(crate) async fn execute_routine_once(
         );
 
         state.current_step_name = Some(current_step.name.clone());
-        state.step_metadata = current_step.config.get("metadata").map(|v| v.to_string());
+        state.current_step_type = Some(current_step.step_type.clone());
+        state.current_agent_id = current_step.agent_id;
+        // Parse step metadata — expect a JSON value. If the raw config value
+        // is not valid JSON (e.g. a bare string without quotes), serialize it
+        // as-is and log a warning so the user can fix their routine config.
+        state.step_metadata = current_step.config.get("metadata").map(|v| {
+            if v.is_object() || v.is_array() || v.is_string() {
+                serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
+            } else {
+                warn!(
+                    step = %current_step.name,
+                    raw = %v,
+                    "Step metadata is not a valid JSON object/array/string — using raw value"
+                );
+                v.to_string()
+            }
+        });
 
         // Emit step started
         let _ = events_tx.send(RoutineEvent::StepStarted {
             step_id: current_step.id,
             step_name: current_step.name.clone(),
             step_type: current_step.step_type.clone(),
+            agent_id: current_step.agent_id,
         });
 
         // Execute the step
+        let step_start = std::time::Instant::now();
         let result = execute_step(provider, &current_step, state, events_tx).await;
+        let duration_ms = step_start.elapsed().as_millis() as u64;
 
         match result {
             Ok(step_result) => {
@@ -113,6 +154,7 @@ pub(crate) async fn execute_routine_once(
                 let _ = events_tx.send(RoutineEvent::StepCompleted {
                     step_id: current_step.id,
                     result: step_result.clone(),
+                    duration_ms,
                 });
 
                 // Store gate feedback if this step failed (for on_fail edges).
@@ -147,6 +189,7 @@ pub(crate) async fn execute_routine_once(
                 let _ = events_tx.send(RoutineEvent::StepFailed {
                     step_id: current_step.id,
                     error: error_msg.clone(),
+                    duration_ms,
                 });
 
                 last_result = StepResult {
@@ -282,25 +325,20 @@ async fn execute_agent_step(
         }
     }
 
-    // Inject routine context so agent prompts can reference
-    // {{ routine.name }}, {{ routine.id }}, {{ routine.execution_id }}.
-    let execution_id = state
-        .input
-        .execution_run_id
-        .map(|id| id.to_string())
-        .unwrap_or_default();
-    builder = builder.with_routine_context(
-        state.routine_id,
-        state.routine_name.as_deref().unwrap_or(""),
-        &execution_id,
-    );
+    // Inject routine + step context into the agent's render vars.
+    let (routine_ctx, step_ctx) = build_routine_ctx(state);
+    builder = builder
+        .with_routine_context(routine_ctx)
+        .with_step_context(step_ctx);
 
-    // Inject step metadata if available.
-    if let Some(ref metadata) = state.step_metadata {
-        builder = builder.with_step_metadata(metadata);
+    // Scope the agent's tools to the git worktree if one was created.
+    if let Some(ref git) = state.input.git {
+        if !git.work_dir.is_empty() {
+            builder = builder.with_work_dir(&git.work_dir);
+        }
     }
 
-    let runner = builder.build()?;
+    let runner = builder.build().await?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -364,21 +402,15 @@ async fn execute_gate_step(
         .or_else(|| resolve_agent_from_model(provider, step.model_id))
         .with_context(|| format!("No agent found for gate step '{}'", step.name))?;
 
-    let execution_id = state
-        .input
-        .execution_run_id
-        .map(|id| id.to_string())
-        .unwrap_or_default();
+    let (routine_ctx, step_ctx) = build_routine_ctx(state);
     let runner = provider
         .agent_by_id(agent_id)
         .await?
         .with_tool(gate::GateVerdictTool::new())
-        .with_routine_context(
-            state.routine_id,
-            state.routine_name.as_deref().unwrap_or(""),
-            &execution_id,
-        )
-        .build()?;
+        .with_routine_context(routine_ctx)
+        .with_step_context(step_ctx)
+        .build()
+        .await?;
 
     let criteria = step
         .config
@@ -523,21 +555,15 @@ async fn execute_cron_step(
 
         let cycle_result = match &config.mode {
             CronMode::Agent(agent_id) => {
-                let cron_exec_id = state
-                    .input
-                    .execution_run_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
+                let (routine_ctx, step_ctx) = build_routine_ctx(state);
                 let runner = provider
                     .agent_by_id(*agent_id)
                     .await?
                     .with_tool(gate::GateVerdictTool::new())
-                    .with_routine_context(
-                        state.routine_id,
-                        state.routine_name.as_deref().unwrap_or(""),
-                        &cron_exec_id,
-                    )
-                    .build()?;
+                    .with_routine_context(routine_ctx)
+                    .with_step_context(step_ctx)
+                    .build()
+                    .await?;
                 // Use TaskType::Cron so the agent's cron_task template is selected.
                 let inner_task = state
                     .input

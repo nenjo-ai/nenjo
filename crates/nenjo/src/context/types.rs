@@ -138,6 +138,28 @@ pub struct RoutineContext {
     pub execution_id: String,
     #[serde(rename = "@description", skip_serializing_if = "str_is_empty")]
     pub description: Option<String>,
+    /// Current step context within the routine.
+    #[serde(skip_serializing_if = "RoutineStepContext::is_empty")]
+    pub step: RoutineStepContext,
+}
+
+/// Context for the currently executing routine step.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename = "step")]
+pub struct RoutineStepContext {
+    #[serde(rename = "@name", skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(rename = "@type", skip_serializing_if = "String::is_empty")]
+    pub step_type: String,
+    /// Arbitrary metadata from the step config, serialized as a JSON string.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub metadata: String,
+}
+
+impl RoutineStepContext {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty() && self.step_type.is_empty() && self.metadata.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -407,6 +429,8 @@ pub struct ProjectContext {
     pub id: String,
     #[serde(rename = "@name")]
     pub name: String,
+    #[serde(rename = "@slug", skip_serializing_if = "String::is_empty")]
+    pub slug: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -423,6 +447,37 @@ pub struct ProjectContext {
 impl ProjectContext {
     pub fn is_empty(&self) -> bool {
         self.id.is_empty() || self.name.is_empty() || self.id == Uuid::nil().to_string()
+    }
+
+    /// Build from a manifest entry, resolving git context from project settings.
+    pub fn from_manifest(project: &crate::manifest::ProjectManifest) -> Self {
+        let git = project
+            .settings
+            .get("repo_sync_status")
+            .and_then(|v| v.as_str())
+            .filter(|s| *s == "synced")
+            .map(|_| {
+                let repo_url = project
+                    .settings
+                    .get("repo_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                GitContext {
+                    repo_url,
+                    ..Default::default()
+                }
+            });
+
+        Self {
+            id: project.id.to_string(),
+            name: project.name.clone(),
+            slug: project.slug.clone(),
+            description: project.description.clone().unwrap_or_default(),
+            metadata: nenjo_xml::types::metadata_json_to_xml(&project.settings),
+            working_dir: String::new(),
+            git,
+        }
     }
 }
 
@@ -533,6 +588,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 execution_id: String::new(),
                 description: Some("Deploy to prod".into()),
+                step: Default::default(),
             }],
         };
         let xml = nenjo_xml::to_xml_pretty(&routines, 2);
@@ -651,6 +707,7 @@ mod tests {
         let project = ProjectContext {
             id: "proj-1".into(),
             name: "MyApp".into(),
+            slug: "myapp".into(),
             description: "A cool app".into(),
             working_dir: "/home/user/myapp".into(),
             metadata: String::new(),

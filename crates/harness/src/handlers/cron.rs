@@ -29,6 +29,7 @@ pub async fn handle_cron_enable(
         assignment_id,
         ActiveExecution {
             kind: crate::harness::ExecutionKind::Cron,
+            execution_run_id: None,
             cancel: cancel.clone(),
             pause: None,
         },
@@ -76,12 +77,17 @@ pub async fn handle_cron_enable(
         match runner.run_stream(task).await {
             Ok(mut handle) => {
                 let mut current_cycle_id: Option<Uuid> = None;
+                let mut current_agent_id: Option<Uuid> = None;
 
                 loop {
                     tokio::select! {
                         event = handle.recv() => {
                             match event {
                                 Some(ev) => {
+                                    // Track agent identity across step events.
+                                    if let nenjo::RoutineEvent::StepStarted { agent_id, .. } = &ev {
+                                        current_agent_id = *agent_id;
+                                    }
                                     // Intercept cron cycle lifecycle events
                                     match &ev {
                                         nenjo::RoutineEvent::CronCycleStarted { cycle } => {
@@ -118,6 +124,9 @@ pub async fn handle_cron_enable(
                                                     },
                                                     total_input_tokens: *total_input_tokens,
                                                     total_output_tokens: *total_output_tokens,
+                                                    execution_type: Some(nenjo_events::ExecutionType::Cron),
+                                                    routine_id: Some(routine_id),
+                                                    routine_name: Some(routine_name.clone()),
                                                 });
                                             }
                                         }
@@ -126,7 +135,7 @@ pub async fn handle_cron_enable(
 
                                     // Forward step events with the cycle-scoped execution_run_id
                                     let eid = current_cycle_id.unwrap_or(assignment_id);
-                                    if let Some(r) = routine_event_to_response(&ev, eid, None) {
+                                    if let Some(r) = routine_event_to_response(&ev, eid, None, current_agent_id, provider.manifest()) {
                                         let _ = response_tx.send(r);
                                     }
                                 }
@@ -143,6 +152,9 @@ pub async fn handle_cron_enable(
                                     error: Some("Cron schedule disabled".to_string()),
                                     total_input_tokens: 0,
                                     total_output_tokens: 0,
+                                    execution_type: Some(nenjo_events::ExecutionType::Cron),
+                                    routine_id: Some(routine_id),
+                                    routine_name: Some(routine_name.clone()),
                                 });
                             }
                             break;
@@ -200,7 +212,7 @@ pub async fn handle_cron_trigger(
         id: execution_id,
         project_id: opt_project_id,
         routine_id,
-        routine_name,
+        routine_name: routine_name.clone(),
         config: serde_json::json!({
             "trigger": "cron",
             "manual": true,
@@ -236,6 +248,9 @@ pub async fn handle_cron_trigger(
         error,
         total_input_tokens,
         total_output_tokens,
+        execution_type: Some(nenjo_events::ExecutionType::Cron),
+        routine_id: Some(routine_id),
+        routine_name: Some(routine_name),
     });
 
     info!(%routine_id, %execution_id, success, "Manual trigger complete");

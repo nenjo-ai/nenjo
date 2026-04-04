@@ -6,6 +6,26 @@ use uuid::Uuid;
 use crate::Capability;
 
 // ---------------------------------------------------------------------------
+// Execution type
+// ---------------------------------------------------------------------------
+
+/// Distinguishes how an execution was triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionType {
+    Cron,
+    Task,
+}
+
+/// Agent identity attached to step events so the frontend can render identicons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepAgent {
+    pub agent_id: Uuid,
+    pub agent_name: Option<String>,
+    pub agent_color: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level response wrapper
 // ---------------------------------------------------------------------------
 
@@ -34,6 +54,9 @@ pub enum Response {
         duration_ms: Option<u64>,
         #[serde(default)]
         data: serde_json::Value,
+        /// Agent executing this step (if it's an agent step).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<StepAgent>,
     },
 
     /// Signals that a task execution finished.
@@ -47,6 +70,10 @@ pub enum Response {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         merge_error: Option<String>,
+        #[serde(default)]
+        total_input_tokens: u64,
+        #[serde(default)]
+        total_output_tokens: u64,
     },
 
     /// Periodic heartbeat from the cron scheduler reporting active schedules.
@@ -78,6 +105,12 @@ pub enum Response {
         total_input_tokens: u64,
         #[serde(default)]
         total_output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_type: Option<ExecutionType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routine_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routine_name: Option<String>,
     },
 
     /// Repo sync completed (or failed) for a project.
@@ -347,6 +380,7 @@ impl Response {
             step_type: step_type.into(),
             duration_ms,
             data,
+            agent: None,
         }
     }
 
@@ -357,6 +391,8 @@ impl Response {
         success: bool,
         error: Option<String>,
         merge_error: Option<String>,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
     ) -> Self {
         Self::TaskCompleted {
             execution_run_id: execution_run_id.to_string(),
@@ -364,6 +400,8 @@ impl Response {
             success,
             error,
             merge_error,
+            total_input_tokens,
+            total_output_tokens,
         }
     }
 }
@@ -451,7 +489,7 @@ mod tests {
 
     #[test]
     fn response_task_completed_builder() {
-        let resp = Response::task_completed(Uuid::nil(), None, true, None, None);
+        let resp = Response::task_completed(Uuid::nil(), None, true, None, None, 100, 50);
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"task.completed""#));
         assert!(json.contains(r#""success":true"#));
@@ -573,6 +611,9 @@ mod tests {
             error: None,
             total_input_tokens: 1000,
             total_output_tokens: 500,
+            execution_type: Some(ExecutionType::Task),
+            routine_id: Some(Uuid::nil()),
+            routine_name: Some("Test Routine".to_string()),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"execution.completed""#));

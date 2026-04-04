@@ -132,6 +132,7 @@ async fn memory_store_writes_to_correct_scope() {
         .unwrap()
         .with_project_context(&project)
         .build()
+        .await
         .unwrap();
 
     let output = runner
@@ -221,6 +222,7 @@ async fn resource_save_writes_to_workspace() {
         .unwrap()
         .with_project_context(&project)
         .build()
+        .await
         .unwrap();
 
     let output = runner
