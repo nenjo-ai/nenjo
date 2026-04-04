@@ -6,10 +6,9 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use nenjo::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
-use nenjo::memory::{MarkdownMemory, Memory, MemoryScope};
+use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
-use nenjo_tools::Tool; // needed to call .execute() on tool structs
 
 // ---------------------------------------------------------------------------
 // Mock Provider
@@ -81,7 +80,7 @@ fn test_manifest() -> Manifest {
         description: Some("An agent with memory".into()),
         is_system: false,
         prompt_config: serde_json::json!({
-            "system_prompt": "You are a helpful assistant with persistent memory.",
+            "system_prompt": "You are a helpful assistant.\n{{ memories }}",
             "templates": {
                 "chat_task": "{{ chat.message }}",
                 "task_execution": "",
@@ -116,19 +115,20 @@ fn test_manifest() -> Manifest {
     }
 }
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // Tests
-// ===========================================================================
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn provider_with_memory_adds_tools() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path());
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
 
     let provider = Provider::builder()
         .with_manifest(test_manifest())
         .with_model_factory(MockModelProviderFactory {
-            response_text: "Got it!".into(),
+            response_text: "ok".into(),
         })
         .with_tool_factory(NoopToolFactory)
         .with_memory(memory)
@@ -143,21 +143,29 @@ async fn provider_with_memory_adds_tools() {
         .build()
         .unwrap();
 
-    // Memory tools should be auto-added
     let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
+    assert!(names.contains(&"memory_store"), "should have memory_store");
     assert!(
-        tool_names.contains(&"memory_store"),
-        "should have memory_store, got: {tool_names:?}"
+        names.contains(&"memory_recall"),
+        "should have memory_recall"
     );
     assert!(
-        tool_names.contains(&"memory_recall"),
-        "should have memory_recall, got: {tool_names:?}"
+        names.contains(&"memory_forget"),
+        "should have memory_forget"
     );
     assert!(
-        tool_names.contains(&"memory_forget"),
-        "should have memory_forget, got: {tool_names:?}"
+        names.contains(&"resource_save"),
+        "should have resource_save"
+    );
+    assert!(
+        names.contains(&"resource_read"),
+        "should have resource_read"
+    );
+    assert!(
+        names.contains(&"resource_delete"),
+        "should have resource_delete"
     );
 }
 
@@ -166,7 +174,7 @@ async fn provider_without_memory_has_no_memory_tools() {
     let provider = Provider::builder()
         .with_manifest(test_manifest())
         .with_model_factory(MockModelProviderFactory {
-            response_text: "No memory.".into(),
+            response_text: "ok".into(),
         })
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -181,347 +189,657 @@ async fn provider_without_memory_has_no_memory_tools() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-
-    assert!(
-        !tool_names.contains(&"memory_store"),
-        "should NOT have memory tools without .with_memory()"
-    );
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(!names.contains(&"memory_store"));
 }
 
 #[tokio::test]
-async fn builder_with_memory_adds_tools() {
+async fn memory_store_and_recall() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path());
-    let manifest = test_manifest();
-    let agent_id = manifest.agents[0].id;
-    let project_id = manifest.projects[0].id;
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let scope = MemoryScope::new("test-agent", Some("test-project"));
 
-    let provider = Provider::builder()
-        .with_manifest(manifest)
-        .with_model_factory(MockModelProviderFactory {
-            response_text: "Builder memory.".into(),
-        })
-        .with_tool_factory(NoopToolFactory)
-        .build()
-        .await
-        .unwrap();
-
-    let scope = MemoryScope::new(&project_id.to_string(), &agent_id.to_string());
-
-    let runner = provider
-        .agent_by_name("memory-agent")
-        .await
-        .unwrap()
-        .with_memory(Arc::new(memory), scope)
-        .build()
-        .unwrap();
-
-    let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-
-    assert!(tool_names.contains(&"memory_store"));
-    assert!(tool_names.contains(&"memory_recall"));
-    assert!(tool_names.contains(&"memory_forget"));
-}
-
-#[tokio::test]
-async fn memory_store_recall_and_forget() {
-    let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let scope = MemoryScope::new("test-project", "test-agent");
+    use nenjo::memory::Memory;
 
     // Store facts
-    let rust_id = memory
-        .store(&scope.project, "User prefers Rust", "preferences", 0.9)
-        .await
-        .unwrap();
-
     memory
-        .store(&scope.project, "Always write tests", "practices", 0.95)
+        .append(&scope.project, "preferences", "User prefers Rust")
         .await
         .unwrap();
-
     memory
-        .store(
-            &scope.core,
-            "Expert in distributed systems",
-            "expertise",
-            0.85,
-        )
+        .append(&scope.project, "preferences", "Always use snake_case")
+        .await
+        .unwrap();
+    memory
+        .append(&scope.core, "expertise", "Distributed systems")
         .await
         .unwrap();
 
-    // Search project scope
-    let results = memory.search(&scope.project, "Rust", 5).await.unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].fact, "User prefers Rust");
+    // Recall by category
+    let cat = memory
+        .read_category(&scope.project, "preferences")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cat.facts.len(), 2);
+    assert_eq!(cat.facts[0].text, "User prefers Rust");
 
-    // Search core scope
-    let results = memory.search(&scope.core, "distributed", 5).await.unwrap();
-    assert_eq!(results.len(), 1);
-    assert!(results[0].fact.contains("distributed"));
+    // List all categories
+    let cats = memory.list_categories(&scope.project).await.unwrap();
+    assert_eq!(cats.len(), 1);
+    assert_eq!(cats[0].category, "preferences");
 
-    // Delete by ID
-    assert!(memory.delete(&rust_id).await.unwrap());
-    let results = memory.search(&scope.project, "Rust", 5).await.unwrap();
-    assert!(
-        results.is_empty(),
-        "deleted item should not appear in search"
-    );
-
-    // Other facts remain
-    let results = memory.search(&scope.project, "tests", 5).await.unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].fact, "Always write tests");
-
-    // Delete non-existent returns false
-    assert!(!memory.delete("no-such-id").await.unwrap());
+    let core_cats = memory.list_categories(&scope.core).await.unwrap();
+    assert_eq!(core_cats.len(), 1);
+    assert_eq!(core_cats[0].category, "expertise");
 }
 
 #[tokio::test]
-async fn memory_forget_tool_by_query() {
+async fn memory_forget() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let scope = MemoryScope::new("test-project", "test-agent");
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let scope = MemoryScope::new("test-agent", Some("test-project"));
+
+    use nenjo::memory::Memory;
 
     memory
-        .store(&scope.project, "User likes Python", "preferences", 0.8)
+        .append(&scope.project, "prefs", "Likes Rust")
         .await
         .unwrap();
     memory
-        .store(&scope.project, "User likes Rust", "preferences", 0.9)
-        .await
-        .unwrap();
-    memory
-        .store(&scope.project, "Deploy on Fridays", "practices", 0.7)
-        .await
-        .unwrap();
-
-    // Use the forget tool to delete by query
-    let tool = nenjo::memory::tools::MemoryForgetTool::new(memory.clone(), scope.clone());
-    let result = tool
-        .execute(serde_json::json!({
-            "query": "Python",
-            "scope": "project"
-        }))
+        .append(&scope.project, "prefs", "Likes Go")
         .await
         .unwrap();
 
-    assert!(result.success);
     assert!(
-        result.output.contains("1"),
-        "should have deleted 1 item: {}",
-        result.output
+        memory
+            .delete_fact(&scope.project, "prefs", "Likes Rust")
+            .await
+            .unwrap()
     );
 
-    // Python gone, Rust and Fridays remain
-    let all = memory.search(&scope.project, "", 10).await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert!(!all.iter().any(|i| i.fact.contains("Python")));
+    let cat = memory
+        .read_category(&scope.project, "prefs")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cat.facts.len(), 1);
+    assert_eq!(cat.facts[0].text, "Likes Go");
 }
 
 #[tokio::test]
-async fn memory_forget_tool_by_id() {
+async fn memory_vars_injected_into_prompts() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let scope = MemoryScope::new("test-project", "test-agent");
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let scope = MemoryScope::new("memory-agent", Some("test-project"));
 
-    let id = memory
-        .store(&scope.project, "Temporary fact", "temp", 0.5)
-        .await
-        .unwrap();
+    use nenjo::memory::Memory;
 
-    let tool = nenjo::memory::tools::MemoryForgetTool::new(memory.clone(), scope.clone());
-    let result = tool.execute(serde_json::json!({ "id": id })).await.unwrap();
-
-    assert!(result.success);
-    assert!(
-        result.output.contains("Deleted"),
-        "should confirm deletion: {}",
-        result.output
-    );
-
-    // Verify it's gone
-    let results = memory
-        .search(&scope.project, "Temporary", 10)
-        .await
-        .unwrap();
-    assert!(results.is_empty());
-}
-
-#[tokio::test]
-async fn memory_store_and_recall_tools_round_trip() {
-    let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let scope = MemoryScope::new("test-project", "test-agent");
-
-    // Store via tool
-    let store_tool = nenjo::memory::tools::MemoryStoreTool::new(memory.clone(), scope.clone());
-    let result = store_tool
-        .execute(serde_json::json!({
-            "fact": "The API uses REST with JSON",
-            "category": "architecture",
-            "confidence": 0.95,
-            "scope": "project"
-        }))
-        .await
-        .unwrap();
-    assert!(result.success);
-
-    // Recall via tool
-    let recall_tool = nenjo::memory::tools::MemoryRecallTool::new(memory.clone(), scope.clone());
-    let result = recall_tool
-        .execute(serde_json::json!({
-            "query": "API REST",
-            "scope": "project"
-        }))
-        .await
-        .unwrap();
-    assert!(result.success);
-    assert!(
-        result.output.contains("REST"),
-        "recall should find the fact: {}",
-        result.output
-    );
-    assert!(
-        result.output.contains("architecture"),
-        "should show category: {}",
-        result.output
-    );
-
-    // Forget via tool
-    let forget_tool = nenjo::memory::tools::MemoryForgetTool::new(memory.clone(), scope.clone());
-    let result = forget_tool
-        .execute(serde_json::json!({
-            "query": "REST",
-            "scope": "project"
-        }))
-        .await
-        .unwrap();
-    assert!(result.success);
-    assert!(
-        result.output.contains("1"),
-        "should delete 1: {}",
-        result.output
-    );
-
-    // Recall again — should be empty
-    let result = recall_tool
-        .execute(serde_json::json!({
-            "query": "API REST",
-            "scope": "project"
-        }))
-        .await
-        .unwrap();
-    assert!(result.success);
-    assert!(
-        result.output.contains("No memories"),
-        "should find nothing after forget: {}",
-        result.output
-    );
-}
-
-#[tokio::test]
-async fn memory_summaries_injected_into_prompts() {
-    let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let manifest = test_manifest();
-    let agent_id = manifest.agents[0].id;
-    let project_id = manifest.projects[0].id;
-    let scope = MemoryScope::new(&project_id.to_string(), &agent_id.to_string());
-
-    // Store summaries in each tier
+    // Store facts in each tier
     memory
-        .upsert_summary(
-            &scope.project,
-            "preferences",
-            "User prefers Rust and snake_case",
-            3,
-        )
+        .append(&scope.core, "expertise", "Distributed systems expert")
         .await
         .unwrap();
-
     memory
-        .upsert_summary(
-            &scope.core,
-            "expertise",
-            "Expert in distributed systems and Rust",
-            5,
-        )
+        .append(&scope.project, "preferences", "User prefers Rust")
         .await
         .unwrap();
-
     memory
-        .upsert_summary(
-            &scope.shared,
-            "decisions",
-            "Using PostgreSQL for the database",
-            2,
-        )
+        .append(&scope.shared, "decisions", "Using PostgreSQL for DB")
         .await
         .unwrap();
 
-    // Build memory XML
-    let xml = nenjo::memory::build_memory_xml(memory.as_ref(), &scope)
+    // Build memory vars
+    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
         .await
         .unwrap();
 
-    assert!(xml.contains("<memory>"), "should have memory root tag");
-    assert!(xml.contains("<memory-core>"), "should have core tier");
+    let full = vars.get("memories").expect("should have memories key");
+    assert!(full.contains("<memories>"), "should have memories root tag");
+    assert!(full.contains("<memories-core>"), "should have core tier");
     assert!(
-        xml.contains("<memory-summaries>"),
+        full.contains("<memories-project>"),
         "should have project tier"
     );
-    assert!(xml.contains("<memory-shared>"), "should have shared tier");
     assert!(
-        xml.contains("User prefers Rust"),
-        "should contain project summary"
+        full.contains("<memories-shared>"),
+        "should have shared tier"
     );
     assert!(
-        xml.contains("distributed systems"),
-        "should contain core summary"
+        full.contains("User prefers Rust"),
+        "should contain project fact"
     );
-    assert!(xml.contains("PostgreSQL"), "should contain shared summary");
+    assert!(
+        full.contains("Distributed systems"),
+        "should contain core fact"
+    );
+    assert!(full.contains("PostgreSQL"), "should contain shared fact");
+
+    // Individual tiers
+    assert!(vars.contains_key("memories.core"), "should have core key");
+    assert!(
+        vars.contains_key("memories.project"),
+        "should have project key"
+    );
+    assert!(
+        vars.contains_key("memories.shared"),
+        "should have shared key"
+    );
 }
 
 #[tokio::test]
-async fn memory_xml_empty_when_no_summaries() {
+async fn memory_vars_empty_when_no_facts() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path()));
-    let scope = MemoryScope::new("empty-project", "empty-agent");
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let scope = MemoryScope::new("empty-agent", Some("empty-project"));
 
-    let xml = nenjo::memory::build_memory_xml(memory.as_ref(), &scope)
+    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
         .await
         .unwrap();
 
-    assert!(xml.is_empty(), "should be empty when no summaries exist");
+    assert!(vars.is_empty(), "should be empty when no facts exist");
 }
 
 #[tokio::test]
-async fn runner_with_memory_injects_xml() {
+async fn resource_vars_injected() {
     let dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path());
-    let manifest = test_manifest();
-    let agent_id = manifest.agents[0].id;
-    let project_id = manifest.projects[0].id;
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let scope = MemoryScope::new("test-agent", Some("test-project"));
 
-    // Pre-populate a summary
-    let scope = MemoryScope::new(&project_id.to_string(), &agent_id.to_string());
+    use nenjo::memory::Memory;
+
     memory
-        .upsert_summary(
-            &scope.project,
-            "context",
-            "This is a Rust project using Axum",
-            1,
+        .save_resource(
+            &scope.resources_project,
+            "auth-prd.md",
+            "Auth PRD",
+            "architect",
+            "# Auth PRD\nOAuth2 flow",
         )
         .await
         .unwrap();
+    memory
+        .save_resource(
+            &scope.resources_global,
+            "standards.md",
+            "Coding standards",
+            "system",
+            "# Standards\nUse Rust",
+        )
+        .await
+        .unwrap();
+
+    let vars = nenjo::memory::build_resource_vars(memory.as_ref(), &scope)
+        .await
+        .unwrap();
+
+    assert!(vars.contains_key("resources"), "should have resources key");
+    assert!(
+        vars.contains_key("resources.project"),
+        "should have project key"
+    );
+    assert!(
+        vars.contains_key("resources.workspace"),
+        "should have workspace key"
+    );
+
+    let full = &vars["resources"];
+    assert!(full.contains("auth-prd.md"));
+    assert!(full.contains("standards.md"));
+    assert!(full.contains("architect"));
+}
+
+// ---------------------------------------------------------------------------
+// Scope isolation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scope_project_agent_three_tiers_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+
+    use nenjo::memory::Memory;
+
+    let scope = MemoryScope::new("coder", Some("webapp"));
+
+    // Store in each tier
+    memory
+        .append(&scope.project, "prefs", "project-only")
+        .await
+        .unwrap();
+    memory
+        .append(&scope.core, "prefs", "core-only")
+        .await
+        .unwrap();
+    memory
+        .append(&scope.shared, "prefs", "shared-only")
+        .await
+        .unwrap();
+
+    // Build memory vars — all three tiers present
+    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+        .await
+        .unwrap();
+    let full = &vars["memories"];
+
+    assert!(full.contains("project-only"));
+    assert!(full.contains("core-only"));
+    assert!(full.contains("shared-only"));
+
+    // Each tier is separate in vars
+    assert!(vars["memories.project"].contains("project-only"));
+    assert!(!vars["memories.project"].contains("core-only"));
+
+    assert!(vars["memories.core"].contains("core-only"));
+    assert!(!vars["memories.core"].contains("project-only"));
+
+    assert!(vars["memories.shared"].contains("shared-only"));
+    assert!(!vars["memories.shared"].contains("project-only"));
+}
+
+#[tokio::test]
+async fn scope_system_agent_collapses_to_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+
+    use nenjo::memory::Memory;
+
+    let scope = MemoryScope::new("nenji", None);
+
+    // Project and core both write to agent_nenji_core
+    memory
+        .append(&scope.project, "prefs", "fact-a")
+        .await
+        .unwrap();
+    memory.append(&scope.core, "prefs", "fact-b").await.unwrap();
+
+    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+        .await
+        .unwrap();
+
+    // Project and core should contain both facts (same underlying dir)
+    let project_xml = &vars["memories.project"];
+    assert!(project_xml.contains("fact-a"));
+    assert!(project_xml.contains("fact-b"));
+
+    let core_xml = &vars["memories.core"];
+    assert!(core_xml.contains("fact-a"));
+    assert!(core_xml.contains("fact-b"));
+}
+
+#[tokio::test]
+async fn scope_shared_visible_across_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+
+    use nenjo::memory::Memory;
+
+    let scope_coder = MemoryScope::new("coder", Some("webapp"));
+    let scope_reviewer = MemoryScope::new("reviewer", Some("webapp"));
+
+    // Coder stores a shared fact
+    memory
+        .append(&scope_coder.shared, "conventions", "Always write tests")
+        .await
+        .unwrap();
+
+    // Reviewer can see it via their shared scope (same project)
+    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope_reviewer)
+        .await
+        .unwrap();
+    assert!(vars["memories.shared"].contains("Always write tests"));
+
+    // But reviewer can't see coder's project-scoped memories
+    let reviewer_project = memory
+        .list_categories(&scope_reviewer.project)
+        .await
+        .unwrap();
+    assert!(reviewer_project.is_empty());
+}
+
+#[tokio::test]
+async fn scope_resources_shared_across_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+
+    use nenjo::memory::Memory;
+
+    let scope_architect = MemoryScope::new("architect", Some("webapp"));
+    let scope_coder = MemoryScope::new("coder", Some("webapp"));
+
+    // Architect saves a project resource
+    memory
+        .save_resource(
+            &scope_architect.resources_project,
+            "design.md",
+            "System design",
+            "architect",
+            "# Design doc",
+        )
+        .await
+        .unwrap();
+
+    // Coder can see it (same project resources path)
+    let vars = nenjo::memory::build_resource_vars(memory.as_ref(), &scope_coder)
+        .await
+        .unwrap();
+    assert!(vars["resources.project"].contains("design.md"));
+    assert!(vars["resources.project"].contains("architect"));
+
+    // Coder can read the full content
+    let content = memory
+        .read_resource(&scope_coder.resources_project, "design.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(content.contains("# Design doc"));
+}
+
+#[tokio::test]
+async fn scope_resources_global_visible_to_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+
+    use nenjo::memory::Memory;
+
+    let scope_a = MemoryScope::new("agent-a", Some("project-x"));
+    let scope_b = MemoryScope::new("agent-b", Some("project-y"));
+    let scope_sys = MemoryScope::new("system-agent", None);
+
+    // Agent A saves a global resource
+    memory
+        .save_resource(
+            &scope_a.resources_global,
+            "guide.md",
+            "Onboarding guide",
+            "agent-a",
+            "# Guide",
+        )
+        .await
+        .unwrap();
+
+    // All agents see it regardless of project
+    for scope in [&scope_a, &scope_b, &scope_sys] {
+        let entries = memory
+            .list_resources(&scope.resources_global)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1, "global resource should be visible");
+        assert_eq!(entries[0].filename, "guide.md");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ability & domain memory flow
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ability_inherits_memory_vars() {
+    use nenjo::manifest::AbilityManifest;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+
+    use nenjo::memory::Memory;
+
+    // Pre-populate memory so it shows up in vars
+    let scope = MemoryScope::new("ability-agent", Some("test-project"));
+    memory
+        .append(&scope.core, "expertise", "Knows Rust deeply")
+        .await
+        .unwrap();
+
+    let model = ModelManifest {
+        id: Uuid::new_v4(),
+        name: "test-model".into(),
+        description: None,
+        model: "mock-llm-v1".into(),
+        model_provider: "mock".into(),
+        temperature: Some(0.5),
+        tags: vec![],
+    };
+
+    let ability = AbilityManifest {
+        id: Uuid::new_v4(),
+        name: "code-review".into(),
+        display_name: None,
+        description: Some("Reviews code".into()),
+        activation_condition: "when code review is needed".into(),
+        prompt: "You review code.".into(),
+        platform_scopes: vec![],
+        skill_ids: vec![],
+        mcp_server_ids: vec![],
+        tool_filter: serde_json::json!({}),
+    };
+
+    let agent = nenjo::manifest::AgentManifest {
+        id: Uuid::new_v4(),
+        name: "ability-agent".into(),
+        description: Some("Agent with abilities".into()),
+        is_system: false,
+        prompt_config: serde_json::json!({
+            "system_prompt": "You are helpful.\n{{ memories }}",
+            "templates": {
+                "chat_task": "{{ chat.message }}",
+                "task_execution": "",
+                "gate_eval": "",
+                "cron_task": ""
+            }
+        }),
+        color: None,
+        model_id: Some(model.id),
+        model_name: Some("test-model".into()),
+        skills: vec![],
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_server_ids: vec![],
+        abilities: vec![ability.id],
+    };
+
+    let project = nenjo::manifest::ProjectManifest {
+        id: Uuid::new_v4(),
+        name: "test-project".into(),
+        slug: "test-project".into(),
+        description: None,
+        is_system: false,
+        settings: serde_json::Value::Null,
+    };
+
+    let manifest = nenjo::manifest::Manifest {
+        agents: vec![agent],
+        models: vec![model],
+        abilities: vec![ability],
+        projects: vec![project],
+        ..Default::default()
+    };
 
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory {
-            response_text: "I see from memory this is a Rust/Axum project.".into(),
+            response_text: "ok".into(),
+        })
+        .with_tool_factory(NoopToolFactory)
+        .with_memory(memory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("ability-agent")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // The agent should have use_ability tool
+    let specs = runner.instance().tool_specs();
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"use_ability"), "should have use_ability");
+    assert!(names.contains(&"memory_store"), "should have memory_store");
+
+    // Memory vars should be empty on the instance (loaded at execution time)
+    // but the memory backend is configured on the runner
+    assert!(
+        runner.memory().is_some(),
+        "runner should have memory backend"
+    );
+}
+
+#[tokio::test]
+async fn domain_expansion_preserves_memory() {
+    use nenjo::manifest::DomainManifest;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+
+    use nenjo::memory::Memory;
+
+    let scope = MemoryScope::new("domain-agent", Some("test-project"));
+    memory
+        .append(&scope.project, "decisions", "Using axum for HTTP")
+        .await
+        .unwrap();
+
+    let model = ModelManifest {
+        id: Uuid::new_v4(),
+        name: "test-model".into(),
+        description: None,
+        model: "mock-llm-v1".into(),
+        model_provider: "mock".into(),
+        temperature: Some(0.5),
+        tags: vec![],
+    };
+
+    let domain = DomainManifest {
+        id: Uuid::new_v4(),
+        name: "prd".into(),
+        display_name: "PRD Mode".into(),
+        description: Some("Product requirements".into()),
+        command: "/prd".into(),
+        manifest: serde_json::json!({
+            "tools": {
+                "additional_scopes": [],
+                "activate_abilities": [],
+            },
+            "prompt": {}
+        }),
+        category: None,
+        tags: vec![],
+        is_system: false,
+        source_domain_id: None,
+    };
+
+    let agent = nenjo::manifest::AgentManifest {
+        id: Uuid::new_v4(),
+        name: "domain-agent".into(),
+        description: Some("Agent with domains".into()),
+        is_system: false,
+        prompt_config: serde_json::json!({
+            "system_prompt": "You are helpful.\n{{ memories }}",
+            "templates": {
+                "chat_task": "{{ chat.message }}",
+                "task_execution": "",
+                "gate_eval": "",
+                "cron_task": ""
+            }
+        }),
+        color: None,
+        model_id: Some(model.id),
+        model_name: Some("test-model".into()),
+        skills: vec![],
+        domains: vec![domain.id],
+        platform_scopes: vec![],
+        mcp_server_ids: vec![],
+        abilities: vec![],
+    };
+
+    let project = nenjo::manifest::ProjectManifest {
+        id: Uuid::new_v4(),
+        name: "test-project".into(),
+        slug: "test-project".into(),
+        description: None,
+        is_system: false,
+        settings: serde_json::Value::Null,
+    };
+
+    let manifest = nenjo::manifest::Manifest {
+        agents: vec![agent],
+        models: vec![model],
+        domains: vec![domain],
+        projects: vec![project],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory {
+            response_text: "ok".into(),
+        })
+        .with_tool_factory(NoopToolFactory)
+        .with_memory(memory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("domain-agent")
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Expand into domain
+    let domain_runner = runner.domain_expansion("prd").await.unwrap();
+
+    // Domain runner should preserve memory backend
+    assert!(
+        domain_runner.memory().is_some(),
+        "domain runner should have memory backend"
+    );
+    assert!(
+        domain_runner.memory_scope().is_some(),
+        "domain runner should have memory scope"
+    );
+
+    // Memory tools should still be present
+    let specs = domain_runner.instance().tool_specs();
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"memory_store"),
+        "domain runner should have memory_store"
+    );
+    assert!(
+        names.contains(&"resource_save"),
+        "domain runner should have resource_save"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Runner execution
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runner_with_memory_executes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockModelProviderFactory {
+            response_text: "I see from memory this is a Rust project.".into(),
         })
         .with_tool_factory(NoopToolFactory)
         .with_memory(memory)
@@ -536,13 +854,9 @@ async fn runner_with_memory_injects_xml() {
         .build()
         .unwrap();
 
-    // The runner should inject memory XML and run successfully
     let output = runner
         .chat("What do you know about this project?")
         .await
         .unwrap();
-    assert_eq!(
-        output.text,
-        "I see from memory this is a Rust/Axum project."
-    );
+    assert_eq!(output.text, "I see from memory this is a Rust project.");
 }

@@ -1,5 +1,6 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use nenjo_models::ModelProvider;
@@ -13,7 +14,7 @@ use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
-use crate::memory::MemoryScope;
+use crate::memory::types::MemoryScope;
 use crate::provider::{ModelProviderFactory, ToolFactory};
 use crate::routines::LambdaRunner;
 
@@ -42,9 +43,8 @@ pub struct AgentBuilder {
     prompt_context: PromptContext,
     agent_config: AgentConfig,
     context_renderer: ContextRenderer,
-    memory_xml: String,
+    memory_vars: HashMap<String, String>,
     memory: Option<Arc<dyn Memory>>,
-    memory_scope: Option<MemoryScope>,
     // For DelegateToTool construction — set by Provider::build_agent().
     manifest: Option<Arc<Manifest>>,
     model_factory: Option<Arc<dyn ModelProviderFactory>>,
@@ -66,9 +66,8 @@ impl AgentBuilder {
             prompt_context: params.prompt_context,
             agent_config: params.agent_config,
             context_renderer: params.context_renderer,
-            memory_xml: String::new(),
+            memory_vars: HashMap::new(),
             memory: None,
-            memory_scope: None,
             manifest: None,
             model_factory: None,
             tool_factory: None,
@@ -78,29 +77,26 @@ impl AgentBuilder {
         }
     }
 
-    /// Set memory backend and scope for this agent.
+    /// Set memory backend for this agent.
     ///
     /// When set, the runner will:
-    /// 1. Load summaries and inject `<memory>` XML into prompts
-    /// 2. Include memory_store/recall/forget tools automatically
-    pub fn with_memory(mut self, memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
-        // Add memory tools if not already present
-        let has_memory_tools = self.tools.iter().any(|t| t.name() == "memory_store");
-        if !has_memory_tools {
-            let mem_tools = crate::memory::tools::memory_tools(memory.clone(), scope.clone());
-            self.tools.extend(mem_tools);
-        }
+    /// 1. Load memories and resources and inject them into prompts
+    /// 2. Include memory and resource tools automatically
+    ///
+    /// The memory scope is derived from the agent name and project context
+    /// at `build()` time, so call `with_project_context()` before `build()`
+    /// to get project-scoped memories.
+    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
         self.memory = Some(memory);
-        self.memory_scope = Some(scope);
         self
     }
 
-    /// Set pre-computed memory XML for prompt injection.
+    /// Set pre-computed memory template vars for prompt injection.
     ///
     /// Use this instead of `with_memory()` if you want to manage memory
-    /// retrieval yourself.
-    pub fn with_memory_xml(mut self, xml: impl Into<String>) -> Self {
-        self.memory_xml = xml.into();
+    /// retrieval yourself. Keys should be `memories`, `memories.core`, etc.
+    pub fn with_memory_vars(mut self, vars: HashMap<String, String>) -> Self {
+        self.memory_vars = vars;
         self
     }
 
@@ -205,8 +201,29 @@ impl AgentBuilder {
     }
 
     /// Build the [`AgentRunner`].
-    pub fn build(self) -> Result<AgentRunner, super::error::AgentError> {
+    pub fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
         let security = Arc::new(SecurityPolicy::default());
+
+        // Build memory scope and inject tools. This is the single place
+        // where memory/resource tools are added — scope is derived from the
+        // agent name and whatever project context was set via with_project_context().
+        let memory_scope = if let Some(ref mem) = self.memory {
+            let slug = &self.prompt_context.render_ctx_extra.project_slug;
+            let project_slug = if slug.is_empty() {
+                None
+            } else {
+                Some(slug.as_str())
+            };
+            let scope = MemoryScope::new(&self.agent.name, project_slug);
+            self.tools.extend(crate::memory::tools::memory_tools(
+                mem.clone(),
+                scope.clone(),
+                &self.agent.name,
+            ));
+            Some(scope)
+        } else {
+            None
+        };
 
         let delegation_support = match (self.manifest, self.model_factory, self.tool_factory) {
             (Some(m), Some(mf), Some(tf)) => Some(super::runner::DelegationSupport {
@@ -236,10 +253,11 @@ impl AgentBuilder {
             security,
             agent_config: self.agent_config,
             context_renderer: self.context_renderer,
-            memory_xml: self.memory_xml,
+            memory_vars: self.memory_vars,
+            resource_vars: HashMap::new(),
             documents_xml: String::new(),
         };
 
-        AgentRunner::new(instance, self.memory, self.memory_scope, delegation_support)
+        AgentRunner::new(instance, self.memory, memory_scope, delegation_support)
     }
 }

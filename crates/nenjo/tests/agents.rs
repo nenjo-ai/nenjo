@@ -317,7 +317,10 @@ async fn instance_builds_prompts() {
         .agent_by_name("test-coder")
         .await
         .unwrap()
-        .with_memory_xml("<memory>test memory</memory>")
+        .with_memory_vars(std::collections::HashMap::from([(
+            "memories".to_string(),
+            "<memories>test memory</memories>".to_string(),
+        )]))
         .build()
         .unwrap();
 

@@ -1,6 +1,7 @@
 //! Fully configured agent instance ready for task execution.
 
 use crate::context::ContextRenderer;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -52,9 +53,8 @@ pub struct AgentInstance {
     pub security: Arc<SecurityPolicy>,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
-    /// Pre-computed memory XML for prompt injection.
-    pub memory_xml: String,
-    /// Pre-computed documents XML for prompt injection.
+    pub memory_vars: HashMap<String, String>,
+    pub resource_vars: HashMap<String, String>,
     pub documents_xml: String,
 }
 
@@ -141,6 +141,13 @@ impl AgentInstance {
                     items: self.prompt_config.memory_profile.project_focus.clone(),
                 })
             },
+            shared_focus: if self.prompt_config.memory_profile.shared_focus.is_empty() {
+                None
+            } else {
+                Some(crate::context::FocusListContext {
+                    items: self.prompt_config.memory_profile.shared_focus.clone(),
+                })
+            },
         };
 
         // 2. Populate available collections (exclude self from agents)
@@ -170,6 +177,11 @@ impl AgentInstance {
             .iter()
             .map(prompts::render_skill)
             .collect();
+
+        // Memories, resources, and documents
+        ctx.memory_vars = self.memory_vars.clone();
+        ctx.resource_vars = self.resource_vars.clone();
+        ctx.documents_xml = self.documents_xml.clone();
 
         // 3. Build the vars HashMap once
         let mut vars = ctx.to_vars();
@@ -222,9 +234,6 @@ impl AgentInstance {
     }
 }
 
-/// Build a compact XML listing of project documents from the manifest.
-///
-/// Returns empty string if no manifest exists or no documents are present.
 /// Document manifest entry (mirrors harness doc_sync).
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ManifestEntry {
@@ -239,6 +248,8 @@ struct DocumentManifest {
 }
 
 /// Build a compact XML listing of project documents from a manifest file.
+///
+/// Returns empty string if no manifest exists or no documents are present.
 pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &str) -> String {
     let project_dir = docs_base_dir.join(project_slug);
     let manifest_path = project_dir.join("manifest.json");
@@ -254,21 +265,19 @@ pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &st
         return String::new();
     }
 
-    let mut xml = format!("<project_documents path=\"{project_slug}\">\n");
-    for doc in &manifest.documents {
-        let size = format_size(doc.size_bytes);
-        xml.push_str(&format!(
-            "  <doc name=\"{}\" size=\"{}\" />\n",
-            doc.filename, size
-        ));
-    }
-    xml.push_str("</project_documents>\n");
-    xml.push_str(&format!(
-        "Use file_read to read these documents when relevant (e.g. path: \"{project_slug}/{}\").",
-        manifest.documents[0].filename
-    ));
+    let ctx = crate::context::ProjectDocumentsContext {
+        path: project_slug.to_string(),
+        documents: manifest
+            .documents
+            .iter()
+            .map(|doc| crate::context::DocumentContext {
+                name: doc.filename.clone(),
+                size: format_size(doc.size_bytes),
+            })
+            .collect(),
+    };
 
-    xml
+    nenjo_xml::to_xml_pretty(&ctx, 2)
 }
 
 /// Format bytes into a human-readable size string.

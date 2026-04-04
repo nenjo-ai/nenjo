@@ -202,14 +202,29 @@ impl AgentRunner {
     ///
     /// Used by the harness to re-use a domain-expanded instance across
     /// multiple chat turns without rebuilding from the Provider each time.
-    pub fn from_instance(instance: AgentInstance) -> Self {
+    /// Pass memory/scope to preserve memory and resource loading.
+    pub fn from_instance(
+        instance: AgentInstance,
+        memory: Option<Arc<dyn Memory>>,
+        memory_scope: Option<MemoryScope>,
+    ) -> Self {
         Self {
             instance: Arc::new(instance),
-            memory: None,
-            memory_scope: None,
+            memory,
+            memory_scope,
             manifest: None,
             platform_resolver: None,
         }
+    }
+
+    /// The memory backend, if configured.
+    pub fn memory(&self) -> Option<&Arc<dyn Memory>> {
+        self.memory.as_ref()
+    }
+
+    /// The memory scope, if configured.
+    pub fn memory_scope(&self) -> Option<&MemoryScope> {
+        self.memory_scope.as_ref()
     }
 
     /// Activate a domain by name, returning a new runner with expanded config.
@@ -379,22 +394,34 @@ impl AgentRunner {
     // -- Internal --
 
     async fn execute_stream(&self, task: TaskType) -> Result<ExecutionHandle> {
-        // Load memory XML if configured (async).
-        let memory_xml = if self.instance.memory_xml.is_empty() {
+        // Load memory + resource vars if configured (async).
+        let (memory_vars, resource_vars) =
             if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope) {
-                memory::build_memory_xml(mem.as_ref(), scope).await?
+                let mv = if self.instance.memory_vars.is_empty() {
+                    memory::build_memory_vars(mem.as_ref(), scope).await?
+                } else {
+                    self.instance.memory_vars.clone()
+                };
+                let rv = if self.instance.resource_vars.is_empty() {
+                    memory::build_resource_vars(mem.as_ref(), scope).await?
+                } else {
+                    self.instance.resource_vars.clone()
+                };
+                (mv, rv)
             } else {
-                String::new()
-            }
-        } else {
-            self.instance.memory_xml.clone()
-        };
+                (
+                    self.instance.memory_vars.clone(),
+                    self.instance.resource_vars.clone(),
+                )
+            };
 
-        // Temporarily set memory_xml on instance for prompt building.
-        // Clone the Arc so we can modify without affecting the original.
-        let inst = if !memory_xml.is_empty() && self.instance.memory_xml.is_empty() {
+        // Temporarily set vars on instance for prompt building.
+        let needs_clone = (!memory_vars.is_empty() && self.instance.memory_vars.is_empty())
+            || (!resource_vars.is_empty() && self.instance.resource_vars.is_empty());
+        let inst = if needs_clone {
             let mut cloned = (*self.instance).clone();
-            cloned.memory_xml = memory_xml;
+            cloned.memory_vars = memory_vars;
+            cloned.resource_vars = resource_vars;
             Arc::new(cloned)
         } else {
             self.instance.clone()

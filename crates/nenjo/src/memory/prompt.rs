@@ -1,72 +1,178 @@
-//! Memory → prompt XML injection.
+//! Memory & resource → prompt template variable injection.
+
+use std::collections::HashMap;
 
 use anyhow::Result;
+
+use crate::context::{
+    MemoriesContext, MemoriesCoreContext, MemoriesProjectContext, MemoriesSharedContext,
+    MemoryCategoryContext, ResourceContext, ResourcesContext, ResourcesProjectContext,
+    ResourcesWorkspaceContext,
+};
 
 use super::Memory;
 use super::types::MemoryScope;
 
-/// Build `<memory>` XML from all 3 tiers of summaries for prompt injection.
+/// Convert memory categories into context structs for XML serialization.
+fn categories_to_contexts(
+    categories: &[super::types::MemoryCategory],
+) -> Vec<MemoryCategoryContext> {
+    categories
+        .iter()
+        .map(|c| {
+            let text = c
+                .facts
+                .iter()
+                .map(|f| f.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            MemoryCategoryContext {
+                name: c.category.clone(),
+                text,
+            }
+        })
+        .collect()
+}
+
+/// Build memory template variables from all 3 tiers.
 ///
-/// Output format:
-/// ```xml
-/// <memory>
-/// <memory-core>
-///   <category name="security">Always check auth bypass</category>
-/// </memory-core>
-/// <memory-summaries>
-///   <category name="preferences">User prefers Rust</category>
-/// </memory-summaries>
-/// <memory-shared>
-///   <category name="decisions">Using PostgreSQL for DB</category>
-/// </memory-shared>
-/// </memory>
-/// ```
+/// Returns a `HashMap` with keys: `memories`, `memories.core`,
+/// `memories.project`, `memories.shared` (only non-empty tiers).
+pub async fn build_memory_vars(
+    memory: &dyn Memory,
+    scope: &MemoryScope,
+) -> Result<HashMap<String, String>> {
+    let core_cats = memory.list_categories(&scope.core).await?;
+    let project_cats = memory.list_categories(&scope.project).await?;
+    let shared_cats = memory.list_categories(&scope.shared).await?;
+
+    let mut vars = HashMap::new();
+
+    if core_cats.is_empty() && project_cats.is_empty() && shared_cats.is_empty() {
+        return Ok(vars);
+    }
+
+    let core = if !core_cats.is_empty() {
+        let ctx = MemoriesCoreContext {
+            categories: categories_to_contexts(&core_cats),
+        };
+        vars.insert(
+            "memories.core".to_string(),
+            nenjo_xml::to_xml_pretty(&ctx, 2),
+        );
+        Some(ctx)
+    } else {
+        None
+    };
+
+    let project = if !project_cats.is_empty() {
+        let ctx = MemoriesProjectContext {
+            categories: categories_to_contexts(&project_cats),
+        };
+        vars.insert(
+            "memories.project".to_string(),
+            nenjo_xml::to_xml_pretty(&ctx, 2),
+        );
+        Some(ctx)
+    } else {
+        None
+    };
+
+    let shared = if !shared_cats.is_empty() {
+        let ctx = MemoriesSharedContext {
+            categories: categories_to_contexts(&shared_cats),
+        };
+        vars.insert(
+            "memories.shared".to_string(),
+            nenjo_xml::to_xml_pretty(&ctx, 2),
+        );
+        Some(ctx)
+    } else {
+        None
+    };
+
+    let full = MemoriesContext {
+        core,
+        project,
+        shared,
+    };
+    vars.insert("memories".to_string(), nenjo_xml::to_xml_pretty(&full, 2));
+
+    Ok(vars)
+}
+
+/// Build resource template variables from project + workspace scopes.
 ///
-/// Returns empty string if no summaries exist in any tier.
-pub async fn build_memory_xml(memory: &dyn Memory, scope: &MemoryScope) -> Result<String> {
-    let core_summaries = memory.list_summaries(&scope.core).await?;
-    let project_summaries = memory.list_summaries(&scope.project).await?;
-    let shared_summaries = memory.list_summaries(&scope.shared).await?;
+/// Returns a `HashMap` with keys: `resources`, `resources.project`,
+/// `resources.workspace` (only non-empty scopes).
+pub async fn build_resource_vars(
+    memory: &dyn Memory,
+    scope: &MemoryScope,
+) -> Result<HashMap<String, String>> {
+    // Skip project tier if it resolves to the same path as global (system agents).
+    let project_entries = if scope.resources_project == scope.resources_global {
+        vec![]
+    } else {
+        memory.list_resources(&scope.resources_project).await?
+    };
+    let workspace_entries = memory.list_resources(&scope.resources_global).await?;
 
-    if core_summaries.is_empty() && project_summaries.is_empty() && shared_summaries.is_empty() {
-        return Ok(String::new());
+    let mut vars = HashMap::new();
+
+    if project_entries.is_empty() && workspace_entries.is_empty() {
+        return Ok(vars);
     }
 
-    let mut xml = String::from("<memory>\n");
-
-    if !core_summaries.is_empty() {
-        xml.push_str("<memory-core>\n");
-        for s in &core_summaries {
-            xml.push_str(&format!(
-                "  <category name=\"{}\">{}</category>\n",
-                s.category, s.text
-            ));
-        }
-        xml.push_str("</memory-core>\n");
+    fn entries_to_contexts(entries: &[super::types::ResourceEntry]) -> Vec<ResourceContext> {
+        entries
+            .iter()
+            .map(|e| ResourceContext {
+                name: e.filename.clone(),
+                description: e.description.clone(),
+                created_by: e.created_by.clone(),
+                size: format_size(e.size_bytes),
+            })
+            .collect()
     }
 
-    if !project_summaries.is_empty() {
-        xml.push_str("<memory-summaries>\n");
-        for s in &project_summaries {
-            xml.push_str(&format!(
-                "  <category name=\"{}\">{}</category>\n",
-                s.category, s.text
-            ));
-        }
-        xml.push_str("</memory-summaries>\n");
-    }
+    let project = if !project_entries.is_empty() {
+        let ctx = ResourcesProjectContext {
+            resources: entries_to_contexts(&project_entries),
+        };
+        vars.insert(
+            "resources.project".to_string(),
+            nenjo_xml::to_xml_pretty(&ctx, 2),
+        );
+        Some(ctx)
+    } else {
+        None
+    };
 
-    if !shared_summaries.is_empty() {
-        xml.push_str("<memory-shared>\n");
-        for s in &shared_summaries {
-            xml.push_str(&format!(
-                "  <category name=\"{}\">{}</category>\n",
-                s.category, s.text
-            ));
-        }
-        xml.push_str("</memory-shared>\n");
-    }
+    let workspace = if !workspace_entries.is_empty() {
+        let ctx = ResourcesWorkspaceContext {
+            resources: entries_to_contexts(&workspace_entries),
+        };
+        vars.insert(
+            "resources.workspace".to_string(),
+            nenjo_xml::to_xml_pretty(&ctx, 2),
+        );
+        Some(ctx)
+    } else {
+        None
+    };
 
-    xml.push_str("</memory>");
-    Ok(xml)
+    let full = ResourcesContext { project, workspace };
+    vars.insert("resources".to_string(), nenjo_xml::to_xml_pretty(&full, 2));
+
+    Ok(vars)
+}
+
+fn format_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{}KB", bytes / 1024)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
