@@ -20,9 +20,17 @@ pub struct Config {
     /// Workspace directory (e.g. `~/.nenjo/workspace/`) — computed, not serialized.
     #[serde(skip)]
     pub workspace_dir: PathBuf,
-    /// Directory for cached bootstrap data (`~/.nenjo/data/`) — computed, not serialized.
+    /// State directory (e.g. `~/.nenjo/state/`) — computed, not serialized.
+    ///
+    /// Contains agent memories and resources. This is the single directory
+    /// users can back up to preserve all agent-generated state. Always resolved
+    /// as an absolute path from `~/.nenjo/` so it remains accessible regardless
+    /// of the current working directory (including worktrees).
     #[serde(skip)]
-    pub data_dir: PathBuf,
+    pub state_dir: PathBuf,
+    /// Directory for cached manifest data (`~/.nenjo/manifests/`) — computed, not serialized.
+    #[serde(skip)]
+    pub manifests_dir: PathBuf,
 
     /// Base URL for the backend API. Defaults to `https://api.nenjo.ai`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -659,7 +667,8 @@ impl Default for Config {
         Self {
             config_dir: nenjo_dir.clone(),
             workspace_dir: nenjo_dir.join("workspace"),
-            data_dir: nenjo_dir.join("data"),
+            state_dir: nenjo_dir.join("state"),
+            manifests_dir: nenjo_dir.join("manifests"),
             model_provider_api_keys: HashMap::new(),
             api_key: String::new(),
             backend_api_url: None,
@@ -707,6 +716,7 @@ impl Config {
             fs::create_dir_all(nenjo_dir.join("workspace"))
                 .context("Failed to create workspace directory")?;
         }
+        fs::create_dir_all(nenjo_dir.join("state")).context("Failed to create state directory")?;
 
         let mut config = if config_path.exists() {
             let contents =
@@ -716,13 +726,15 @@ impl Config {
             // Set computed paths that are skipped during serialization
             config.config_dir = nenjo_dir.clone();
             config.workspace_dir = nenjo_dir.join("workspace");
-            config.data_dir = nenjo_dir.join("data");
+            config.state_dir = nenjo_dir.join("state");
+            config.manifests_dir = nenjo_dir.join("manifests");
             config
         } else {
             let config = Config {
                 config_dir: nenjo_dir.clone(),
                 workspace_dir: nenjo_dir.join("workspace"),
-                data_dir: nenjo_dir.join("data"),
+                state_dir: nenjo_dir.join("state"),
+                manifests_dir: nenjo_dir.join("manifests"),
                 ..Config::default()
             };
             config.save()?;

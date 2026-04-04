@@ -12,7 +12,7 @@
 //! let provider = Provider::builder()
 //!     .with_loader(client)
 //!     .with_model_factory(factory)
-//!     .with_memory(MarkdownMemory::new("./memory", "./workspace"))
+//!     .with_memory(MarkdownMemory::new("./state/memory", "./state"))
 //!     .build()
 //!     .await?;
 //! ```
@@ -33,7 +33,7 @@ use anyhow::Result;
 /// Memory operations are namespace-scoped. Namespaces isolate memory by
 /// agent, project, and scope (project/core/shared).
 ///
-/// Resource operations use `workspace/resources/` paths for shared access.
+/// Resource operations use `state/{ns}/resources/` paths for shared access.
 ///
 /// The default implementation is [`MarkdownMemory`] (file-based).
 #[async_trait::async_trait]

@@ -114,9 +114,9 @@ impl Harness {
     pub async fn new(config: Config) -> Result<Self> {
         let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
 
-        crate::manifest::sync(&api, &config.data_dir, &config.workspace_dir).await?;
+        crate::manifest::sync(&api, &config.manifests_dir, &config.workspace_dir).await?;
 
-        let loader = FileSystemManifestLoader::new(&config.data_dir);
+        let loader = FileSystemManifestLoader::new(&config.manifests_dir);
         let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
         let mcp_servers =
@@ -140,11 +140,8 @@ impl Harness {
             platform_resolver.clone(),
         );
 
-        let home = directories::UserDirs::new()
-            .map(|u| u.home_dir().to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let memory_dir = home.join(".nenjo").join("memory");
-        let mem = nenjo::memory::MarkdownMemory::new(&memory_dir, &config.workspace_dir);
+        let memory_dir = config.state_dir.join("memory");
+        let mem = nenjo::memory::MarkdownMemory::new(&memory_dir, &config.state_dir);
 
         let agent_config = config.agent.clone();
 
