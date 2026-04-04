@@ -602,8 +602,17 @@ esac
         });
     let helper_path = helper_script.to_string_lossy();
 
+    // Include the user's own gitconfig so signing, aliases, and other
+    // personal settings carry through. The nenjo-specific sections below
+    // (credential helper, user identity) take precedence over included values
+    // because they appear after the [include].
+    let user_gitconfig = home.join(".gitconfig");
+    let user_gitconfig_path = user_gitconfig.to_string_lossy();
+
     let mut contents = format!(
-        r#"[credential "https://github.com"]
+        r#"[include]
+    path = {user_gitconfig_path}
+[credential "https://github.com"]
     helper = {helper_path}
 [user]
     name = {git_name}
