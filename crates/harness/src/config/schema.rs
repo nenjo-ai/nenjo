@@ -704,11 +704,14 @@ impl Config {
             .unwrap_or(DEFAULT_NATS_URL)
     }
 
-    pub fn load_or_init() -> Result<Self> {
+    pub fn load_or_init(nenjo_dir_override: Option<&str>) -> Result<Self> {
         let home = UserDirs::new()
             .map(|u| u.home_dir().to_path_buf())
             .context("Could not find home directory")?;
-        let nenjo_dir = home.join(".nenjo");
+        let nenjo_dir = match nenjo_dir_override {
+            Some(dir) => PathBuf::from(dir),
+            None => home.join(".nenjo"),
+        };
         let config_path = nenjo_dir.join("config.toml");
 
         if !nenjo_dir.exists() {

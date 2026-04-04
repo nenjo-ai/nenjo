@@ -48,6 +48,10 @@ pub struct RunArgs {
     /// Show the log target (module path) in log output.
     #[arg(long, env = "NENJO_LOG_TARGET")]
     pub log_target: bool,
+
+    /// Override the .nenjo directory path (default: ~/.nenjo).
+    #[arg(long, env = "NENJO_DIR")]
+    pub nenjo_dir: Option<String>,
 }
 
 /// Initialize tracing, load config, boot harness, connect NATS, and run.
@@ -83,7 +87,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     info!("Starting Nenjo worker...");
 
     // Load configuration (config.toml + env overrides + API key validation)
-    let mut config = Config::load_or_init()?;
+    let mut config = Config::load_or_init(args.nenjo_dir.as_deref())?;
 
     // CLI args override config + env values
     if let Some(ref url) = args.nats_url {
