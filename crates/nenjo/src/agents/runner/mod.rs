@@ -8,7 +8,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use nenjo_models::ChatMessage;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use super::abilities::UseAbilityTool;
@@ -283,9 +283,24 @@ impl AgentRunner {
         let mut instance = (*self.instance).clone();
         instance.prompt_context.active_domain = Some(active_domain);
 
+        info!(
+            agent = instance.name,
+            domain = domain_name,
+            session_id = %instance.prompt_context.active_domain.as_ref().unwrap().session_id,
+            "Domain expansion started"
+        );
+
         let tool_config = &session_manifest.tools;
 
         // Merge additional_scopes into the agent's platform_scopes.
+        if !tool_config.additional_scopes.is_empty() {
+            debug!(
+                agent = instance.name,
+                domain = domain_name,
+                scopes = ?tool_config.additional_scopes,
+                "Merging domain scopes"
+            );
+        }
         for scope in &tool_config.additional_scopes {
             if !instance.prompt_context.platform_scopes.contains(scope) {
                 instance.prompt_context.platform_scopes.push(scope.clone());
@@ -307,6 +322,12 @@ impl AgentRunner {
 
         // Activate abilities listed in the domain config.
         if !tool_config.activate_abilities.is_empty() {
+            debug!(
+                agent = instance.name,
+                domain = domain_name,
+                abilities = ?tool_config.activate_abilities,
+                "Activating domain abilities"
+            );
             if let Some(ref manifest) = self.manifest {
                 for ability_name in &tool_config.activate_abilities {
                     if let Some(ability) =
@@ -435,8 +456,35 @@ impl AgentRunner {
         // 3. Build prompts.
         let prompts = inst.build_prompts(&task);
 
-        debug!(agent = self.instance.name, "Agent Prompt");
-        debug!("{prompts}");
+        let task_label = match &task {
+            TaskType::Chat { .. } => "chat",
+            TaskType::Task(_) => "task",
+            TaskType::Cron { .. } => "cron",
+            TaskType::Gate { .. } => "gate",
+            TaskType::CouncilSubtask { .. } => "council_subtask",
+        };
+        let domain_label = inst
+            .prompt_context
+            .active_domain
+            .as_ref()
+            .map(|d| d.domain_name.as_str());
+
+        info!(
+            agent = inst.name,
+            model = inst.model.as_str(),
+            task_type = task_label,
+            domain = ?domain_label,
+            tool_count = inst.tools.len(),
+            "Executing agent"
+        );
+
+        debug!(
+            agent = inst.name,
+            "--- System Prompt ---\n{}\n--- Developer Prompt ---\n{}\n--- User Message ---\n{}",
+            prompts.system,
+            prompts.developer,
+            prompts.user_message,
+        );
 
         // 4. Build initial messages.
         let mut messages: Vec<ChatMessage> = Vec::new();
@@ -489,7 +537,7 @@ impl AgentRunner {
         };
 
         if !user_message.is_empty() {
-            debug!(agent = self.instance.name, user_message = %user_message, "Agent user message");
+            debug!(agent = inst.name, user_message = %user_message, "Agent user message");
             messages.push(ChatMessage::user(&user_message));
         }
 

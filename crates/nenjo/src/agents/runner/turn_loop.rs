@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use nenjo_models::{ChatMessage, ChatRequest};
 use nenjo_tools::Tool;
@@ -32,6 +32,7 @@ pub async fn run(
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     pause_token: Option<super::types::PauseToken>,
 ) -> Result<TurnOutput> {
+    let agent_name = &agent.name;
     let provider = &*agent.provider;
     let model = &agent.model;
     let temperature = agent.temperature;
@@ -53,16 +54,22 @@ pub async fn run(
     if !tool_specs.is_empty() {
         let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();
         debug!(
+            agent = agent_name,
+            model,
             tool_count = tool_specs.len(),
             tools = ?tool_names,
             "Turn loop starting with tools"
         );
     } else {
-        warn!("Turn loop starting with NO tools");
+        warn!(
+            agent = agent_name,
+            model, "Turn loop starting with NO tools"
+        );
     }
 
     for iteration in 0..max_iterations {
         debug!(
+            agent = agent_name,
             iteration,
             messages_count = messages.len(),
             "Turn loop iteration"
@@ -117,6 +124,7 @@ pub async fn run(
 
         // Log response summary to diagnose tool-calling issues
         debug!(
+            agent = agent_name,
             model,
             iteration,
             has_tool_calls = response.has_tool_calls(),
@@ -126,8 +134,6 @@ pub async fn run(
                 .text
                 .as_deref()
                 .map(|t| {
-                    // Find the last char boundary at or before byte 300 to avoid
-                    // panicking on multi-byte UTF-8 characters (e.g. em-dash).
                     let end = t
                         .char_indices()
                         .map(|(i, c)| i + c.len_utf8())
@@ -172,7 +178,10 @@ pub async fn run(
                 "tool_calls": tool_calls_json,
             });
 
-            debug!(model, "Tool call response: {assistant_content}");
+            debug!(
+                agent = agent_name,
+                model, "Tool call response: {assistant_content}"
+            );
             messages.push(ChatMessage::assistant(assistant_content.to_string()));
 
             // Execute tool calls — parallel when the model returns multiple
@@ -197,14 +206,14 @@ pub async fn run(
             let tool_results: Vec<(&nenjo_models::ToolCall, nenjo_tools::ToolResult)> =
                 if run_parallel {
                     let futs = response.tool_calls.iter().map(|tc| async move {
-                        let result = execute_tool(tools, tc).await;
+                        let result = execute_tool(agent_name, tools, tc).await;
                         (tc, result)
                     });
                     futures_util::future::join_all(futs).await
                 } else {
                     let mut results = Vec::with_capacity(response.tool_calls.len());
                     for tc in &response.tool_calls {
-                        let result = execute_tool(tools, tc).await;
+                        let result = execute_tool(agent_name, tools, tc).await;
                         results.push((tc, result));
                     }
                     results
@@ -234,11 +243,13 @@ pub async fn run(
                 // Log tool failures so auth issues (e.g. `gh` CLI) are
                 // visible in worker logs instead of being silently swallowed.
                 if !tool_result.success {
+                    let raw_err = tool_result.error.as_deref().unwrap_or("(no error message)");
+                    let err_first_line = raw_err.lines().next().unwrap_or(raw_err);
                     warn!(
+                        agent = agent_name,
                         model,
                         tool = %tool_call.name,
-                        error = tool_result.error.as_deref().unwrap_or("(no error message)"),
-                        output = truncate(&tool_result.output, 300).as_str(),
+                        error = err_first_line,
                         "Tool call failed"
                     );
                 }
@@ -271,7 +282,10 @@ pub async fn run(
             // Terminal tool: stop the loop. The verdict is already recorded
             // in the assistant message's tool_calls for extraction.
             if has_terminal {
-                debug!(model, "Terminal tool called, ending turn loop");
+                debug!(
+                    agent = agent_name,
+                    model, "Terminal tool called, ending turn loop"
+                );
                 final_text = response.text.as_deref().unwrap_or("").to_string();
                 break;
             }
@@ -286,8 +300,8 @@ pub async fn run(
         // return these.  Retry instead of treating as final answer.
         if text.trim().is_empty() {
             warn!(
-                model,
-                iteration, "LLM returned empty response (no text, no tool calls), retrying"
+                agent = agent_name,
+                model, iteration, "LLM returned empty response (no text, no tool calls), retrying"
             );
             // Push an empty assistant message so the provider sees the turn,
             // then add a nudge so the model tries again.
@@ -305,8 +319,8 @@ pub async fn run(
 
     if final_text.is_empty() && max_iterations > 0 {
         warn!(
-            model,
-            "Turn loop reached max iterations without final response"
+            agent = agent_name,
+            model, "Turn loop reached max iterations without final response"
         );
         final_text = messages
             .iter()
@@ -335,10 +349,16 @@ pub async fn run(
 
 /// Execute a single tool call against the tool registry.
 async fn execute_tool(
+    agent_name: &str,
     tools: &[Arc<dyn Tool>],
     tool_call: &nenjo_models::ToolCall,
 ) -> nenjo_tools::ToolResult {
-    debug!(tool_call = %tool_call, "Executing tool");
+    info!(
+        agent = agent_name,
+        tool = %tool_call.name,
+        args = %truncate(&tool_call.arguments, 200),
+        "Tool call"
+    );
 
     // Find the tool
     let tool = match tools.iter().find(|t| t.name() == tool_call.name) {
