@@ -119,11 +119,11 @@ impl AgentRunner {
         delegation: Option<DelegationSupport>,
     ) -> Result<Self, super::error::AgentError> {
         // Pre-compute documents XML (sync, from disk).
-        if instance.documents_xml.is_empty() {
-            if let Some(ref dir) = instance.prompt_context.docs_base_dir {
-                let slug = &instance.prompt_context.current_project.slug;
-                instance.documents_xml = build_document_listing(dir, slug);
-            }
+        if instance.documents_xml.is_empty()
+            && let Some(ref dir) = instance.prompt_context.docs_base_dir
+        {
+            let slug = &instance.prompt_context.current_project.slug;
+            instance.documents_xml = build_document_listing(dir, slug);
         }
 
         // Extract manifest and platform resolver before delegation is consumed —
@@ -308,14 +308,14 @@ impl AgentRunner {
         }
 
         // Resolve and add platform tools for the expanded scopes.
-        if !tool_config.additional_scopes.is_empty() {
-            if let Some(ref resolver) = self.platform_resolver {
-                let scope_tools = resolver.resolve_tools(&tool_config.additional_scopes).await;
-                for tool in scope_tools {
-                    let name = tool.name().to_string();
-                    if !instance.tools.iter().any(|t| t.name() == name) {
-                        instance.tools.push(tool);
-                    }
+        if !tool_config.additional_scopes.is_empty()
+            && let Some(ref resolver) = self.platform_resolver
+        {
+            let scope_tools = resolver.resolve_tools(&tool_config.additional_scopes).await;
+            for tool in scope_tools {
+                let name = tool.name().to_string();
+                if !instance.tools.iter().any(|t| t.name() == name) {
+                    instance.tools.push(tool);
                 }
             }
         }
@@ -332,18 +332,16 @@ impl AgentRunner {
                 for ability_name in &tool_config.activate_abilities {
                     if let Some(ability) =
                         manifest.abilities.iter().find(|a| a.name == *ability_name)
-                    {
-                        if !instance
+                        && !instance
                             .prompt_context
                             .available_abilities
                             .iter()
                             .any(|a| a.id == ability.id)
-                        {
-                            instance
-                                .prompt_context
-                                .available_abilities
-                                .push(ability.clone());
-                        }
+                    {
+                        instance
+                            .prompt_context
+                            .available_abilities
+                            .push(ability.clone());
                     }
                 }
             }
@@ -353,13 +351,14 @@ impl AgentRunner {
         // and the use_ability tool isn't already present, inject it.
         let has_abilities = !instance.prompt_context.available_abilities.is_empty();
         let has_ability_tool = instance.tools.iter().any(|t| t.name() == "use_ability");
-        if has_abilities && !has_ability_tool {
-            if let Some(ref m) = self.manifest {
-                let base_instance = Arc::new(instance.clone());
-                let ability_tool =
-                    UseAbilityTool::new(base_instance, m.clone(), self.platform_resolver.clone());
-                instance.tools.push(Arc::new(ability_tool));
-            }
+        if has_abilities
+            && !has_ability_tool
+            && let Some(ref m) = self.manifest
+        {
+            let base_instance = Arc::new(instance.clone());
+            let ability_tool =
+                UseAbilityTool::new(base_instance, m.clone(), self.platform_resolver.clone());
+            instance.tools.push(Arc::new(ability_tool));
         }
 
         Ok(Self {

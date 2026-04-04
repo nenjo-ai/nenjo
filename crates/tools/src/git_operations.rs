@@ -98,15 +98,15 @@ impl GitOperationsTool {
         }
         // Default committer identity from author identity if not explicitly set.
         // Users only need to set GIT_AUTHOR_NAME/EMAIL.
-        if std::env::var("GIT_COMMITTER_NAME").is_err() {
-            if let Ok(name) = std::env::var("GIT_AUTHOR_NAME") {
-                cmd.env("GIT_COMMITTER_NAME", name);
-            }
+        if std::env::var("GIT_COMMITTER_NAME").is_err()
+            && let Ok(name) = std::env::var("GIT_AUTHOR_NAME")
+        {
+            cmd.env("GIT_COMMITTER_NAME", name);
         }
-        if std::env::var("GIT_COMMITTER_EMAIL").is_err() {
-            if let Ok(email) = std::env::var("GIT_AUTHOR_EMAIL") {
-                cmd.env("GIT_COMMITTER_EMAIL", email);
-            }
+        if std::env::var("GIT_COMMITTER_EMAIL").is_err()
+            && let Ok(email) = std::env::var("GIT_AUTHOR_EMAIL")
+        {
+            cmd.env("GIT_COMMITTER_EMAIL", email);
         }
         for (key, val) in &self.security.forwarded_env {
             cmd.env(key, val);
@@ -140,16 +140,16 @@ impl GitOperationsTool {
             } else if let Some(rest) = line.strip_prefix("1 ") {
                 // Ordinary changed entry
                 let mut parts = rest.splitn(3, ' ');
-                if let (Some(staging), Some(path)) = (parts.next(), parts.next()) {
-                    if !staging.is_empty() {
-                        let status_char = staging.chars().next().unwrap_or(' ');
-                        if status_char != '.' && status_char != ' ' {
-                            staged.push(json!({"path": path, "status": status_char}));
-                        }
-                        let status_char = staging.chars().nth(1).unwrap_or(' ');
-                        if status_char != '.' && status_char != ' ' {
-                            unstaged.push(json!({"path": path, "status": status_char}));
-                        }
+                if let (Some(staging), Some(path)) = (parts.next(), parts.next())
+                    && !staging.is_empty()
+                {
+                    let status_char = staging.chars().next().unwrap_or(' ');
+                    if status_char != '.' && status_char != ' ' {
+                        staged.push(json!({"path": path, "status": status_char}));
+                    }
+                    let status_char = staging.chars().nth(1).unwrap_or(' ');
+                    if status_char != '.' && status_char != ' ' {
+                        unstaged.push(json!({"path": path, "status": status_char}));
                     }
                 }
             } else if let Some(rest) = line.strip_prefix("? ") {

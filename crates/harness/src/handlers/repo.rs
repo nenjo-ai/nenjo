@@ -65,10 +65,10 @@ pub async fn handle_repo_unsync(ctx: &CommandContext, project_id: Uuid) -> Resul
     }
 
     // Clean up any git worktrees first
-    if repo_dir.join(".git").exists() {
-        if let Err(e) = cleanup_worktrees(&repo_dir).await {
-            warn!(error = %e, "Failed to clean up worktrees, proceeding with removal");
-        }
+    if repo_dir.join(".git").exists()
+        && let Err(e) = cleanup_worktrees(&repo_dir).await
+    {
+        warn!(error = %e, "Failed to clean up worktrees, proceeding with removal");
     }
 
     // Remove the repo directory

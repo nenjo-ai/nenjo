@@ -184,13 +184,12 @@ impl GeminiProvider {
         let creds: GeminiCliOAuthCreds = serde_json::from_str(&content).ok()?;
 
         // Check if token is expired (basic check)
-        if let Some(ref expiry) = creds.expiry {
-            if let Ok(expiry_time) = chrono::DateTime::parse_from_rfc3339(expiry) {
-                if expiry_time < chrono::Utc::now() {
-                    tracing::warn!("Gemini CLI OAuth token expired — re-run `gemini` to refresh");
-                    return None;
-                }
-            }
+        if let Some(ref expiry) = creds.expiry
+            && let Ok(expiry_time) = chrono::DateTime::parse_from_rfc3339(expiry)
+            && expiry_time < chrono::Utc::now()
+        {
+            tracing::warn!("Gemini CLI OAuth token expired — re-run `gemini` to refresh");
+            return None;
         }
 
         creds

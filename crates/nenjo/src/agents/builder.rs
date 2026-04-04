@@ -203,12 +203,12 @@ impl AgentBuilder {
 
         // When work_dir is set, rebuild tools with the scoped security policy
         // so file, shell, and git tools operate in the correct directory.
-        if self.work_dir.is_some() {
-            if let Some(ref tf) = self.tool_factory {
-                self.tools = tf
-                    .create_tools_with_security(&self.agent, security.clone())
-                    .await;
-            }
+        if self.work_dir.is_some()
+            && let Some(ref tf) = self.tool_factory
+        {
+            self.tools = tf
+                .create_tools_with_security(&self.agent, security.clone())
+                .await;
         }
 
         // Build memory scope and inject tools. This is the single place

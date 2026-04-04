@@ -56,9 +56,12 @@ pub struct RunArgs {
 
 /// Initialize tracing, load config, boot harness, connect NATS, and run.
 pub async fn run(args: RunArgs) -> Result<()> {
-    // Install rustls crypto provider before any TLS connections (ignore if already installed)
-    let _ =
-        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+    // Install rustls crypto provider before any TLS connections
+    if let Err(err) =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+    {
+        debug!("Crypto provider installation failed (likely already installed): {err:?}");
+    }
 
     // Load .env file FIRST so RUST_LOG and other env vars are available
     dotenvy::dotenv().ok();
@@ -72,11 +75,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Build the env filter, suppressing noisy third-party crates at info level.
     // async_nats logs connection events at info which duplicates our own logs.
-    let filter = if log_filter.contains("async_nats") {
+    let base_filter = tracing_subscriber::EnvFilter::new(&log_filter);
+    let filter = if base_filter.to_string().contains("async_nats") {
         // User explicitly configured async_nats level — respect it.
-        tracing_subscriber::EnvFilter::new(&log_filter)
+        base_filter
     } else {
-        tracing_subscriber::EnvFilter::new(format!("{log_filter},async_nats=warn"))
+        base_filter.add_directive("async_nats=warn".parse().expect("valid directive"))
     };
 
     tracing_subscriber::registry()

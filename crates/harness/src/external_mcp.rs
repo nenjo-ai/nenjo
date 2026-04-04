@@ -79,24 +79,24 @@ fn resolve_mcp_credentials(
         // 0. Platform server shortcut: use NENJO_API_KEY directly for the
         //    built-in platform MCP server. This avoids requiring users to
         //    set a separate NENJO_MCP_APP_NENJO_PLATFORM_API_KEY env var.
-        if server_name == PLATFORM_SERVER_NAME && field == "api_key" {
-            if let Ok(val) = std::env::var("NENJO_API_KEY") {
-                if !val.is_empty() {
-                    debug!(server = %server_name, field = %field, source = "NENJO_API_KEY", "Platform MCP credential resolved");
-                    credentials.insert(field.clone(), val);
-                    continue;
-                }
-            }
+        if server_name == PLATFORM_SERVER_NAME
+            && field == "api_key"
+            && let Ok(val) = std::env::var("NENJO_API_KEY")
+            && !val.is_empty()
+        {
+            debug!(server = %server_name, field = %field, source = "NENJO_API_KEY", "Platform MCP credential resolved");
+            credentials.insert(field.clone(), val);
+            continue;
         }
 
         // 1. Try env var: NENJO_MCP_{SERVER_NAME}_{FIELD_KEY}
         let env_key = format!("NENJO_MCP_{}_{}", sanitized_name, field.to_uppercase());
-        if let Ok(val) = std::env::var(&env_key) {
-            if !val.is_empty() {
-                debug!(server = %server_name, field = %field, source = "env", env_key = %env_key, "MCP credential resolved");
-                credentials.insert(field.clone(), val);
-                continue;
-            }
+        if let Ok(val) = std::env::var(&env_key)
+            && !val.is_empty()
+        {
+            debug!(server = %server_name, field = %field, source = "env", env_key = %env_key, "MCP credential resolved");
+            credentials.insert(field.clone(), val);
+            continue;
         }
 
         // 2. Try credentials.toml: [mcp.{server_name}] / field
@@ -681,12 +681,11 @@ impl ExternalMcpPool {
             for tool_def in &server.tools {
                 // Scope filtering: if scopes are provided and the tool has a scope,
                 // only include if the agent's scopes grant access.
-                if let Some(agent_scopes) = scopes {
-                    if let Some(ref tool_scope) = tool_def.scope {
-                        if !has_scope(agent_scopes, tool_scope) {
-                            continue;
-                        }
-                    }
+                if let Some(agent_scopes) = scopes
+                    && let Some(ref tool_scope) = tool_def.scope
+                    && !has_scope(agent_scopes, tool_scope)
+                {
+                    continue;
                 }
 
                 tools.push(Box::new(ExternalMcpTool {

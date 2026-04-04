@@ -41,10 +41,10 @@ impl MemoryForgetTool {
             "shared" => vec![self.shared_namespace.clone()],
             "all" => {
                 let mut ns = vec![self.role_namespace.clone()];
-                if let Some(ref core) = self.core_namespace {
-                    if !ns.contains(core) {
-                        ns.push(core.clone());
-                    }
+                if let Some(ref core) = self.core_namespace
+                    && !ns.contains(core)
+                {
+                    ns.push(core.clone());
                 }
                 if !ns.contains(&self.shared_namespace) {
                     ns.push(self.shared_namespace.clone());
