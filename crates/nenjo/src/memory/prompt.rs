@@ -43,7 +43,13 @@ pub async fn build_memory_vars(
     scope: &MemoryScope,
 ) -> Result<HashMap<String, String>> {
     let core_cats = memory.list_categories(&scope.core).await?;
-    let project_cats = memory.list_categories(&scope.project).await?;
+    // Skip project tier if it resolves to the same namespace as core (system agents
+    // with no project have both point to `agent_{name}_core`).
+    let project_cats = if scope.project == scope.core {
+        vec![]
+    } else {
+        memory.list_categories(&scope.project).await?
+    };
     let shared_cats = memory.list_categories(&scope.shared).await?;
 
     let mut vars = HashMap::new();
