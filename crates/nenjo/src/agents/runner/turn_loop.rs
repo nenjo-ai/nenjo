@@ -96,12 +96,12 @@ pub async fn run(
 
         // Check pause token before each LLM call. If paused, block until
         // resumed. In-flight tool executions finish before we reach this point.
-        if let Some(ref pt) = pause_token {
-            if pt.is_paused() {
-                let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Paused));
-                pt.wait_if_paused().await;
-                let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Resumed));
-            }
+        if let Some(ref pt) = pause_token
+            && pt.is_paused()
+        {
+            let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Paused));
+            pt.wait_if_paused().await;
+            let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Resumed));
         }
 
         // Call LLM
@@ -133,15 +133,7 @@ pub async fn run(
             text_preview = response
                 .text
                 .as_deref()
-                .map(|t| {
-                    let end = t
-                        .char_indices()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .take_while(|&end| end <= 300)
-                        .last()
-                        .unwrap_or(0);
-                    &t[..end]
-                })
+                .map(|t| truncate_str(t, 300))
                 .unwrap_or("(none)"),
             input_tokens = response.usage.input_tokens,
             output_tokens = response.usage.output_tokens,
@@ -428,18 +420,18 @@ fn compact_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
         }
         // Try to preserve the tool_call_id while truncating the content.
         if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&messages[i].content) {
-            if let Some(obj) = parsed.as_object_mut() {
-                if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                    let preview = truncate(content, 200);
-                    obj.insert(
-                        "content".to_string(),
-                        serde_json::Value::String(format!(
-                            "{preview}\n[compacted — {} chars total]",
-                            content.len()
-                        )),
-                    );
-                    messages[i].content = serde_json::to_string(obj).unwrap_or_default();
-                }
+            if let Some(obj) = parsed.as_object_mut()
+                && let Some(content) = obj.get("content").and_then(|v| v.as_str())
+            {
+                let preview = truncate(content, 200);
+                obj.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(format!(
+                        "{preview}\n[compacted — {} chars total]",
+                        content.len()
+                    )),
+                );
+                messages[i].content = serde_json::to_string(obj).unwrap_or_default();
             }
         } else {
             // Plain text tool result
@@ -462,26 +454,26 @@ fn compact_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
         if messages[i].role != "assistant" {
             continue;
         }
-        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&messages[i].content) {
-            if let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array()).cloned() {
-                if calls.is_empty() {
-                    continue;
-                }
-                let summarized_calls: Vec<serde_json::Value> = calls
-                    .into_iter()
-                    .map(|mut c| {
-                        if let Some(obj) = c.as_object_mut() {
-                            obj.insert("arguments".to_string(), serde_json::json!("{}"));
-                        }
-                        c
-                    })
-                    .collect();
-                parsed["tool_calls"] = serde_json::Value::Array(summarized_calls);
-                messages[i].content = parsed.to_string();
+        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&messages[i].content)
+            && let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array()).cloned()
+        {
+            if calls.is_empty() {
+                continue;
+            }
+            let summarized_calls: Vec<serde_json::Value> = calls
+                .into_iter()
+                .map(|mut c| {
+                    if let Some(obj) = c.as_object_mut() {
+                        obj.insert("arguments".to_string(), serde_json::json!("{}"));
+                    }
+                    c
+                })
+                .collect();
+            parsed["tool_calls"] = serde_json::Value::Array(summarized_calls);
+            messages[i].content = parsed.to_string();
 
-                if estimate_tokens(messages) <= max_tokens {
-                    return;
-                }
+            if estimate_tokens(messages) <= max_tokens {
+                return;
             }
         }
     }
@@ -588,14 +580,12 @@ fn truncate_old_tool_arguments(messages: &mut [ChatMessage], max_tokens: usize) 
             new_calls.push(new_call);
         }
 
-        if changed {
-            if let Some(obj) = parsed.as_object_mut() {
-                obj.insert(
-                    "tool_calls".to_string(),
-                    serde_json::Value::Array(new_calls),
-                );
-                msg.content = serde_json::to_string(obj).unwrap_or_default();
-            }
+        if changed && let Some(obj) = parsed.as_object_mut() {
+            obj.insert(
+                "tool_calls".to_string(),
+                serde_json::Value::Array(new_calls),
+            );
+            msg.content = serde_json::to_string(obj).unwrap_or_default();
         }
     }
 }
@@ -615,88 +605,83 @@ fn truncate_tool_arguments(tool_name: &str, arguments: &str) -> String {
     }
 
     // Try to parse as JSON so we can surgically truncate large fields.
-    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(arguments) {
-        if let Some(obj) = parsed.as_object_mut() {
-            match tool_name {
-                "file_write" => {
-                    // Keep path, replace content with an unambiguous
-                    // system-level marker.  The «» delimiters and explicit
-                    // "previously written" phrasing prevent models from
-                    // reproducing the marker as literal file content.
-                    if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                        let len = content.len();
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(arguments)
+        && let Some(obj) = parsed.as_object_mut()
+    {
+        match tool_name {
+            "file_write" => {
+                // Keep path, replace content with an unambiguous
+                // system-level marker.  The «» delimiters and explicit
+                // "previously written" phrasing prevent models from
+                // reproducing the marker as literal file content.
+                if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+                    let len = content.len();
+                    obj.insert(
+                        "content".to_string(),
+                        serde_json::Value::String(format!("«previously written — {len} chars»")),
+                    );
+                }
+            }
+            "file_edit" => {
+                // Truncate old_string and new_string if large.
+                for key in &["old_string", "new_string"] {
+                    if let Some(val) = obj.get(*key).and_then(|v| v.as_str())
+                        && val.len() > 200
+                    {
+                        let preview = truncate(val, 100);
                         obj.insert(
-                            "content".to_string(),
-                            serde_json::Value::String(format!(
-                                "«previously written — {len} chars»"
-                            )),
+                            key.to_string(),
+                            serde_json::Value::String(format!("«{} chars» {preview}", val.len())),
                         );
                     }
                 }
-                "file_edit" => {
-                    // Truncate old_string and new_string if large.
-                    for key in &["old_string", "new_string"] {
-                        if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
-                            if val.len() > 200 {
-                                let preview = truncate(val, 100);
-                                obj.insert(
-                                    key.to_string(),
-                                    serde_json::Value::String(format!(
-                                        "«{} chars» {preview}",
-                                        val.len()
-                                    )),
-                                );
-                            }
-                        }
-                    }
+            }
+            "shell" => {
+                // Keep command, truncate if very long.
+                if let Some(cmd) = obj.get("command").and_then(|v| v.as_str())
+                    && cmd.len() > 300
+                {
+                    obj.insert(
+                        "command".to_string(),
+                        serde_json::Value::String(truncate(cmd, 300)),
+                    );
                 }
-                "shell" => {
-                    // Keep command, truncate if very long.
-                    if let Some(cmd) = obj.get("command").and_then(|v| v.as_str()) {
-                        if cmd.len() > 300 {
-                            obj.insert(
-                                "command".to_string(),
-                                serde_json::Value::String(truncate(cmd, 300)),
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    // Generic: truncate any string value over 300 chars.
-                    let keys: Vec<String> = obj.keys().cloned().collect();
-                    for key in keys {
-                        if let Some(val) = obj.get(&key).and_then(|v| v.as_str()) {
-                            if val.len() > 300 {
-                                obj.insert(
-                                    key,
-                                    serde_json::Value::String(format!(
-                                        "«{} chars omitted»",
-                                        val.len()
-                                    )),
-                                );
-                            }
-                        }
+            }
+            _ => {
+                // Generic: truncate any string value over 300 chars.
+                let keys: Vec<String> = obj.keys().cloned().collect();
+                for key in keys {
+                    if let Some(val) = obj.get(&key).and_then(|v| v.as_str())
+                        && val.len() > 300
+                    {
+                        obj.insert(
+                            key,
+                            serde_json::Value::String(format!("«{} chars omitted»", val.len())),
+                        );
                     }
                 }
             }
-            return serde_json::to_string(obj).unwrap_or_else(|_| truncate(arguments, MAX_ARG_LEN));
         }
+        return serde_json::to_string(obj).unwrap_or_else(|_| truncate(arguments, MAX_ARG_LEN));
     }
 
     // Fallback: raw truncation.
     truncate(arguments, MAX_ARG_LEN)
 }
 
+/// Truncate a string at a character boundary, returning a `&str` slice.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    &s[..s.floor_char_boundary(max_bytes)]
+}
+
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
+        return s.to_string();
     }
+    if max_len <= 3 {
+        return truncate_str(s, max_len).to_string();
+    }
+    format!("{}...", truncate_str(s, max_len.saturating_sub(3)))
 }
 
 #[cfg(test)]
@@ -710,9 +695,10 @@ mod tests {
 
     #[test]
     fn truncate_long_string() {
-        let result = truncate("hello world this is a long string", 10);
+        let max_len = 10;
+        let result = truncate("hello world this is a long string", max_len);
         assert!(result.ends_with("..."));
-        assert_eq!(result.len(), 13);
+        assert_eq!(result.len(), max_len);
     }
 
     #[test]
@@ -960,12 +946,12 @@ mod tests {
             if m.role != "assistant" {
                 return false;
             }
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                if let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array()) {
-                    return calls
-                        .iter()
-                        .any(|c| c.get("arguments").and_then(|a| a.as_str()) == Some("{}"));
-                }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&m.content)
+                && let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array())
+            {
+                return calls
+                    .iter()
+                    .any(|c| c.get("arguments").and_then(|a| a.as_str()) == Some("{}"));
             }
             false
         });

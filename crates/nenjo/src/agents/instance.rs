@@ -193,15 +193,14 @@ impl AgentInstance {
         // 5. Assemble developer prompt
         // Domain system_addon is appended when a domain session is active.
         let mut developer = self.prompt_config.developer_prompt.clone();
-        if let Some(ref domain) = self.prompt_context.active_domain {
-            if let Some(ref addon) = domain.manifest.prompt.system_addon {
-                if !addon.is_empty() {
-                    if !developer.is_empty() {
-                        developer.push_str("\n\n");
-                    }
-                    developer.push_str(addon);
-                }
+        if let Some(ref domain) = self.prompt_context.active_domain
+            && let Some(ref addon) = domain.manifest.prompt.system_addon
+            && !addon.is_empty()
+        {
+            if !developer.is_empty() {
+                developer.push_str("\n\n");
             }
+            developer.push_str(addon);
         }
 
         // 6. Select the user message template based on task type

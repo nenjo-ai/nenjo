@@ -65,7 +65,10 @@ impl MarkdownMemory {
 impl Memory for MarkdownMemory {
     async fn append(&self, ns: &str, category: &str, fact: &str) -> Result<()> {
         let path = self.category_path(ns, category);
-        std::fs::create_dir_all(path.parent().unwrap())?;
+        let parent = path.parent().ok_or_else(|| {
+            anyhow::anyhow!("Invalid category path with no parent: {}", path.display())
+        })?;
+        std::fs::create_dir_all(parent)?;
 
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -99,10 +102,11 @@ impl Memory for MarkdownMemory {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|e| e == "md") {
-                if let Ok(cat) = parse_category(&path) {
-                    categories.push(cat);
-                }
+            if path.is_file()
+                && path.extension().is_some_and(|e| e == "md")
+                && let Ok(cat) = parse_category(&path)
+            {
+                categories.push(cat);
             }
         }
         categories.sort_by(|a, b| a.category.cmp(&b.category));

@@ -269,11 +269,11 @@ pub async fn handle_execution_cancel(ctx: &CommandContext, execution_run_id: Uui
 pub async fn handle_execution_pause(ctx: &CommandContext, execution_run_id: Uuid) -> Result<()> {
     let mut paused = 0u32;
     for entry in ctx.executions.iter() {
-        if entry.execution_run_id == Some(execution_run_id) {
-            if let Some(ref pt) = entry.pause {
-                pt.pause();
-                paused += 1;
-            }
+        if entry.execution_run_id == Some(execution_run_id)
+            && let Some(ref pt) = entry.pause
+        {
+            pt.pause();
+            paused += 1;
         }
     }
     if paused > 0 {
@@ -286,11 +286,11 @@ pub async fn handle_execution_pause(ctx: &CommandContext, execution_run_id: Uuid
 pub async fn handle_execution_resume(ctx: &CommandContext, execution_run_id: Uuid) -> Result<()> {
     let mut resumed = 0u32;
     for entry in ctx.executions.iter() {
-        if entry.execution_run_id == Some(execution_run_id) {
-            if let Some(ref pt) = entry.pause {
-                pt.resume();
-                resumed += 1;
-            }
+        if entry.execution_run_id == Some(execution_run_id)
+            && let Some(ref pt) = entry.pause
+        {
+            pt.resume();
+            resumed += 1;
         }
     }
     if resumed > 0 {
@@ -379,12 +379,11 @@ async fn execute_direct_task(
 ) -> Result<()> {
     let mut builder = ctx.provider().agent_by_id(agent_id).await?;
     // Scope tools to the git worktree if one was created.
-    if let nenjo::types::TaskType::Task(ref t) = task {
-        if let Some(ref git) = t.git {
-            if !git.work_dir.is_empty() {
-                builder = builder.with_work_dir(&git.work_dir);
-            }
-        }
+    if let nenjo::types::TaskType::Task(ref t) = task
+        && let Some(ref git) = t.git
+        && !git.work_dir.is_empty()
+    {
+        builder = builder.with_work_dir(&git.work_dir);
     }
     let runner = builder.build().await?;
     let provider = ctx.provider();

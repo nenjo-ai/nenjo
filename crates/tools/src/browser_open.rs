@@ -141,10 +141,10 @@ async fn open_in_brave(url: &str) -> anyhow::Result<()> {
                 .status()
                 .await;
 
-            if let Ok(s) = status {
-                if s.success() {
-                    return Ok(());
-                }
+            if let Ok(s) = status
+                && s.success()
+            {
+                return Ok(());
             }
         }
         anyhow::bail!(

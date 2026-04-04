@@ -33,17 +33,15 @@ pub async fn handle_manifest_changed(
             false
         };
 
-        if !applied {
-            if let Err(e) = apply_upsert(ctx, resource_type, resource_id).await {
-                warn!(
-                    error = %e,
-                    %resource_type,
-                    %resource_id,
-                    "Incremental fetch failed, falling back to full refresh"
-                );
-                full_refresh(ctx).await?;
-                return Ok(());
-            }
+        if !applied && let Err(e) = apply_upsert(ctx, resource_type, resource_id).await {
+            warn!(
+                error = %e,
+                %resource_type,
+                %resource_id,
+                "Incremental fetch failed, falling back to full refresh"
+            );
+            full_refresh(ctx).await?;
+            return Ok(());
         }
     }
 

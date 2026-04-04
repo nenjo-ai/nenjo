@@ -9,18 +9,18 @@ use std::time::Duration;
 
 /// Check if an error is non-retryable (client errors that won't resolve with retries).
 fn is_non_retryable(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if let Some(status) = reqwest_err.status() {
-            let code = status.as_u16();
-            return status.is_client_error() && code != 429 && code != 408;
-        }
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
+        && let Some(status) = reqwest_err.status()
+    {
+        let code = status.as_u16();
+        return status.is_client_error() && code != 429 && code != 408;
     }
     let msg = err.to_string();
     for word in msg.split(|c: char| !c.is_ascii_digit()) {
-        if let Ok(code) = word.parse::<u16>() {
-            if (400..500).contains(&code) {
-                return code != 429 && code != 408;
-            }
+        if let Ok(code) = word.parse::<u16>()
+            && (400..500).contains(&code)
+        {
+            return code != 429 && code != 408;
         }
     }
     false
@@ -28,10 +28,10 @@ fn is_non_retryable(err: &anyhow::Error) -> bool {
 
 /// Check if an error is a rate-limit (429) error.
 fn is_rate_limited(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if let Some(status) = reqwest_err.status() {
-            return status.as_u16() == 429;
-        }
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
+        && let Some(status) = reqwest_err.status()
+    {
+        return status.as_u16() == 429;
     }
     let msg = err.to_string();
     msg.contains("429")
@@ -58,12 +58,13 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
                 .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '.')
                 .collect();
-            if let Ok(secs) = num_str.parse::<f64>() {
-                if secs.is_finite() && secs >= 0.0 {
-                    let millis = Duration::from_secs_f64(secs).as_millis();
-                    if let Ok(value) = u64::try_from(millis) {
-                        return Some(value);
-                    }
+            if let Ok(secs) = num_str.parse::<f64>()
+                && secs.is_finite()
+                && secs >= 0.0
+            {
+                let millis = Duration::from_secs_f64(secs).as_millis();
+                if let Ok(value) = u64::try_from(millis) {
+                    return Some(value);
                 }
             }
         }
