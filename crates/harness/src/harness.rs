@@ -137,7 +137,7 @@ impl Harness {
             .map(|u| u.home_dir().to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let memory_dir = home.join(".nenjo").join("memory");
-        let mem = nenjo::memory::MarkdownMemory::new(&memory_dir);
+        let mem = nenjo::memory::MarkdownMemory::new(&memory_dir, &config.workspace_dir);
 
         let agent_config = config.agent.clone();
 

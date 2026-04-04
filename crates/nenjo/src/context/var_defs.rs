@@ -156,6 +156,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     description: "Absolute path to the project workspace directory",
                     group: "Project",
                 },
+                TemplateVarDef {
+                    name: "project.documents",
+                    description: "XML listing of project documents available for retrieval",
+                    group: "Project",
+                },
             ],
         },
         TemplateVarGroup {
@@ -274,19 +279,72 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             ],
         },
         TemplateVarGroup {
-            name: "Global",
+            name: "Memory",
             variables: vec![
                 TemplateVarDef {
-                    name: "global.timestamp",
-                    description: "Current UTC timestamp (ISO 8601)",
-                    group: "Global",
+                    name: "memories",
+                    description: "Full memories XML (all tiers combined)",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memories.core",
+                    description: "Agent's core memories (cross-project)",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memories.project",
+                    description: "Agent's memories for the current project",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memories.shared",
+                    description: "Project memories shared across agents",
+                    group: "Memory",
                 },
                 TemplateVarDef {
                     name: "memory_profile",
                     description: "Full XML of the agent's memory focus areas",
-                    group: "Global",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memory_profile.core_focus",
+                    description: "Cross-project expertise focus areas",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memory_profile.project_focus",
+                    description: "Project-specific knowledge focus areas",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "memory_profile.shared_focus",
+                    description: "Knowledge to store in shared scope for other agents",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "resources",
+                    description: "Index of available resources (project + workspace)",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "resources.project",
+                    description: "Project-scoped resource index",
+                    group: "Memory",
+                },
+                TemplateVarDef {
+                    name: "resources.workspace",
+                    description: "Workspace-global resource index",
+                    group: "Memory",
                 },
             ],
+        },
+        TemplateVarGroup {
+            name: "Global",
+            variables: vec![TemplateVarDef {
+                name: "global.timestamp",
+                description: "Current UTC timestamp (ISO 8601)",
+                group: "Global",
+            }],
         },
     ]
 }

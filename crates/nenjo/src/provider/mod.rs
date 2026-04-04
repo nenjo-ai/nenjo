@@ -21,13 +21,13 @@ use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
-use crate::memory::{self, Memory, MemoryScope};
+use crate::memory::Memory;
 use crate::routines::{
     self, LambdaRunner, RoutineEvent, RoutineExecutionHandle, types::StepResult,
 };
 use crate::types::RenderContextVars;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 // ---------------------------------------------------------------------------
 // Factory traits
@@ -223,23 +223,10 @@ impl Provider {
                 )))
             })?;
 
-        let mut tools = self.tool_factory.create_tools(agent).await;
+        let tools = self.tool_factory.create_tools(agent).await;
 
-        // If memory is configured, build scope and add memory tools.
-        let memory_and_scope = if let Some(ref mem) = self.memory {
-            let project_id = self
-                .manifest
-                .projects
-                .first()
-                .map(|p| p.id.to_string())
-                .unwrap_or_default();
-            let scope = MemoryScope::new(&project_id, &agent.id.to_string());
-            let mem_tools = memory::tools::memory_tools(mem.clone(), scope.clone());
-            tools.extend(mem_tools);
-            Some((mem.clone(), scope))
-        } else {
-            None
-        };
+        // Memory backend is passed to the builder; scope and tools are
+        // constructed in build() based on the project context set at that point.
 
         let prompt_config: crate::agents::prompts::PromptConfig =
             match serde_json::from_value::<crate::agents::prompts::PromptConfig>(
@@ -256,7 +243,7 @@ impl Provider {
                     config
                 }
                 Err(e) => {
-                    warn!(
+                    error!(
                         agent = %agent.name,
                         error = %e,
                         raw = %agent.prompt_config,
@@ -290,8 +277,8 @@ impl Provider {
             context_renderer,
         });
 
-        if let Some((mem, scope)) = memory_and_scope {
-            builder = builder.with_memory(mem, scope);
+        if let Some(ref mem) = self.memory {
+            builder = builder.with_memory(mem.clone());
         }
 
         // Enable delegation support so the runner can inject DelegateToTool.

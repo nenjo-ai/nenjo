@@ -306,7 +306,8 @@ fn build_ability_instance(
         security: caller.security.clone(),
         agent_config: caller.agent_config.clone(),
         context_renderer: caller.context_renderer.clone(),
-        memory_xml: caller.memory_xml.clone(),
+        memory_vars: caller.memory_vars.clone(),
+        resource_vars: caller.resource_vars.clone(),
         documents_xml: caller.documents_xml.clone(),
     }
 }

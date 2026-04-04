@@ -1,235 +1,217 @@
 //! File-based markdown memory backend.
 //!
-//! Stores items and summaries as markdown files with YAML frontmatter.
-//! No external dependencies (no SQLite, no vector search).
+//! Stores memory categories as markdown files with YAML frontmatter.
+//! Resources are stored as plain files with a `manifest.json` index.
 //!
-//! Search uses keyword overlap scoring — devs who need vector search
-//! should implement a custom [`Memory`] backend.
+//! Directory layout:
+//! ```text
+//! {root}/
+//! ├── {namespace}/
+//! │   ├── {category}.md          # memory category file
+//! │   └── ...
+//! └── workspace/resources/
+//!     ├── manifest.json          # global resource index
+//!     ├── {file}                 # global resource
+//!     └── {slug}/
+//!         ├── manifest.json      # project resource index
+//!         └── {file}             # project resource
+//! ```
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use uuid::Uuid;
 
 use super::Memory;
-use super::types::{MemoryItem, MemoryStatus, MemorySummary};
+use super::types::{MemoryCategory, MemoryFact, ResourceEntry};
 
 /// File-based markdown memory backend.
-///
-/// Directory layout:
-/// ```text
-/// {root}/
-/// ├── {namespace}/
-/// │   ├── items/
-/// │   │   └── {id}.md
-/// │   └── summaries/
-/// │       └── {category}.md
-/// ```
 pub struct MarkdownMemory {
+    /// Root for memory categories (e.g. `~/.nenjo/memory/`).
     root: PathBuf,
+    /// Root for resources (e.g. `~/.nenjo/workspace/`).
+    workspace_root: PathBuf,
 }
 
 impl MarkdownMemory {
-    /// Create a new markdown memory rooted at the given directory.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// Create a new markdown memory with memory and workspace roots.
+    ///
+    /// Memory categories are stored under `memory_root/`.
+    /// Resources are stored under `workspace_root/resources/`.
+    pub fn new(memory_root: impl Into<PathBuf>, workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: memory_root.into(),
+            workspace_root: workspace_root.into(),
+        }
     }
 
     fn ns_dir(&self, ns: &str) -> PathBuf {
-        self.root.join(ns.replace(':', "_"))
+        self.root.join(ns)
     }
 
-    fn items_dir(&self, ns: &str) -> PathBuf {
-        self.ns_dir(ns).join("items")
+    fn resource_dir(&self, ns: &str) -> PathBuf {
+        self.workspace_root.join(ns)
     }
 
-    fn summaries_dir(&self, ns: &str) -> PathBuf {
-        self.ns_dir(ns).join("summaries")
-    }
-
-    /// Read all active items in a namespace.
-    fn read_items(&self, ns: &str) -> Result<Vec<MemoryItem>> {
-        let dir = self.items_dir(ns);
-        if !dir.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut items = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md") {
-                if let Ok(item) = parse_item(&path) {
-                    if item.status == MemoryStatus::Active {
-                        items.push(item);
-                    }
-                }
-            }
-        }
-        Ok(items)
+    fn category_path(&self, ns: &str, category: &str) -> PathBuf {
+        self.ns_dir(ns).join(format!("{category}.md"))
     }
 }
 
 #[async_trait::async_trait]
 impl Memory for MarkdownMemory {
-    async fn store(&self, ns: &str, fact: &str, category: &str, confidence: f64) -> Result<String> {
-        let id = Uuid::new_v4().to_string();
-        let dir = self.items_dir(ns);
-        std::fs::create_dir_all(&dir)?;
+    async fn append(&self, ns: &str, category: &str, fact: &str) -> Result<()> {
+        let path = self.category_path(ns, category);
+        std::fs::create_dir_all(path.parent().unwrap())?;
 
         let now = chrono::Utc::now().to_rfc3339();
-        let content = format!(
-            "---\n\
-             id: {id}\n\
-             category: {category}\n\
-             confidence: {confidence}\n\
-             status: active\n\
-             access_count: 0\n\
-             created_at: {now}\n\
-             ---\n\
-             {fact}\n"
-        );
 
-        let path = dir.join(format!("{id}.md"));
-        std::fs::write(&path, content)?;
-        Ok(id)
-    }
-
-    async fn search(&self, ns: &str, query: &str, limit: usize) -> Result<Vec<MemoryItem>> {
-        let items = self.read_items(ns)?;
-        if items.is_empty() || query.is_empty() {
-            return Ok(items.into_iter().take(limit).collect());
-        }
-
-        let query_words: Vec<String> = query
-            .to_lowercase()
-            .split_whitespace()
-            .map(String::from)
-            .collect();
-
-        let mut scored: Vec<(f64, MemoryItem)> = items
-            .into_iter()
-            .map(|item| {
-                let text = format!("{} {}", item.fact, item.category).to_lowercase();
-                let matches = query_words
-                    .iter()
-                    .filter(|w| text.contains(w.as_str()))
-                    .count();
-                let score = matches as f64 / query_words.len().max(1) as f64;
-                (score, item)
-            })
-            .filter(|(score, _)| *score > 0.0)
-            .collect();
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-
-        // Bump access counts
-        for (_, item) in &scored {
-            let path = self.items_dir(ns).join(format!("{}.md", item.id));
-            if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let bumped = content.replacen(
-                        &format!("access_count: {}", item.access_count),
-                        &format!("access_count: {}", item.access_count + 1),
-                        1,
-                    );
-                    let _ = std::fs::write(&path, bumped);
-                }
+        if path.exists() {
+            // Read existing, append fact, update timestamp
+            let content = std::fs::read_to_string(&path)?;
+            let (_fm, body) = split_frontmatter(&content)?;
+            let mut facts_text = body.trim().to_string();
+            if !facts_text.is_empty() {
+                facts_text.push('\n');
             }
+            facts_text.push_str(fact);
+
+            let new_content =
+                format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{facts_text}\n");
+            std::fs::write(&path, new_content)?;
+        } else {
+            let content = format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{fact}\n");
+            std::fs::write(&path, content)?;
         }
-
-        Ok(scored.into_iter().map(|(_, item)| item).collect())
-    }
-
-    async fn delete(&self, id: &str) -> Result<bool> {
-        // Search all namespace dirs for this item
-        if !self.root.is_dir() {
-            return Ok(false);
-        }
-        for entry in std::fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let items_dir = entry.path().join("items");
-            let path = items_dir.join(format!("{id}.md"));
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    async fn delete_stale(&self, ns: &str, older_than_days: u64, min_access: u64) -> Result<u64> {
-        let items = self.read_items(ns)?;
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(older_than_days as i64);
-        let mut count = 0u64;
-
-        for item in items {
-            if item.access_count < min_access {
-                if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&item.created_at) {
-                    if created < cutoff {
-                        let path = self.items_dir(ns).join(format!("{}.md", item.id));
-                        if path.exists() {
-                            std::fs::remove_file(&path)?;
-                            count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(count)
-    }
-
-    async fn get_summary(&self, ns: &str, category: &str) -> Result<Option<MemorySummary>> {
-        let path = self.summaries_dir(ns).join(format!("{category}.md"));
-        if !path.exists() {
-            return Ok(None);
-        }
-        parse_summary(&path).map(Some)
-    }
-
-    async fn upsert_summary(
-        &self,
-        ns: &str,
-        category: &str,
-        text: &str,
-        item_count: u32,
-    ) -> Result<()> {
-        let dir = self.summaries_dir(ns);
-        std::fs::create_dir_all(&dir)?;
-
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = format!(
-            "---\n\
-             category: {category}\n\
-             item_count: {item_count}\n\
-             updated_at: {now}\n\
-             ---\n\
-             {text}\n"
-        );
-
-        let path = dir.join(format!("{category}.md"));
-        std::fs::write(&path, content)?;
         Ok(())
     }
 
-    async fn list_summaries(&self, ns: &str) -> Result<Vec<MemorySummary>> {
-        let dir = self.summaries_dir(ns);
+    async fn list_categories(&self, ns: &str) -> Result<Vec<MemoryCategory>> {
+        let dir = self.ns_dir(ns);
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
 
-        let mut summaries = Vec::new();
+        let mut categories = Vec::new();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md") {
-                if let Ok(summary) = parse_summary(&path) {
-                    summaries.push(summary);
+            if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                if let Ok(cat) = parse_category(&path) {
+                    categories.push(cat);
                 }
             }
         }
-        summaries.sort_by(|a, b| a.category.cmp(&b.category));
-        Ok(summaries)
+        categories.sort_by(|a, b| a.category.cmp(&b.category));
+        Ok(categories)
+    }
+
+    async fn read_category(&self, ns: &str, category: &str) -> Result<Option<MemoryCategory>> {
+        let path = self.category_path(ns, category);
+        if !path.exists() {
+            return Ok(None);
+        }
+        parse_category(&path).map(Some)
+    }
+
+    async fn delete_fact(&self, ns: &str, category: &str, fact: &str) -> Result<bool> {
+        let path = self.category_path(ns, category);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let (_fm, body) = split_frontmatter(&content)?;
+
+        let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        let new_lines: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.trim() != fact.trim())
+            .copied()
+            .collect();
+
+        if new_lines.len() == lines.len() {
+            return Ok(false); // fact not found
+        }
+
+        if new_lines.is_empty() {
+            // No facts left — remove the file
+            std::fs::remove_file(&path)?;
+        } else {
+            let now = chrono::Utc::now().to_rfc3339();
+            let facts_text = new_lines.join("\n");
+            let new_content =
+                format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{facts_text}\n");
+            std::fs::write(&path, new_content)?;
+        }
+        Ok(true)
+    }
+
+    async fn save_resource(
+        &self,
+        ns: &str,
+        filename: &str,
+        description: &str,
+        created_by: &str,
+        content: &str,
+    ) -> Result<()> {
+        let dir = self.resource_dir(ns);
+        std::fs::create_dir_all(&dir)?;
+
+        // Write the file
+        let file_path = dir.join(filename);
+        std::fs::write(&file_path, content)?;
+
+        // Update manifest
+        let manifest_path = dir.join("manifest.json");
+        let mut entries = read_manifest(&manifest_path);
+
+        // Remove existing entry with same filename (update)
+        entries.retain(|e| e.filename != filename);
+
+        let size_bytes = content.len() as i64;
+        entries.push(ResourceEntry {
+            filename: filename.to_string(),
+            description: description.to_string(),
+            created_by: created_by.to_string(),
+            size_bytes,
+        });
+
+        let json = serde_json::to_string_pretty(&entries)?;
+        std::fs::write(&manifest_path, json)?;
+        Ok(())
+    }
+
+    async fn list_resources(&self, ns: &str) -> Result<Vec<ResourceEntry>> {
+        let manifest_path = self.resource_dir(ns).join("manifest.json");
+        Ok(read_manifest(&manifest_path))
+    }
+
+    async fn read_resource(&self, ns: &str, filename: &str) -> Result<Option<String>> {
+        let path = self.resource_dir(ns).join(filename);
+        if !path.exists() {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&path).map(Some).map_err(Into::into)
+    }
+
+    async fn delete_resource(&self, ns: &str, filename: &str) -> Result<bool> {
+        let dir = self.resource_dir(ns);
+        let file_path = dir.join(filename);
+        if !file_path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&file_path)?;
+
+        // Update manifest
+        let manifest_path = dir.join("manifest.json");
+        let mut entries = read_manifest(&manifest_path);
+        let before = entries.len();
+        entries.retain(|e| e.filename != filename);
+        if entries.len() != before {
+            let json = serde_json::to_string_pretty(&entries)?;
+            std::fs::write(&manifest_path, json)?;
+        }
+        Ok(true)
     }
 }
 
@@ -237,42 +219,34 @@ impl Memory for MarkdownMemory {
 // Parsing helpers
 // ---------------------------------------------------------------------------
 
-fn parse_item(path: &Path) -> Result<MemoryItem> {
+fn parse_category(path: &Path) -> Result<MemoryCategory> {
     let content = std::fs::read_to_string(path)?;
     let (frontmatter, body) = split_frontmatter(&content)?;
 
-    Ok(MemoryItem {
-        id: extract_field(&frontmatter, "id")?,
-        category: extract_field(&frontmatter, "category")?,
-        confidence: extract_field(&frontmatter, "confidence")?
-            .parse()
-            .unwrap_or(0.5),
-        status: match extract_field(&frontmatter, "status")?.as_str() {
-            "superseded" => MemoryStatus::Superseded,
-            "archived" => MemoryStatus::Archived,
-            _ => MemoryStatus::Active,
-        },
-        access_count: extract_field(&frontmatter, "access_count")
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or(0),
-        created_at: extract_field(&frontmatter, "created_at").unwrap_or_default(),
-        fact: body.trim().to_string(),
+    let category = extract_field(&frontmatter, "category")?;
+    let updated_at = extract_field(&frontmatter, "updated_at").unwrap_or_default();
+
+    let facts: Vec<MemoryFact> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| MemoryFact {
+            text: l.trim().to_string(),
+            created_at: String::new(), // not tracked per-line in this format
+        })
+        .collect();
+
+    Ok(MemoryCategory {
+        category,
+        facts,
+        updated_at,
     })
 }
 
-fn parse_summary(path: &Path) -> Result<MemorySummary> {
-    let content = std::fs::read_to_string(path)?;
-    let (frontmatter, body) = split_frontmatter(&content)?;
-
-    Ok(MemorySummary {
-        category: extract_field(&frontmatter, "category")?,
-        item_count: extract_field(&frontmatter, "item_count")
-            .unwrap_or_default()
-            .parse()
-            .unwrap_or(0),
-        text: body.trim().to_string(),
-    })
+fn read_manifest(path: &Path) -> Vec<ResourceEntry> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn split_frontmatter(content: &str) -> Result<(String, String)> {
@@ -310,94 +284,274 @@ fn extract_field(frontmatter: &str, key: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn temp_memory() -> (tempfile::TempDir, MarkdownMemory) {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = MarkdownMemory::new(dir.path());
-        (dir, memory)
+    fn temp_memory() -> (tempfile::TempDir, tempfile::TempDir, MarkdownMemory) {
+        let mem_dir = tempfile::tempdir().unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let memory = MarkdownMemory::new(mem_dir.path(), ws_dir.path());
+        (mem_dir, ws_dir, memory)
     }
 
     #[tokio::test]
-    async fn store_and_search() {
-        let (_dir, mem) = temp_memory();
-        let ns = "test:ns";
+    async fn append_and_list() {
+        let (_md, _wd, mem) = temp_memory();
+        let ns = "agent_test_core";
 
-        let id = mem
-            .store(ns, "Rust is fast", "languages", 0.9)
+        mem.append(ns, "preferences", "User prefers Rust")
             .await
             .unwrap();
-        assert!(!id.is_empty());
-
-        mem.store(ns, "Python is flexible", "languages", 0.8)
+        mem.append(ns, "preferences", "Always use snake_case")
             .await
             .unwrap();
-        mem.store(ns, "Always write tests", "practices", 0.95)
+        mem.append(ns, "decisions", "Using PostgreSQL")
             .await
             .unwrap();
 
-        let results = mem.search(ns, "Rust fast", 10).await.unwrap();
-        assert!(!results.is_empty());
-        assert_eq!(results[0].fact, "Rust is fast");
+        let categories = mem.list_categories(ns).await.unwrap();
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0].category, "decisions");
+        assert_eq!(categories[1].category, "preferences");
+        assert_eq!(categories[1].facts.len(), 2);
+        assert_eq!(categories[1].facts[0].text, "User prefers Rust");
+        assert_eq!(categories[1].facts[1].text, "Always use snake_case");
     }
 
     #[tokio::test]
-    async fn delete_item() {
-        let (_dir, mem) = temp_memory();
-        let ns = "test:ns";
+    async fn read_category() {
+        let (_md, _wd, mem) = temp_memory();
+        let ns = "agent_test_core";
 
-        let id = mem.store(ns, "temporary fact", "temp", 0.5).await.unwrap();
-        assert!(mem.delete(&id).await.unwrap());
-        assert!(!mem.delete(&id).await.unwrap()); // already gone
+        assert!(mem.read_category(ns, "prefs").await.unwrap().is_none());
 
-        let results = mem.search(ns, "temporary", 10).await.unwrap();
-        assert!(results.is_empty());
+        mem.append(ns, "prefs", "Likes Rust").await.unwrap();
+        let cat = mem.read_category(ns, "prefs").await.unwrap().unwrap();
+        assert_eq!(cat.category, "prefs");
+        assert_eq!(cat.facts.len(), 1);
     }
 
     #[tokio::test]
-    async fn summaries_crud() {
-        let (_dir, mem) = temp_memory();
-        let ns = "test:ns";
+    async fn delete_fact() {
+        let (_md, _wd, mem) = temp_memory();
+        let ns = "agent_test_core";
 
-        assert!(mem.get_summary(ns, "prefs").await.unwrap().is_none());
+        mem.append(ns, "prefs", "Likes Rust").await.unwrap();
+        mem.append(ns, "prefs", "Likes Go").await.unwrap();
 
-        mem.upsert_summary(ns, "prefs", "User likes Rust", 3)
+        assert!(mem.delete_fact(ns, "prefs", "Likes Rust").await.unwrap());
+        assert!(!mem.delete_fact(ns, "prefs", "Likes Rust").await.unwrap()); // already gone
+
+        let cat = mem.read_category(ns, "prefs").await.unwrap().unwrap();
+        assert_eq!(cat.facts.len(), 1);
+        assert_eq!(cat.facts[0].text, "Likes Go");
+    }
+
+    #[tokio::test]
+    async fn delete_last_fact_removes_file() {
+        let (_md, _wd, mem) = temp_memory();
+        let ns = "agent_test_core";
+
+        mem.append(ns, "temp", "only fact").await.unwrap();
+        assert!(mem.delete_fact(ns, "temp", "only fact").await.unwrap());
+        assert!(mem.read_category(ns, "temp").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_namespace() {
+        let (_md, _wd, mem) = temp_memory();
+        let cats = mem.list_categories("nonexistent").await.unwrap();
+        assert!(cats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resource_crud() {
+        let (_md, _wd, mem) = temp_memory();
+        let ns = "workspace/resources";
+
+        // Save
+        mem.save_resource(
+            ns,
+            "design.md",
+            "System design doc",
+            "architect",
+            "# Design\nHere it is.",
+        )
+        .await
+        .unwrap();
+
+        // List
+        let entries = mem.list_resources(ns).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename, "design.md");
+        assert_eq!(entries[0].description, "System design doc");
+        assert_eq!(entries[0].created_by, "architect");
+
+        // Read
+        let content = mem.read_resource(ns, "design.md").await.unwrap().unwrap();
+        assert!(content.contains("# Design"));
+
+        // Update (overwrite)
+        mem.save_resource(
+            ns,
+            "design.md",
+            "Updated design",
+            "architect",
+            "# Design v2",
+        )
+        .await
+        .unwrap();
+        let entries = mem.list_resources(ns).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].description, "Updated design");
+
+        // Delete
+        assert!(mem.delete_resource(ns, "design.md").await.unwrap());
+        assert!(!mem.delete_resource(ns, "design.md").await.unwrap());
+        assert!(mem.list_resources(ns).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resource_not_found() {
+        let (_md, _wd, mem) = temp_memory();
+        assert!(
+            mem.read_resource("resources", "nope.md")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // -- Scoping tests --
+
+    #[tokio::test]
+    async fn memory_scope_isolation_project_agent() {
+        let (_md, _wd, mem) = temp_memory();
+        let scope = super::super::types::MemoryScope::new("coder", Some("myapp"));
+
+        // Each tier writes to a different namespace
+        mem.append(&scope.project, "prefs", "project fact")
             .await
             .unwrap();
-        let summary = mem.get_summary(ns, "prefs").await.unwrap().unwrap();
-        assert_eq!(summary.category, "prefs");
-        assert_eq!(summary.text, "User likes Rust");
-        assert_eq!(summary.item_count, 3);
-
-        mem.upsert_summary(ns, "prefs", "User loves Rust", 5)
+        mem.append(&scope.core, "prefs", "core fact").await.unwrap();
+        mem.append(&scope.shared, "prefs", "shared fact")
             .await
             .unwrap();
-        let updated = mem.get_summary(ns, "prefs").await.unwrap().unwrap();
-        assert_eq!(updated.text, "User loves Rust");
-        assert_eq!(updated.item_count, 5);
 
-        let all = mem.list_summaries(ns).await.unwrap();
-        assert_eq!(all.len(), 1);
+        // Each tier is isolated
+        let proj = mem.list_categories(&scope.project).await.unwrap();
+        assert_eq!(proj[0].facts[0].text, "project fact");
+
+        let core = mem.list_categories(&scope.core).await.unwrap();
+        assert_eq!(core[0].facts[0].text, "core fact");
+
+        let shared = mem.list_categories(&scope.shared).await.unwrap();
+        assert_eq!(shared[0].facts[0].text, "shared fact");
+
+        // Verify namespace strings
+        assert_eq!(scope.project, "agent_coder_project_myapp");
+        assert_eq!(scope.core, "agent_coder_core");
+        assert_eq!(scope.shared, "project_myapp");
     }
 
     #[tokio::test]
-    async fn search_empty_namespace() {
-        let (_dir, mem) = temp_memory();
-        let results = mem.search("nonexistent", "anything", 10).await.unwrap();
-        assert!(results.is_empty());
+    async fn memory_scope_system_agent_collapses() {
+        let (_md, _wd, mem) = temp_memory();
+        let scope = super::super::types::MemoryScope::new("nenji", None);
+
+        // Project and core resolve to the same namespace
+        assert_eq!(scope.project, "agent_nenji_core");
+        assert_eq!(scope.core, "agent_nenji_core");
+        // Shared gets its own namespace
+        assert_eq!(scope.shared, "shared");
+
+        // Writing to project and core goes to the same dir
+        mem.append(&scope.project, "prefs", "from project scope")
+            .await
+            .unwrap();
+        mem.append(&scope.core, "prefs", "from core scope")
+            .await
+            .unwrap();
+
+        let cats = mem.list_categories(&scope.core).await.unwrap();
+        assert_eq!(cats[0].facts.len(), 2, "project + core should share a dir");
+
+        // Shared is separate
+        mem.append(&scope.shared, "team", "shared fact")
+            .await
+            .unwrap();
+        let shared = mem.list_categories(&scope.shared).await.unwrap();
+        assert_eq!(shared[0].facts.len(), 1);
     }
 
     #[tokio::test]
-    async fn namespace_isolation() {
-        let (_dir, mem) = temp_memory();
+    async fn memory_scope_shared_visible_across_agents() {
+        let (_md, _wd, mem) = temp_memory();
+        let scope_a = super::super::types::MemoryScope::new("coder", Some("myapp"));
+        let scope_b = super::super::types::MemoryScope::new("reviewer", Some("myapp"));
 
-        mem.store("ns1", "fact in ns1", "cat", 0.9).await.unwrap();
-        mem.store("ns2", "fact in ns2", "cat", 0.9).await.unwrap();
+        // Both agents share the same shared namespace for the same project
+        assert_eq!(scope_a.shared, scope_b.shared);
+        assert_eq!(scope_a.shared, "project_myapp");
 
-        let ns1 = mem.search("ns1", "fact", 10).await.unwrap();
-        let ns2 = mem.search("ns2", "fact", 10).await.unwrap();
+        mem.append(&scope_a.shared, "conventions", "Use Rust")
+            .await
+            .unwrap();
 
-        assert_eq!(ns1.len(), 1);
-        assert_eq!(ns2.len(), 1);
-        assert!(ns1[0].fact.contains("ns1"));
-        assert!(ns2[0].fact.contains("ns2"));
+        let cats = mem.list_categories(&scope_b.shared).await.unwrap();
+        assert_eq!(cats.len(), 1);
+        assert_eq!(cats[0].facts[0].text, "Use Rust");
+    }
+
+    #[tokio::test]
+    async fn resource_scope_project_under_workspace() {
+        let (_md, wd, mem) = temp_memory();
+        let scope = super::super::types::MemoryScope::new("architect", Some("myapp"));
+
+        assert_eq!(scope.resources_project, "myapp/resources");
+        assert_eq!(scope.resources_global, "resources");
+
+        // Project resource goes under {workspace}/myapp/resources/
+        mem.save_resource(
+            &scope.resources_project,
+            "prd.md",
+            "Product requirements",
+            "architect",
+            "# PRD",
+        )
+        .await
+        .unwrap();
+
+        // Global resource goes under {workspace}/resources/
+        mem.save_resource(
+            &scope.resources_global,
+            "standards.md",
+            "Coding standards",
+            "system",
+            "# Standards",
+        )
+        .await
+        .unwrap();
+
+        // Verify files are in the workspace dir, not memory dir
+        assert!(wd.path().join("myapp/resources/prd.md").exists());
+        assert!(wd.path().join("resources/standards.md").exists());
+
+        // Another agent on the same project sees the same resources
+        let scope_b = super::super::types::MemoryScope::new("coder", Some("myapp"));
+        assert_eq!(scope_b.resources_project, scope.resources_project);
+
+        let entries = mem
+            .list_resources(&scope_b.resources_project)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename, "prd.md");
+    }
+
+    #[tokio::test]
+    async fn resource_scope_system_agent_global_only() {
+        let scope = super::super::types::MemoryScope::new("nenji", None);
+
+        // Both project and global resolve to the same "resources" path
+        assert_eq!(scope.resources_project, "resources");
+        assert_eq!(scope.resources_global, "resources");
     }
 }

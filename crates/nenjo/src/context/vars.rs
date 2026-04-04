@@ -43,6 +43,15 @@ pub struct RenderContextVars {
     pub step_metadata: String,
     pub timestamp: String,
 
+    // Pre-computed memory vars (memories, memories.core, etc.)
+    pub memory_vars: HashMap<String, String>,
+
+    // Pre-computed resource vars (resources, resources.project, resources.workspace)
+    pub resource_vars: HashMap<String, String>,
+
+    // Pre-computed documents XML for project.documents
+    pub documents_xml: String,
+
     // Context blocks (pre-rendered, keyed by dotted path)
     pub context_blocks: HashMap<String, String>,
 }
@@ -79,10 +88,23 @@ impl RenderContextVars {
         };
         let memory_profile_xml = if self.memory_profile.core_focus.is_none()
             && self.memory_profile.project_focus.is_none()
+            && self.memory_profile.shared_focus.is_none()
         {
             String::new()
         } else {
             nenjo_xml::to_xml_pretty(&self.memory_profile, 2)
+        };
+        let memory_profile_core_xml = match &self.memory_profile.core_focus {
+            Some(focus) => nenjo_xml::to_xml_pretty(focus, 2),
+            None => String::new(),
+        };
+        let memory_profile_project_xml = match &self.memory_profile.project_focus {
+            Some(focus) => nenjo_xml::to_xml_pretty(focus, 2),
+            None => String::new(),
+        };
+        let memory_profile_shared_xml = match &self.memory_profile.shared_focus {
+            Some(focus) => nenjo_xml::to_xml_pretty(focus, 2),
+            None => String::new(),
         };
         let git_xml = if self.git.is_empty() {
             String::new()
@@ -198,8 +220,20 @@ impl RenderContextVars {
             ("git.repo_url", &self.git.repo_url),
             // Global
             ("global.timestamp", &self.timestamp),
-            // Memory profile — singular XML
+            // Memory profile — singular XML + sub-keys
             ("memory_profile", memory_profile_xml.as_str()),
+            (
+                "memory_profile.core_focus",
+                memory_profile_core_xml.as_str(),
+            ),
+            (
+                "memory_profile.project_focus",
+                memory_profile_project_xml.as_str(),
+            ),
+            (
+                "memory_profile.shared_focus",
+                memory_profile_shared_xml.as_str(),
+            ),
             // Available collections — plural XML
             ("available_agents", available_agents_xml.as_str()),
             ("available_abilities", available_abilities_xml.as_str()),
@@ -211,6 +245,17 @@ impl RenderContextVars {
             if !value.is_empty() {
                 vars.insert(key.to_string(), value.to_string());
             }
+        }
+
+        // Memory vars (memories, memories.core, etc.)
+        vars.extend(self.memory_vars.clone());
+
+        // Resource vars (resources, resources.project, resources.workspace)
+        vars.extend(self.resource_vars.clone());
+
+        // Documents
+        if !self.documents_xml.is_empty() {
+            vars.insert("project.documents".to_string(), self.documents_xml.clone());
         }
 
         // Merge context blocks

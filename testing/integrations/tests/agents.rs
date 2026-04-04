@@ -11,7 +11,7 @@ use uuid::Uuid;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
 };
-use nenjo::memory::{MarkdownMemory, Memory, MemoryScope};
+use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
@@ -219,7 +219,8 @@ async fn memory_store_recall_with_real_llm() {
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path());
+    let ws_dir = tempfile::tempdir().unwrap();
+    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
 
     let model = make_model();
     let project = make_project();
@@ -232,8 +233,7 @@ async fn memory_store_recall_with_real_llm() {
          Always respond concisely.",
     );
 
-    let agent_id = agent.id;
-    let project_id = project.id;
+    let _agent_id = agent.id;
 
     let manifest = Manifest {
         agents: vec![agent],
@@ -289,23 +289,29 @@ async fn memory_store_recall_with_real_llm() {
     );
 
     // Verify the fact was actually persisted to the markdown backend
-    let scope = MemoryScope::new(&project_id.to_string(), &agent_id.to_string());
-    let backend = MarkdownMemory::new(dir.path());
-    let items = backend.search(&scope.project, "Rust", 10).await.unwrap();
+    let scope = MemoryScope::new("memory-agent", Some("test-project"));
+    let backend = MarkdownMemory::new(dir.path(), ws_dir.path());
 
-    println!("--- Persisted Items ---");
-    for item in &items {
-        println!("  [{}] {}", item.category, item.fact);
+    use nenjo::memory::Memory;
+    let cats = backend.list_categories(&scope.project).await.unwrap();
+
+    println!("--- Persisted Categories ---");
+    for cat in &cats {
+        println!("  {}: {} facts", cat.category, cat.facts.len());
+        for fact in &cat.facts {
+            println!("    - {}", fact.text);
+        }
     }
 
     assert!(
-        !items.is_empty(),
-        "memory_store should have persisted the fact to disk"
+        !cats.is_empty(),
+        "memory_store should have persisted facts to disk"
     );
-    assert!(
-        items.iter().any(|i| i.fact.to_lowercase().contains("rust")),
-        "stored fact should mention Rust"
-    );
+    let has_rust = cats
+        .iter()
+        .flat_map(|c| &c.facts)
+        .any(|f| f.text.to_lowercase().contains("rust"));
+    assert!(has_rust, "stored fact should mention Rust");
 
     // Now ask the agent to forget it
     let output = runner
@@ -324,17 +330,20 @@ async fn memory_store_recall_with_real_llm() {
     );
 
     // Verify the fact was deleted from disk
-    let items = backend.search(&scope.project, "Rust", 10).await.unwrap();
+    let cats_after = backend.list_categories(&scope.project).await.unwrap();
+    let has_rust_after = cats_after
+        .iter()
+        .flat_map(|c| &c.facts)
+        .any(|f| f.text.to_lowercase().contains("rust"));
 
-    println!("--- Items After Forget ---");
-    for item in &items {
-        println!("  [{}] {}", item.category, item.fact);
+    println!("--- Categories After Forget ---");
+    for cat in &cats_after {
+        println!("  {}: {} facts", cat.category, cat.facts.len());
     }
 
     assert!(
-        items.is_empty(),
-        "memory_forget should have deleted the fact, but found: {:?}",
-        items.iter().map(|i| &i.fact).collect::<Vec<_>>()
+        !has_rust_after,
+        "memory_forget should have deleted the Rust fact"
     );
 }
 
