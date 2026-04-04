@@ -1,6 +1,6 @@
 //! Task execution handlers — with git worktree lifecycle.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
@@ -46,10 +46,75 @@ pub async fn handle_task_execute(
     // Set up git worktree if the project has a synced repo.
     // If the repo exists but worktree creation fails, the task fails —
     // we don't run tasks against a dirty or shared working tree.
+    let eid = execution_run_id.to_string();
+    let tid = Some(task_id.to_string());
+    // Per-repo mutex — git's .git/config lock doesn't support concurrent writes,
+    // so parallel worktree add/remove on the same repo must be serialized.
+    let git_lock = ctx
+        .git_locks
+        .entry(repo_dir.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
     let git_ctx = if repo_dir.join(".git").exists() {
-        let wt = setup_worktree(&repo_dir, &pslug, execution_run_id, task_slug).await?;
-        info!(branch = %wt.branch, work_dir = %wt.work_dir, "Created git worktree for task");
-        Some(wt)
+        let _ = ctx.response_tx.send(Response::TaskStepEvent {
+            execution_run_id: eid.clone(),
+            task_id: tid.clone(),
+            event_type: "step_started".to_string(),
+            step_name: "worktree_setup".to_string(),
+            step_type: "worktree".to_string(),
+            duration_ms: None,
+            data: serde_json::Value::Null,
+            agent: None,
+        });
+
+        let start = std::time::Instant::now();
+        let setup_result = {
+            let _guard = git_lock.lock().await;
+            setup_worktree(&repo_dir, execution_run_id, task_slug).await
+        };
+        match setup_result {
+            Ok(wt) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                info!(branch = %wt.branch, work_dir = %wt.work_dir, "Created git worktree for task");
+
+                let _ = ctx.response_tx.send(Response::TaskStepEvent {
+                    execution_run_id: eid.clone(),
+                    task_id: tid.clone(),
+                    event_type: "step_completed".to_string(),
+                    step_name: "worktree_setup".to_string(),
+                    step_type: "worktree".to_string(),
+                    duration_ms: Some(duration_ms),
+                    data: serde_json::json!({
+                        "branch": wt.branch,
+                        "target_branch": wt.target_branch,
+                        "work_dir": wt.work_dir,
+                    }),
+                    agent: None,
+                });
+
+                Some(wt)
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                let error_msg = format!("{e:#}");
+                warn!(error = %error_msg, "Worktree setup failed");
+
+                let _ = ctx.response_tx.send(Response::TaskStepEvent {
+                    execution_run_id: eid.clone(),
+                    task_id: tid.clone(),
+                    event_type: "step_failed".to_string(),
+                    step_name: "worktree_setup".to_string(),
+                    step_type: "worktree".to_string(),
+                    duration_ms: Some(duration_ms),
+                    data: serde_json::json!({ "error": &error_msg }),
+                    agent: None,
+                });
+
+                send_task_failed(ctx, &eid, &tid, &error_msg);
+                return Ok(());
+            }
+        }
     } else {
         None
     };
@@ -76,6 +141,7 @@ pub async fn handle_task_execute(
         task_id,
         ActiveExecution {
             kind: crate::harness::ExecutionKind::Task,
+            execution_run_id: Some(execution_run_id),
             cancel: cancel.clone(),
             pause: Some(pause.clone()),
         },
@@ -87,51 +153,136 @@ pub async fn handle_task_execute(
         execute_direct_task(ctx, aid, task, execution_run_id, task_id, &cancel).await
     } else {
         warn!("TaskExecute without routine_id or assigned_agent_id");
+        send_task_failed(ctx, &eid, &tid, "No routine_id or assigned_agent_id");
         Ok(())
     };
+
+    // If execution itself errored (e.g. routine not found, agent build failure),
+    // send TaskCompleted failed and clean up.
+    if let Err(ref e) = result {
+        let error_msg = format!("{e:#}");
+        send_task_failed(ctx, &eid, &tid, &error_msg);
+        ctx.executions.remove(&task_id);
+        // Still clean up worktree even on failure.
+        if let Some(ref wt) = git_ctx {
+            let _guard = git_lock.lock().await;
+            if let Err(e) = cleanup_worktree(&repo_dir, &wt.work_dir, &wt.branch).await {
+                warn!(error = %e, branch = %wt.branch, "Failed to clean up worktree");
+            }
+        }
+        evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
+        return Ok(());
+    }
 
     // Unregister execution
     ctx.executions.remove(&task_id);
 
     // Clean up worktree after execution
     if let Some(ref wt) = git_ctx {
-        if let Err(e) = cleanup_worktree(&repo_dir, &wt.work_dir, &wt.branch).await {
-            warn!(error = %e, branch = %wt.branch, "Failed to clean up worktree");
-        } else {
-            debug!(branch = %wt.branch, "Cleaned up worktree");
+        let _ = ctx.response_tx.send(Response::TaskStepEvent {
+            execution_run_id: eid.clone(),
+            task_id: tid.clone(),
+            event_type: "step_started".to_string(),
+            step_name: "worktree_cleanup".to_string(),
+            step_type: "worktree".to_string(),
+            duration_ms: None,
+            data: serde_json::Value::Null,
+            agent: None,
+        });
+
+        let start = std::time::Instant::now();
+        let cleanup_result = {
+            let _guard = git_lock.lock().await;
+            cleanup_worktree(&repo_dir, &wt.work_dir, &wt.branch).await
+        };
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match &cleanup_result {
+            Ok(()) => {
+                debug!(branch = %wt.branch, "Cleaned up worktree");
+                let _ = ctx.response_tx.send(Response::TaskStepEvent {
+                    execution_run_id: eid.clone(),
+                    task_id: tid.clone(),
+                    event_type: "step_completed".to_string(),
+                    step_name: "worktree_cleanup".to_string(),
+                    step_type: "worktree".to_string(),
+                    duration_ms: Some(duration_ms),
+                    data: serde_json::json!({ "branch": wt.branch }),
+                    agent: None,
+                });
+            }
+            Err(e) => {
+                warn!(error = %e, branch = %wt.branch, "Failed to clean up worktree");
+                let _ = ctx.response_tx.send(Response::TaskStepEvent {
+                    execution_run_id: eid.clone(),
+                    task_id: tid.clone(),
+                    event_type: "step_failed".to_string(),
+                    step_name: "worktree_cleanup".to_string(),
+                    step_type: "worktree".to_string(),
+                    duration_ms: Some(duration_ms),
+                    data: serde_json::json!({ "error": e.to_string() }),
+                    agent: None,
+                });
+            }
         }
     }
 
-    result
+    evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
+    Ok(())
 }
 
-/// Cancel a running execution by execution_run_id.
+/// Cancel all tasks belonging to an execution run.
 pub async fn handle_execution_cancel(ctx: &CommandContext, execution_run_id: Uuid) -> Result<()> {
-    if let Some((_, exec)) = ctx.executions.remove(&execution_run_id) {
-        exec.cancel.cancel();
-        info!(%execution_run_id, "Cancelled active task execution");
+    let mut cancelled = 0u32;
+    // Collect keys first to avoid holding DashMap ref during remove.
+    let keys: Vec<Uuid> = ctx
+        .executions
+        .iter()
+        .filter(|e| e.execution_run_id == Some(execution_run_id))
+        .map(|e| *e.key())
+        .collect();
+    for key in keys {
+        if let Some((_, exec)) = ctx.executions.remove(&key) {
+            exec.cancel.cancel();
+            cancelled += 1;
+        }
+    }
+    if cancelled > 0 {
+        info!(%execution_run_id, cancelled, "Cancelled active task executions");
     }
     Ok(())
 }
 
-/// Pause a running execution. The agent stops before the next LLM call.
+/// Pause all tasks belonging to an execution run.
 pub async fn handle_execution_pause(ctx: &CommandContext, execution_run_id: Uuid) -> Result<()> {
-    if let Some(exec) = ctx.executions.get(&execution_run_id) {
-        if let Some(ref pt) = exec.pause {
-            pt.pause();
-            info!(%execution_run_id, "Paused execution");
+    let mut paused = 0u32;
+    for entry in ctx.executions.iter() {
+        if entry.execution_run_id == Some(execution_run_id) {
+            if let Some(ref pt) = entry.pause {
+                pt.pause();
+                paused += 1;
+            }
         }
+    }
+    if paused > 0 {
+        info!(%execution_run_id, paused, "Paused task executions");
     }
     Ok(())
 }
 
-/// Resume a paused execution.
+/// Resume all paused tasks belonging to an execution run.
 pub async fn handle_execution_resume(ctx: &CommandContext, execution_run_id: Uuid) -> Result<()> {
-    if let Some(exec) = ctx.executions.get(&execution_run_id) {
-        if let Some(ref pt) = exec.pause {
-            pt.resume();
-            info!(%execution_run_id, "Resumed execution");
+    let mut resumed = 0u32;
+    for entry in ctx.executions.iter() {
+        if entry.execution_run_id == Some(execution_run_id) {
+            if let Some(ref pt) = entry.pause {
+                pt.resume();
+                resumed += 1;
+            }
         }
+    }
+    if resumed > 0 {
+        info!(%execution_run_id, resumed, "Resumed task executions");
     }
     Ok(())
 }
@@ -157,18 +308,24 @@ async fn execute_routine_task(
     // Accumulate token metrics from step events as they stream through.
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
+    // Track the current agent_id so step_completed events can carry it.
+    let mut current_agent_id: Option<uuid::Uuid> = None;
 
     loop {
         tokio::select! {
             event = handle.recv() => {
                 match event {
                     Some(ev) => {
+                        // Track agent identity across step events.
+                        if let nenjo::RoutineEvent::StepStarted { agent_id, .. } = &ev {
+                            current_agent_id = *agent_id;
+                        }
                         // Track token totals from completed steps
                         if let nenjo::RoutineEvent::StepCompleted { result, .. } = &ev {
                             total_input_tokens += result.input_tokens;
                             total_output_tokens += result.output_tokens;
                         }
-                        if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id)) {
+                        if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, ctx.provider().manifest()) {
                             let _ = ctx.response_tx.send(r);
                         }
                     }
@@ -193,13 +350,6 @@ async fn execute_routine_task(
             Some(result.output)
         },
         merge_error: None,
-    });
-
-    // Log execution completion with token metrics
-    let _ = ctx.response_tx.send(Response::ExecutionCompleted {
-        id: execution_run_id,
-        success: result.passed,
-        error: None,
         total_input_tokens,
         total_output_tokens,
     });
@@ -215,11 +365,26 @@ async fn execute_direct_task(
     task_id: Uuid,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let runner = ctx.provider().agent_by_id(agent_id).await?.build()?;
+    let mut builder = ctx.provider().agent_by_id(agent_id).await?;
+    // Scope tools to the git worktree if one was created.
+    if let nenjo::types::TaskType::Task(ref t) = task {
+        if let Some(ref git) = t.git {
+            if !git.work_dir.is_empty() {
+                builder = builder.with_work_dir(&git.work_dir);
+            }
+        }
+    }
+    let runner = builder.build().await?;
     let provider = ctx.provider();
     let aname = agent_name(provider.manifest(), agent_id);
 
     let mut handle = runner.task_stream(task).await?;
+
+    // Update the registry with the actual pause token from the execution handle
+    // so external pause/resume commands reach the turn loop.
+    if let Some(mut entry) = ctx.executions.get_mut(&task_id) {
+        entry.pause = Some(handle.pause_token());
+    }
 
     loop {
         tokio::select! {
@@ -259,13 +424,6 @@ async fn execute_direct_task(
             Some("Cancelled".to_string())
         },
         merge_error: None,
-    });
-
-    // Log execution completion with token metrics
-    let _ = ctx.response_tx.send(Response::ExecutionCompleted {
-        id: execution_run_id,
-        success,
-        error: None,
         total_input_tokens,
         total_output_tokens,
     });
@@ -273,17 +431,46 @@ async fn execute_direct_task(
     Ok(())
 }
 
+/// Send `TaskCompleted` (failed) to the platform.
+///
+/// Used for early termination when the task cannot proceed (e.g. worktree
+/// setup failure, missing routine/agent).
+fn send_task_failed(ctx: &CommandContext, eid: &str, tid: &Option<String>, error: &str) {
+    let _ = ctx.response_tx.send(Response::TaskCompleted {
+        execution_run_id: eid.to_string(),
+        task_id: tid.clone(),
+        success: false,
+        error: Some(error.to_string()),
+        merge_error: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Git worktree lifecycle
 // ---------------------------------------------------------------------------
 
+/// Remove a repo's lock entry when no other task is using it.
+///
+/// The map holds one `Arc` and the caller holds another. If the strong count is
+/// exactly 2, no other task is sharing this lock, so we can safely evict it.
+fn evict_git_lock(
+    locks: &crate::harness::GitLocks,
+    repo_dir: &std::path::Path,
+    lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    if std::sync::Arc::strong_count(lock) <= 2 {
+        locks.remove(repo_dir);
+    }
+}
+
 /// Create a git worktree for a task execution.
 ///
 /// Branch name: `agent/{short_id}/{task_slug}`
-/// Worktree path: `{workspace_dir}/{project_slug}/worktrees/{task_slug}/{short_id}`
+/// Worktree path: `{workspace_dir}/{project_slug}/worktrees/{task_slug}`
 async fn setup_worktree(
-    repo_dir: &PathBuf,
-    _project_slug: &str,
+    repo_dir: &Path,
     execution_run_id: Uuid,
     task_slug: &str,
 ) -> Result<GitContext> {
@@ -293,8 +480,7 @@ async fn setup_worktree(
         .parent()
         .unwrap_or(repo_dir)
         .join("worktrees")
-        .join(task_slug)
-        .join(short_id);
+        .join(task_slug);
 
     // Ensure worktree parent dir exists
     if let Some(parent) = worktree_dir.parent() {
@@ -305,6 +491,39 @@ async fn setup_worktree(
     let target_branch = default_branch(repo_dir)
         .await
         .unwrap_or_else(|| "main".to_string());
+
+    // Fetch latest from origin so the worktree starts from up-to-date state
+    let fetch_output = tokio::process::Command::new("git")
+        .args(["fetch", "origin", &target_branch])
+        .current_dir(repo_dir)
+        .output()
+        .await
+        .context("Failed to spawn git fetch")?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        warn!(error = %stderr.trim(), "git fetch failed, proceeding with local state");
+    }
+
+    // Clean up stale worktree/branch from a previous run that wasn't cleaned up
+    // (e.g. crash, kill signal, timeout).
+    if worktree_dir.exists() {
+        warn!(path = %worktree_dir.display(), "Stale worktree found, removing before re-creating");
+        let _ = tokio::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree_dir)
+            .current_dir(repo_dir)
+            .output()
+            .await;
+        // Also try removing the directory if git worktree remove didn't
+        let _ = tokio::fs::remove_dir_all(&worktree_dir).await;
+    }
+    // Delete stale branch if it exists
+    let _ = tokio::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(repo_dir)
+        .output()
+        .await;
 
     // Create the worktree with a new branch
     let output = tokio::process::Command::new("git")
@@ -335,7 +554,7 @@ async fn setup_worktree(
 }
 
 /// Remove a worktree and delete its branch.
-async fn cleanup_worktree(repo_dir: &PathBuf, worktree_path: &str, branch: &str) -> Result<()> {
+async fn cleanup_worktree(repo_dir: &Path, worktree_path: &str, branch: &str) -> Result<()> {
     // Remove the worktree
     let output = tokio::process::Command::new("git")
         .args(["worktree", "remove", "--force", worktree_path])
@@ -364,7 +583,7 @@ async fn cleanup_worktree(repo_dir: &PathBuf, worktree_path: &str, branch: &str)
 }
 
 /// Get the default branch name from the remote.
-async fn default_branch(repo_dir: &PathBuf) -> Option<String> {
+async fn default_branch(repo_dir: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
         .current_dir(repo_dir)
@@ -386,7 +605,7 @@ async fn default_branch(repo_dir: &PathBuf) -> Option<String> {
 }
 
 /// Get the remote URL of the repository.
-async fn get_remote_url(repo_dir: &PathBuf) -> Option<String> {
+async fn get_remote_url(repo_dir: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_dir)

@@ -1,6 +1,7 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nenjo_models::ModelProvider;
@@ -12,6 +13,7 @@ use super::prompts::{PromptConfig, PromptContext};
 use super::runner::AgentRunner;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
+use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
 use crate::memory::types::MemoryScope;
@@ -52,6 +54,9 @@ pub struct AgentBuilder {
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
     platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
+    /// When set, overrides SecurityPolicy.workspace_dir so all tools
+    /// (shell, file_read, file_write, git) operate in this directory.
+    work_dir: Option<PathBuf>,
 }
 
 impl AgentBuilder {
@@ -74,6 +79,7 @@ impl AgentBuilder {
             lambda_runner: None,
             platform_resolver: None,
             child_delegation_ctx: None,
+            work_dir: None,
         }
     }
 
@@ -115,56 +121,40 @@ impl AgentBuilder {
     /// Inject project context so the agent's prompts can reference
     /// `{{ project.name }}`, `{{ project.description }}`, etc.
     ///
-    /// Also resolves git context from project settings if the repo is synced.
+    /// Resolves git context from project settings if the repo is synced.
     /// `working_dir` is derived from `workspace_dir/slug` in `build_prompts()`.
     pub fn with_project_context(mut self, project: &ProjectManifest) -> Self {
+        let ctx = ProjectContext::from_manifest(project);
         let extra = &mut self.prompt_context.render_ctx_extra;
-        extra.project.id = project.id.to_string();
-        extra.project.name = project.name.clone();
-        extra.project.description = project.description.clone().unwrap_or_default();
-        extra.project.metadata = nenjo_xml::types::metadata_json_to_xml(&project.settings);
-        extra.project_slug = project.slug.clone();
-
-        // Resolve git context from project settings if repo is synced.
-        // Task-level git (worktree) overrides this in from_task().
-        let sync_status = project
-            .settings
-            .get("repo_sync_status")
-            .and_then(|v| v.as_str());
-        if sync_status == Some("synced") {
-            let repo_url = project
-                .settings
-                .get("repo_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            extra.git = crate::context::types::GitContext {
-                repo_url,
-                ..Default::default()
-            };
+        // Resolve git at the top level for backward compat with from_task() merge logic.
+        if let Some(ref git) = ctx.git {
+            extra.git = git.clone();
         }
-
+        extra.project = ctx;
         self
     }
 
     /// Inject routine context so the agent's prompts can reference
     /// `{{ routine.name }}`, `{{ routine.id }}`, `{{ routine.execution_id }}`.
-    pub fn with_routine_context(
-        mut self,
-        routine_id: uuid::Uuid,
-        routine_name: &str,
-        execution_id: &str,
-    ) -> Self {
-        let extra = &mut self.prompt_context.render_ctx_extra;
-        extra.routine.id = routine_id;
-        extra.routine.name = routine_name.to_string();
-        extra.routine.execution_id = execution_id.to_string();
+    pub fn with_routine_context(mut self, ctx: RoutineContext) -> Self {
+        self.prompt_context.render_ctx_extra.routine = ctx;
         self
     }
 
-    /// Inject step metadata into the render context.
-    pub fn with_step_metadata(mut self, metadata: &str) -> Self {
-        self.prompt_context.render_ctx_extra.step_metadata = metadata.to_string();
+    /// Inject step context so the agent's prompts can reference
+    /// `{{ routine.step.name }}`, `{{ routine.step.type }}`, `{{ routine.step.metadata }}`.
+    pub fn with_step_context(mut self, ctx: RoutineStepContext) -> Self {
+        self.prompt_context.render_ctx_extra.routine.step = ctx;
+        self
+    }
+
+    /// Scope the agent's tools to a specific working directory.
+    ///
+    /// When set, the `SecurityPolicy.workspace_dir` is overridden so all
+    /// file and shell tools operate relative to this directory. Used to
+    /// confine agents to a git worktree during task execution.
+    pub fn with_work_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(dir.into());
         self
     }
 
@@ -201,14 +191,31 @@ impl AgentBuilder {
     }
 
     /// Build the [`AgentRunner`].
-    pub fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
-        let security = Arc::new(SecurityPolicy::default());
+    pub async fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
+        let mut policy = SecurityPolicy::default();
+        if let Some(dir) = &self.work_dir {
+            policy.workspace_dir = dir.clone();
+            // Agents running in a worktree are autonomous task executions —
+            // allow all operations including git push and PR creation.
+            policy.autonomy = nenjo_tools::security::AutonomyLevel::Full;
+        }
+        let security = Arc::new(policy);
+
+        // When work_dir is set, rebuild tools with the scoped security policy
+        // so file, shell, and git tools operate in the correct directory.
+        if self.work_dir.is_some() {
+            if let Some(ref tf) = self.tool_factory {
+                self.tools = tf
+                    .create_tools_with_security(&self.agent, security.clone())
+                    .await;
+            }
+        }
 
         // Build memory scope and inject tools. This is the single place
         // where memory/resource tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
         let memory_scope = if let Some(ref mem) = self.memory {
-            let slug = &self.prompt_context.render_ctx_extra.project_slug;
+            let slug = &self.prompt_context.render_ctx_extra.project.slug;
             let project_slug = if slug.is_empty() {
                 None
             } else {

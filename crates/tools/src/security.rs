@@ -530,30 +530,52 @@ impl SecurityPolicy {
             return false;
         }
 
-        // Block subshell/expansion operators
+        // Block subshell/expansion operators outside of any quotes
         {
-            let mut outside_single_quotes = String::new();
+            let mut outside_quotes = String::new();
             let mut in_single = false;
+            let mut in_double = false;
+            let mut escaped = false;
             for c in command.chars() {
-                if c == '\'' {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if c == '\\' && !in_single {
+                    escaped = true;
+                    continue;
+                }
+                if c == '\'' && !in_double {
                     in_single = !in_single;
                     continue;
                 }
-                if !in_single {
-                    outside_single_quotes.push(c);
+                if c == '"' && !in_single {
+                    in_double = !in_double;
+                    continue;
+                }
+                if !in_single && !in_double {
+                    outside_quotes.push(c);
                 }
             }
-            if outside_single_quotes.contains('`')
-                || outside_single_quotes.contains("$(")
-                || outside_single_quotes.contains("${")
+            if outside_quotes.contains('`')
+                || outside_quotes.contains("$(")
+                || outside_quotes.contains("${")
             {
                 return false;
             }
         }
 
-        // Block output redirections
-        if contains_unquoted(command, '>') {
-            return false;
+        // Block output redirections — but allow safe patterns like 2>&1 and >/dev/null
+        {
+            let stripped = command
+                .replace("2>&1", "")
+                .replace(">&2", "")
+                .replace(">/dev/null", "")
+                .replace("2>/dev/null", "")
+                .replace("1>/dev/null", "");
+            if contains_unquoted(&stripped, '>') {
+                return false;
+            }
         }
 
         let segments = split_on_unquoted_separators(command);

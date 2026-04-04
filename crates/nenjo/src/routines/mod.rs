@@ -48,13 +48,22 @@ pub enum RoutineEvent {
         step_id: Uuid,
         step_name: String,
         step_type: String,
+        agent_id: Option<Uuid>,
     },
     /// A turn-loop event from an agent or gate step (tool calls, etc.).
     AgentEvent { step_id: Uuid, event: TurnEvent },
     /// A step completed successfully.
-    StepCompleted { step_id: Uuid, result: StepResult },
+    StepCompleted {
+        step_id: Uuid,
+        result: StepResult,
+        duration_ms: u64,
+    },
     /// A step failed.
-    StepFailed { step_id: Uuid, error: String },
+    StepFailed {
+        step_id: Uuid,
+        error: String,
+        duration_ms: u64,
+    },
     /// The entire routine finished.
     Done { result: StepResult },
     /// A cron cycle is starting.

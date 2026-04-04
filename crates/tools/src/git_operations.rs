@@ -10,15 +10,17 @@ use std::sync::Arc;
 /// Provides safe, parsed git operations with JSON output.
 pub struct GitOperationsTool {
     security: Arc<SecurityPolicy>,
-    workspace_dir: std::path::PathBuf,
 }
 
 impl GitOperationsTool {
-    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: std::path::PathBuf) -> Self {
-        Self {
-            security,
-            workspace_dir,
-        }
+    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+        Self { security }
+    }
+
+    /// The working directory for git commands — delegates to `SecurityPolicy.workspace_dir`
+    /// so it's automatically scoped to the worktree when one is active.
+    fn workspace_dir(&self) -> &std::path::Path {
+        &self.security.workspace_dir
     }
 
     /// Sanitize git arguments to prevent injection attacks
@@ -62,18 +64,48 @@ impl GitOperationsTool {
     /// Environment variables safe to pass to git subprocesses.
     /// Mirrors the shell tool's allowlist to prevent leaking API keys.
     const SAFE_ENV_VARS: &[&str] = &[
-        "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
+        "PATH",
+        "HOME",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "USER",
+        "SHELL",
+        "TMPDIR",
+        // Git identity — needed when global .gitconfig isn't available
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        // Git config paths — set by harness to use ~/.nenjo/gitconfig
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        // XDG config (some systems store .gitconfig here)
+        "XDG_CONFIG_HOME",
     ];
 
     async fn run_git_command(&self, args: &[&str]) -> anyhow::Result<String> {
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(args).current_dir(&self.workspace_dir);
+        cmd.args(args).current_dir(self.workspace_dir());
 
         // Clear env to prevent leaking secrets, then re-add safe vars + forwarded creds
         cmd.env_clear();
         for var in Self::SAFE_ENV_VARS {
             if let Ok(val) = std::env::var(var) {
                 cmd.env(var, val);
+            }
+        }
+        // Default committer identity from author identity if not explicitly set.
+        // Users only need to set GIT_AUTHOR_NAME/EMAIL.
+        if std::env::var("GIT_COMMITTER_NAME").is_err() {
+            if let Ok(name) = std::env::var("GIT_AUTHOR_NAME") {
+                cmd.env("GIT_COMMITTER_NAME", name);
+            }
+        }
+        if std::env::var("GIT_COMMITTER_EMAIL").is_err() {
+            if let Ok(email) = std::env::var("GIT_AUTHOR_EMAIL") {
+                cmd.env("GIT_COMMITTER_EMAIL", email);
             }
         }
         for (key, val) in &self.security.forwarded_env {
@@ -497,9 +529,9 @@ impl Tool for GitOperationsTool {
         };
 
         // Check if we're in a git repository
-        if !self.workspace_dir.join(".git").exists() {
+        if !self.workspace_dir().join(".git").exists() {
             // Try to find .git in parent directories
-            let mut current_dir = self.workspace_dir.as_path();
+            let mut current_dir = self.workspace_dir();
             let mut found_git = false;
             while current_dir.parent().is_some() {
                 if current_dir.join(".git").exists() {
@@ -579,9 +611,10 @@ mod tests {
     fn test_tool(dir: &std::path::Path) -> GitOperationsTool {
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
+            workspace_dir: dir.to_path_buf(),
             ..SecurityPolicy::default()
         });
-        GitOperationsTool::new(security, dir.to_path_buf())
+        GitOperationsTool::new(security)
     }
 
     #[test]
@@ -647,9 +680,10 @@ mod tests {
 
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
+            workspace_dir: tmp.path().to_path_buf(),
             ..SecurityPolicy::default()
         });
-        let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
+        let tool = GitOperationsTool::new(security);
 
         let result = tool
             .execute(json!({"operation": "commit", "message": "test"}))
@@ -671,9 +705,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
+            workspace_dir: tmp.path().to_path_buf(),
             ..SecurityPolicy::default()
         });
-        let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
+        let tool = GitOperationsTool::new(security);
 
         // This will fail because there's no git repo, but it shouldn't be blocked by autonomy
         let result = tool.execute(json!({"operation": "status"})).await.unwrap();

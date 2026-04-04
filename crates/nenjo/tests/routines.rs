@@ -1212,6 +1212,7 @@ async fn delegation_basic() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -1250,6 +1251,7 @@ async fn delegation_not_injected_for_single_agent() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();

@@ -24,10 +24,6 @@ pub struct RenderContextVars {
     pub memory_profile: MemoryProfileContext,
     pub git: GitContext,
 
-    // Project slug (used to derive working_dir from workspace_dir)
-    #[doc(hidden)]
-    pub project_slug: String,
-
     // Available collections (plural)
     pub available_agents: Vec<AgentContext>,
     pub available_abilities: Vec<AbilityContext>,
@@ -40,7 +36,6 @@ pub struct RenderContextVars {
     pub gate_previous_output: String,
     pub subtask_parent_task: String,
     pub subtask_description: String,
-    pub step_metadata: String,
     pub timestamp: String,
 
     // Pre-computed memory vars (memories, memories.core, etc.)
@@ -202,6 +197,7 @@ impl RenderContextVars {
             ("project", project_xml.as_str()),
             ("project.id", &self.project.id),
             ("project.name", &self.project.name),
+            ("project.slug", &self.project.slug),
             ("project.description", &self.project.description),
             ("project.metadata", &self.project.metadata),
             ("project.working_dir", &self.project.working_dir),
@@ -210,8 +206,10 @@ impl RenderContextVars {
             ("routine.id", routine_id.as_str()),
             ("routine.name", &self.routine.name),
             ("routine.execution_id", &self.routine.execution_id),
-            // Step
-            ("step.metadata", &self.step_metadata),
+            // Routine step context
+            ("routine.step.name", &self.routine.step.name),
+            ("routine.step.type", &self.routine.step.step_type),
+            ("routine.step.metadata", &self.routine.step.metadata),
             // Git — singular XML + fields
             ("git", git_xml.as_str()),
             ("git.current_branch", &self.git.branch),

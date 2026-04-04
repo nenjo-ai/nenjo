@@ -178,6 +178,7 @@ async fn tool_call_round_trip() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let specs = runner.instance().tool_specs();
@@ -258,6 +259,7 @@ async fn memory_store_recall_with_real_llm() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Verify memory tools are present
@@ -409,6 +411,7 @@ async fn use_ability_with_real_llm() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Verify use_ability tool is present
@@ -520,6 +523,7 @@ async fn domain_expansion_with_real_llm() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     // Activate the PRD domain
@@ -591,6 +595,7 @@ async fn domain_expansion_unknown_domain_fails() {
         .await
         .unwrap()
         .build()
+        .await
         .unwrap();
 
     let result = runner.domain_expansion("nonexistent").await;
