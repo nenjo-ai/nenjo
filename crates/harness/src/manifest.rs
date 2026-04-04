@@ -147,10 +147,13 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
 /// Write lambda script bodies to `{workspace_dir}/../lambdas/{path}` and set
 /// the executable bit so scripts with shebangs can be run directly.
 pub fn sync_lambdas(workspace_dir: &Path, lambdas: &[LambdaManifest]) -> Result<()> {
-    let lambdas_dir = workspace_dir
-        .parent()
-        .unwrap_or(workspace_dir)
-        .join("lambdas");
+    let parent = workspace_dir.parent().with_context(|| {
+        format!(
+            "Workspace directory `{}` has no parent; cannot determine sibling `lambdas` directory",
+            workspace_dir.display()
+        )
+    })?;
+    let lambdas_dir = parent.join("lambdas");
     std::fs::create_dir_all(&lambdas_dir).with_context(|| {
         format!(
             "Failed to create lambdas directory: {}",

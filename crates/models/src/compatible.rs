@@ -286,10 +286,10 @@ fn extract_responses_text(response: ResponsesResponse) -> Option<String> {
 
     for item in &response.output {
         for content in &item.content {
-            if content.kind.as_deref() == Some("output_text") {
-                if let Some(text) = first_nonempty(content.text.as_deref()) {
-                    return Some(text);
-                }
+            if content.kind.as_deref() == Some("output_text")
+                && let Some(text) = first_nonempty(content.text.as_deref())
+            {
+                return Some(text);
             }
         }
     }
@@ -345,56 +345,53 @@ impl OpenAiCompatibleProvider {
             .iter()
             .map(|m| {
                 // Assistant message with tool calls encoded as JSON
-                if m.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tc.name,
-                                            arguments: tc.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                return Message {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                };
-                            }
-                        }
-                    }
+                if m.role == "assistant"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                    && let Some(tool_calls_value) = value.get("tool_calls")
+                    && let Ok(parsed_calls) =
+                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
+                {
+                    let tool_calls = parsed_calls
+                        .into_iter()
+                        .map(|tc| NativeToolCall {
+                            id: Some(tc.id),
+                            kind: Some("function".to_string()),
+                            function: NativeFunctionCall {
+                                name: tc.name,
+                                arguments: tc.arguments,
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return Message {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_call_id: None,
+                        tool_calls: Some(tool_calls),
+                    };
                 }
 
                 // Tool result message with tool_call_id encoded as JSON
-                if m.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        return Message {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                        };
-                    }
+                if m.role == "tool"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return Message {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                    };
                 }
 
                 // Regular message (system, user, plain assistant)
@@ -517,17 +514,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         // Some providers (e.g. OpenRouter routing to Clarifai) return HTTP 200
         // with an error payload instead of a valid chat completion.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text) {
-            if let Some(err) = value.get("error") {
-                let msg = err
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown error");
-                return Err(anyhow::anyhow!(
-                    "{} returned an error in a 200 response: {msg}",
-                    self.name
-                ));
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+            && let Some(err) = value.get("error")
+        {
+            let msg = err
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(anyhow::anyhow!(
+                "{} returned an error in a 200 response: {msg}",
+                self.name
+            ));
         }
 
         let chat_response: ApiChatResponse = serde_json::from_str(&body_text).map_err(|e| {

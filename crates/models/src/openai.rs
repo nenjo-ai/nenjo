@@ -122,55 +122,52 @@ impl OpenAiProvider {
         messages
             .iter()
             .map(|m| {
-                if m.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tc.name,
-                                            arguments: tc.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                };
-                            }
-                        }
-                    }
+                if m.role == "assistant"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                    && let Some(tool_calls_value) = value.get("tool_calls")
+                    && let Ok(parsed_calls) =
+                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
+                {
+                    let tool_calls = parsed_calls
+                        .into_iter()
+                        .map(|tc| NativeToolCall {
+                            id: Some(tc.id),
+                            kind: Some("function".to_string()),
+                            function: NativeFunctionCall {
+                                name: tc.name,
+                                arguments: tc.arguments,
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return NativeMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_call_id: None,
+                        tool_calls: Some(tool_calls),
+                    };
                 }
 
-                if m.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                        };
-                    }
+                if m.role == "tool"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return NativeMessage {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                    };
                 }
 
                 NativeMessage {

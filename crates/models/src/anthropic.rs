@@ -254,10 +254,10 @@ impl AnthropicProvider {
         for block in response.content {
             match block.kind.as_str() {
                 "text" => {
-                    if let Some(text) = block.text.map(|t| t.trim().to_string()) {
-                        if !text.is_empty() {
-                            text_parts.push(text);
-                        }
+                    if let Some(text) = block.text.map(|t| t.trim().to_string())
+                        && !text.is_empty()
+                    {
+                        text_parts.push(text);
                     }
                 }
                 "tool_use" => {

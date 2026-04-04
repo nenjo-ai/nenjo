@@ -314,15 +314,14 @@ async fn execute_agent_step(
 
     // Resolve project context from manifest so agent prompts can reference
     // {{ project.name }}, {{ project.description }}, etc.
-    if !state.input.project_id.is_nil() {
-        if let Some(project) = provider
+    if !state.input.project_id.is_nil()
+        && let Some(project) = provider
             .manifest()
             .projects
             .iter()
             .find(|p| p.id == state.input.project_id)
-        {
-            builder = builder.with_project_context(project);
-        }
+    {
+        builder = builder.with_project_context(project);
     }
 
     // Inject routine + step context into the agent's render vars.
@@ -332,10 +331,10 @@ async fn execute_agent_step(
         .with_step_context(step_ctx);
 
     // Scope the agent's tools to the git worktree if one was created.
-    if let Some(ref git) = state.input.git {
-        if !git.work_dir.is_empty() {
-            builder = builder.with_work_dir(&git.work_dir);
-        }
+    if let Some(ref git) = state.input.git
+        && !git.work_dir.is_empty()
+    {
+        builder = builder.with_work_dir(&git.work_dir);
     }
 
     let runner = builder.build().await?;
@@ -725,18 +724,18 @@ fn build_task_description(step: &RoutineStepManifest, state: &RoutineState) -> S
     }
 
     // Append previous step context
-    if let Some(last) = state.step_results.values().last() {
-        if !last.output.is_empty() {
-            let preview = if last.output.len() > 2000 {
-                format!("{}...", &last.output[..2000])
-            } else {
-                last.output.clone()
-            };
-            description.push_str(&format!(
-                "\n\n<previous_step>\nStep '{}' output:\n{preview}\n</previous_step>",
-                last.step_name
-            ));
-        }
+    if let Some(last) = state.step_results.values().last()
+        && !last.output.is_empty()
+    {
+        let preview = if last.output.len() > 2000 {
+            format!("{}...", &last.output[..2000])
+        } else {
+            last.output.clone()
+        };
+        description.push_str(&format!(
+            "\n\n<previous_step>\nStep '{}' output:\n{preview}\n</previous_step>",
+            last.step_name
+        ));
     }
 
     description

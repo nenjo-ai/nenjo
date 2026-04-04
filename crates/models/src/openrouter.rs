@@ -142,55 +142,52 @@ impl OpenRouterProvider {
         messages
             .iter()
             .map(|m| {
-                if m.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| NativeToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tc.name,
-                                            arguments: tc.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                };
-                            }
-                        }
-                    }
+                if m.role == "assistant"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                    && let Some(tool_calls_value) = value.get("tool_calls")
+                    && let Ok(parsed_calls) =
+                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
+                {
+                    let tool_calls = parsed_calls
+                        .into_iter()
+                        .map(|tc| NativeToolCall {
+                            id: Some(tc.id),
+                            kind: Some("function".to_string()),
+                            function: NativeFunctionCall {
+                                name: tc.name,
+                                arguments: tc.arguments,
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return NativeMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_call_id: None,
+                        tool_calls: Some(tool_calls),
+                    };
                 }
 
-                if m.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                        };
-                    }
+                if m.role == "tool"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
+                {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    return NativeMessage {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                    };
                 }
 
                 NativeMessage {
@@ -312,16 +309,16 @@ impl ModelProvider for OpenRouterProvider {
         // OpenRouter can return HTTP 200 with an error payload when a
         // downstream provider (e.g. Clarifai) fails.  Detect this before
         // trying to parse as a normal chat completion.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text) {
-            if let Some(err) = value.get("error") {
-                let msg = err
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown error");
-                return Err(anyhow::anyhow!(
-                    "OpenRouter returned an error in a 200 response: {msg}"
-                ));
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+            && let Some(err) = value.get("error")
+        {
+            let msg = err
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(anyhow::anyhow!(
+                "OpenRouter returned an error in a 200 response: {msg}"
+            ));
         }
 
         let native_response: NativeChatResponse =
@@ -334,10 +331,10 @@ impl ModelProvider for OpenRouterProvider {
 
         // Track the upstream provider that served this response so we
         // can pin future requests to it.
-        if let Some(ref provider_name) = native_response.provider {
-            if let Ok(mut guard) = self.last_good_provider.lock() {
-                *guard = Some(provider_name.clone());
-            }
+        if let Some(ref provider_name) = native_response.provider
+            && let Ok(mut guard) = self.last_good_provider.lock()
+        {
+            *guard = Some(provider_name.clone());
         }
 
         let usage = native_response

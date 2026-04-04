@@ -147,14 +147,14 @@ pub fn extract_gate_verdict(messages: &[ChatMessage]) -> Option<bool> {
 fn parse_gate_verdict_from_text(output: &str) -> Option<bool> {
     // Try JSON: {"verdict": "pass"} or {"verdict": "fail"}
     for candidate in extract_json_candidates(output) {
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&candidate) {
-            if let Some(verdict) = obj.get("verdict").and_then(|v| v.as_str()) {
-                return match verdict.to_lowercase().as_str() {
-                    "pass" => Some(true),
-                    "fail" => Some(false),
-                    _ => None,
-                };
-            }
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&candidate)
+            && let Some(verdict) = obj.get("verdict").and_then(|v| v.as_str())
+        {
+            return match verdict.to_lowercase().as_str() {
+                "pass" => Some(true),
+                "fail" => Some(false),
+                _ => None,
+            };
         }
     }
     None
@@ -239,10 +239,10 @@ pub fn extract_gate_reasoning(messages: &[ChatMessage]) -> Option<String> {
             let args_str = tc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
             let args: serde_json::Value =
                 serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
-            if let Some(reasoning) = args.get("reasoning").and_then(|v| v.as_str()) {
-                if !reasoning.is_empty() {
-                    return Some(reasoning.to_string());
-                }
+            if let Some(reasoning) = args.get("reasoning").and_then(|v| v.as_str())
+                && !reasoning.is_empty()
+            {
+                return Some(reasoning.to_string());
             }
         }
     }
