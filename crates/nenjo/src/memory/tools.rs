@@ -1,4 +1,4 @@
-//! Memory tools for agent use: store, recall, forget.
+//! Memory and resource tools for agent use.
 
 use std::sync::Arc;
 
@@ -46,10 +46,6 @@ impl Tool for MemoryStoreTool {
                     "type": "string",
                     "description": "Category for grouping (e.g. 'preferences', 'decisions', 'architecture')"
                 },
-                "confidence": {
-                    "type": "number",
-                    "description": "Confidence score from 0.0 to 1.0 (default: 0.9)"
-                },
                 "scope": {
                     "type": "string",
                     "enum": ["project", "core", "shared"],
@@ -67,7 +63,6 @@ impl Tool for MemoryStoreTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let fact = args["fact"].as_str().unwrap_or("");
         let category = args["category"].as_str().unwrap_or("general");
-        let confidence = args["confidence"].as_f64().unwrap_or(0.9);
         let scope = args["scope"].as_str().unwrap_or("project");
 
         if fact.is_empty() {
@@ -79,11 +74,11 @@ impl Tool for MemoryStoreTool {
         }
 
         let ns = self.scope.resolve(scope);
-        let id = self.memory.store(ns, fact, category, confidence).await?;
+        self.memory.append(ns, category, fact).await?;
 
         Ok(ToolResult {
             success: true,
-            output: format!("Stored in {scope} memory (id: {id}, category: {category})"),
+            output: format!("Stored in {scope} memory (category: {category})"),
             error: None,
         })
     }
@@ -93,7 +88,7 @@ impl Tool for MemoryStoreTool {
 // MemoryRecallTool
 // ---------------------------------------------------------------------------
 
-/// Tool for agents to search and recall facts from memory.
+/// Tool for agents to recall facts from memory.
 pub struct MemoryRecallTool {
     memory: Arc<dyn Memory>,
     scope: MemoryScope,
@@ -112,28 +107,23 @@ impl Tool for MemoryRecallTool {
     }
 
     fn description(&self) -> &str {
-        "Search persistent memory for facts matching a query."
+        "Recall facts from persistent memory, optionally filtered by category."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {
+                "category": {
                     "type": "string",
-                    "description": "Keywords to search for"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results to return (default: 5)"
+                    "description": "Category to read (omit to list all categories)"
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["project", "core", "shared", "all"],
-                    "description": "Where to search (default: 'project', 'all' searches everywhere)"
+                    "description": "Where to search (default: 'all')"
                 }
-            },
-            "required": ["query"]
+            }
         })
     }
 
@@ -142,55 +132,46 @@ impl Tool for MemoryRecallTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let query = args["query"].as_str().unwrap_or("");
-        let limit = args["limit"].as_u64().unwrap_or(5) as usize;
-        let scope = args["scope"].as_str().unwrap_or("project");
+        let category = args["category"].as_str();
+        let scope = args["scope"].as_str().unwrap_or("all");
 
-        if query.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("query is required".into()),
-            });
-        }
-
-        let namespaces: Vec<&str> = if scope == "all" {
-            self.scope.all().to_vec()
+        let namespaces: Vec<(&str, &str)> = if scope == "all" {
+            vec![
+                ("project", &self.scope.project),
+                ("core", &self.scope.core),
+                ("shared", &self.scope.shared),
+            ]
         } else {
-            vec![self.scope.resolve(scope)]
+            vec![(scope, self.scope.resolve(scope))]
         };
 
-        let mut all_results = Vec::new();
-        for ns in namespaces {
-            let results = self.memory.search(ns, query, limit).await?;
-            all_results.extend(results);
-        }
-
-        // Sort by confidence descending, truncate
-        all_results.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        all_results.truncate(limit);
-
-        if all_results.is_empty() {
-            return Ok(ToolResult {
-                success: true,
-                output: "No memories found matching that query.".into(),
-                error: None,
-            });
-        }
-
         let mut output = String::new();
-        for (i, item) in all_results.iter().enumerate() {
-            output.push_str(&format!(
-                "{}. [{}] (confidence: {:.1}) {}\n",
-                i + 1,
-                item.category,
-                item.confidence,
-                item.fact
-            ));
+
+        for (scope_name, ns) in namespaces {
+            if let Some(cat_name) = category {
+                if let Some(cat) = self.memory.read_category(ns, cat_name).await? {
+                    output.push_str(&format!("[{scope_name}/{cat_name}]\n"));
+                    for fact in &cat.facts {
+                        output.push_str(&format!("  - {}\n", fact.text));
+                    }
+                }
+            } else {
+                let cats = self.memory.list_categories(ns).await?;
+                if !cats.is_empty() {
+                    output.push_str(&format!("[{scope_name}]\n"));
+                    for cat in &cats {
+                        output.push_str(&format!(
+                            "  {}: {} facts\n",
+                            cat.category,
+                            cat.facts.len()
+                        ));
+                    }
+                }
+            }
+        }
+
+        if output.is_empty() {
+            output = "No memories found.".to_string();
         }
 
         Ok(ToolResult {
@@ -224,31 +205,28 @@ impl Tool for MemoryForgetTool {
     }
 
     fn description(&self) -> &str {
-        "Delete facts from memory by query, ID, or age."
+        "Delete a specific fact from memory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {
+                "fact": {
                     "type": "string",
-                    "description": "Search and delete matching facts"
+                    "description": "Exact text of the fact to remove"
                 },
-                "id": {
+                "category": {
                     "type": "string",
-                    "description": "Delete a specific fact by ID"
-                },
-                "prune_older_than_days": {
-                    "type": "integer",
-                    "description": "Delete stale facts older than N days with low access"
+                    "description": "Category the fact belongs to"
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["project", "core", "shared"],
                     "description": "Scope to delete from (default: 'project')"
                 }
-            }
+            },
+            "required": ["fact", "category"]
         })
     }
 
@@ -257,63 +235,292 @@ impl Tool for MemoryForgetTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let fact = args["fact"].as_str().unwrap_or("");
+        let category = args["category"].as_str().unwrap_or("");
         let scope = args["scope"].as_str().unwrap_or("project");
 
-        // Delete by ID
-        if let Some(id) = args["id"].as_str() {
-            let deleted = self.memory.delete(id).await?;
+        if fact.is_empty() || category.is_empty() {
             return Ok(ToolResult {
-                success: true,
-                output: if deleted {
-                    format!("Deleted memory {id}")
-                } else {
-                    format!("Memory {id} not found")
-                },
-                error: None,
+                success: false,
+                output: String::new(),
+                error: Some("fact and category are required".into()),
             });
         }
 
-        // Prune by age
-        if let Some(days) = args["prune_older_than_days"].as_u64() {
-            let ns = self.scope.resolve(scope);
-            let count = self.memory.delete_stale(ns, days, 2).await?;
-            return Ok(ToolResult {
-                success: true,
-                output: format!("Pruned {count} stale memories older than {days} days"),
-                error: None,
-            });
-        }
-
-        // Delete by query
-        if let Some(query) = args["query"].as_str() {
-            let ns = self.scope.resolve(scope);
-            let matches = self.memory.search(ns, query, 10).await?;
-            let mut deleted = 0;
-            for item in &matches {
-                if self.memory.delete(&item.id).await? {
-                    deleted += 1;
-                }
-            }
-            return Ok(ToolResult {
-                success: true,
-                output: format!("Deleted {deleted} memories matching '{query}'"),
-                error: None,
-            });
-        }
+        let ns = self.scope.resolve(scope);
+        let deleted = self.memory.delete_fact(ns, category, fact).await?;
 
         Ok(ToolResult {
-            success: false,
-            output: String::new(),
-            error: Some("Provide 'query', 'id', or 'prune_older_than_days'".into()),
+            success: true,
+            output: if deleted {
+                format!("Deleted fact from {scope}/{category}")
+            } else {
+                format!("Fact not found in {scope}/{category}")
+            },
+            error: None,
         })
     }
 }
 
-/// Create all three memory tools for an agent.
-pub fn memory_tools(memory: Arc<dyn Memory>, scope: MemoryScope) -> Vec<Arc<dyn Tool>> {
+// ---------------------------------------------------------------------------
+// ResourceSaveTool
+// ---------------------------------------------------------------------------
+
+/// Tool for agents to save resource documents.
+pub struct ResourceSaveTool {
+    memory: Arc<dyn Memory>,
+    scope: MemoryScope,
+    agent_name: String,
+}
+
+impl ResourceSaveTool {
+    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope, agent_name: String) -> Self {
+        Self {
+            memory,
+            scope,
+            agent_name,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ResourceSaveTool {
+    fn name(&self) -> &str {
+        "resource_save"
+    }
+
+    fn description(&self) -> &str {
+        "Save a document as a shared resource. Resources are visible to all agents."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename for the resource (e.g. 'auth-prd.md')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-line description of the resource"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full content of the resource document"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "workspace"],
+                    "description": "Where to save: 'project' (default) or 'workspace' (global)"
+                }
+            },
+            "required": ["filename", "description", "content"]
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Write
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let filename = args["filename"].as_str().unwrap_or("");
+        let description = args["description"].as_str().unwrap_or("");
+        let content = args["content"].as_str().unwrap_or("");
+        let scope = args["scope"].as_str().unwrap_or("project");
+
+        if filename.is_empty() || content.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("filename and content are required".into()),
+            });
+        }
+
+        let ns = self.scope.resolve_resource(scope);
+        self.memory
+            .save_resource(ns, filename, description, &self.agent_name, content)
+            .await?;
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("Saved resource '{filename}' in {scope} scope"),
+            error: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResourceReadTool
+// ---------------------------------------------------------------------------
+
+/// Tool for agents to read resource documents.
+pub struct ResourceReadTool {
+    memory: Arc<dyn Memory>,
+    scope: MemoryScope,
+}
+
+impl ResourceReadTool {
+    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
+        Self { memory, scope }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ResourceReadTool {
+    fn name(&self) -> &str {
+        "resource_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read a shared resource document by filename."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename of the resource to read"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "workspace"],
+                    "description": "Where to look: 'project' (default) or 'workspace'"
+                }
+            },
+            "required": ["filename"]
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let filename = args["filename"].as_str().unwrap_or("");
+        let scope = args["scope"].as_str().unwrap_or("project");
+
+        if filename.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("filename is required".into()),
+            });
+        }
+
+        let ns = self.scope.resolve_resource(scope);
+        match self.memory.read_resource(ns, filename).await? {
+            Some(content) => Ok(ToolResult {
+                success: true,
+                output: content,
+                error: None,
+            }),
+            None => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Resource '{filename}' not found in {scope} scope")),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResourceDeleteTool
+// ---------------------------------------------------------------------------
+
+/// Tool for agents to delete resource documents.
+pub struct ResourceDeleteTool {
+    memory: Arc<dyn Memory>,
+    scope: MemoryScope,
+}
+
+impl ResourceDeleteTool {
+    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
+        Self { memory, scope }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ResourceDeleteTool {
+    fn name(&self) -> &str {
+        "resource_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a shared resource document."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename of the resource to delete"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "workspace"],
+                    "description": "Where to delete from: 'project' (default) or 'workspace'"
+                }
+            },
+            "required": ["filename"]
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Write
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let filename = args["filename"].as_str().unwrap_or("");
+        let scope = args["scope"].as_str().unwrap_or("project");
+
+        if filename.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("filename is required".into()),
+            });
+        }
+
+        let ns = self.scope.resolve_resource(scope);
+        let deleted = self.memory.delete_resource(ns, filename).await?;
+
+        Ok(ToolResult {
+            success: true,
+            output: if deleted {
+                format!("Deleted resource '{filename}' from {scope} scope")
+            } else {
+                format!("Resource '{filename}' not found in {scope} scope")
+            },
+            error: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool factory
+// ---------------------------------------------------------------------------
+
+/// Create all memory and resource tools for an agent.
+pub fn memory_tools(
+    memory: Arc<dyn Memory>,
+    scope: MemoryScope,
+    agent_name: &str,
+) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(MemoryStoreTool::new(memory.clone(), scope.clone())),
         Arc::new(MemoryRecallTool::new(memory.clone(), scope.clone())),
-        Arc::new(MemoryForgetTool::new(memory, scope)),
+        Arc::new(MemoryForgetTool::new(memory.clone(), scope.clone())),
+        Arc::new(ResourceSaveTool::new(
+            memory.clone(),
+            scope.clone(),
+            agent_name.to_string(),
+        )),
+        Arc::new(ResourceReadTool::new(memory.clone(), scope.clone())),
+        Arc::new(ResourceDeleteTool::new(memory, scope)),
     ]
 }

@@ -1,9 +1,8 @@
 //! Memory system for persistent agent knowledge.
 //!
 //! The [`Memory`] trait defines the interface for storing and retrieving
-//! agent facts. The default [`MarkdownMemory`] backend uses plain markdown
-//! files with YAML frontmatter. Custom backends (SQLite, Redis, etc.) can
-//! implement the trait directly.
+//! agent facts and resources. The default [`MarkdownMemory`] backend uses
+//! plain markdown files. Custom backends can implement the trait directly.
 //!
 //! # Usage
 //!
@@ -13,7 +12,7 @@
 //! let provider = Provider::builder()
 //!     .with_loader(client)
 //!     .with_model_factory(factory)
-//!     .with_memory(MarkdownMemory::new("./memory"))
+//!     .with_memory(MarkdownMemory::new("./memory", "./workspace"))
 //!     .build()
 //!     .await?;
 //! ```
@@ -24,48 +23,54 @@ pub mod tools;
 pub mod types;
 
 pub use markdown::MarkdownMemory;
-pub use prompt::build_memory_xml;
-pub use types::{MemoryItem, MemoryScope, MemoryStatus, MemorySummary};
+pub use prompt::{build_memory_vars, build_resource_vars};
+pub use types::{MemoryCategory, MemoryFact, MemoryScope, ResourceEntry};
 
 use anyhow::Result;
 
-/// Trait for persistent agent memory backends.
+/// Trait for persistent agent memory and resource backends.
 ///
-/// All operations are namespace-scoped. Namespaces isolate memory by
+/// Memory operations are namespace-scoped. Namespaces isolate memory by
 /// agent, project, and scope (project/core/shared).
 ///
+/// Resource operations use `workspace/resources/` paths for shared access.
+///
 /// The default implementation is [`MarkdownMemory`] (file-based).
-/// Implement this trait for custom backends (SQLite, Redis, vector DBs, etc.).
 #[async_trait::async_trait]
 pub trait Memory: Send + Sync {
-    // -- Items (atomic facts) --
+    // -- Facts (category-grouped knowledge) --
 
-    /// Store a fact and return its ID.
-    async fn store(&self, ns: &str, fact: &str, category: &str, confidence: f64) -> Result<String>;
+    /// Append a fact to a category. Creates the category if it doesn't exist.
+    async fn append(&self, ns: &str, category: &str, fact: &str) -> Result<()>;
 
-    /// Search for items matching a query. Returns scored results.
-    async fn search(&self, ns: &str, query: &str, limit: usize) -> Result<Vec<MemoryItem>>;
+    /// List all categories in a namespace with their facts.
+    async fn list_categories(&self, ns: &str) -> Result<Vec<MemoryCategory>>;
 
-    /// Delete an item by ID. Returns true if it existed.
-    async fn delete(&self, id: &str) -> Result<bool>;
+    /// Read a single category.
+    async fn read_category(&self, ns: &str, category: &str) -> Result<Option<MemoryCategory>>;
 
-    /// Delete items older than `days` with fewer than `min_access` accesses.
-    async fn delete_stale(&self, ns: &str, older_than_days: u64, min_access: u64) -> Result<u64>;
+    /// Delete a specific fact from a category by exact text match.
+    /// Returns true if the fact was found and removed.
+    async fn delete_fact(&self, ns: &str, category: &str, fact: &str) -> Result<bool>;
 
-    // -- Summaries (category rollups) --
+    // -- Resources (shared documents) --
 
-    /// Get the summary for a category, if it exists.
-    async fn get_summary(&self, ns: &str, category: &str) -> Result<Option<MemorySummary>>;
-
-    /// Create or update a category summary.
-    async fn upsert_summary(
+    /// Save a resource file with provenance metadata.
+    async fn save_resource(
         &self,
         ns: &str,
-        category: &str,
-        text: &str,
-        item_count: u32,
+        filename: &str,
+        description: &str,
+        created_by: &str,
+        content: &str,
     ) -> Result<()>;
 
-    /// List all summaries in a namespace.
-    async fn list_summaries(&self, ns: &str) -> Result<Vec<MemorySummary>>;
+    /// List all resources in a namespace.
+    async fn list_resources(&self, ns: &str) -> Result<Vec<ResourceEntry>>;
+
+    /// Read a resource file's content.
+    async fn read_resource(&self, ns: &str, filename: &str) -> Result<Option<String>>;
+
+    /// Delete a resource file. Returns true if it existed.
+    async fn delete_resource(&self, ns: &str, filename: &str) -> Result<bool>;
 }

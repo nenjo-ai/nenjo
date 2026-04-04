@@ -1,75 +1,85 @@
-//! Memory types: items, summaries, scopes.
+//! Memory types: categories, facts, resources, scopes.
 
 use serde::{Deserialize, Serialize};
 
-/// An atomic fact stored in memory.
+/// A single fact within a category.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryItem {
-    pub id: String,
-    pub fact: String,
-    pub category: String,
-    pub confidence: f64,
-    pub status: MemoryStatus,
-    pub access_count: u64,
+pub struct MemoryFact {
+    pub text: String,
     pub created_at: String,
 }
 
-/// Category summary — a rolled-up view of items in a category.
+/// A category of memories (one file on disk).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemorySummary {
+pub struct MemoryCategory {
     pub category: String,
-    pub text: String,
-    pub item_count: u32,
+    pub facts: Vec<MemoryFact>,
+    pub updated_at: String,
 }
 
-/// Lifecycle status of a memory item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum MemoryStatus {
-    #[default]
-    Active,
-    Superseded,
-    Archived,
+/// A resource entry in the manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceEntry {
+    pub filename: String,
+    pub description: String,
+    pub created_by: String,
+    pub size_bytes: i64,
 }
 
-impl std::fmt::Display for MemoryStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Active => write!(f, "active"),
-            Self::Superseded => write!(f, "superseded"),
-            Self::Archived => write!(f, "archived"),
-        }
-    }
-}
-
-/// 3-tier namespace scoping for memory isolation.
+/// 3-tier namespace scoping for memory isolation + resource paths.
 ///
-/// Each agent gets three namespaces:
-/// - **project**: per-agent, per-project facts (the default)
-/// - **core**: cross-project agent expertise (persists across projects)
-/// - **shared**: visible to all agents in the project
+/// Memory and resource namespace scoping.
+///
+/// When a project is provided:
+/// - **project**: per-agent, per-project → `agent_{name}_project_{slug}`
+/// - **core**: cross-project agent expertise → `agent_{name}_core`
+/// - **shared**: visible to all agents in the project → `project_{slug}`
+/// - **resources_project**: project-scoped → `{slug}/resources`
+/// - **resources_global**: workspace-global → `resources`
+///
+/// When no project (system agents):
+/// - All memory scopes collapse to `agent_{name}_core`
+/// - Resources collapse to global `resources`
 #[derive(Debug, Clone)]
 pub struct MemoryScope {
-    /// Per-agent-per-project: `"proj:{project_id}:agent:{agent_id}"`
     pub project: String,
-    /// Cross-project agent knowledge: `"agent:{agent_id}:core"`
     pub core: String,
-    /// All agents in project: `"proj:{project_id}:shared"`
     pub shared: String,
+    pub resources_project: String,
+    pub resources_global: String,
 }
 
 impl MemoryScope {
-    /// Build a scope from project and agent IDs.
-    pub fn new(project_id: &str, agent_id: &str) -> Self {
-        Self {
-            project: format!("proj:{project_id}:agent:{agent_id}"),
-            core: format!("agent:{agent_id}:core"),
-            shared: format!("proj:{project_id}:shared"),
+    /// Build a scope from agent name and optional project slug.
+    ///
+    /// When `project_slug` is `None`, all memory scopes collapse to
+    /// `agent_{name}_core` and resources to global only.
+    pub fn new(agent_name: &str, project_slug: Option<&str>) -> Self {
+        let name = sanitize_name(agent_name);
+        let core = format!("agent_{name}_core");
+
+        match project_slug {
+            Some(slug) if !slug.is_empty() => {
+                let slug = sanitize_name(slug);
+                Self {
+                    project: format!("agent_{name}_project_{slug}"),
+                    core: core.clone(),
+                    shared: format!("project_{slug}"),
+                    resources_project: format!("{slug}/resources"),
+                    resources_global: "resources".to_string(),
+                }
+            }
+            _ => Self {
+                project: core.clone(),
+                core,
+                shared: "shared".to_string(),
+                resources_project: "resources".to_string(),
+                resources_global: "resources".to_string(),
+            },
         }
     }
 
-    /// Resolve a scope name ("project", "core", "shared") to a namespace string.
+    /// Resolve a memory scope name ("project", "core", "shared") to a namespace string.
     pub fn resolve(&self, scope: &str) -> &str {
         match scope {
             "core" => &self.core,
@@ -78,8 +88,24 @@ impl MemoryScope {
         }
     }
 
-    /// All three namespaces for exhaustive search.
+    /// Resolve a resource scope name ("project", "workspace") to a namespace string.
+    pub fn resolve_resource(&self, scope: &str) -> &str {
+        match scope {
+            "workspace" => &self.resources_global,
+            _ => &self.resources_project,
+        }
+    }
+
+    /// All three memory namespaces for exhaustive search.
     pub fn all(&self) -> [&str; 3] {
         [&self.project, &self.core, &self.shared]
     }
+}
+
+/// Sanitize a name for use as a filesystem-safe directory component.
+fn sanitize_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }

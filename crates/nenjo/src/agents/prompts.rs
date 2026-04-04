@@ -45,6 +45,9 @@ pub struct MemoryProfile {
     pub core_focus: Vec<String>,
     /// What this role wants remembered as project-specific knowledge.
     pub project_focus: Vec<String>,
+    /// What this role should store in shared scope for other agents to reference.
+    #[serde(default)]
+    pub shared_focus: Vec<String>,
     /// Categories this role cares about most (prioritized in retrieval).
     pub priority_categories: Vec<String>,
 }
@@ -53,6 +56,7 @@ impl MemoryProfile {
     pub fn is_empty(&self) -> bool {
         self.core_focus.is_empty()
             && self.project_focus.is_empty()
+            && self.shared_focus.is_empty()
             && self.priority_categories.is_empty()
     }
 }

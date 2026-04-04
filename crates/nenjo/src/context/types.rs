@@ -147,12 +147,132 @@ pub struct MemoryProfileContext {
     pub core_focus: Option<FocusListContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_focus: Option<FocusListContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_focus: Option<FocusListContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FocusListContext {
     #[serde(rename = "item")]
     pub items: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Memories (category facts injected into prompts)
+// ---------------------------------------------------------------------------
+
+/// A single memory category with its facts as text content.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "category")]
+pub struct MemoryCategoryContext {
+    #[serde(rename = "@name")]
+    pub name: String,
+    #[serde(rename = "$text")]
+    pub text: String,
+}
+
+/// Core tier — agent's cross-project memories.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "memories-core")]
+pub struct MemoriesCoreContext {
+    #[serde(rename = "category")]
+    pub categories: Vec<MemoryCategoryContext>,
+}
+
+/// Project tier — agent's memories for the current project.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "memories-project")]
+pub struct MemoriesProjectContext {
+    #[serde(rename = "category")]
+    pub categories: Vec<MemoryCategoryContext>,
+}
+
+/// Shared tier — project memories shared across agents.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "memories-shared")]
+pub struct MemoriesSharedContext {
+    #[serde(rename = "category")]
+    pub categories: Vec<MemoryCategoryContext>,
+}
+
+/// All memory tiers combined.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "memories")]
+pub struct MemoriesContext {
+    #[serde(rename = "memories-core", skip_serializing_if = "Option::is_none")]
+    pub core: Option<MemoriesCoreContext>,
+    #[serde(rename = "memories-project", skip_serializing_if = "Option::is_none")]
+    pub project: Option<MemoriesProjectContext>,
+    #[serde(rename = "memories-shared", skip_serializing_if = "Option::is_none")]
+    pub shared: Option<MemoriesSharedContext>,
+}
+
+// ---------------------------------------------------------------------------
+// Resources (document index injected into prompts)
+// ---------------------------------------------------------------------------
+
+/// A single resource entry in the prompt index.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "resource")]
+pub struct ResourceContext {
+    #[serde(rename = "@name")]
+    pub name: String,
+    #[serde(rename = "@description")]
+    pub description: String,
+    #[serde(rename = "@created_by")]
+    pub created_by: String,
+    #[serde(rename = "@size")]
+    pub size: String,
+}
+
+/// Project-scoped resources.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "project")]
+pub struct ResourcesProjectContext {
+    #[serde(rename = "resource")]
+    pub resources: Vec<ResourceContext>,
+}
+
+/// Workspace-global resources.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "workspace")]
+pub struct ResourcesWorkspaceContext {
+    #[serde(rename = "resource")]
+    pub resources: Vec<ResourceContext>,
+}
+
+/// All resources combined.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "resources")]
+pub struct ResourcesContext {
+    #[serde(rename = "project", skip_serializing_if = "Option::is_none")]
+    pub project: Option<ResourcesProjectContext>,
+    #[serde(rename = "workspace", skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ResourcesWorkspaceContext>,
+}
+
+// ---------------------------------------------------------------------------
+// Documents (project document listing)
+// ---------------------------------------------------------------------------
+
+/// A single document entry in the project listing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "doc")]
+pub struct DocumentContext {
+    #[serde(rename = "@name")]
+    pub name: String,
+    #[serde(rename = "@size")]
+    pub size: String,
+}
+
+/// Project documents listing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename = "project_documents")]
+pub struct ProjectDocumentsContext {
+    #[serde(rename = "@path")]
+    pub path: String,
+    #[serde(rename = "doc")]
+    pub documents: Vec<DocumentContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +578,7 @@ mod tests {
                 items: vec!["architecture".into(), "patterns".into()],
             }),
             project_focus: None,
+            shared_focus: None,
         };
         let xml = nenjo_xml::to_xml_pretty(&profile, 2);
         assert!(xml.contains("<memory_profile>"));

@@ -63,7 +63,11 @@ pub async fn handle_chat(
             Some(mut session) => {
                 session.turn_number += 1;
                 let instance = session.runner.instance().clone();
-                nenjo::AgentRunner::from_instance(instance)
+                nenjo::AgentRunner::from_instance(
+                    instance,
+                    session.runner.memory().cloned(),
+                    session.runner.memory_scope().cloned(),
+                )
             }
             None => {
                 // Domain session not found — likely from a previous harness run.

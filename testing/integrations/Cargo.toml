@@ -12,6 +12,10 @@ path = "tests/agents.rs"
 name = "delegation"
 path = "tests/delegation.rs"
 
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
+
 [dependencies]
 nenjo = { workspace = true }
 nenjo-models = { workspace = true }
