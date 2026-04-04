@@ -466,10 +466,9 @@ async fn scope_system_agent_collapses_to_core() {
         .await
         .unwrap();
 
-    // Project and core should contain both facts (same underlying dir)
-    let project_xml = &vars["memories.project"];
-    assert!(project_xml.contains("fact-a"));
-    assert!(project_xml.contains("fact-b"));
+    // Project tier is skipped when it resolves to the same namespace as core
+    // (system agents with no project), so only core should appear.
+    assert!(!vars.contains_key("memories.project"));
 
     let core_xml = &vars["memories.core"];
     assert!(core_xml.contains("fact-a"));

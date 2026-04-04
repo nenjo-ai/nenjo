@@ -226,9 +226,14 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
 
 /// Full re-fetch of all manifest data (fallback).
 async fn full_refresh(ctx: &CommandContext) -> Result<()> {
-    crate::manifest::sync(&ctx.api, &ctx.config.data_dir, &ctx.config.workspace_dir).await?;
+    crate::manifest::sync(
+        &ctx.api,
+        &ctx.config.manifests_dir,
+        &ctx.config.workspace_dir,
+    )
+    .await?;
 
-    let loader = FileSystemManifestLoader::new(&ctx.config.data_dir);
+    let loader = FileSystemManifestLoader::new(&ctx.config.manifests_dir);
     let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
     let servers = crate::harness::override_platform_mcp_url(
@@ -246,24 +251,26 @@ async fn full_refresh(ctx: &CommandContext) -> Result<()> {
 /// Persist the current manifest to the filesystem cache for this resource type.
 fn persist_cache(ctx: &CommandContext, rt: ResourceType) {
     let manifest = ctx.provider().manifest().clone();
-    let data_dir = &ctx.config.data_dir;
+    let manifests_dir = &ctx.config.manifests_dir;
 
     let result = match rt {
-        ResourceType::Model => atomic_write(data_dir, "models.json", &manifest.models),
-        ResourceType::Agent => atomic_write(data_dir, "agents.json", &manifest.agents),
-        ResourceType::Routine => atomic_write(data_dir, "routines.json", &manifest.routines),
-        ResourceType::Project => atomic_write(data_dir, "projects.json", &manifest.projects),
-        ResourceType::Skill => atomic_write(data_dir, "skills.json", &manifest.skills),
-        ResourceType::Council => atomic_write(data_dir, "councils.json", &manifest.councils),
-        ResourceType::Lambda => atomic_write(data_dir, "lambdas.json", &manifest.lambdas),
-        ResourceType::Ability => atomic_write(data_dir, "abilities.json", &manifest.abilities),
-        ResourceType::ContextBlock => {
-            atomic_write(data_dir, "context_blocks.json", &manifest.context_blocks)
-        }
+        ResourceType::Model => atomic_write(manifests_dir, "models.json", &manifest.models),
+        ResourceType::Agent => atomic_write(manifests_dir, "agents.json", &manifest.agents),
+        ResourceType::Routine => atomic_write(manifests_dir, "routines.json", &manifest.routines),
+        ResourceType::Project => atomic_write(manifests_dir, "projects.json", &manifest.projects),
+        ResourceType::Skill => atomic_write(manifests_dir, "skills.json", &manifest.skills),
+        ResourceType::Council => atomic_write(manifests_dir, "councils.json", &manifest.councils),
+        ResourceType::Lambda => atomic_write(manifests_dir, "lambdas.json", &manifest.lambdas),
+        ResourceType::Ability => atomic_write(manifests_dir, "abilities.json", &manifest.abilities),
+        ResourceType::ContextBlock => atomic_write(
+            manifests_dir,
+            "context_blocks.json",
+            &manifest.context_blocks,
+        ),
         ResourceType::McpServer => {
-            atomic_write(data_dir, "mcp_servers.json", &manifest.mcp_servers)
+            atomic_write(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)
         }
-        ResourceType::Domain => atomic_write(data_dir, "domains.json", &manifest.domains),
+        ResourceType::Domain => atomic_write(manifests_dir, "domains.json", &manifest.domains),
         ResourceType::Document => return,
     };
 

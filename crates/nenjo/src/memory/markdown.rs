@@ -3,18 +3,22 @@
 //! Stores memory categories as markdown files with YAML frontmatter.
 //! Resources are stored as plain files with a `manifest.json` index.
 //!
+//! Both memories and resources live under `~/.nenjo/state/` so that all
+//! agent-generated state can be backed up from a single directory. The
+//! state dir is resolved as an absolute path, so it remains accessible
+//! regardless of the current working directory (including git worktrees).
+//!
 //! Directory layout:
 //! ```text
-//! {root}/
-//! ├── {namespace}/
-//! │   ├── {category}.md          # memory category file
-//! │   └── ...
-//! └── workspace/resources/
-//!     ├── manifest.json          # global resource index
-//!     ├── {file}                 # global resource
-//!     └── {slug}/
-//!         ├── manifest.json      # project resource index
-//!         └── {file}             # project resource
+//! {state}/
+//! ├── memory/
+//! │   └── {namespace}/
+//! │       ├── {category}.md      # memory category file
+//! │       └── ...
+//! └── {ns}/resources/
+//!     ├── manifest.json          # resource index
+//!     ├── {file}                 # resource file
+//!     └── ...
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -26,21 +30,21 @@ use super::types::{MemoryCategory, MemoryFact, ResourceEntry};
 
 /// File-based markdown memory backend.
 pub struct MarkdownMemory {
-    /// Root for memory categories (e.g. `~/.nenjo/memory/`).
+    /// Root for memory categories (e.g. `~/.nenjo/state/memory/`).
     root: PathBuf,
-    /// Root for resources (e.g. `~/.nenjo/workspace/`).
-    workspace_root: PathBuf,
+    /// Root for resources (e.g. `~/.nenjo/state/`).
+    resource_root: PathBuf,
 }
 
 impl MarkdownMemory {
-    /// Create a new markdown memory with memory and workspace roots.
+    /// Create a new markdown memory with memory and resource roots.
     ///
     /// Memory categories are stored under `memory_root/`.
-    /// Resources are stored under `workspace_root/resources/`.
-    pub fn new(memory_root: impl Into<PathBuf>, workspace_root: impl Into<PathBuf>) -> Self {
+    /// Resources are stored under `resource_root/{ns}/`.
+    pub fn new(memory_root: impl Into<PathBuf>, resource_root: impl Into<PathBuf>) -> Self {
         Self {
             root: memory_root.into(),
-            workspace_root: workspace_root.into(),
+            resource_root: resource_root.into(),
         }
     }
 
@@ -49,7 +53,7 @@ impl MarkdownMemory {
     }
 
     fn resource_dir(&self, ns: &str) -> PathBuf {
-        self.workspace_root.join(ns)
+        self.resource_root.join(ns)
     }
 
     fn category_path(&self, ns: &str, category: &str) -> PathBuf {
@@ -286,9 +290,9 @@ mod tests {
 
     fn temp_memory() -> (tempfile::TempDir, tempfile::TempDir, MarkdownMemory) {
         let mem_dir = tempfile::tempdir().unwrap();
-        let ws_dir = tempfile::tempdir().unwrap();
-        let memory = MarkdownMemory::new(mem_dir.path(), ws_dir.path());
-        (mem_dir, ws_dir, memory)
+        let res_dir = tempfile::tempdir().unwrap();
+        let memory = MarkdownMemory::new(mem_dir.path(), res_dir.path());
+        (mem_dir, res_dir, memory)
     }
 
     #[tokio::test]
@@ -501,14 +505,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_scope_project_under_workspace() {
-        let (_md, wd, mem) = temp_memory();
+    async fn resource_scope_project_under_state() {
+        let (_md, rd, mem) = temp_memory();
         let scope = super::super::types::MemoryScope::new("architect", Some("myapp"));
 
         assert_eq!(scope.resources_project, "myapp/resources");
         assert_eq!(scope.resources_global, "resources");
 
-        // Project resource goes under {workspace}/myapp/resources/
+        // Project resource goes under {state}/myapp/resources/
         mem.save_resource(
             &scope.resources_project,
             "prd.md",
@@ -519,7 +523,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Global resource goes under {workspace}/resources/
+        // Global resource goes under {state}/resources/
         mem.save_resource(
             &scope.resources_global,
             "standards.md",
@@ -530,9 +534,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Verify files are in the workspace dir, not memory dir
-        assert!(wd.path().join("myapp/resources/prd.md").exists());
-        assert!(wd.path().join("resources/standards.md").exists());
+        // Verify files are in the resource dir, not memory dir
+        assert!(rd.path().join("myapp/resources/prd.md").exists());
+        assert!(rd.path().join("resources/standards.md").exists());
 
         // Another agent on the same project sees the same resources
         let scope_b = super::super::types::MemoryScope::new("coder", Some("myapp"));

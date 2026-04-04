@@ -1,7 +1,7 @@
 //! Worker bootstrap — fetch and cache user data on startup.
 //!
 //! Calls `GET /api/v1/agents/bootstrap` and writes the response as individual
-//! JSON files under `~/.nenjo/data/`. If the backend is unreachable the worker
+//! JSON files under `~/.nenjo/manifests/`. If the backend is unreachable the worker
 //! continues with a warning; filesystem failures are hard errors.
 
 use anyhow::{Context, Result};
@@ -82,10 +82,14 @@ impl ManifestLoader for LocalManifestLoader {
 ///
 /// On network / API errors the function logs a warning and returns `Ok(())`
 /// so the worker can still start. Filesystem errors are propagated.
-pub async fn sync(api: &NenjoClient, data_dir: &Path, workspace_dir: &Path) -> Result<()> {
+pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path) -> Result<()> {
     // Ensure the data directory exists (filesystem error = hard fail)
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("Failed to create data directory: {}", data_dir.display()))?;
+    std::fs::create_dir_all(manifests_dir).with_context(|| {
+        format!(
+            "Failed to create manifests directory: {}",
+            manifests_dir.display()
+        )
+    })?;
 
     // Fetch bootstrap data — soft-fail on network/API errors
     let data = match api.fetch_manifest().await {
@@ -112,24 +116,24 @@ pub async fn sync(api: &NenjoClient, data_dir: &Path, workspace_dir: &Path) -> R
     // Write auth info (user_id + api_key_id) as a single file.
     debug!(user_id = %data.user_id, api_key_id = ?data.api_key_id, "Writing auth.json");
     atomic_write_json(
-        data_dir,
+        manifests_dir,
         "auth.json",
         &serde_json::json!({
             "user_id": data.user_id,
             "api_key_id": data.api_key_id,
         }),
     )?;
-    atomic_write_json(data_dir, "projects.json", &data.projects)?;
-    atomic_write_json(data_dir, "routines.json", &data.routines)?;
-    atomic_write_json(data_dir, "models.json", &data.models)?;
-    atomic_write_json(data_dir, "agents.json", &data.agents)?;
-    atomic_write_json(data_dir, "councils.json", &data.councils)?;
-    atomic_write_json(data_dir, "skills.json", &data.skills)?;
-    atomic_write_json(data_dir, "domains.json", &data.domains)?;
-    atomic_write_json(data_dir, "lambdas.json", &data.lambdas)?;
-    atomic_write_json(data_dir, "mcp_servers.json", &data.mcp_servers)?;
-    atomic_write_json(data_dir, "abilities.json", &data.abilities)?;
-    atomic_write_json(data_dir, "context_blocks.json", &data.context_blocks)?;
+    atomic_write_json(manifests_dir, "projects.json", &data.projects)?;
+    atomic_write_json(manifests_dir, "routines.json", &data.routines)?;
+    atomic_write_json(manifests_dir, "models.json", &data.models)?;
+    atomic_write_json(manifests_dir, "agents.json", &data.agents)?;
+    atomic_write_json(manifests_dir, "councils.json", &data.councils)?;
+    atomic_write_json(manifests_dir, "skills.json", &data.skills)?;
+    atomic_write_json(manifests_dir, "domains.json", &data.domains)?;
+    atomic_write_json(manifests_dir, "lambdas.json", &data.lambdas)?;
+    atomic_write_json(manifests_dir, "mcp_servers.json", &data.mcp_servers)?;
+    atomic_write_json(manifests_dir, "abilities.json", &data.abilities)?;
+    atomic_write_json(manifests_dir, "context_blocks.json", &data.context_blocks)?;
 
     // Sync lambda script files to workspace
     sync_lambdas(workspace_dir, &data.lambdas)?;

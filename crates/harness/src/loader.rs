@@ -1,4 +1,4 @@
-//! Filesystem manifest loader — reads cached bootstrap JSON from `~/.nenjo/data/`.
+//! Filesystem manifest loader — reads cached bootstrap JSON from `~/.nenjo/manifests/`.
 //!
 //! The bootstrap module fetches data from the backend API and writes JSON files.
 //! This loader reads those files and assembles a [`Manifest`].
@@ -16,25 +16,25 @@ use nenjo::manifest::{
 
 /// Loads a [`Manifest`] from cached JSON files on disk.
 ///
-/// Reads from a directory (typically `~/.nenjo/data/`) that was populated by
+/// Reads from a directory (typically `~/.nenjo/manifests/`) that was populated by
 /// the bootstrap module. Each resource type is stored as a separate JSON file.
 ///
 /// Note the naming quirk from bootstrap.rs:
 /// - `agents.json` contains **models** (not agents)
 /// - `agents.json` contains **agents**
 pub struct FileSystemManifestLoader {
-    data_dir: PathBuf,
+    manifests_dir: PathBuf,
 }
 
 impl FileSystemManifestLoader {
-    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(manifests_dir: impl Into<PathBuf>) -> Self {
         Self {
-            data_dir: data_dir.into(),
+            manifests_dir: manifests_dir.into(),
         }
     }
 
     fn load_json<T: serde::de::DeserializeOwned>(&self, filename: &str) -> Vec<T> {
-        let path = self.data_dir.join(filename);
+        let path = self.manifests_dir.join(filename);
         match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 warn!(file = %path.display(), error = %e, "Failed to parse cached JSON");
@@ -51,8 +51,8 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
         // Read auth info (user_id + api_key_id).
         // Falls back to legacy user_id.json for backward compat.
         let (user_id, api_key_id) = {
-            let auth_path = self.data_dir.join("auth.json");
-            let legacy_path = self.data_dir.join("user_id.json");
+            let auth_path = self.manifests_dir.join("auth.json");
+            let legacy_path = self.manifests_dir.join("user_id.json");
 
             if let Ok(s) = std::fs::read_to_string(&auth_path) {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
