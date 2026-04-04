@@ -43,6 +43,18 @@ pub async fn handle_task_execute(
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.config.workspace_dir.join(&pslug).join("repo");
 
+    let aname = assigned_agent_id.map(|id| agent_name(manifest, id));
+
+    info!(
+        agent = ?aname,
+        task_id = %task_id,
+        routine_id = ?routine_id,
+        execution_run_id = %execution_run_id,
+        project = %pslug,
+        title = %title,
+        "Task execution started"
+    );
+
     // Set up git worktree if the project has a synced repo.
     // If the repo exists but worktree creation fails, the task fails —
     // we don't run tasks against a dirty or shared working tree.

@@ -48,7 +48,13 @@ pub async fn handle_domain_enter(
                 },
             );
 
-            info!(agent = %aname, domain = %domain_name, %session_id, "Domain expansion");
+            info!(
+                agent = %aname,
+                agent_id = %agent_id,
+                domain = %domain_name,
+                %session_id,
+                "Domain session entered"
+            );
 
             let _ = ctx.response_tx.send(Response::AgentResponse {
                 payload: StreamEvent::DomainEntered {

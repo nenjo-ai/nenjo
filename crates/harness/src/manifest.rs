@@ -182,7 +182,7 @@ pub fn sync_lambdas(workspace_dir: &Path, lambdas: &[LambdaManifest]) -> Result<
         }
     }
 
-    info!(count = lambdas.len(), dir = %lambdas_dir.display(), "Lambda scripts synced");
+    debug!(count = lambdas.len(), dir = %lambdas_dir.display(), "Lambda scripts synced");
     Ok(())
 }
 

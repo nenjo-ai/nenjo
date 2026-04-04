@@ -46,10 +46,11 @@ pub async fn handle_chat(
 
     info!(
         agent = %aname,
+        agent_id = %agent_id,
         session = %session_id,
         domain_session = ?domain_session_id,
         history_len = history.len(),
-        "Routing chat"
+        "Chat request received"
     );
 
     // Cancel any previous execution for this session

@@ -1,11 +1,11 @@
 [package]
-name = "runner"
+name = "worker"
 version.workspace = true
 publish = false
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Agent worker runner for the Nenjo platform"
+description = "Agent worker for the Nenjo platform"
 
 [dependencies]
 harness = { workspace = true }
