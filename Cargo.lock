@@ -1853,8 +1853,8 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
- "runner",
  "tokio",
+ "worker",
 ]
 
 [[package]]
@@ -2629,23 +2629,6 @@ checksum = "a8a1f2315036ef6b1fbacd1972e8ee7688030b0a2121edfc2a6550febd41574d"
 dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "runner"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "clap",
- "dotenvy",
- "harness",
- "nenjo-eventbus",
- "nenjo-events",
- "rustls",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4497,6 +4480,23 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "worker"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dotenvy",
+ "harness",
+ "nenjo-eventbus",
+ "nenjo-events",
+ "rustls",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

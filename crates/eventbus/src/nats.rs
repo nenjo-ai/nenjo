@@ -362,7 +362,7 @@ impl NatsTransportBuilder {
             .event_callback(|event| async move {
                 match event {
                     async_nats::Event::Connected => {
-                        info!("NATS connected");
+                        debug!("NATS event: connected");
                     }
                     async_nats::Event::Disconnected => {
                         warn!("NATS disconnected, will attempt reconnection");
@@ -379,7 +379,7 @@ impl NatsTransportBuilder {
             .await
             .map_err(|e| EventBusError::Transport(format!("NATS connect failed: {e}")))?;
 
-        info!(url = %self.url, "connected to NATS");
+        debug!(url = %self.url, "Connected to NATS server");
 
         let jetstream = jetstream::new(client);
 
@@ -398,7 +398,7 @@ impl NatsTransportBuilder {
             .await
             .map_err(|e| EventBusError::Transport(format!("stream setup failed: {e}")))?;
 
-        info!(stream = %self.stream_name, "JetStream stream ready");
+        debug!(stream = %self.stream_name, "JetStream stream ready");
 
         Ok(NatsTransport {
             jetstream,

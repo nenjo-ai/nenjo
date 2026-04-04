@@ -299,7 +299,7 @@ impl Harness {
             }
         });
 
-        info!("Harness event loop started");
+        info!("Nenjo harness event loop started");
 
         // Main loop: dispatch commands to independent tasks.
         while let Some(received) = command_rx.recv().await {

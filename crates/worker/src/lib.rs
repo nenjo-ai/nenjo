@@ -1,11 +1,11 @@
-//! # runner
+//! # worker
 //!
-//! Agent worker runner for the Nenjo platform.
+//! Agent worker for the Nenjo platform.
 //!
 //! Boots the harness, connects to NATS via the event-bus transport layer,
 //! and runs the agent event loop. This is the implementation behind `nenjo run`.
 //!
-//! The runner is resilient to backend and NATS outages: startup and the event
+//! The worker is resilient to backend and NATS outages: startup and the event
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
@@ -16,7 +16,7 @@ use clap::Args;
 use harness::Harness;
 use harness::config::Config;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Maximum backoff between connection attempts.
@@ -37,13 +37,17 @@ pub struct RunArgs {
     pub backend_url: Option<String>,
 
     /// Log level filter (e.g. info, debug, trace, info,nenjo=debug)
-    #[arg(long, env = "RUST_LOG")]
+    #[arg(short, long, env = "RUST_LOG")]
     pub log_level: Option<String>,
 
     /// Worker capabilities (comma-separated). Default: all.
     /// Options: chat, task, cron, manifest, repo
     #[arg(long, env = "NENJO_CAPABILITIES", value_delimiter = ',')]
     pub capabilities: Option<Vec<String>>,
+
+    /// Show the log target (module path) in log output.
+    #[arg(long, env = "NENJO_LOG_TARGET")]
+    pub log_target: bool,
 }
 
 /// Initialize tracing, load config, boot harness, connect NATS, and run.
@@ -62,12 +66,21 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .or_else(|| std::env::var("RUST_LOG").ok())
         .unwrap_or_else(|| "info".into());
 
+    // Build the env filter, suppressing noisy third-party crates at info level.
+    // async_nats logs connection events at info which duplicates our own logs.
+    let filter = if log_filter.contains("async_nats") {
+        // User explicitly configured async_nats level — respect it.
+        tracing_subscriber::EnvFilter::new(&log_filter)
+    } else {
+        tracing_subscriber::EnvFilter::new(format!("{log_filter},async_nats=warn"))
+    };
+
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(log_filter))
-        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(args.log_target))
         .init();
 
-    info!("Starting Nenjo agent runner...");
+    info!("Starting Nenjo worker...");
 
     // Load configuration (config.toml + env overrides + API key validation)
     let mut config = Config::load_or_init()?;
@@ -118,23 +131,23 @@ pub async fn run(args: RunArgs) -> Result<()> {
         match run_once(&config, &shutdown).await {
             Ok(()) => {
                 // Clean shutdown (signal received) — exit.
-                info!("Runner shut down");
+                info!("Worker shut down");
                 break;
             }
             Err(e) => {
                 if shutdown.is_cancelled() {
-                    info!("Runner shut down");
+                    info!("Worker shut down");
                     break;
                 }
                 warn!(
                     error = %e,
                     retry_in = ?backoff,
-                    "Runner failed, retrying"
+                    "Worker failed, retrying"
                 );
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown.cancelled() => {
-                        info!("Runner shut down");
+                        info!("Worker shut down");
                         break;
                     }
                 }
@@ -162,7 +175,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
              Ensure the backend is updated and the API key is valid."
         )
     })?;
-    info!(%api_key_id, "Using API key ID as stable worker identifier");
+    debug!(%api_key_id, "Using API key ID as stable worker identifier");
 
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
         .url(config.nats_url())
