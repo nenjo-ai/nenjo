@@ -93,8 +93,8 @@ impl RoutineInput {
         self
     }
 
-    pub fn with_acceptance_criteria(mut self, criteria: impl Into<String>) -> Self {
-        self.acceptance_criteria = Some(criteria.into());
+    pub fn with_acceptance_criteria(mut self, criteria: Option<String>) -> Self {
+        self.acceptance_criteria = criteria;
         self
     }
 
@@ -210,6 +210,7 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
                 .with_task_type(&t.task_type)
                 .with_slug(&t.slug)
                 .with_complexity(&t.complexity)
+                .with_acceptance_criteria(t.acceptance_criteria.clone())
                 .with_git(t.git.clone())
         }
         crate::types::TaskType::Cron {
@@ -220,6 +221,7 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
             .with_task_id(t.task_id)
             .with_tags(t.tags.clone())
             .with_source(&t.source)
+            .with_acceptance_criteria(t.acceptance_criteria.clone())
             .with_git(t.git.clone())
             .with_cron_trigger(),
         crate::types::TaskType::Cron {

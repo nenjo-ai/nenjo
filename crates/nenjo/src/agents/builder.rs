@@ -192,7 +192,10 @@ impl AgentBuilder {
 
     /// Build the [`AgentRunner`].
     pub async fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
-        let mut policy = SecurityPolicy::default();
+        let mut policy = match &self.tool_factory {
+            Some(tf) => SecurityPolicy::with_workspace_dir(tf.workspace_dir()),
+            None => SecurityPolicy::default(),
+        };
         if let Some(dir) = &self.work_dir {
             policy.workspace_dir = dir.clone();
             // Agents running in a worktree are autonomous task executions —
