@@ -127,7 +127,9 @@ impl Harness {
 
         let provider_registry =
             ProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
-        let security = Arc::new(nenjo_tools::security::SecurityPolicy::default());
+        let security = Arc::new(nenjo_tools::security::SecurityPolicy::with_workspace_dir(
+            config.workspace_dir.clone(),
+        ));
         let runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter> = Arc::new(NativeRuntime);
         let platform_resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(
             nenjo::PlatformMcpResolver::new(config.backend_api_url(), &config.api_key),

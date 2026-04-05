@@ -164,6 +164,10 @@ impl ToolFactory for HarnessToolFactory {
     ) -> Vec<Arc<dyn Tool>> {
         self.build_tools(agent, &security).await
     }
+
+    fn workspace_dir(&self) -> std::path::PathBuf {
+        self.security.workspace_dir.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------

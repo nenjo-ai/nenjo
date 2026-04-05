@@ -123,7 +123,12 @@ pub enum Command {
     // -----------------------------------------------------------------
     /// Clone/pull a project repository.
     #[serde(rename = "repo.sync")]
-    RepoSync { project_id: Uuid, repo_url: String },
+    RepoSync {
+        project_id: Uuid,
+        repo_url: String,
+        /// Branch to sync. The clone/pull targets this branch.
+        target_branch: String,
+    },
 
     /// Remove a synced project repository.
     #[serde(rename = "repo.unsync")]

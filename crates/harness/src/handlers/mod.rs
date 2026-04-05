@@ -133,7 +133,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::RepoSync {
             project_id,
             repo_url,
-        } => repo::handle_repo_sync(&ctx, project_id, &repo_url).await,
+            target_branch,
+        } => repo::handle_repo_sync(&ctx, project_id, &repo_url, &target_branch).await,
 
         Command::RepoUnsync { project_id } => repo::handle_repo_unsync(&ctx, project_id).await,
 

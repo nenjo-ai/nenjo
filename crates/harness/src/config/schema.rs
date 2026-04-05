@@ -606,11 +606,21 @@ esac
     // personal settings carry through. The nenjo-specific sections below
     // (credential helper, user identity) take precedence over included values
     // because they appear after the [include].
+    //
+    // Skip the include if the user's gitconfig references the nenjo gitconfig
+    // (e.g. a stale `includeIf` from a previous version), which would cause
+    // a circular include loop (fatal: exceeded maximum include depth).
     let user_gitconfig = home.join(".gitconfig");
+    let include_user_gitconfig = user_gitconfig.exists()
+        && !fs::read_to_string(&user_gitconfig)
+            .unwrap_or_default()
+            .contains(".nenjo/gitconfig");
+
     let user_gitconfig_path = user_gitconfig.to_string_lossy();
 
-    let mut contents = format!(
-        r#"[include]
+    let mut contents = if include_user_gitconfig {
+        format!(
+            r#"[include]
     path = {user_gitconfig_path}
 [credential "https://github.com"]
     helper = {helper_path}
@@ -618,7 +628,22 @@ esac
     name = {git_name}
     email = {git_email}
 "#
-    );
+        )
+    } else {
+        if user_gitconfig.exists() {
+            tracing::warn!(
+                "Skipping include of ~/.gitconfig — references .nenjo/gitconfig (circular include)"
+            );
+        }
+        format!(
+            r#"[credential "https://github.com"]
+    helper = {helper_path}
+[user]
+    name = {git_name}
+    email = {git_email}
+"#
+        )
+    };
 
     if let Some(ref key) = signing_key {
         contents.push_str(&format!(
@@ -723,12 +748,12 @@ impl Config {
         };
         let config_path = nenjo_dir.join("config.toml");
 
-        if !nenjo_dir.exists() {
-            fs::create_dir_all(&nenjo_dir).context("Failed to create .nenjo directory")?;
-            fs::create_dir_all(nenjo_dir.join("workspace"))
-                .context("Failed to create workspace directory")?;
-        }
+        fs::create_dir_all(&nenjo_dir).context("Failed to create nenjo directory")?;
+        fs::create_dir_all(nenjo_dir.join("workspace"))
+            .context("Failed to create workspace directory")?;
         fs::create_dir_all(nenjo_dir.join("state")).context("Failed to create state directory")?;
+        fs::create_dir_all(nenjo_dir.join("manifests"))
+            .context("Failed to create manifests directory")?;
 
         let mut config = if config_path.exists() {
             let contents =
