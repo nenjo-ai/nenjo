@@ -43,6 +43,15 @@ pub async fn handle_task_execute(
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.config.workspace_dir.join(&pslug).join("repo");
 
+    // Resolve target branch from project settings.
+    let target_branch = manifest
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.settings.get("target_branch"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
     let aname = assigned_agent_id.map(|id| agent_name(manifest, id));
 
     info!(
@@ -83,7 +92,7 @@ pub async fn handle_task_execute(
         let start = std::time::Instant::now();
         let setup_result = {
             let _guard = git_lock.lock().await;
-            setup_worktree(&repo_dir, execution_run_id, task_slug).await
+            setup_worktree(&repo_dir, execution_run_id, task_slug, target_branch).await
         };
         match setup_result {
             Ok(wt) => {
@@ -480,10 +489,14 @@ fn evict_git_lock(
 ///
 /// Branch name: `agent/{short_id}/{task_slug}`
 /// Worktree path: `{workspace_dir}/{project_slug}/worktrees/{task_slug}`
+///
+/// When `configured_target` is set, the worktree is branched from that branch
+/// instead of detecting the remote's default HEAD.
 async fn setup_worktree(
     repo_dir: &Path,
     execution_run_id: Uuid,
     task_slug: &str,
+    configured_target: Option<&str>,
 ) -> Result<GitContext> {
     let short_id = &execution_run_id.to_string()[..8];
     let branch = format!("agent/{short_id}/{task_slug}");
@@ -498,10 +511,13 @@ async fn setup_worktree(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    // Determine default branch to base the worktree on
-    let target_branch = default_branch(repo_dir)
-        .await
-        .unwrap_or_else(|| "main".to_string());
+    // Use configured target branch, or detect default from remote
+    let target_branch = match configured_target {
+        Some(b) => b.to_string(),
+        None => default_branch(repo_dir)
+            .await
+            .unwrap_or_else(|| "main".to_string()),
+    };
 
     // Fetch latest from origin so the worktree starts from up-to-date state
     let fetch_output = tokio::process::Command::new("git")

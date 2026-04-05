@@ -346,6 +346,17 @@ fn skip_env_assignments(s: &str) -> &str {
 }
 
 impl SecurityPolicy {
+    /// Create a SecurityPolicy with a specific workspace directory.
+    ///
+    /// Use this instead of `Default` when a custom nenjo directory is configured
+    /// so that tool scoping and template variables resolve to the correct paths.
+    pub fn with_workspace_dir(workspace_dir: PathBuf) -> Self {
+        Self {
+            workspace_dir,
+            ..Default::default()
+        }
+    }
+
     /// Classify command risk. Any high-risk segment marks the whole command high.
     pub fn command_risk_level(&self, command: &str) -> CommandRiskLevel {
         let segments = split_on_unquoted_separators(command);

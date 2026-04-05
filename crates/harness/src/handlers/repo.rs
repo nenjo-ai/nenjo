@@ -15,18 +15,26 @@ pub async fn handle_repo_sync(
     ctx: &CommandContext,
     project_id: Uuid,
     repo_url: &str,
+    target_branch: &str,
 ) -> Result<()> {
     let provider = ctx.provider();
     let manifest = provider.manifest();
     let slug = project_slug(manifest, project_id);
     let repo_dir = ctx.config.workspace_dir.join(&slug).join("repo");
 
-    info!(%project_id, slug = %slug, %repo_url, dir = %repo_dir.display(), "Syncing repo");
+    info!(
+        %project_id,
+        slug = %slug,
+        %repo_url,
+        %target_branch,
+        dir = %repo_dir.display(),
+        "Syncing repo"
+    );
 
     let result = if repo_dir.join(".git").exists() {
-        git_pull(&repo_dir).await
+        git_pull(&repo_dir, target_branch).await
     } else {
-        git_clone(repo_url, &repo_dir).await
+        git_clone(repo_url, &repo_dir, target_branch).await
     };
 
     // Notify backend of sync result via NATS response channel
@@ -80,15 +88,21 @@ pub async fn handle_repo_unsync(ctx: &CommandContext, project_id: Uuid) -> Resul
     Ok(())
 }
 
-/// Clone a repository to the target directory.
-async fn git_clone(repo_url: &str, target: &Path) -> Result<()> {
+/// Clone a repository to the target directory, checking out `target_branch`.
+async fn git_clone(repo_url: &str, target: &Path, target_branch: &str) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
     let output = tokio::process::Command::new("git")
-        .args(["clone", repo_url])
+        .args([
+            "clone",
+            "--branch",
+            target_branch,
+            "--no-single-branch",
+            repo_url,
+        ])
         .arg(target)
         .output()
         .await
@@ -102,11 +116,13 @@ async fn git_clone(repo_url: &str, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Pull latest changes in an existing repository.
-async fn git_pull(repo_dir: &Path) -> Result<()> {
-    // Fetch + reset to handle any local divergence cleanly
+/// Pull latest changes in an existing repository, resetting to `target_branch`.
+async fn git_pull(repo_dir: &Path, target_branch: &str) -> Result<()> {
+    // Use an explicit refspec so the fetch succeeds even if the repo was
+    // previously cloned with --single-branch for a different branch.
+    let refspec = format!("+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}");
     let fetch = tokio::process::Command::new("git")
-        .args(["fetch", "origin"])
+        .args(["fetch", "origin", &refspec])
         .current_dir(repo_dir)
         .output()
         .await
@@ -117,13 +133,8 @@ async fn git_pull(repo_dir: &Path) -> Result<()> {
         anyhow::bail!("git fetch failed: {}", stderr.trim());
     }
 
-    // Determine default branch
-    let branch = default_branch(repo_dir)
-        .await
-        .unwrap_or_else(|| "main".to_string());
-
     let reset = tokio::process::Command::new("git")
-        .args(["reset", "--hard", &format!("origin/{branch}")])
+        .args(["reset", "--hard", &format!("origin/{target_branch}")])
         .current_dir(repo_dir)
         .output()
         .await
@@ -135,29 +146,6 @@ async fn git_pull(repo_dir: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Get the default branch name (HEAD reference from origin).
-async fn default_branch(repo_dir: &Path) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
-        .current_dir(repo_dir)
-        .output()
-        .await
-        .ok()?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Strip "origin/" prefix if present
-        Some(
-            branch
-                .strip_prefix("origin/")
-                .unwrap_or(&branch)
-                .to_string(),
-        )
-    } else {
-        None
-    }
 }
 
 /// Remove all git worktrees for a repository.
