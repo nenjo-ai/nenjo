@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/nenjo-ai/nenjo/compare/v0.4.0...v0.5.0) - 2026-04-05
+
+### Added
+
+- git worktree isolation, agent identity tracking, and config-driven git identity
+
+### Fixed
+
+- address dependabot and codeql findings
+- clean up log output
+
+### Other
+
+- refactor folder structure for mems and res
+
 ## [0.4.0](https://github.com/nenjo-ai/nenjo/compare/v0.3.2...v0.4.0) - 2026-04-04
 
 ### Added
