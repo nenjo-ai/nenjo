@@ -19,7 +19,7 @@ use super::client::{McpClient, McpTool};
 
 /// Resolves platform tools for a given set of scopes.
 ///
-/// Implementations map `platform_scopes` (e.g. `["tasks:read", "agents:write"]`)
+/// Implementations map `platform_scopes` (e.g. `["projects:read", "agents:write"]`)
 /// to concrete [`Tool`] instances that the agent can invoke.
 #[async_trait]
 pub trait PlatformToolResolver: Send + Sync {
@@ -59,6 +59,11 @@ impl PlatformToolResolver for PlatformMcpResolver {
             return Vec::new();
         }
 
+        debug!(
+            scopes = ?platform_scopes,
+            "Resolving platform tools via MCP tools/list"
+        );
+
         let all_tools = match self.client.list_tools(Some(platform_scopes)).await {
             Ok(tools) => tools,
             Err(e) => {
@@ -67,10 +72,19 @@ impl PlatformToolResolver for PlatformMcpResolver {
             }
         };
 
+        // Consolidated tools (platform_read, platform_write, platform_graph)
+        // handle scope checking server-side at call time, so include them
+        // unconditionally. Legacy per-resource tools are still filtered client-side.
         let tools: Vec<Arc<dyn Tool>> = all_tools
             .into_iter()
-            .filter(|def| has_scope(platform_scopes, &def.scope))
-            .map(|def| -> Arc<dyn Tool> { Arc::new(McpTool::new(def, self.client.clone())) })
+            .filter(|def| def.scope.is_empty() || has_scope(platform_scopes, &def.scope))
+            .map(|def| -> Arc<dyn Tool> {
+                Arc::new(McpTool::new(
+                    def,
+                    self.client.clone(),
+                    platform_scopes.to_vec(),
+                ))
+            })
             .collect();
 
         debug!(
@@ -90,7 +104,7 @@ impl PlatformToolResolver for PlatformMcpResolver {
 /// Check if the given scopes grant access to the required scope.
 ///
 /// Write scopes implicitly include read access for the same resource.
-/// For example, `tasks:write` grants access to tools requiring `tasks:read`.
+/// For example, `projects:write` grants access to tools requiring `projects:read`.
 pub fn has_scope(scopes: &[String], required: &str) -> bool {
     if scopes.is_empty() {
         return true;
@@ -128,32 +142,32 @@ mod tests {
 
     #[test]
     fn has_scope_empty_is_full_access() {
-        assert!(has_scope(&[], "tasks:read"));
-        assert!(has_scope(&[], "tasks:write"));
+        assert!(has_scope(&[], "projects:read"));
+        assert!(has_scope(&[], "projects:write"));
     }
 
     #[test]
     fn has_scope_write_implies_read() {
-        let scopes = vec!["tasks:write".to_string()];
-        assert!(has_scope(&scopes, "tasks:read"));
-        assert!(has_scope(&scopes, "tasks:write"));
-        assert!(!has_scope(&scopes, "projects:read"));
+        let scopes = vec!["projects:write".to_string()];
+        assert!(has_scope(&scopes, "projects:read"));
+        assert!(has_scope(&scopes, "projects:write"));
+        assert!(!has_scope(&scopes, "agents:read"));
     }
 
     #[test]
     fn has_scope_exact_match() {
-        let scopes = vec!["tasks:read".to_string()];
-        assert!(has_scope(&scopes, "tasks:read"));
-        assert!(!has_scope(&scopes, "tasks:write"));
+        let scopes = vec!["projects:read".to_string()];
+        assert!(has_scope(&scopes, "projects:read"));
+        assert!(!has_scope(&scopes, "projects:write"));
     }
 
     #[test]
     fn has_scope_multiple() {
-        let scopes = vec!["tasks:read".to_string(), "agents:write".to_string()];
-        assert!(has_scope(&scopes, "tasks:read"));
+        let scopes = vec!["projects:read".to_string(), "agents:write".to_string()];
+        assert!(has_scope(&scopes, "projects:read"));
         assert!(has_scope(&scopes, "agents:write"));
         assert!(has_scope(&scopes, "agents:read")); // write implies read
-        assert!(!has_scope(&scopes, "tasks:write"));
-        assert!(!has_scope(&scopes, "projects:read"));
+        assert!(!has_scope(&scopes, "projects:write"));
+        assert!(!has_scope(&scopes, "models:read"));
     }
 }

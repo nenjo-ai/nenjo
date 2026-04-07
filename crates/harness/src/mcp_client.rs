@@ -46,8 +46,9 @@ pub struct McpToolDef {
     description: String,
     #[serde(rename = "inputSchema")]
     input_schema: serde_json::Value,
-    /// The scope required for this tool (e.g. "tasks:read").
-    /// Provided by the backend in the tools/list response.
+    /// Optional legacy per-tool scope. Generic platform tools may omit this
+    /// because scope is resolved dynamically from the call arguments.
+    #[serde(default)]
     scope: String,
 }
 
@@ -110,10 +111,12 @@ impl McpClient {
         &self,
         name: &str,
         arguments: serde_json::Value,
+        agent_scopes: Option<&[String]>,
     ) -> anyhow::Result<String> {
         let params = serde_json::json!({
             "name": name,
             "arguments": arguments,
+            "agent_scopes": agent_scopes,
         });
         let resp = self.rpc("tools/call", Some(params)).await?;
 
@@ -181,10 +184,11 @@ pub struct McpTool {
     input_schema: serde_json::Value,
     client: Arc<McpClient>,
     tool_category: ToolCategory,
+    agent_scopes: Vec<String>,
 }
 
 impl McpTool {
-    fn new(def: McpToolDef, client: Arc<McpClient>) -> Self {
+    fn new(def: McpToolDef, client: Arc<McpClient>, agent_scopes: Vec<String>) -> Self {
         let category = if def.scope.ends_with(":read") {
             ToolCategory::Read
         } else {
@@ -197,6 +201,7 @@ impl McpTool {
             input_schema: def.input_schema,
             client,
             tool_category: category,
+            agent_scopes,
         }
     }
 }
@@ -220,7 +225,11 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        match self.client.call_tool(&self.tool_name, args).await {
+        match self
+            .client
+            .call_tool(&self.tool_name, args, Some(&self.agent_scopes))
+            .await
+        {
             Ok(output) => Ok(ToolResult {
                 success: true,
                 output,
@@ -266,12 +275,12 @@ pub async fn mcp_tools_for_agent(
         }
     };
 
-    // Filter by the role's platform_scopes using the scope provided by the
-    // backend in each tool definition. No inference needed.
     let filtered: Vec<Box<dyn Tool>> = all_tools
         .into_iter()
-        .filter(|def| has_scope(platform_scopes, &def.scope))
-        .map(|def| -> Box<dyn Tool> { Box::new(McpTool::new(def, client.clone())) })
+        .filter(|def| def.scope.is_empty() || has_scope(platform_scopes, &def.scope))
+        .map(|def| -> Box<dyn Tool> {
+            Box::new(McpTool::new(def, client.clone(), platform_scopes.to_vec()))
+        })
         .collect();
 
     debug!(
@@ -306,22 +315,22 @@ mod tests {
 
     #[test]
     fn has_scope_empty_is_full_access() {
-        assert!(has_scope(&[], "tasks:read"));
-        assert!(has_scope(&[], "tasks:write"));
+        assert!(has_scope(&[], "projects:read"));
+        assert!(has_scope(&[], "projects:write"));
     }
 
     #[test]
     fn has_scope_write_implies_read() {
-        let scopes = vec!["tasks:write".to_string()];
-        assert!(has_scope(&scopes, "tasks:read"));
-        assert!(has_scope(&scopes, "tasks:write"));
-        assert!(!has_scope(&scopes, "projects:read"));
+        let scopes = vec!["projects:write".to_string()];
+        assert!(has_scope(&scopes, "projects:read"));
+        assert!(has_scope(&scopes, "projects:write"));
+        assert!(!has_scope(&scopes, "agents:read"));
     }
 
     #[test]
     fn has_scope_exact_match() {
-        let scopes = vec!["tasks:read".to_string()];
-        assert!(has_scope(&scopes, "tasks:read"));
-        assert!(!has_scope(&scopes, "tasks:write"));
+        let scopes = vec!["projects:read".to_string()];
+        assert!(has_scope(&scopes, "projects:read"));
+        assert!(!has_scope(&scopes, "projects:write"));
     }
 }

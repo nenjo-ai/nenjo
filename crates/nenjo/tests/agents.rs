@@ -157,11 +157,11 @@ fn test_manifest() -> Manifest {
         color: None,
         model_id: Some(model.id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     };
 
     Manifest {
@@ -399,21 +399,29 @@ struct MockPlatformResolver;
 #[async_trait::async_trait]
 impl nenjo::PlatformToolResolver for MockPlatformResolver {
     async fn resolve_tools(&self, platform_scopes: &[String]) -> Vec<Arc<dyn Tool>> {
-        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut tool_names: Vec<&str> = Vec::new();
         for scope in platform_scopes {
-            let tool_name = match scope.as_str() {
-                "tasks:read" => "app.nenjo.platform/tasks_list",
-                "tasks:write" => "app.nenjo.platform/tasks_create",
-                "agents:read" => "app.nenjo.platform/agents_list",
-                "agents:write" => "app.nenjo.platform/agents_create",
-                "projects:read" => "app.nenjo.platform/projects_list",
+            let tool_name = match scope.split(':').next().unwrap_or_default() {
+                "agents" => "app.nenjo.platform/agents",
+                "projects" => "app.nenjo.platform/projects",
+                "routines" => "app.nenjo.platform/routines",
+                "mcp_servers" => "app.nenjo.platform/mcp_servers",
+                "chat" => "app.nenjo.platform/chat",
+                "models" => "app.nenjo.platform/models",
                 _ => continue,
             };
-            tools.push(Arc::new(FakePlatformTool {
-                tool_name: tool_name.to_string(),
-            }));
+            if !tool_names.contains(&tool_name) {
+                tool_names.push(tool_name);
+            }
         }
-        tools
+        tool_names
+            .into_iter()
+            .map(|tool_name| {
+                Arc::new(FakePlatformTool {
+                    tool_name: tool_name.to_string(),
+                }) as Arc<dyn Tool>
+            })
+            .collect()
     }
 }
 
@@ -425,14 +433,15 @@ fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
     AbilityManifest {
         id: Uuid::new_v4(),
         name: name.into(),
+        path: String::new(),
         display_name: None,
         description: Some(format!("{name} ability")),
         activation_condition: format!("when {name} is needed"),
         prompt: format!("You are the {name} ability."),
         platform_scopes: scopes.into_iter().map(String::from).collect(),
-        skill_ids: vec![],
         mcp_server_ids: vec![],
         tool_filter: serde_json::json!({}),
+        is_system: false,
     }
 }
 
@@ -444,6 +453,7 @@ fn domain_manifest_with_config(
     DomainManifest {
         id: Uuid::new_v4(),
         name: name.into(),
+        path: String::new(),
         display_name: name.into(),
         description: Some(format!("{name} domain")),
         command: name.into(),
@@ -495,11 +505,11 @@ fn manifest_with_abilities_and_domains(
         color: None,
         model_id: Some(model.id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: agent_domains,
         platform_scopes: agent_scopes.into_iter().map(String::from).collect(),
         mcp_server_ids: vec![],
         abilities: agent_abilities,
+        prompt_locked: false,
     };
 
     Manifest {
@@ -524,12 +534,12 @@ fn manifest_with_abilities_and_domains(
 // ===========================================================================
 
 #[tokio::test]
-async fn ability_agent_has_use_ability_and_platform_tools() {
+async fn ability_agent_has_per_ability_tools_and_platform_tools() {
     let ability = ability_manifest("writer", vec!["agents:write"]);
     let manifest = manifest_with_abilities_and_domains(
         vec![ability.id],
         vec![],
-        vec!["tasks:read"],
+        vec!["projects:read"],
         vec![ability],
         vec![],
     );
@@ -557,19 +567,69 @@ async fn ability_agent_has_use_ability_and_platform_tools() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"app.nenjo.platform/tasks_list"),
-        "base agent should have tasks_list, got: {tool_names:?}"
+        tool_names.contains(&"app.nenjo.platform/projects"),
+        "base agent should have platform/projects, got: {tool_names:?}"
     );
     assert!(
-        tool_names.contains(&"use_ability"),
-        "base agent should have use_ability, got: {tool_names:?}"
+        tool_names.contains(&"ability/writer"),
+        "base agent should have ability/writer, got: {tool_names:?}"
     );
 }
 
 #[tokio::test]
-async fn agent_without_abilities_has_no_use_ability() {
+async fn abilities_with_same_name_in_different_paths_get_distinct_tool_names() {
+    let mut frontend = ability_manifest("review", vec!["projects:read"]);
+    frontend.path = "frontend".into();
+    let frontend_id = frontend.id;
+
+    let mut backend = ability_manifest("review", vec!["projects:read"]);
+    backend.path = "backend".into();
+    let backend_id = backend.id;
+
+    let manifest = manifest_with_abilities_and_domains(
+        vec![frontend_id, backend_id],
+        vec![],
+        vec!["projects:read"],
+        vec![frontend, backend],
+        vec![],
+    );
+
+    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(MockPlatformToolFactory)
+        .with_platform_resolver(resolver)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let specs = runner.instance().tool_specs();
+    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(
+        tool_names.contains(&"ability/frontend.review"),
+        "missing frontend review tool: {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"ability/backend.review"),
+        "missing backend review tool: {tool_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn agent_without_abilities_has_no_ability_tools() {
     let manifest =
-        manifest_with_abilities_and_domains(vec![], vec![], vec!["tasks:read"], vec![], vec![]);
+        manifest_with_abilities_and_domains(vec![], vec![], vec!["projects:read"], vec![], vec![]);
 
     let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
 
@@ -593,10 +653,10 @@ async fn agent_without_abilities_has_no_use_ability() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        !tool_names.contains(&"use_ability"),
-        "agent without abilities should not have use_ability, got: {tool_names:?}"
+        !tool_names.iter().any(|n| n.starts_with("ability/")),
+        "agent without abilities should not have ability tools, got: {tool_names:?}"
     );
-    assert!(tool_names.contains(&"app.nenjo.platform/tasks_list"));
+    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
 }
 
 // ===========================================================================
@@ -609,7 +669,7 @@ async fn domain_expansion_adds_scopes_and_tools() {
     let manifest = manifest_with_abilities_and_domains(
         vec![],
         vec![domain.id],
-        vec!["tasks:read"],
+        vec!["projects:read"],
         vec![],
         vec![domain],
     );
@@ -633,22 +693,22 @@ async fn domain_expansion_adds_scopes_and_tools() {
         .await
         .unwrap();
 
-    // Before: only tasks_list
+    // Before: only platform/projects
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"app.nenjo.platform/tasks_list"));
-    assert!(!tool_names.contains(&"app.nenjo.platform/agents_create"));
+    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
+    assert!(!tool_names.contains(&"app.nenjo.platform/agents"));
 
-    // After: also agents_create
+    // After: also platform/agents
     let domain_runner = runner.domain_expansion("creator").await.unwrap();
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"app.nenjo.platform/tasks_list"),
+        tool_names.contains(&"app.nenjo.platform/projects"),
         "domain should preserve parent tools, got: {tool_names:?}"
     );
     assert!(
-        tool_names.contains(&"app.nenjo.platform/agents_create"),
+        tool_names.contains(&"app.nenjo.platform/agents"),
         "domain should add scope-resolved tools, got: {tool_names:?}"
     );
     assert!(
@@ -662,13 +722,13 @@ async fn domain_expansion_adds_scopes_and_tools() {
 }
 
 #[tokio::test]
-async fn domain_expansion_activates_abilities_and_injects_use_ability() {
-    let ability = ability_manifest("code-review", vec!["tasks:write"]);
+async fn domain_expansion_activates_abilities_and_injects_ability_tools() {
+    let ability = ability_manifest("code-review", vec!["projects:write"]);
     let domain = domain_manifest_with_config("reviewer", vec!["code-review"], vec![]);
     let manifest = manifest_with_abilities_and_domains(
         vec![], // agent has no abilities
         vec![domain.id],
-        vec!["tasks:read"],
+        vec!["projects:read"],
         vec![ability],
         vec![domain],
     );
@@ -692,10 +752,10 @@ async fn domain_expansion_activates_abilities_and_injects_use_ability() {
         .await
         .unwrap();
 
-    // Before: no abilities, no use_ability
+    // Before: no abilities, no ability tools
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(!tool_names.contains(&"use_ability"));
+    assert!(!tool_names.iter().any(|n| n.starts_with("ability/")));
     assert!(
         runner
             .instance()
@@ -704,13 +764,13 @@ async fn domain_expansion_activates_abilities_and_injects_use_ability() {
             .is_empty()
     );
 
-    // After: ability activated, use_ability injected
+    // After: ability activated, per-ability tool injected
     let domain_runner = runner.domain_expansion("reviewer").await.unwrap();
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"use_ability"),
-        "domain should inject use_ability, got: {tool_names:?}"
+        tool_names.contains(&"ability/code-review"),
+        "domain should inject ability/code-review, got: {tool_names:?}"
     );
 
     let ability_names: Vec<&str> = domain_runner
@@ -733,7 +793,7 @@ async fn domain_expansion_with_scopes_and_abilities() {
     let manifest = manifest_with_abilities_and_domains(
         vec![],
         vec![domain.id],
-        vec!["tasks:read"],
+        vec!["projects:read"],
         vec![ability],
         vec![domain],
     );
@@ -761,9 +821,9 @@ async fn domain_expansion_with_scopes_and_abilities() {
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(tool_names.contains(&"app.nenjo.platform/tasks_list"));
-    assert!(tool_names.contains(&"app.nenjo.platform/agents_create"));
-    assert!(tool_names.contains(&"use_ability"));
+    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
+    assert!(tool_names.contains(&"app.nenjo.platform/agents"));
+    assert!(tool_names.contains(&"ability/deployer"));
 
     let ability_names: Vec<&str> = domain_runner
         .instance()
@@ -782,7 +842,7 @@ async fn domain_expansion_does_not_duplicate_existing_abilities() {
     let manifest = manifest_with_abilities_and_domains(
         vec![ability.id], // agent already has this ability
         vec![domain.id],
-        vec!["tasks:read"],
+        vec!["projects:read"],
         vec![ability],
         vec![domain],
     );

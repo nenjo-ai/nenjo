@@ -118,10 +118,6 @@ impl NenjoClient {
         self.fetch_resource(&format!("/api/v1/lambdas/{id}")).await
     }
 
-    pub async fn fetch_skill(&self, id: Uuid) -> Result<Option<SkillManifest>> {
-        self.fetch_resource(&format!("/api/v1/skills/{id}")).await
-    }
-
     pub async fn fetch_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
         self.fetch_resource(&format!("/api/v1/domains/{id}")).await
     }

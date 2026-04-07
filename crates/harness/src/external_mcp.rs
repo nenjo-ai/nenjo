@@ -158,7 +158,7 @@ struct ExternalMcpToolDef {
     description: Option<String>,
     #[serde(rename = "inputSchema")]
     input_schema: serde_json::Value,
-    /// MCP scope required for this tool (e.g. "tasks:read").
+    /// MCP scope required for this tool (e.g. "projects:read").
     /// Only present for Nenjo platform tools — external servers don't have scopes.
     #[serde(default)]
     scope: Option<String>,
@@ -656,7 +656,7 @@ impl ExternalMcpPool {
     ///
     /// When `scopes` is provided, only tools whose `scope` field matches the
     /// given scopes are included. This is used for the internal Nenjo platform
-    /// server where each tool has a scope (e.g. "tasks:read"). External servers
+    /// server where each tool has a scope (e.g. "projects:read"). External servers
     /// have no per-tool scopes — pass `None` for those.
     pub async fn tools_for_agent(
         self: &Arc<Self>,

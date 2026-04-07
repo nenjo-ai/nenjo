@@ -190,17 +190,12 @@ pub struct MemoryProfile {
     /// What this role wants remembered as project-specific knowledge.
     #[serde(default)]
     pub project_focus: Vec<String>,
-    /// Categories this role cares about most (prioritized in retrieval).
-    #[serde(default)]
-    pub priority_categories: Vec<String>,
 }
 
 impl MemoryProfile {
     /// Returns true if the profile has any focus configured.
     pub fn is_empty(&self) -> bool {
-        self.core_focus.is_empty()
-            && self.project_focus.is_empty()
-            && self.priority_categories.is_empty()
+        self.core_focus.is_empty() && self.project_focus.is_empty()
     }
 }
 
@@ -318,7 +313,7 @@ pub struct DomainToolConfig {
     pub inject_categories: Vec<String>,
     /// Additional platform scopes to grant when this domain is active.
     /// Escalates the role's base platform_scopes with extra MCP access.
-    /// Example: ["tasks:write", "routines:write"]
+    /// Example: ["projects:write", "routines:write"]
     #[serde(default)]
     pub additional_scopes: Vec<String>,
     /// Activate external MCP servers by name for this domain.

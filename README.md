@@ -85,7 +85,11 @@ println!("{}", output.text);
 let mut handle = runner.chat_stream("Refactor the auth module").await?;
 while let Some(event) = handle.recv().await {
     match event {
-        nenjo::TurnEvent::ToolCallStart { tool_name, .. } => println!("calling {tool_name}..."),
+        nenjo::TurnEvent::ToolCallStart { calls } => {
+            for call in calls {
+                println!("calling {}...", call.tool_name);
+            }
+        }
         nenjo::TurnEvent::Done { .. } => break,
         _ => {}
     }

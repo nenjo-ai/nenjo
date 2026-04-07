@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct AgentConfig {
     pub compact_context: bool,
     pub parallel_tools: bool,
+    #[serde(default)]
+    pub execution_traces: bool,
     #[serde(default = "default_agent_max_tool_iterations")]
     pub max_tool_iterations: usize,
     #[serde(default = "default_agent_max_history_messages")]
@@ -37,6 +39,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             compact_context: false,
+            execution_traces: false,
             max_tool_iterations: default_agent_max_tool_iterations(),
             max_history_messages: default_agent_max_history_messages(),
             parallel_tools: true,

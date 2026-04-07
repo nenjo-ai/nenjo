@@ -1,14 +1,57 @@
 //! Chat command handlers.
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo_events::{Response, StreamEvent};
 use nenjo_models::ChatMessage;
 
 use super::event_bridge::{agent_name, project_slug, turn_event_to_stream_event};
-use crate::harness::{ActiveExecution, CommandContext, ExecutionKind};
+use crate::domain_session_store::PersistedDomainSession;
+use crate::execution_trace::ExecutionTraceRecorder;
+use crate::harness::{ActiveExecution, CommandContext, DomainSession, ExecutionKind};
+
+async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Result<bool> {
+    let Some(persisted) = ctx.domain_session_store.load(session_id)? else {
+        return Ok(false);
+    };
+
+    let provider = ctx.provider();
+    let base_runner = provider
+        .agent_by_id(persisted.agent_id)
+        .await?
+        .build()
+        .await?;
+    let domain_runner = base_runner
+        .domain_expansion(&persisted.domain_command)
+        .await?;
+
+    let mut instance = domain_runner.instance().clone();
+    if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
+        active_domain.session_id = persisted.session_id;
+        active_domain.turn_number = persisted.turn_number;
+    }
+
+    let restored_runner = nenjo::AgentRunner::from_instance(
+        instance,
+        domain_runner.memory().cloned(),
+        domain_runner.memory_scope().cloned(),
+    );
+
+    ctx.domains.insert(
+        persisted.session_id,
+        DomainSession {
+            runner: restored_runner,
+            agent_id: persisted.agent_id,
+            project_id: persisted.project_id,
+            domain_command: persisted.domain_command,
+            turn_number: persisted.turn_number,
+        },
+    );
+
+    Ok(true)
+}
 
 /// Handle a chat message — with cancellation and domain session support.
 ///
@@ -43,6 +86,13 @@ pub async fn handle_chat(
         .chat_history
         .read(&slug, &aname, session_id)
         .unwrap_or_default();
+    let mut trace_recorder = ExecutionTraceRecorder::for_chat(
+        &ctx.config.workspace_dir,
+        &slug,
+        &aname,
+        agent_id,
+        session_id,
+    );
 
     info!(
         agent = %aname,
@@ -60,9 +110,28 @@ pub async fn handle_chat(
 
     // Use domain-expanded runner if in an active domain session
     let runner = if let Some(dsid) = domain_session_id {
+        if !ctx.domains.contains_key(&dsid) {
+            match restore_domain_session(ctx, dsid).await {
+                Ok(true) => {
+                    info!(%dsid, "Restored persisted domain session on demand");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(%dsid, error = %e, "Failed to restore persisted domain session");
+                }
+            }
+        }
+
         match ctx.domains.get_mut(&dsid) {
             Some(mut session) => {
                 session.turn_number += 1;
+                let _ = ctx.domain_session_store.save(&PersistedDomainSession {
+                    session_id: dsid,
+                    project_id: session.project_id,
+                    agent_id: session.agent_id,
+                    domain_command: session.domain_command.clone(),
+                    turn_number: session.turn_number,
+                });
                 let instance = session.runner.instance().clone();
                 nenjo::AgentRunner::from_instance(
                     instance,
@@ -71,9 +140,9 @@ pub async fn handle_chat(
                 )
             }
             None => {
-                // Domain session not found — likely from a previous harness run.
-                // Notify the frontend to exit the stale domain so it can re-enter.
-                warn!(%dsid, "Domain session not found (stale from previous run?)");
+                // Domain session still could not be restored, so it is genuinely stale.
+                warn!(%dsid, "Domain session not found after restore attempt");
+                let _ = ctx.domain_session_store.delete(dsid);
                 let _ = ctx.response_tx.send(Response::AgentResponse {
                     payload: StreamEvent::DomainExited {
                         session_id: dsid,
@@ -123,7 +192,19 @@ pub async fn handle_chat(
             event = handle.recv() => {
                 match event {
                     Some(ev) => {
+                        debug!(event = ?ev, agent = %aname, "Chat handler received turn event");
+                        let _ = trace_recorder.record(&ev);
                         if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
+                            let se = match se {
+                                StreamEvent::Done { final_output, .. } => StreamEvent::Done {
+                                    final_output,
+                                    project_id,
+                                    agent_id: Some(agent_id),
+                                    session_id: Some(session_id),
+                                },
+                                other => other,
+                            };
+                            debug!(stream_event = %se, agent = %aname, "Chat handler sending stream event");
                             let _ = ctx.response_tx.send(Response::AgentResponse { payload: se });
                         }
                     }
@@ -133,6 +214,7 @@ pub async fn handle_chat(
             _ = cancel.cancelled() => {
                 info!(agent = %aname, session = %session_id, "Chat execution cancelled");
                 handle.abort();
+                let _ = trace_recorder.finalize_with_error("Cancelled");
                 let _ = ctx.response_tx.send(Response::AgentResponse {
                     payload: StreamEvent::Error { message: "Cancelled".to_string() },
                 });

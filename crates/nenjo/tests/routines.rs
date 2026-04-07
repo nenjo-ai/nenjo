@@ -231,11 +231,11 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
         color: None,
         model_id: Some(model_id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     }
 }
 

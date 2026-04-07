@@ -3,6 +3,7 @@
 use nenjo::manifest::Manifest;
 use nenjo_events::{Response, StepAgent, StreamEvent};
 use serde::Serialize;
+use tracing::debug;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -42,28 +43,98 @@ pub fn turn_event_to_stream_event(
     event: &nenjo::TurnEvent,
     agent_name: &str,
 ) -> Option<StreamEvent> {
-    match event {
-        nenjo::TurnEvent::ToolCallStart { calls } => {
+    let stream_event = match event {
+        nenjo::TurnEvent::AbilityStarted {
+            ability_tool_name,
+            ability_name,
+            task_input,
+            ..
+        } => Some(StreamEvent::AbilityActivated {
+            agent: agent_name.to_string(),
+            ability: ability_name.clone(),
+            ability_tool_name: ability_tool_name.clone(),
+            task_preview: task_input.clone(),
+        }),
+        nenjo::TurnEvent::ToolCallStart {
+            parent_tool_name,
+            calls,
+        } => {
             if calls.len() == 1 {
                 Some(StreamEvent::ToolInvoked {
                     tool_name: calls[0].tool_name.clone(),
                     tool_args: calls[0].tool_args.clone(),
                     agent_name: agent_name.to_string(),
+                    text_preview: calls[0].text_preview.clone(),
+                    parent_tool_name: parent_tool_name.clone(),
                 })
             } else {
                 Some(StreamEvent::ToolsInvoked {
                     tool_names: calls.iter().map(|c| c.tool_name.clone()).collect(),
                     tool_args: calls.iter().map(|c| c.tool_args.clone()).collect(),
                     agent_name: agent_name.to_string(),
+                    text_preview: calls.first().and_then(|c| c.text_preview.clone()),
+                    parent_tool_name: parent_tool_name.clone(),
                 })
             }
         }
-        nenjo::TurnEvent::ToolCallEnd { .. } => None,
+        nenjo::TurnEvent::ToolCallEnd {
+            parent_tool_name,
+            tool_name,
+            result,
+        } => Some(StreamEvent::ToolCompleted {
+            tool_name: tool_name.clone(),
+            success: result.success,
+            output_preview: result
+                .output
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| truncate_preview(line, 160)),
+            error_preview: result
+                .error
+                .as_deref()
+                .and_then(|err| err.lines().next())
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| truncate_preview(line, 160)),
+            parent_tool_name: parent_tool_name.clone(),
+        }),
+        nenjo::TurnEvent::AbilityCompleted {
+            ability_tool_name,
+            ability_name,
+            success,
+            final_output,
+        } => Some(StreamEvent::AbilityCompleted {
+            agent: agent_name.to_string(),
+            ability: ability_name.clone(),
+            ability_tool_name: ability_tool_name.clone(),
+            success: *success,
+            result_preview: final_output.clone(),
+        }),
         nenjo::TurnEvent::Paused => Some(StreamEvent::Paused),
         nenjo::TurnEvent::Resumed => Some(StreamEvent::Resumed),
         nenjo::TurnEvent::Done { output } => Some(StreamEvent::Done {
             final_output: output.text.clone(),
+            project_id: None,
+            agent_id: None,
+            session_id: None,
         }),
+    };
+
+    if let Some(ref stream_event) = stream_event {
+        debug!(turn_event = ?event, stream_event = %stream_event, agent = agent_name, "Bridged turn event to stream event");
+    } else {
+        debug!(turn_event = ?event, agent = agent_name, "Turn event did not produce a stream event");
+    }
+
+    stream_event
+}
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+        None => s.to_string(),
     }
 }
 
@@ -162,8 +233,13 @@ pub fn routine_event_to_response(
             .unwrap_or_default(),
             agent: None,
         }),
-        nenjo::RoutineEvent::AgentEvent { event, .. } => turn_event_to_stream_event(event, "agent")
-            .map(|se| Response::AgentResponse { payload: se }),
+        nenjo::RoutineEvent::AgentEvent { event, .. } => routine_agent_event_to_response(
+            event,
+            execution_run_id,
+            task_id,
+            current_agent_id,
+            manifest,
+        ),
         nenjo::RoutineEvent::Done { .. } => None,
         nenjo::RoutineEvent::CronCycleStarted { cycle } => Some(Response::TaskStepEvent {
             execution_run_id: eid,
@@ -191,6 +267,98 @@ pub fn routine_event_to_response(
                 agent: None,
             })
         }
+    }
+}
+
+fn routine_agent_event_to_response(
+    event: &nenjo::TurnEvent,
+    execution_run_id: Uuid,
+    task_id: Option<Uuid>,
+    current_agent_id: Option<Uuid>,
+    manifest: &Manifest,
+) -> Option<Response> {
+    let agent = resolve_agent(manifest, current_agent_id);
+
+    match event {
+        nenjo::TurnEvent::ToolCallStart { calls, .. } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: "step_started".to_string(),
+            step_name: calls
+                .first()
+                .map(|c| c.tool_name.clone())
+                .unwrap_or_else(|| "tool_call".to_string()),
+            step_type: "tool".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
+                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::ToolCallEnd {
+            tool_name, result, ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: if result.success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: tool_name.clone(),
+            step_type: "tool".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": result.success,
+                "output_preview": result.output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "error": result.error,
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::AbilityStarted {
+            ability_name,
+            task_input,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: "step_started".to_string(),
+            step_name: ability_name.clone(),
+            step_type: "ability".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "task_preview": task_input,
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::AbilityCompleted {
+            ability_name,
+            success,
+            final_output,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: if *success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: ability_name.clone(),
+            step_type: "ability".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": success,
+                "output_preview": final_output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+            }),
+            agent,
+        }),
+        // The enclosing routine step already emits StepCompleted/StepFailed.
+        // Suppress the nested agent Done event here to avoid a duplicate
+        // synthetic "agent_response" step in task timelines.
+        nenjo::TurnEvent::Done { .. } => None,
+        nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
     }
 }
 

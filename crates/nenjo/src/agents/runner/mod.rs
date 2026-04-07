@@ -11,7 +11,7 @@ use nenjo_models::ChatMessage;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use super::abilities::UseAbilityTool;
+use super::abilities::AbilityTool;
 use super::delegation::DelegateToTool;
 use super::instance::{AgentInstance, build_document_listing};
 use anyhow::Context;
@@ -135,16 +135,23 @@ impl AgentRunner {
 
         let has_abilities = !instance.prompt_context.available_abilities.is_empty();
 
-        // If the agent has abilities, add the use_ability tool.
+        // If the agent has abilities, register each as a dedicated tool.
         // Uses the manifest from DelegationSupport to resolve the ability's
-        // skills and MCP servers the same way the Provider does for the base agent.
+        // MCP servers the same way the Provider does for the base agent.
         if has_abilities {
             let m = manifest
                 .clone()
                 .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name.clone()))?;
             let base_instance = Arc::new(instance.clone());
-            let ability_tool = UseAbilityTool::new(base_instance, m, platform_resolver.clone());
-            instance.tools.push(Arc::new(ability_tool));
+            for ability in &instance.prompt_context.available_abilities {
+                let tool = AbilityTool::new(
+                    ability.clone(),
+                    base_instance.clone(),
+                    m.clone(),
+                    platform_resolver.clone(),
+                );
+                instance.tools.push(Arc::new(tool));
+            }
         }
 
         // If delegation is enabled (other agents exist + max_depth > 0), add delegate_to.
@@ -347,18 +354,23 @@ impl AgentRunner {
             }
         }
 
-        // If abilities are now available (either pre-existing or domain-activated)
-        // and the use_ability tool isn't already present, inject it.
+        // If abilities are now available (either pre-existing or domain-activated),
+        // register any missing dedicated ability tools.
         let has_abilities = !instance.prompt_context.available_abilities.is_empty();
-        let has_ability_tool = instance.tools.iter().any(|t| t.name() == "use_ability");
-        if has_abilities
-            && !has_ability_tool
-            && let Some(ref m) = self.manifest
-        {
+        if has_abilities && let Some(ref m) = self.manifest {
             let base_instance = Arc::new(instance.clone());
-            let ability_tool =
-                UseAbilityTool::new(base_instance, m.clone(), self.platform_resolver.clone());
-            instance.tools.push(Arc::new(ability_tool));
+            for ability in &instance.prompt_context.available_abilities {
+                let tool_name = super::abilities::ability_tool_name(ability);
+                if !instance.tools.iter().any(|t| t.name() == tool_name) {
+                    let tool = AbilityTool::new(
+                        ability.clone(),
+                        base_instance.clone(),
+                        m.clone(),
+                        self.platform_resolver.clone(),
+                    );
+                    instance.tools.push(Arc::new(tool));
+                }
+            }
         }
 
         Ok(Self {

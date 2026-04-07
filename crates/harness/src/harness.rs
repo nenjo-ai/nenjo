@@ -20,6 +20,7 @@ use nenjo_events::Response;
 use crate::api_client::NenjoClient;
 use crate::chat_history::ChatHistory;
 use crate::config::Config;
+use crate::domain_session_store::DomainSessionStore;
 use crate::external_mcp::ExternalMcpPool;
 use crate::handlers;
 use crate::loader::FileSystemManifestLoader;
@@ -54,6 +55,7 @@ pub struct DomainSession {
     pub runner: nenjo::AgentRunner,
     pub agent_id: Uuid,
     pub project_id: Uuid,
+    pub domain_command: String,
     pub turn_number: u32,
 }
 
@@ -72,6 +74,7 @@ pub struct CommandContext {
     pub provider: Arc<ArcSwap<Provider>>,
     pub response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
     pub chat_history: Arc<ChatHistory>,
+    pub domain_session_store: Arc<DomainSessionStore>,
     pub api: Arc<NenjoClient>,
     pub config: Config,
     pub external_mcp: Arc<ExternalMcpPool>,
@@ -102,6 +105,7 @@ pub struct Harness {
     config: Config,
     api: Arc<NenjoClient>,
     chat_history: Arc<ChatHistory>,
+    domain_session_store: Arc<DomainSessionStore>,
     external_mcp: Arc<ExternalMcpPool>,
     executions: ExecutionRegistry,
     domains: DomainRegistry,
@@ -147,6 +151,10 @@ impl Harness {
 
         let agent_config = config.agent.clone();
 
+        let template_source: Arc<dyn nenjo::context::TemplateSource> = Arc::new(
+            crate::manifest::FileTemplateSource::new(config.manifests_dir.join("context_blocks")),
+        );
+
         let provider = Provider::builder()
             .with_loader(loader)
             .with_model_factory(provider_registry)
@@ -154,22 +162,77 @@ impl Harness {
             .with_memory(mem)
             .with_agent_config(agent_config)
             .with_platform_resolver(platform_resolver)
+            .with_template_source(template_source)
             .build()
             .await
             .context("Failed to build Provider")?;
 
         let provider = Arc::new(ArcSwap::from_pointee(provider));
         let chat_history = Arc::new(ChatHistory::new(&config.workspace_dir));
+        let domain_session_store = Arc::new(DomainSessionStore::new(&config.workspace_dir));
         let executions = Arc::new(DashMap::new());
         let domains = Arc::new(DashMap::new());
         let git_locks = Arc::new(DashMap::new());
         let shutdown = CancellationToken::new();
+
+        for persisted in domain_session_store.load_all().unwrap_or_default() {
+            let provider_snapshot = provider.load_full();
+            let base_runner = match provider_snapshot.agent_by_id(persisted.agent_id).await {
+                Ok(builder) => match builder.build().await {
+                    Ok(runner) => runner,
+                    Err(e) => {
+                        warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain base runner");
+                        let _ = domain_session_store.delete(persisted.session_id);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    warn!(session_id = %persisted.session_id, error = %e, "Failed to find agent for persisted domain session");
+                    let _ = domain_session_store.delete(persisted.session_id);
+                    continue;
+                }
+            };
+
+            let domain_runner = match base_runner
+                .domain_expansion(&persisted.domain_command)
+                .await
+            {
+                Ok(runner) => runner,
+                Err(e) => {
+                    warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain session");
+                    let _ = domain_session_store.delete(persisted.session_id);
+                    continue;
+                }
+            };
+
+            let mut instance = domain_runner.instance().clone();
+            if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
+                active_domain.session_id = persisted.session_id;
+                active_domain.turn_number = persisted.turn_number;
+            }
+            let restored_runner = nenjo::AgentRunner::from_instance(
+                instance,
+                domain_runner.memory().cloned(),
+                domain_runner.memory_scope().cloned(),
+            );
+            domains.insert(
+                persisted.session_id,
+                DomainSession {
+                    runner: restored_runner,
+                    agent_id: persisted.agent_id,
+                    project_id: persisted.project_id,
+                    domain_command: persisted.domain_command,
+                    turn_number: persisted.turn_number,
+                },
+            );
+        }
 
         Ok(Self {
             provider,
             config,
             api,
             chat_history,
+            domain_session_store,
             external_mcp,
             executions,
             domains,
@@ -314,6 +377,7 @@ impl Harness {
                 provider: self.provider.clone(),
                 response_tx: response_tx.clone(),
                 chat_history: self.chat_history.clone(),
+                domain_session_store: self.domain_session_store.clone(),
                 api: self.api.clone(),
                 config: self.config.clone(),
                 external_mcp: self.external_mcp.clone(),

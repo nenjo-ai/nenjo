@@ -6,8 +6,7 @@ use crate::context::{MemoryProfileContext, TaskContext};
 
 use super::types::{
     AbilityContext, AgentContext, AvailableAbilitiesContext, AvailableAgentsContext,
-    AvailableDomainsContext, AvailableSkillsContext, DomainContext, GitContext, ProjectContext,
-    RoutineContext, SkillContext,
+    AvailableDomainsContext, DomainContext, GitContext, ProjectContext, RoutineContext,
 };
 
 /// All renderable data for template variable substitution.
@@ -28,7 +27,6 @@ pub struct RenderContextVars {
     pub available_agents: Vec<AgentContext>,
     pub available_abilities: Vec<AbilityContext>,
     pub available_domains: Vec<DomainContext>,
-    pub available_skills: Vec<SkillContext>,
 
     // Separate vars
     pub chat_message: String,
@@ -138,17 +136,6 @@ impl RenderContextVars {
                 2,
             )
         };
-        let available_skills_xml = if self.available_skills.is_empty() {
-            String::new()
-        } else {
-            nenjo_xml::to_xml_pretty(
-                &AvailableSkillsContext {
-                    skills: self.available_skills.clone(),
-                },
-                2,
-            )
-        };
-
         // Convert UUIDs, skipping nil values
         let agent_id = if self._self.id.is_nil() {
             String::new()
@@ -236,7 +223,6 @@ impl RenderContextVars {
             ("available_agents", available_agents_xml.as_str()),
             ("available_abilities", available_abilities_xml.as_str()),
             ("available_domains", available_domains_xml.as_str()),
-            ("available_skills", available_skills_xml.as_str()),
         ];
 
         for (key, value) in fields {

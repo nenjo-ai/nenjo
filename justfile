@@ -41,6 +41,7 @@ fmt-check:
 pr:
     just lint-fix
     just fmt
+    just test
 
 # Type-check without building
 check:

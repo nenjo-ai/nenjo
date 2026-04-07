@@ -127,11 +127,11 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         color: None,
         model_id: Some(model_id),
         model_name: Some("claude-haiku".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     }
 }
 
@@ -375,6 +375,7 @@ async fn use_ability_with_real_llm() {
     let ability = AbilityManifest {
         id: code_review_ability_id,
         name: "code_review".into(),
+        path: String::new(),
         display_name: Some("Code Review".into()),
         description: Some("Reviews code for bugs, style issues, and improvements".into()),
         activation_condition: "When the user asks for a code review".into(),
@@ -385,9 +386,9 @@ async fn use_ability_with_real_llm() {
                  Respond with a concise review in bullet points."
             .into(),
         platform_scopes: vec![],
-        skill_ids: vec![],
         mcp_server_ids: vec![],
         tool_filter: serde_json::json!({}),
+        is_system: false,
     };
 
     let manifest = Manifest {
@@ -414,12 +415,12 @@ async fn use_ability_with_real_llm() {
         .await
         .unwrap();
 
-    // Verify use_ability tool is present
+    // Verify per-ability tool is present
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"use_ability"),
-        "should have use_ability tool, got: {tool_names:?}"
+        tool_names.contains(&"ability/code_review"),
+        "should have ability/code_review tool, got: {tool_names:?}"
     );
 
     // Ask the agent to review some code — it should activate the code_review ability
@@ -432,11 +433,11 @@ async fn use_ability_with_real_llm() {
     println!("Response: {}", output.text);
     println!("Tool calls: {}", output.tool_calls);
 
-    // The agent should have called use_ability and returned a review
+    // The agent should have called the ability tool and returned a review
     assert!(!output.text.is_empty(), "should have a response");
     assert!(
         output.tool_calls >= 1,
-        "agent should have called use_ability, got: {}",
+        "agent should have called ability tool, got: {}",
         output.tool_calls
     );
     // The review should mention the bug (subtraction instead of addition)
@@ -477,6 +478,7 @@ async fn domain_expansion_with_real_llm() {
     let domain = DomainManifest {
         id: prd_domain_id,
         name: "prd".into(),
+        path: String::new(),
         display_name: "PRD Writer".into(),
         description: Some("Write product requirements documents".into()),
         command: "/prd".into(),

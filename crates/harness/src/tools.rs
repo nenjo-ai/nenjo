@@ -21,8 +21,8 @@ pub use nenjo_tools::{
     MemoryStoreTool, ScreenshotTool, ShellTool, WebFetchTool, WebSearchTool,
 };
 
-// Re-export UseAbilityTool from nenjo SDK.
-pub use nenjo::agents::abilities::UseAbilityTool;
+// Re-export AbilityTool from nenjo SDK.
+pub use nenjo::agents::abilities::AbilityTool;
 
 /// A tool factory that builds per-agent tool sets for the harness.
 ///
