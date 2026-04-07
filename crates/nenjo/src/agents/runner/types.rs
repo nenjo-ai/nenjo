@@ -12,17 +12,36 @@ use tokio::sync::Notify;
 pub struct ToolCall {
     pub tool_name: String,
     pub tool_args: String,
+    pub text_preview: Option<String>,
 }
 
 /// Events yielded by the turn loop during execution.
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
+    /// An ability sub-execution started.
+    AbilityStarted {
+        ability_tool_name: String,
+        ability_name: String,
+        task_input: String,
+        caller_history: Vec<ChatMessage>,
+    },
     /// One or more tool calls are starting.
-    ToolCallStart { calls: Vec<ToolCall> },
+    ToolCallStart {
+        parent_tool_name: Option<String>,
+        calls: Vec<ToolCall>,
+    },
     /// A tool call completed with a result.
     ToolCallEnd {
+        parent_tool_name: Option<String>,
         tool_name: String,
         result: ToolResult,
+    },
+    /// An ability sub-execution finished.
+    AbilityCompleted {
+        ability_tool_name: String,
+        ability_name: String,
+        success: bool,
+        final_output: String,
     },
     /// Execution was paused by the caller.
     Paused,

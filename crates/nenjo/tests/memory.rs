@@ -91,11 +91,11 @@ fn test_manifest() -> Manifest {
         color: None,
         model_id: Some(model.id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     };
 
     let project = ProjectManifest {
@@ -614,14 +614,15 @@ async fn ability_inherits_memory_vars() {
     let ability = AbilityManifest {
         id: Uuid::new_v4(),
         name: "code-review".into(),
+        path: String::new(),
         display_name: None,
         description: Some("Reviews code".into()),
         activation_condition: "when code review is needed".into(),
         prompt: "You review code.".into(),
         platform_scopes: vec![],
-        skill_ids: vec![],
         mcp_server_ids: vec![],
         tool_filter: serde_json::json!({}),
+        is_system: false,
     };
 
     let agent = nenjo::manifest::AgentManifest {
@@ -641,11 +642,11 @@ async fn ability_inherits_memory_vars() {
         color: None,
         model_id: Some(model.id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![ability.id],
+        prompt_locked: false,
     };
 
     let project = nenjo::manifest::ProjectManifest {
@@ -684,10 +685,13 @@ async fn ability_inherits_memory_vars() {
         .await
         .unwrap();
 
-    // The agent should have use_ability tool
+    // The agent should have per-ability tool
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"use_ability"), "should have use_ability");
+    assert!(
+        names.contains(&"ability/code-review"),
+        "should have ability/code-review"
+    );
     assert!(names.contains(&"memory_store"), "should have memory_store");
 
     // Memory vars should be empty on the instance (loaded at execution time)
@@ -727,6 +731,7 @@ async fn domain_expansion_preserves_memory() {
     let domain = DomainManifest {
         id: Uuid::new_v4(),
         name: "prd".into(),
+        path: String::new(),
         display_name: "PRD Mode".into(),
         description: Some("Product requirements".into()),
         command: "/prd".into(),
@@ -760,11 +765,11 @@ async fn domain_expansion_preserves_memory() {
         color: None,
         model_id: Some(model.id),
         model_name: Some("test-model".into()),
-        skills: vec![],
         domains: vec![domain.id],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     };
 
     let project = nenjo::manifest::ProjectManifest {

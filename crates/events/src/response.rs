@@ -233,6 +233,10 @@ pub enum StreamEvent {
         tool_name: String,
         tool_args: String,
         agent_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_name: Option<String>,
     },
 
     /// Batch tool invocation (parallel tool calls).
@@ -240,12 +244,29 @@ pub enum StreamEvent {
         tool_names: Vec<String>,
         tool_args: Vec<String>,
         agent_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_name: Option<String>,
+    },
+
+    /// A single tool invocation completed.
+    ToolCompleted {
+        tool_name: String,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_name: Option<String>,
     },
 
     /// An ability was activated for an agent.
     AbilityActivated {
         agent: String,
         ability: String,
+        ability_tool_name: String,
         task_preview: String,
     },
 
@@ -253,6 +274,7 @@ pub enum StreamEvent {
     AbilityCompleted {
         agent: String,
         ability: String,
+        ability_tool_name: String,
         success: bool,
         result_preview: String,
     },
@@ -261,7 +283,15 @@ pub enum StreamEvent {
     Error { message: String },
 
     /// Execution completed successfully.
-    Done { final_output: String },
+    Done {
+        final_output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
+    },
 
     /// A domain session was entered.
     DomainEntered {
@@ -309,6 +339,9 @@ impl std::fmt::Display for StreamEvent {
                 "tools_invoked([{}], agent={agent_name})",
                 tool_names.join(", ")
             ),
+            Self::ToolCompleted {
+                tool_name, success, ..
+            } => write!(f, "tool_completed({tool_name}, success={success})"),
             Self::AbilityActivated { agent, ability, .. } => {
                 write!(f, "ability_activated({ability}, agent={agent})")
             }
@@ -347,8 +380,8 @@ impl std::fmt::Display for StreamEvent {
 /// Status of a single cron schedule in a heartbeat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronScheduleStatus {
-    /// The cron assignment this status refers to.
-    pub assignment_id: String,
+    /// The routine this status refers to.
+    pub routine_id: String,
     /// ISO 8601 timestamp of the last successful run, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
@@ -435,6 +468,8 @@ mod tests {
             tool_name: "shell".into(),
             tool_args: r#"{"cmd":"ls"}"#.into(),
             agent_name: "coder".into(),
+            text_preview: Some("Running a quick command".into()),
+            parent_tool_name: Some("ability/test.builder".into()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
@@ -442,10 +477,42 @@ mod tests {
             StreamEvent::ToolInvoked {
                 tool_name,
                 agent_name,
+                text_preview,
+                parent_tool_name,
                 ..
             } => {
                 assert_eq!(tool_name, "shell");
                 assert_eq!(agent_name, "coder");
+                assert_eq!(text_preview.as_deref(), Some("Running a quick command"));
+                assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn stream_event_tool_completed_roundtrip() {
+        let event = StreamEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            success: false,
+            output_preview: None,
+            error_preview: Some("permission denied".into()),
+            parent_tool_name: Some("ability/test.builder".into()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            StreamEvent::ToolCompleted {
+                tool_name,
+                success,
+                error_preview,
+                parent_tool_name,
+                ..
+            } => {
+                assert_eq!(tool_name, "shell");
+                assert!(!success);
+                assert_eq!(error_preview.as_deref(), Some("permission denied"));
+                assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
             }
             _ => panic!("wrong variant"),
         }
@@ -456,6 +523,7 @@ mod tests {
         let cmd = Command::ChatMessage {
             id: Some("msg-123".into()),
             content: "hello".into(),
+            hidden: true,
             project_id: None,
             routine_id: None,
             agent_id: Some(Uuid::nil()),
@@ -464,9 +532,15 @@ mod tests {
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"chat.message""#));
+        assert!(json.contains(r#""hidden":true"#));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::ChatMessage { content, .. } => assert_eq!(content, "hello"),
+            Command::ChatMessage {
+                content, hidden, ..
+            } => {
+                assert_eq!(content, "hello");
+                assert!(hidden);
+            }
             _ => panic!("wrong variant"),
         }
     }
@@ -500,6 +574,9 @@ mod tests {
         let resp = Response::AgentResponse {
             payload: StreamEvent::Done {
                 final_output: "result".into(),
+                project_id: None,
+                agent_id: None,
+                session_id: None,
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -507,7 +584,7 @@ mod tests {
         let parsed: Response = serde_json::from_str(&json).unwrap();
         match parsed {
             Response::AgentResponse { payload } => match payload {
-                StreamEvent::Done { final_output } => assert_eq!(final_output, "result"),
+                StreamEvent::Done { final_output, .. } => assert_eq!(final_output, "result"),
                 _ => panic!("wrong stream event"),
             },
             _ => panic!("wrong variant"),
@@ -637,7 +714,7 @@ mod tests {
     fn response_cron_heartbeat_roundtrip() {
         let resp = Response::CronHeartbeat {
             active_schedules: vec![CronScheduleStatus {
-                assignment_id: "a1".into(),
+                routine_id: "r1".into(),
                 last_run_at: Some("2026-01-01T00:00:00Z".into()),
                 next_fire_at: None,
             }],
@@ -648,7 +725,7 @@ mod tests {
         match parsed {
             Response::CronHeartbeat { active_schedules } => {
                 assert_eq!(active_schedules.len(), 1);
-                assert_eq!(active_schedules[0].assignment_id, "a1");
+                assert_eq!(active_schedules[0].routine_id, "r1");
             }
             _ => panic!("wrong variant"),
         }
@@ -744,9 +821,8 @@ mod tests {
     #[test]
     fn command_cron_enable_roundtrip() {
         let cmd = Command::CronEnable {
-            assignment_id: Uuid::nil(),
             routine_id: Uuid::nil(),
-            project_id: Uuid::nil(),
+            project_id: None,
             schedule: "0 * * * *".into(),
         };
         let json = serde_json::to_string(&cmd).unwrap();

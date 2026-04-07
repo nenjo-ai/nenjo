@@ -138,7 +138,6 @@ fn apply_inline_upsert(
         ResourceType::Model => inline_upsert!(models, nenjo::manifest::ModelManifest),
         ResourceType::Routine => inline_upsert!(routines, nenjo::manifest::RoutineManifest),
         ResourceType::Project => inline_upsert!(projects, nenjo::manifest::ProjectManifest),
-        ResourceType::Skill => inline_upsert!(skills, nenjo::manifest::SkillManifest),
         ResourceType::Council => inline_upsert!(councils, nenjo::manifest::CouncilManifest),
         ResourceType::Lambda => inline_upsert!(lambdas, nenjo::manifest::LambdaManifest),
         ResourceType::Ability => inline_upsert!(abilities, nenjo::manifest::AbilityManifest),
@@ -165,7 +164,6 @@ fn apply_delete(ctx: &CommandContext, rt: ResourceType, id: Uuid) {
         ResourceType::Model => manifest.models.retain(|r| r.id != id),
         ResourceType::Routine => manifest.routines.retain(|r| r.id != id),
         ResourceType::Project => manifest.projects.retain(|r| r.id != id),
-        ResourceType::Skill => manifest.skills.retain(|r| r.id != id),
         ResourceType::Council => manifest.councils.retain(|r| r.id != id),
         ResourceType::Lambda => manifest.lambdas.retain(|r| r.id != id),
         ResourceType::Ability => manifest.abilities.retain(|r| r.id != id),
@@ -208,7 +206,6 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
         ResourceType::Model => upsert!(models, fetch_model),
         ResourceType::Routine => upsert!(routines, fetch_routine),
         ResourceType::Project => upsert!(projects, fetch_project),
-        ResourceType::Skill => upsert!(skills, fetch_skill),
         ResourceType::Council => upsert!(councils, fetch_council),
         ResourceType::Lambda => upsert!(lambdas, fetch_lambda),
         ResourceType::Ability => upsert!(abilities, fetch_ability),
@@ -256,19 +253,21 @@ fn persist_cache(ctx: &CommandContext, rt: ResourceType) {
         ResourceType::Agent => atomic_write(manifests_dir, "agents.json", &manifest.agents),
         ResourceType::Routine => atomic_write(manifests_dir, "routines.json", &manifest.routines),
         ResourceType::Project => atomic_write(manifests_dir, "projects.json", &manifest.projects),
-        ResourceType::Skill => atomic_write(manifests_dir, "skills.json", &manifest.skills),
         ResourceType::Council => atomic_write(manifests_dir, "councils.json", &manifest.councils),
         ResourceType::Lambda => atomic_write(manifests_dir, "lambdas.json", &manifest.lambdas),
-        ResourceType::Ability => atomic_write(manifests_dir, "abilities.json", &manifest.abilities),
-        ResourceType::ContextBlock => atomic_write(
-            manifests_dir,
-            "context_blocks.json",
+        ResourceType::Ability => {
+            crate::manifest::sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)
+        }
+        ResourceType::ContextBlock => crate::manifest::sync_tree(
+            &manifests_dir.join("context_blocks"),
             &manifest.context_blocks,
         ),
         ResourceType::McpServer => {
             atomic_write(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)
         }
-        ResourceType::Domain => atomic_write(manifests_dir, "domains.json", &manifest.domains),
+        ResourceType::Domain => {
+            crate::manifest::sync_tree(&manifests_dir.join("domains"), &manifest.domains)
+        }
         ResourceType::Document => return,
     };
 

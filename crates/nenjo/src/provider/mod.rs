@@ -42,7 +42,7 @@ pub trait ModelProviderFactory: Send + Sync {
 
 /// Creates tools for an agent based on its bootstrap configuration.
 ///
-/// Implementations use the agent's `platform_scopes`, `skills`, `abilities`,
+/// Implementations use the agent's `platform_scopes`, `abilities`,
 /// and `mcp_server_ids` to decide which tools to provide.
 #[async_trait::async_trait]
 pub trait ToolFactory: Send + Sync {
@@ -96,6 +96,9 @@ pub struct Provider {
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
     platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
+    /// Optional lazy template source for context blocks.
+    /// When set, the ContextRenderer loads templates on demand instead of from memory.
+    template_source: Option<Arc<dyn crate::context::TemplateSource>>,
 }
 
 impl Provider {
@@ -122,6 +125,7 @@ impl Provider {
             agent_config,
             lambda_runner,
             platform_resolver,
+            template_source: None,
         }
     }
 
@@ -171,6 +175,7 @@ impl Provider {
             agent_config: self.agent_config.clone(),
             lambda_runner: self.lambda_runner.clone(),
             platform_resolver: self.platform_resolver.clone(),
+            template_source: self.template_source.clone(),
         }
     }
 
@@ -275,7 +280,17 @@ impl Provider {
         let agent_config = self.agent_config.clone();
         let prompt_context = self.build_prompt_context(agent);
 
-        let context_renderer = {
+        let context_renderer = if let Some(ref source) = self.template_source {
+            // Lazy: load templates from the source on demand.
+            let block_meta: Vec<(String, String)> = self
+                .manifest
+                .context_blocks
+                .iter()
+                .map(|b| (b.path.clone(), b.name.clone()))
+                .collect();
+            crate::context::ContextRenderer::new(source.clone(), block_meta)
+        } else {
+            // Eager: all templates already in memory (backward compat / tests).
             let render_blocks: Vec<_> = self
                 .manifest
                 .context_blocks
@@ -331,14 +346,6 @@ impl Provider {
     }
 
     fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext {
-        let skills: Vec<_> = self
-            .manifest
-            .skills
-            .iter()
-            .filter(|s| agent.skills.contains(&s.id))
-            .cloned()
-            .collect();
-
         let abilities: Vec<_> = self
             .manifest
             .abilities
@@ -388,12 +395,12 @@ impl Provider {
             available_agents: self.manifest.agents.clone(),
             available_routines: self.manifest.routines.clone(),
             current_project,
-            skills,
             available_abilities: abilities,
             available_domains: domains,
             mcp_server_info,
             platform_scopes: agent.platform_scopes.clone(),
             active_domain: None,
+            append_active_domain_addon: true,
             docs_base_dir: None,
             render_ctx_extra: RenderContextVars::default(),
         }
@@ -573,11 +580,11 @@ mod tests {
             color: None,
             model_id: Some(model.id),
             model_name: None,
-            skills: vec![],
             domains: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
             abilities: vec![],
+            prompt_locked: false,
         };
         Manifest {
             agents: vec![agent],

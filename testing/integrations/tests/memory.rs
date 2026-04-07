@@ -65,11 +65,11 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         color: None,
         model_id: Some(model_id),
         model_name: Some("claude-haiku".into()),
-        skills: vec![],
         domains: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
         abilities: vec![],
+        prompt_locked: false,
     }
 }
 

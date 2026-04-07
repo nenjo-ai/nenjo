@@ -286,11 +286,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     description: "XML list of all available domains (name, command, description)",
                     group: "Available",
                 },
-                TemplateVarDef {
-                    name: "available_skills",
-                    description: "XML list of all available skills (name, instructions)",
-                    group: "Available",
-                },
             ],
         },
         TemplateVarGroup {

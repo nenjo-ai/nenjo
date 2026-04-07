@@ -11,22 +11,21 @@ use uuid::Uuid;
 use super::event_bridge::routine_event_to_response;
 use crate::harness::{ActiveExecution, CommandContext};
 
-/// Enable a cron schedule. Keyed by `assignment_id` for cancellation.
+/// Enable a cron schedule. Keyed by `routine_id` for cancellation.
 pub async fn handle_cron_enable(
     ctx: &CommandContext,
-    assignment_id: Uuid,
     routine_id: Uuid,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
     schedule: &str,
 ) -> Result<()> {
-    info!(%assignment_id, %routine_id, %schedule, "Enabling cron schedule");
+    info!(%routine_id, %schedule, "Enabling cron schedule");
 
     let cancel = CancellationToken::new();
-    if let Some((_, prev)) = ctx.executions.remove(&assignment_id) {
+    if let Some((_, prev)) = ctx.executions.remove(&routine_id) {
         prev.cancel.cancel();
     }
     ctx.executions.insert(
-        assignment_id,
+        routine_id,
         ActiveExecution {
             kind: crate::harness::ExecutionKind::Cron,
             execution_run_id: None,
@@ -40,7 +39,7 @@ pub async fn handle_cron_enable(
 
     let task = nenjo::types::TaskType::Cron {
         task: None,
-        project_id,
+        project_id: project_id.unwrap_or(Uuid::nil()),
         interval,
         timeout: Duration::from_secs(24 * 3600),
     };
@@ -59,12 +58,7 @@ pub async fn handle_cron_enable(
         .map(|r| r.name.clone())
         .unwrap_or_else(|| routine_id.to_string());
 
-    // Nil project_id means no project assigned
-    let opt_project_id = if project_id.is_nil() {
-        None
-    } else {
-        Some(project_id)
-    };
+    let opt_project_id = project_id;
 
     tokio::spawn(async move {
         let runner = match provider.routine_by_id(routine_id) {
@@ -103,7 +97,7 @@ pub async fn handle_cron_enable(
                                                     "trigger": "cron",
                                                     "cycle": cycle,
                                                     "schedule": schedule_owned,
-                                                    "assignment_id": assignment_id.to_string(),
+                                                    "routine_id": routine_id.to_string(),
                                                 }),
                                             });
                                         }
@@ -134,7 +128,7 @@ pub async fn handle_cron_enable(
                                     }
 
                                     // Forward step events with the cycle-scoped execution_run_id
-                                    let eid = current_cycle_id.unwrap_or(assignment_id);
+                                    let eid = current_cycle_id.unwrap_or(routine_id);
                                     if let Some(r) = routine_event_to_response(&ev, eid, None, current_agent_id, provider.manifest()) {
                                         let _ = response_tx.send(r);
                                     }
@@ -163,21 +157,21 @@ pub async fn handle_cron_enable(
                 }
             }
             Err(e) => {
-                error!(%assignment_id, error = %e, "Cron routine execution failed");
+                error!(%routine_id, error = %e, "Cron routine execution failed");
             }
         }
 
-        executions.remove(&assignment_id);
+        executions.remove(&routine_id);
     });
 
     Ok(())
 }
 
-/// Disable a cron schedule by assignment_id.
-pub async fn handle_cron_disable(ctx: &CommandContext, assignment_id: Uuid) -> Result<()> {
-    if let Some((_, exec)) = ctx.executions.remove(&assignment_id) {
+/// Disable a cron schedule by routine_id.
+pub async fn handle_cron_disable(ctx: &CommandContext, routine_id: Uuid) -> Result<()> {
+    if let Some((_, exec)) = ctx.executions.remove(&routine_id) {
         exec.cancel.cancel();
-        info!(%assignment_id, "Disabled cron schedule");
+        info!(%routine_id, "Disabled cron schedule");
     }
     Ok(())
 }

@@ -3,8 +3,14 @@
 //! Calls `GET /api/v1/agents/bootstrap` and writes the response as individual
 //! JSON files under `~/.nenjo/manifests/`. If the backend is unreachable the worker
 //! continues with a warning; filesystem failures are hard errors.
+//!
+//! Abilities and context blocks are stored as directory trees:
+//!   `manifests/abilities/{path}/{name}.json`
+//!   `manifests/context_blocks/{path}/{name}.json`
+//! Other resource types remain as flat JSON arrays.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -14,6 +20,72 @@ use nenjo::manifest::LambdaManifest;
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// Trait for manifest items that can be stored as tree files.
+pub trait TreeItem: serde::Serialize {
+    fn path(&self) -> &str;
+    fn name(&self) -> &str;
+}
+
+impl TreeItem for nenjo::manifest::AbilityManifest {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl TreeItem for nenjo::manifest::DomainManifest {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl TreeItem for ContextBlockManifest {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// File-backed template source that reads context block templates from the
+/// tree structure on disk: `{base_dir}/{path}/{name}.json`.
+///
+/// Used by [`ContextRenderer`] for lazy template loading — templates are read
+/// from disk only when rendering is requested, rather than held in memory.
+pub struct FileTemplateSource {
+    base_dir: PathBuf,
+}
+
+impl FileTemplateSource {
+    /// Create a new file template source rooted at the given directory.
+    ///
+    /// `base_dir` is typically `{manifests_dir}/context_blocks/`.
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: base_dir.into(),
+        }
+    }
+}
+
+impl nenjo::context::TemplateSource for FileTemplateSource {
+    fn load_template(&self, path: &str, name: &str) -> Option<String> {
+        let file_path = tree_item_path(&self.base_dir, path, name);
+        let content = std::fs::read_to_string(&file_path).ok()?;
+        // Parse the JSON and extract the "template" field.
+        let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+        value
+            .get("template")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+}
 
 /// Loads context blocks from a local `.nenjo/context/` directory.
 ///
@@ -106,7 +178,6 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
         models = data.models.len(),
         agents = data.agents.len(),
         councils = data.councils.len(),
-        skills = data.skills.len(),
         domains = data.domains.len(),
         lambdas = data.lambdas.len(),
         mcp_servers = data.mcp_servers.len(),
@@ -128,12 +199,11 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
     atomic_write_json(manifests_dir, "models.json", &data.models)?;
     atomic_write_json(manifests_dir, "agents.json", &data.agents)?;
     atomic_write_json(manifests_dir, "councils.json", &data.councils)?;
-    atomic_write_json(manifests_dir, "skills.json", &data.skills)?;
-    atomic_write_json(manifests_dir, "domains.json", &data.domains)?;
+    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
     atomic_write_json(manifests_dir, "lambdas.json", &data.lambdas)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &data.mcp_servers)?;
-    atomic_write_json(manifests_dir, "abilities.json", &data.abilities)?;
-    atomic_write_json(manifests_dir, "context_blocks.json", &data.context_blocks)?;
+    sync_tree(&manifests_dir.join("abilities"), &data.abilities)?;
+    sync_tree(&manifests_dir.join("context_blocks"), &data.context_blocks)?;
 
     // Sync lambda script files to workspace
     sync_lambdas(workspace_dir, &data.lambdas)?;
@@ -186,6 +256,79 @@ pub fn sync_lambdas(workspace_dir: &Path, lambdas: &[LambdaManifest]) -> Result<
     }
 
     debug!(count = lambdas.len(), dir = %lambdas_dir.display(), "Lambda scripts synced");
+    Ok(())
+}
+
+/// Sync a list of tree items to a directory tree on disk.
+///
+/// Each item is written to `{base_dir}/{path}/{name}.json`. Stale files that
+/// are not in the expected set are removed, and empty directories are cleaned up.
+pub fn sync_tree<T: TreeItem>(base_dir: &Path, items: &[T]) -> Result<()> {
+    std::fs::create_dir_all(base_dir)
+        .with_context(|| format!("Failed to create tree dir: {}", base_dir.display()))?;
+
+    // Build the set of expected file paths.
+    let mut expected: HashSet<PathBuf> = HashSet::new();
+    for item in items {
+        let file_path = tree_item_path(base_dir, item.path(), item.name());
+        expected.insert(file_path);
+    }
+
+    // Remove stale files.
+    if base_dir.is_dir() {
+        remove_stale_files(base_dir, &expected)?;
+    }
+
+    // Write each item.
+    for item in items {
+        let file_path = tree_item_path(base_dir, item.path(), item.name());
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create dir: {}", parent.display()))?;
+        }
+        let tmp = file_path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(item)
+            .with_context(|| format!("Failed to serialize tree item: {}", file_path.display()))?;
+        std::fs::write(&tmp, json.as_bytes())
+            .with_context(|| format!("Failed to write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &file_path).with_context(|| {
+            format!(
+                "Failed to rename {} → {}",
+                tmp.display(),
+                file_path.display()
+            )
+        })?;
+    }
+
+    debug!(dir = %base_dir.display(), count = items.len(), "Tree synced");
+    Ok(())
+}
+
+/// Compute the file path for a tree item: `{base_dir}/{path}/{name}.json`
+pub fn tree_item_path(base_dir: &Path, path: &str, name: &str) -> PathBuf {
+    if path.is_empty() {
+        base_dir.join(format!("{name}.json"))
+    } else {
+        base_dir.join(path).join(format!("{name}.json"))
+    }
+}
+
+/// Recursively remove files in `dir` that are not in the expected set, and clean up
+/// empty directories.
+fn remove_stale_files(dir: &Path, expected: &HashSet<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            remove_stale_files(&path, expected)?;
+            // Remove directory if now empty.
+            if path.read_dir().map_or(true, |mut d| d.next().is_none()) {
+                let _ = std::fs::remove_dir(&path);
+            }
+        } else if path.extension().is_some_and(|ext| ext == "json") && !expected.contains(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     Ok(())
 }
 
