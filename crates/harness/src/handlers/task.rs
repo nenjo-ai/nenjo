@@ -8,11 +8,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::types::GitContext;
-use nenjo_events::Response;
+use nenjo_events::{Response, StepAgent};
 
-use super::event_bridge::{
-    agent_name, project_slug, routine_event_to_response, turn_event_to_stream_event,
-};
+use super::event_bridge::{agent_name, project_slug, routine_event_to_response};
+use crate::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
 use crate::harness::{ActiveExecution, CommandContext};
 
 /// Handle a task execution command.
@@ -320,6 +319,15 @@ async fn execute_routine_task(
     task_id: Uuid,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    let provider = ctx.provider();
+    let project_slug_value = match &task {
+        nenjo::types::TaskType::Task(t) => project_slug(provider.manifest(), t.project_id),
+        _ => String::new(),
+    };
+    let task_slug_value = match &task {
+        nenjo::types::TaskType::Task(t) => t.slug.clone(),
+        _ => "task".to_string(),
+    };
     let mut handle = ctx
         .provider()
         .routine_by_id(routine_id)?
@@ -331,6 +339,12 @@ async fn execute_routine_task(
     let mut total_output_tokens: u64 = 0;
     // Track the current agent_id so step_completed events can carry it.
     let mut current_agent_id: Option<uuid::Uuid> = None;
+    let mut step_agents: std::collections::HashMap<uuid::Uuid, (uuid::Uuid, String)> =
+        std::collections::HashMap::new();
+    let mut trace_recorders: std::collections::HashMap<
+        (uuid::Uuid, uuid::Uuid),
+        ExecutionTraceRecorder,
+    > = std::collections::HashMap::new();
 
     loop {
         tokio::select! {
@@ -338,13 +352,43 @@ async fn execute_routine_task(
                 match event {
                     Some(ev) => {
                         // Track agent identity across step events.
-                        if let nenjo::RoutineEvent::StepStarted { agent_id, .. } = &ev {
+                        if let nenjo::RoutineEvent::StepStarted { step_id, step_name, agent_id, .. } = &ev {
                             current_agent_id = *agent_id;
+                            if let Some(agent_id) = agent_id {
+                                step_agents.insert(*step_id, (*agent_id, step_name.clone()));
+                            }
                         }
                         // Track token totals from completed steps
                         if let nenjo::RoutineEvent::StepCompleted { result, .. } = &ev {
                             total_input_tokens += result.input_tokens;
                             total_output_tokens += result.output_tokens;
+                        }
+                        if let nenjo::RoutineEvent::AgentEvent { step_id, event } = &ev
+                            && let Some((agent_id, step_name)) = step_agents.get(step_id)
+                        {
+                            let recorder = trace_recorders.entry((*agent_id, *step_id)).or_insert_with(|| {
+                                let agent = provider
+                                    .manifest()
+                                    .agents
+                                    .iter()
+                                    .find(|a| a.id == *agent_id);
+                                let agent_name = agent
+                                    .map(|a| a.name.as_str())
+                                    .unwrap_or("agent");
+                                ExecutionTraceRecorder::for_task(
+                                    &ctx.config.workspace_dir,
+                                    agent_name,
+                                    *agent_id,
+                                    TaskTraceLocation {
+                                        project_slug: &project_slug_value,
+                                        task_slug: &task_slug_value,
+                                        step_name: Some(step_name.as_str()),
+                                        step_id: Some(*step_id),
+                                    },
+                                    ctx.config.agent.execution_traces,
+                                )
+                            });
+                            let _ = recorder.record(event);
                         }
                         if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, ctx.provider().manifest()) {
                             let _ = ctx.response_tx.send(r);
@@ -355,6 +399,9 @@ async fn execute_routine_task(
             }
             _ = cancel.cancelled() => {
                 handle.cancel();
+                for recorder in trace_recorders.values_mut() {
+                    let _ = recorder.finalize_with_error("Cancelled");
+                }
                 break;
             }
         }
@@ -396,7 +443,28 @@ async fn execute_direct_task(
     }
     let runner = builder.build().await?;
     let provider = ctx.provider();
-    let aname = agent_name(provider.manifest(), agent_id);
+    let manifest = provider.manifest().clone();
+    let aname = agent_name(&manifest, agent_id);
+    let project_slug = match &task {
+        nenjo::types::TaskType::Task(t) => project_slug(&manifest, t.project_id),
+        _ => String::new(),
+    };
+    let task_slug = match &task {
+        nenjo::types::TaskType::Task(t) => t.slug.clone(),
+        _ => "task".to_string(),
+    };
+    let mut trace_recorder = ExecutionTraceRecorder::for_task(
+        &ctx.config.workspace_dir,
+        &aname,
+        agent_id,
+        TaskTraceLocation {
+            project_slug: &project_slug,
+            task_slug: &task_slug,
+            step_name: None,
+            step_id: None,
+        },
+        ctx.config.agent.execution_traces,
+    );
 
     let mut handle = runner.task_stream(task).await?;
 
@@ -411,10 +479,16 @@ async fn execute_direct_task(
             event = handle.recv() => {
                 match event {
                     Some(ev) => {
-                        if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
-                            let _ = ctx.response_tx.send(
-                                Response::AgentResponse { payload: se }
-                            );
+                        let _ = trace_recorder.record(&ev);
+                        if let Some(response) = direct_task_turn_event_to_response(
+                            &ev,
+                            execution_run_id,
+                            task_id,
+                            agent_id,
+                            &aname,
+                            &manifest,
+                        ) {
+                            let _ = ctx.response_tx.send(response);
                         }
                     }
                     None => break,
@@ -422,6 +496,7 @@ async fn execute_direct_task(
             }
             _ = cancel.cancelled() => {
                 handle.abort();
+                let _ = trace_recorder.finalize_with_error("Cancelled");
                 break;
             }
         }
@@ -449,6 +524,119 @@ async fn execute_direct_task(
     });
 
     Ok(())
+}
+
+fn direct_task_turn_event_to_response(
+    event: &nenjo::TurnEvent,
+    execution_run_id: Uuid,
+    task_id: Uuid,
+    agent_id: Uuid,
+    agent_name: &str,
+    manifest: &nenjo::manifest::Manifest,
+) -> Option<Response> {
+    let eid = execution_run_id.to_string();
+    let tid = Some(task_id.to_string());
+    let agent = Some(StepAgent {
+        agent_id,
+        agent_name: Some(agent_name.to_string()),
+        agent_color: manifest
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .and_then(|a| a.color.clone()),
+    });
+
+    match event {
+        nenjo::TurnEvent::ToolCallStart { calls, .. } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: "step_started".to_string(),
+            step_name: calls
+                .first()
+                .map(|c| c.tool_name.clone())
+                .unwrap_or_else(|| "tool_call".to_string()),
+            step_type: "tool".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
+                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::ToolCallEnd {
+            tool_name, result, ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: if result.success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: tool_name.clone(),
+            step_type: "tool".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": result.success,
+                "output_preview": result.output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "error": result.error,
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::AbilityStarted {
+            ability_name,
+            task_input,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: "step_started".to_string(),
+            step_name: ability_name.clone(),
+            step_type: "ability".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "task_preview": task_input,
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::AbilityCompleted {
+            ability_name,
+            success,
+            final_output,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: if *success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: ability_name.clone(),
+            step_type: "ability".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": success,
+                "output_preview": final_output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::Done { output } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: "step_completed".to_string(),
+            step_name: "agent_response".to_string(),
+            step_type: "agent".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "output_preview": output.text.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "input_tokens": output.input_tokens,
+                "output_tokens": output.output_tokens,
+            }),
+            agent,
+        }),
+        nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
+    }
 }
 
 /// Send `TaskCompleted` (failed) to the platform.

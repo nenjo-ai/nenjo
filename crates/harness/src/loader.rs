@@ -2,8 +2,11 @@
 //!
 //! The bootstrap module fetches data from the backend API and writes JSON files.
 //! This loader reads those files and assembles a [`Manifest`].
+//!
+//! Abilities and context blocks are stored as directory trees (one JSON per item).
+//! Other resource types remain as flat JSON arrays.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tracing::warn;
@@ -11,7 +14,6 @@ use tracing::warn;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
     LambdaManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
-    SkillManifest,
 };
 
 /// Loads a [`Manifest`] from cached JSON files on disk.
@@ -41,6 +43,50 @@ impl FileSystemManifestLoader {
                 Vec::new()
             }),
             Err(_) => Vec::new(), // file doesn't exist yet (first run)
+        }
+    }
+
+    /// Walk a directory tree and load all `.json` files as manifest items.
+    ///
+    /// Falls back to loading a legacy flat JSON array file if the directory
+    /// doesn't exist (backward compat with pre-tree storage).
+    fn load_tree<T: serde::de::DeserializeOwned>(&self, subdir: &str, legacy_file: &str) -> Vec<T> {
+        let dir = self.manifests_dir.join(subdir);
+        if dir.is_dir() {
+            let mut items = Vec::new();
+            walk_json_files(&dir, &mut items);
+            items
+        } else {
+            // Backward compat: try the old flat JSON file.
+            self.load_json(legacy_file)
+        }
+    }
+}
+
+/// Recursively walk a directory tree, reading each `.json` file as type `T`.
+fn walk_json_files<T: serde::de::DeserializeOwned>(dir: &Path, items: &mut Vec<T>) {
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(e) => e.flatten().collect(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_json_files(&path, items);
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match serde_json::from_str::<T>(&content) {
+                    Ok(item) => items.push(item),
+                    Err(e) => {
+                        warn!(file = %path.display(), error = %e, "Failed to parse tree item");
+                    }
+                },
+                Err(e) => {
+                    warn!(file = %path.display(), error = %e, "Failed to read tree item");
+                }
+            }
         }
     }
 }
@@ -81,12 +127,12 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
             models: self.load_json::<ModelManifest>("models.json"),
             agents: self.load_json::<AgentManifest>("agents.json"),
             councils: self.load_json::<CouncilManifest>("councils.json"),
-            skills: self.load_json::<SkillManifest>("skills.json"),
-            domains: self.load_json::<DomainManifest>("domains.json"),
+            domains: self.load_tree::<DomainManifest>("domains", "domains.json"),
             lambdas: self.load_json::<LambdaManifest>("lambdas.json"),
             mcp_servers: self.load_json::<McpServerManifest>("mcp_servers.json"),
-            abilities: self.load_json::<AbilityManifest>("abilities.json"),
-            context_blocks: self.load_json::<ContextBlockManifest>("context_blocks.json"),
+            abilities: self.load_tree::<AbilityManifest>("abilities", "abilities.json"),
+            context_blocks: self
+                .load_tree::<ContextBlockManifest>("context_blocks", "context_blocks.json"),
         })
     }
 }
@@ -136,11 +182,11 @@ mod tests {
             color: None,
             model_id: Some(model.id),
             model_name: Some("test-model".into()),
-            skills: vec![],
             domains: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
             abilities: vec![],
+            prompt_locked: false,
         };
         std::fs::write(
             dir.path().join("agents.json"),
@@ -166,7 +212,6 @@ mod tests {
         for file in &[
             "routines.json",
             "councils.json",
-            "skills.json",
             "domains.json",
             "lambdas.json",
             "mcp_servers.json",

@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::context::types::{
-    AbilityContext, AgentContext, DomainContext, RenderContextBlock, RoutineContext, SkillContext,
+    AbilityContext, AgentContext, DomainContext, RenderContextBlock, RoutineContext,
 };
 
 use crate::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, ProjectManifest,
-    RoutineManifest, SkillManifest,
+    RoutineManifest,
 };
 use crate::types::{ActiveDomain, RenderContextVars};
 
@@ -48,16 +48,11 @@ pub struct MemoryProfile {
     /// What this role should store in shared scope for other agents to reference.
     #[serde(default)]
     pub shared_focus: Vec<String>,
-    /// Categories this role cares about most (prioritized in retrieval).
-    pub priority_categories: Vec<String>,
 }
 
 impl MemoryProfile {
     pub fn is_empty(&self) -> bool {
-        self.core_focus.is_empty()
-            && self.project_focus.is_empty()
-            && self.shared_focus.is_empty()
-            && self.priority_categories.is_empty()
+        self.core_focus.is_empty() && self.project_focus.is_empty() && self.shared_focus.is_empty()
     }
 }
 
@@ -73,8 +68,6 @@ pub struct PromptContext {
     pub available_routines: Vec<RoutineManifest>,
     /// All available projects (used to resolve project slugs for paths).
     pub current_project: ProjectManifest,
-    /// Skills assigned to this agent (instruction packs for prompt injection).
-    pub skills: Vec<SkillManifest>,
     /// Abilities available to this agent (assigned + domain-activated).
     pub available_abilities: Vec<AbilityManifest>,
     /// Domains assigned to this agent (for context injection).
@@ -85,6 +78,8 @@ pub struct PromptContext {
     pub platform_scopes: Vec<String>,
     /// Active domain session (if the user is in a domain like /prd).
     pub active_domain: Option<ActiveDomain>,
+    /// Whether the active domain's developer prompt addon should be appended.
+    pub append_active_domain_addon: bool,
     /// Workspace directory containing project document subdirs.
     pub docs_base_dir: Option<PathBuf>,
     /// Routine/project-level context fields injected by the executor.
@@ -107,6 +102,7 @@ pub fn render_agent(a: &AgentManifest) -> AgentContext {
 pub fn render_ability(a: &AbilityManifest) -> AbilityContext {
     AbilityContext {
         name: a.name.clone(),
+        tool_name: crate::agents::abilities::ability_tool_name(a),
         activate_when: a.activation_condition.clone(),
     }
 }
@@ -118,13 +114,6 @@ pub fn render_routine(r: &RoutineManifest) -> RoutineContext {
         execution_id: String::new(),
         description: r.description.clone(),
         step: Default::default(),
-    }
-}
-
-pub fn render_skill(s: &SkillManifest) -> SkillContext {
-    SkillContext {
-        name: s.name.clone(),
-        instructions: s.instructions.clone(),
     }
 }
 

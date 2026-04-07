@@ -7,6 +7,7 @@ use uuid::Uuid;
 use nenjo_events::{Response, StreamEvent};
 
 use super::event_bridge::agent_name;
+use crate::domain_session_store::PersistedDomainSession;
 use crate::harness::{CommandContext, DomainSession};
 
 /// Enter a domain session — creates a domain-expanded runner with escalated scopes.
@@ -44,9 +45,17 @@ pub async fn handle_domain_enter(
                     runner: domain_runner,
                     agent_id,
                     project_id,
+                    domain_command: domain_command.to_string(),
                     turn_number: 0,
                 },
             );
+            let _ = ctx.domain_session_store.save(&PersistedDomainSession {
+                session_id,
+                project_id,
+                agent_id,
+                domain_command: domain_command.to_string(),
+                turn_number: 0,
+            });
 
             info!(
                 agent = %aname,
@@ -88,6 +97,7 @@ pub async fn handle_domain_exit(
     let aname = agent_name(manifest, agent_id);
 
     let session = ctx.domains.remove(&domain_session_id).map(|(_, v)| v);
+    let _ = ctx.domain_session_store.delete(domain_session_id);
 
     match session {
         Some(session) => {

@@ -1,5 +1,7 @@
 pub mod config;
 pub mod doc_sync;
+pub mod domain_session_store;
+pub mod execution_trace;
 pub mod handlers;
 pub mod harness;
 pub mod loader;

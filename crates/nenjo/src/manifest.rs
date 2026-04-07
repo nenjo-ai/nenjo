@@ -1,7 +1,7 @@
 //! Manifest types — the canonical representation of platform resources.
 //!
-//! A `Manifest` is the full catalog of agents, models, routines, skills,
-//! domains, abilities, and context blocks. It can be loaded from multiple
+//! A `Manifest` is the full catalog of agents, models, routines, domains,
+//! abilities, and context blocks. It can be loaded from multiple
 //! sources (API backend, local `.nenjo/` folder) and merged.
 
 use anyhow::Result;
@@ -32,7 +32,6 @@ pub struct Manifest {
     pub models: Vec<ModelManifest>,
     pub agents: Vec<AgentManifest>,
     pub councils: Vec<CouncilManifest>,
-    pub skills: Vec<SkillManifest>,
     pub domains: Vec<DomainManifest>,
     pub projects: Vec<ProjectManifest>,
     pub lambdas: Vec<LambdaManifest>,
@@ -59,7 +58,6 @@ impl Manifest {
         self.models.extend(other.models);
         self.agents.extend(other.agents);
         self.councils.extend(other.councils);
-        self.skills.extend(other.skills);
         self.domains.extend(other.domains);
         self.projects.extend(other.projects);
         self.lambdas.extend(other.lambdas);
@@ -191,7 +189,7 @@ fn default_model_provider() -> String {
     "openai".to_string()
 }
 
-/// An agent definition — prompt config, assigned model, skills, domains, and tools.
+/// An agent definition — prompt config, assigned model, domains, and tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
     pub id: Uuid,
@@ -202,9 +200,6 @@ pub struct AgentManifest {
     pub color: Option<String>,
     pub model_id: Option<Uuid>,
     pub model_name: Option<String>,
-    /// Skill IDs assigned to this agent (bootstrap: "skills", detail: "skill_ids").
-    #[serde(default, alias = "skill_ids")]
-    pub skills: Vec<Uuid>,
     /// Domain IDs assigned to this agent (bootstrap: "domains", detail: "domain_ids").
     #[serde(default, alias = "domain_ids")]
     pub domains: Vec<Uuid>,
@@ -215,6 +210,9 @@ pub struct AgentManifest {
     /// Ability IDs assigned to this agent (bootstrap: "abilities", detail: "ability_ids").
     #[serde(default, alias = "ability_ids")]
     pub abilities: Vec<Uuid>,
+    /// When true, prompt_config updates are blocked.
+    #[serde(default)]
+    pub prompt_locked: bool,
 }
 
 /// An ability — a sub-execution mode with its own prompt and filtered tools.
@@ -222,14 +220,67 @@ pub struct AgentManifest {
 pub struct AbilityManifest {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub path: String,
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub activation_condition: String,
     pub prompt: String,
     pub platform_scopes: Vec<String>,
-    pub skill_ids: Vec<Uuid>,
     pub mcp_server_ids: Vec<Uuid>,
     pub tool_filter: serde_json::Value,
+    #[serde(default)]
+    pub is_system: bool,
+}
+
+/// Lightweight ability metadata — kept in memory for lazy loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbilityMeta {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub activation_condition: String,
+    #[serde(default)]
+    pub is_system: bool,
+}
+
+impl From<&AbilityManifest> for AbilityMeta {
+    fn from(a: &AbilityManifest) -> Self {
+        Self {
+            id: a.id,
+            name: a.name.clone(),
+            path: a.path.clone(),
+            display_name: a.display_name.clone(),
+            description: a.description.clone(),
+            activation_condition: a.activation_condition.clone(),
+            is_system: a.is_system,
+        }
+    }
+}
+
+/// Lightweight context block metadata — kept in memory for lazy loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextBlockMeta {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub is_system: bool,
+}
+
+impl From<&ContextBlockManifest> for ContextBlockMeta {
+    fn from(b: &ContextBlockManifest) -> Self {
+        Self {
+            id: b.id,
+            name: b.name.clone(),
+            path: b.path.clone(),
+            is_system: b.is_system,
+        }
+    }
 }
 
 /// A context block — a MiniJinja template injected into the agent's prompt.
@@ -244,21 +295,13 @@ pub struct ContextBlockManifest {
     pub is_system: bool,
 }
 
-/// A skill — reusable instructions injected into the prompt when assigned to an agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillManifest {
-    pub id: Uuid,
-    pub name: String,
-    pub display_name: String,
-    pub description: Option<String>,
-    pub instructions: String,
-}
-
 /// A domain — an activatable execution mode with its own prompt addons and tool config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainManifest {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub path: String,
     pub display_name: String,
     pub description: Option<String>,
     pub command: String,

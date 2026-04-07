@@ -45,8 +45,8 @@ pub struct McpToolDef {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
-    /// The scope required for this tool (e.g. "tasks:read").
-    /// Provided by the server in the tools/list response.
+    /// Optional legacy per-tool scope. Generic platform tools may omit this
+    /// because scope is resolved dynamically from the call arguments.
     #[serde(default)]
     pub scope: String,
 }
@@ -109,10 +109,12 @@ impl McpClient {
         &self,
         name: &str,
         arguments: serde_json::Value,
+        agent_scopes: Option<&[String]>,
     ) -> anyhow::Result<String> {
         let params = serde_json::json!({
             "name": name,
             "arguments": arguments,
+            "agent_scopes": agent_scopes,
         });
         let resp = self.rpc("tools/call", Some(params)).await?;
 
@@ -180,12 +182,18 @@ pub struct McpTool {
     input_schema: serde_json::Value,
     client: Arc<McpClient>,
     tool_category: ToolCategory,
+    agent_scopes: Vec<String>,
 }
 
 impl McpTool {
     /// Create a new MCP tool from a definition and shared client.
-    pub fn new(def: McpToolDef, client: Arc<McpClient>) -> Self {
-        let category = if def.scope.ends_with(":read") {
+    pub fn new(def: McpToolDef, client: Arc<McpClient>, agent_scopes: Vec<String>) -> Self {
+        // Categorize by tool name for consolidated tools, fall back to scope suffix.
+        let category = if def.name.ends_with("/read") || def.name.ends_with("/graph") {
+            ToolCategory::Read
+        } else if def.name.ends_with("/write") {
+            ToolCategory::Write
+        } else if def.scope.ends_with(":read") {
             ToolCategory::Read
         } else {
             ToolCategory::Write
@@ -197,6 +205,7 @@ impl McpTool {
             input_schema: def.input_schema,
             client,
             tool_category: category,
+            agent_scopes,
         }
     }
 }
@@ -220,7 +229,11 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        match self.client.call_tool(&self.tool_name, args).await {
+        match self
+            .client
+            .call_tool(&self.tool_name, args, Some(&self.agent_scopes))
+            .await
+        {
             Ok(output) => Ok(ToolResult {
                 success: true,
                 output,

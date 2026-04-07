@@ -114,15 +114,12 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::CronEnable {
-            assignment_id,
             routine_id,
             project_id,
             schedule,
-        } => cron::handle_cron_enable(&ctx, assignment_id, routine_id, project_id, &schedule).await,
+        } => cron::handle_cron_enable(&ctx, routine_id, project_id, &schedule).await,
 
-        Command::CronDisable { assignment_id } => {
-            cron::handle_cron_disable(&ctx, assignment_id).await
-        }
+        Command::CronDisable { routine_id } => cron::handle_cron_disable(&ctx, routine_id).await,
 
         Command::CronTrigger {
             routine_id,

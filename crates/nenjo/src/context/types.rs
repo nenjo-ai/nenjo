@@ -50,6 +50,8 @@ pub struct AvailableAbilitiesContext {
 pub struct AbilityContext {
     #[serde(rename = "@name")]
     pub name: String,
+    #[serde(rename = "@tool")]
+    pub tool_name: String,
     #[serde(rename = "@use_when")]
     pub activate_when: String,
 }
@@ -74,22 +76,6 @@ pub struct DomainContext {
     pub description: Option<String>,
     #[serde(rename = "@category", skip_serializing_if = "str_is_empty")]
     pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_skills")]
-pub struct AvailableSkillsContext {
-    #[serde(rename = "skill")]
-    pub skills: Vec<SkillContext>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "skill")]
-pub struct SkillContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub instructions: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -552,12 +538,14 @@ mod tests {
         let abilities = AvailableAbilitiesContext {
             abilities: vec![AbilityContext {
                 name: "search".into(),
+                tool_name: "ability/search".into(),
                 activate_when: "user asks to find something".into(),
             }],
         };
         let xml = nenjo_xml::to_xml_pretty(&abilities, 2);
         assert!(xml.contains("<available_abilities>"));
         assert!(xml.contains("name=\"search\""));
+        assert!(xml.contains("tool=\"ability/search\""));
         assert!(xml.contains("use_when=\"user asks to find something\""));
     }
 
@@ -594,20 +582,6 @@ mod tests {
         let xml = nenjo_xml::to_xml_pretty(&routines, 2);
         assert!(xml.contains("<available_routines>"));
         assert!(xml.contains("name=\"deploy\""));
-    }
-
-    #[test]
-    fn test_skill_context_xml() {
-        let skills = AvailableSkillsContext {
-            skills: vec![SkillContext {
-                name: "rust-expert".into(),
-                instructions: "Use idiomatic Rust patterns".into(),
-            }],
-        };
-        let xml = nenjo_xml::to_xml_pretty(&skills, 2);
-        assert!(xml.contains("<available_skills>"));
-        assert!(xml.contains("name=\"rust-expert\""));
-        assert!(xml.contains("<instructions>"));
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub enum Command {
         id: Option<String>,
         /// The user's message text.
         content: String,
+        /// When true, persist for context/history but do not surface in normal chat views.
+        #[serde(default)]
+        hidden: bool,
         /// Target project for context scoping.
         #[serde(default)]
         project_id: Option<Uuid>,
@@ -140,21 +143,19 @@ pub enum Command {
     /// Enable a cron schedule for a routine.
     #[serde(rename = "cron.enable")]
     CronEnable {
-        assignment_id: Uuid,
         routine_id: Uuid,
-        project_id: Uuid,
+        #[serde(default)]
+        project_id: Option<Uuid>,
         schedule: String,
     },
 
     /// Disable a cron schedule.
     #[serde(rename = "cron.disable")]
-    CronDisable { assignment_id: Uuid },
+    CronDisable { routine_id: Uuid },
 
     /// Trigger a routine immediately (manual or test run).
     #[serde(rename = "cron.trigger")]
     CronTrigger {
-        #[serde(default)]
-        assignment_id: Option<Uuid>,
         routine_id: Uuid,
         #[serde(default)]
         project_id: Option<Uuid>,
@@ -222,11 +223,11 @@ impl std::fmt::Display for Command {
             }
             Self::RepoSync { project_id, .. } => write!(f, "repo.sync(project={project_id})"),
             Self::RepoUnsync { project_id } => write!(f, "repo.unsync(project={project_id})"),
-            Self::CronEnable { assignment_id, .. } => {
-                write!(f, "cron.enable(assignment={assignment_id})")
+            Self::CronEnable { routine_id, .. } => {
+                write!(f, "cron.enable(routine={routine_id})")
             }
-            Self::CronDisable { assignment_id } => {
-                write!(f, "cron.disable(assignment={assignment_id})")
+            Self::CronDisable { routine_id } => {
+                write!(f, "cron.disable(routine={routine_id})")
             }
             Self::CronTrigger { routine_id, .. } => write!(f, "cron.trigger(routine={routine_id})"),
             Self::WorkerPing => write!(f, "worker.ping"),
@@ -278,7 +279,6 @@ pub enum ResourceType {
     Model,
     Routine,
     Project,
-    Skill,
     Council,
     Lambda,
     Ability,
@@ -295,7 +295,6 @@ impl std::fmt::Display for ResourceType {
             Self::Model => write!(f, "model"),
             Self::Routine => write!(f, "routine"),
             Self::Project => write!(f, "project"),
-            Self::Skill => write!(f, "skill"),
             Self::Council => write!(f, "council"),
             Self::Lambda => write!(f, "lambda"),
             Self::Ability => write!(f, "ability"),

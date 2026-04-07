@@ -171,12 +171,6 @@ impl AgentInstance {
             .iter()
             .map(prompts::render_domain)
             .collect();
-        ctx.available_skills = self
-            .prompt_context
-            .skills
-            .iter()
-            .map(prompts::render_skill)
-            .collect();
 
         // Memories, resources, and documents
         ctx.memory_vars = self.memory_vars.clone();
@@ -193,7 +187,8 @@ impl AgentInstance {
         // 5. Assemble developer prompt
         // Domain system_addon is appended when a domain session is active.
         let mut developer = self.prompt_config.developer_prompt.clone();
-        if let Some(ref domain) = self.prompt_context.active_domain
+        if self.prompt_context.append_active_domain_addon
+            && let Some(ref domain) = self.prompt_context.active_domain
             && let Some(ref addon) = domain.manifest.prompt.system_addon
             && !addon.is_empty()
         {
