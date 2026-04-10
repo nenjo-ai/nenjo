@@ -11,7 +11,7 @@ use nenjo::types::GitContext;
 use nenjo_events::{Response, StepAgent};
 
 use super::event_bridge::{agent_name, project_slug, routine_event_to_response};
-use crate::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
+use crate::harness::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
 use crate::harness::{ActiveExecution, CommandContext};
 
 /// Handle a task execution command.

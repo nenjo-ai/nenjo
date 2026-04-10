@@ -31,8 +31,8 @@ pub use nenjo::agents::abilities::AbilityTool;
 pub struct HarnessToolFactory {
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter>,
-    config: crate::config::Config,
-    external_mcp: Arc<crate::external_mcp::ExternalMcpPool>,
+    config: crate::harness::config::Config,
+    external_mcp: Arc<crate::harness::external_mcp::ExternalMcpPool>,
     platform_resolver: Arc<dyn nenjo::PlatformToolResolver>,
 }
 
@@ -40,8 +40,8 @@ impl HarnessToolFactory {
     pub fn new(
         security: Arc<SecurityPolicy>,
         runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter>,
-        config: crate::config::Config,
-        external_mcp: Arc<crate::external_mcp::ExternalMcpPool>,
+        config: crate::harness::config::Config,
+        external_mcp: Arc<crate::harness::external_mcp::ExternalMcpPool>,
         platform_resolver: Arc<dyn nenjo::PlatformToolResolver>,
     ) -> Self {
         Self {
@@ -178,7 +178,7 @@ impl ToolFactory for HarnessToolFactory {
 ///
 /// TODO: restore after full integration
 pub struct ProgressUpdateTool {
-    _sender: Option<Arc<dyn crate::stream::StreamSender>>,
+    _sender: Option<Arc<dyn crate::harness::stream::StreamSender>>,
     _run_id: uuid::Uuid,
     _task_id: Option<uuid::Uuid>,
     _step_name: String,
@@ -186,7 +186,7 @@ pub struct ProgressUpdateTool {
 
 impl ProgressUpdateTool {
     pub fn new(
-        sender: Option<Arc<dyn crate::stream::StreamSender>>,
+        sender: Option<Arc<dyn crate::harness::stream::StreamSender>>,
         run_id: uuid::Uuid,
         task_id: Option<uuid::Uuid>,
         step_name: String,
@@ -246,14 +246,14 @@ pub fn all_tools(
     namespace: &str,
     shared_namespace: Option<&str>,
     core_namespace: Option<&str>,
-    delegation_ctx: Option<crate::agent::DelegationContext>,
+    delegation_ctx: Option<crate::harness::agent::DelegationContext>,
     progress_sender: Option<()>,
     workspace_dir: &std::path::Path,
-    stream_sender: Option<Arc<dyn crate::stream::StreamSender>>,
-    config: &crate::config::Config,
+    stream_sender: Option<Arc<dyn crate::harness::stream::StreamSender>>,
+    config: &crate::harness::config::Config,
 ) -> Vec<Box<dyn Tool>> {
     let runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter> = Arc::new(NativeRuntime);
-    let mcp_pool = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let mcp_pool = Arc::new(crate::harness::external_mcp::ExternalMcpPool::new());
     let noop_resolver: Arc<dyn nenjo::PlatformToolResolver> =
         Arc::new(nenjo::mcp::NoopPlatformResolver);
     let factory = HarnessToolFactory::new(

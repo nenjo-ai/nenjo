@@ -14,7 +14,7 @@ use nenjo_models::ModelProvider;
 use nenjo_models::ReliableProvider;
 
 use super::ModelProviders;
-use crate::config::ReliabilityConfig;
+use crate::harness::config::ReliabilityConfig;
 
 /// Registry that creates LLM provider instances on demand.
 ///

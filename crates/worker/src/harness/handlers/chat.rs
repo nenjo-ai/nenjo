@@ -8,8 +8,8 @@ use nenjo_events::{Response, StreamEvent};
 use nenjo_models::ChatMessage;
 
 use super::event_bridge::{agent_name, project_slug, turn_event_to_stream_event};
-use crate::domain_session_store::PersistedDomainSession;
-use crate::execution_trace::ExecutionTraceRecorder;
+use crate::harness::domain_session_store::PersistedDomainSession;
+use crate::harness::execution_trace::ExecutionTraceRecorder;
 use crate::harness::{ActiveExecution, CommandContext, DomainSession, ExecutionKind};
 
 async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Result<bool> {

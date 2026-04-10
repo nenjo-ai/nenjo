@@ -1,6 +1,6 @@
 //! Audit logging for security events
 
-use crate::config::AuditConfig;
+use crate::harness::config::AuditConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

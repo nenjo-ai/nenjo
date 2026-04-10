@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
-use crate::doc_sync;
+use crate::harness::doc_sync;
 use nenjo::client::NenjoClient;
 use nenjo::manifest::LambdaManifest;
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};

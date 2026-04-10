@@ -44,7 +44,7 @@ fn collect_forwarded_env() -> Vec<(String, String)> {
 /// `nenjo-tools` and we cannot add inherent methods to foreign types.
 /// Callers should use this instead of `SecurityPolicy::from_config`.
 pub fn security_policy_from_config(
-    autonomy_config: &crate::config::AutonomyConfig,
+    autonomy_config: &crate::harness::config::AutonomyConfig,
     workspace_dir: &Path,
 ) -> SecurityPolicy {
     SecurityPolicy {
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn from_config_maps_all_fields() {
-        let autonomy_config = crate::config::AutonomyConfig {
+        let autonomy_config = crate::harness::config::AutonomyConfig {
             workspace_only: false,
             blocked_commands: vec!["docker".into()],
             forbidden_paths: vec!["/secret".into()],
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn from_config_creates_fresh_tracker() {
-        let autonomy_config = crate::config::AutonomyConfig {
+        let autonomy_config = crate::harness::config::AutonomyConfig {
             workspace_only: false,
             blocked_commands: vec![],
             forbidden_paths: vec![],
