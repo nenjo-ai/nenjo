@@ -1,4 +1,4 @@
-use crate::providers::ModelProviders;
+use crate::harness::providers::ModelProviders;
 use anyhow::{Context, Result};
 use directories::UserDirs;
 use nenjo::AgentConfig;
@@ -818,7 +818,7 @@ impl Config {
         }
 
         // ── Model provider API key overrides ─────────────────
-        let provider_vars = crate::providers::provider_env_vars();
+        let provider_vars = crate::harness::providers::provider_env_vars();
         for (provider, env_var_candidates) in &provider_vars {
             for env_var in env_var_candidates {
                 if let Ok(val) = std::env::var(env_var) {

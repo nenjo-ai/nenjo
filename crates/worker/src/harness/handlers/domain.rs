@@ -7,7 +7,7 @@ use uuid::Uuid;
 use nenjo_events::{Response, StreamEvent};
 
 use super::event_bridge::agent_name;
-use crate::domain_session_store::PersistedDomainSession;
+use crate::harness::domain_session_store::PersistedDomainSession;
 use crate::harness::{CommandContext, DomainSession};
 
 /// Enter a domain session — creates a domain-expanded runner with escalated scopes.

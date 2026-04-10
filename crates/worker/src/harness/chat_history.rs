@@ -4,8 +4,8 @@ use anyhow::Result;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::agent::MemoryProfile;
-use crate::providers::{self, ChatMessage, Provider};
+use crate::harness::agent::MemoryProfile;
+use crate::harness::providers::{self, ChatMessage, Provider};
 
 /// Options for chat history compaction.
 pub struct CompactOptions<'a> {

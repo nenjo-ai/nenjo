@@ -12,7 +12,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::api_client::{DocumentSyncMeta, NenjoClient};
+use crate::harness::api_client::{DocumentSyncMeta, NenjoClient};
 
 // ---------------------------------------------------------------------------
 // Manifest

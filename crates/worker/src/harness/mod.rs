@@ -17,15 +17,32 @@ use nenjo::Provider;
 use nenjo_eventbus::{EventBus, Transport};
 use nenjo_events::Response;
 
-use crate::api_client::NenjoClient;
-use crate::chat_history::ChatHistory;
-use crate::config::Config;
-use crate::domain_session_store::DomainSessionStore;
-use crate::external_mcp::ExternalMcpPool;
-use crate::handlers;
-use crate::loader::FileSystemManifestLoader;
-use crate::providers::registry::ProviderRegistry;
-use crate::tools::{HarnessToolFactory, NativeRuntime};
+pub mod agent;
+pub mod chat_history;
+pub mod config;
+pub mod doc_sync;
+pub mod domain_session_store;
+pub mod execution_trace;
+pub mod external_mcp;
+pub mod handlers;
+pub mod loader;
+pub mod manifest;
+pub mod prompt;
+pub mod providers;
+pub mod security;
+pub mod stream;
+pub mod tools;
+
+pub use nenjo::client as api_client;
+
+use api_client::NenjoClient;
+use chat_history::ChatHistory;
+use config::Config;
+use domain_session_store::DomainSessionStore;
+use external_mcp::ExternalMcpPool;
+use loader::FileSystemManifestLoader;
+use providers::registry::ProviderRegistry;
+use tools::{HarnessToolFactory, NativeRuntime};
 
 // ---------------------------------------------------------------------------
 // Shared types used by handlers
@@ -118,7 +135,7 @@ impl Harness {
     pub async fn new(config: Config) -> Result<Self> {
         let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
 
-        crate::manifest::sync(&api, &config.manifests_dir, &config.workspace_dir).await?;
+        manifest::sync(&api, &config.manifests_dir, &config.workspace_dir).await?;
 
         let loader = FileSystemManifestLoader::new(&config.manifests_dir);
         let manifest = nenjo::ManifestLoader::load(&loader).await?;
@@ -152,7 +169,7 @@ impl Harness {
         let agent_config = config.agent.clone();
 
         let template_source: Arc<dyn nenjo::context::TemplateSource> = Arc::new(
-            crate::manifest::FileTemplateSource::new(config.manifests_dir.join("context_blocks")),
+            manifest::FileTemplateSource::new(config.manifests_dir.join("context_blocks")),
         );
 
         let provider = Provider::builder()
@@ -415,7 +432,7 @@ pub fn override_platform_mcp_url(
 ) -> Vec<nenjo::manifest::McpServerManifest> {
     let backend_mcp = format!("{}/mcp", backend_api_url.trim_end_matches('/'));
     for server in &mut servers {
-        if server.name == crate::external_mcp::PLATFORM_SERVER_NAME
+        if server.name == external_mcp::PLATFORM_SERVER_NAME
             && server.url.as_deref() != Some(&backend_mcp)
         {
             debug!(

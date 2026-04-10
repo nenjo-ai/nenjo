@@ -1,8 +1,8 @@
 //! Auto-detection of available security features
 #![allow(unexpected_cfgs)]
 
-use crate::config::{SandboxBackend, SecurityConfig};
-use crate::security::traits::Sandbox;
+use crate::harness::config::{SandboxBackend, SecurityConfig};
+use crate::harness::security::traits::Sandbox;
 use std::sync::Arc;
 
 /// Create a sandbox based on auto-detection or explicit config
@@ -118,7 +118,7 @@ fn detect_best_sandbox() -> Arc<dyn Sandbox> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SandboxConfig, SecurityConfig};
+    use crate::harness::config::{SandboxConfig, SecurityConfig};
 
     #[test]
     fn detect_best_sandbox_returns_something() {

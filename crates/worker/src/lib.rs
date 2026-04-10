@@ -9,12 +9,14 @@
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
+pub mod harness;
+
 use std::time::Duration;
 
+use crate::harness::Harness;
+use crate::harness::config::Config;
 use anyhow::Result;
 use clap::Args;
-use harness::Harness;
-use harness::config::Config;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

@@ -1,6 +1,6 @@
 //! Docker sandbox (container isolation)
 
-use crate::security::traits::Sandbox;
+use crate::harness::security::traits::Sandbox;
 use std::process::Command;
 
 /// Docker sandbox backend

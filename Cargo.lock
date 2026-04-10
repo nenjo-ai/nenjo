@@ -1180,58 +1180,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "axum",
- "axum-test",
- "base64",
- "chrono",
- "config",
- "cron",
- "dashmap",
- "directories",
- "dotenvy",
- "futures-util",
- "glob",
- "nanohtml2text",
- "nenjo",
- "nenjo-eventbus",
- "nenjo-events",
- "nenjo-models",
- "nenjo-tools",
- "nenjo-xml",
- "parking_lot",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "shellexpand",
- "sqlite-vec",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tokio-tungstenite",
- "tokio-util",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "uuid",
- "which",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1837,8 +1785,8 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nenjo-worker",
  "tokio",
- "worker",
 ]
 
 [[package]]
@@ -1920,6 +1868,60 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+ "which",
+]
+
+[[package]]
+name = "nenjo-worker"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "axum-test",
+ "base64",
+ "chrono",
+ "clap",
+ "config",
+ "cron",
+ "dashmap",
+ "directories",
+ "dotenvy",
+ "futures-util",
+ "glob",
+ "nanohtml2text",
+ "nenjo",
+ "nenjo-eventbus",
+ "nenjo-events",
+ "nenjo-models",
+ "nenjo-tools",
+ "nenjo-xml",
+ "parking_lot",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shellexpand",
+ "sqlite-vec",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
  "which",
 ]
 
@@ -4413,23 +4415,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
-]
-
-[[package]]
-name = "worker"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "clap",
- "dotenvy",
- "harness",
- "nenjo-eventbus",
- "nenjo-events",
- "rustls",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -18,4 +18,5 @@ changelog_include = [
     "nenjo-tools",
     "nenjo-events",
     "nenjo-eventbus",
+    "nenjo-worker",
 ]

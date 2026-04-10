@@ -8,7 +8,7 @@ use uuid::Uuid;
 use nenjo_events::{ResourceAction, ResourceType};
 
 use crate::harness::CommandContext;
-use crate::loader::FileSystemManifestLoader;
+use crate::harness::loader::FileSystemManifestLoader;
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -60,7 +60,10 @@ pub async fn handle_manifest_changed(
         }
         ResourceType::Lambda => {
             let manifest = ctx.provider().manifest().clone();
-            let _ = crate::manifest::sync_lambdas(&ctx.config.workspace_dir, &manifest.lambdas);
+            let _ = crate::harness::manifest::sync_lambdas(
+                &ctx.config.workspace_dir,
+                &manifest.lambdas,
+            );
         }
         ResourceType::Document => {
             // Sync docs for the specific project that owns this document.
@@ -73,7 +76,9 @@ pub async fn handle_manifest_changed(
                     .map(|p| p.slug.clone())
                     .unwrap_or_else(|| pid.to_string());
                 let project_dir = ctx.config.workspace_dir.join(&slug);
-                if let Err(e) = crate::doc_sync::sync_project(&ctx.api, &project_dir, pid).await {
+                if let Err(e) =
+                    crate::harness::doc_sync::sync_project(&ctx.api, &project_dir, pid).await
+                {
                     warn!(%pid, error = %e, "Doc sync failed");
                 }
             } else {
@@ -90,7 +95,7 @@ pub async fn handle_manifest_changed(
             {
                 let project_dir = ctx.config.workspace_dir.join(&project.slug);
                 if let Err(e) =
-                    crate::doc_sync::sync_project(&ctx.api, &project_dir, project.id).await
+                    crate::harness::doc_sync::sync_project(&ctx.api, &project_dir, project.id).await
                 {
                     warn!(project_id = %project.id, error = %e, "Doc sync failed");
                 }
@@ -224,7 +229,7 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
 
 /// Full re-fetch of all manifest data (fallback).
 async fn full_refresh(ctx: &CommandContext) -> Result<()> {
-    crate::manifest::sync(
+    crate::harness::manifest::sync(
         &ctx.api,
         &ctx.config.manifests_dir,
         &ctx.config.workspace_dir,
@@ -258,10 +263,11 @@ fn persist_cache(ctx: &CommandContext, rt: ResourceType) {
         ResourceType::Project => atomic_write(manifests_dir, "projects.json", &manifest.projects),
         ResourceType::Council => atomic_write(manifests_dir, "councils.json", &manifest.councils),
         ResourceType::Lambda => atomic_write(manifests_dir, "lambdas.json", &manifest.lambdas),
-        ResourceType::Ability => {
-            crate::manifest::sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)
-        }
-        ResourceType::ContextBlock => crate::manifest::sync_tree(
+        ResourceType::Ability => crate::harness::manifest::sync_tree(
+            &manifests_dir.join("abilities"),
+            &manifest.abilities,
+        ),
+        ResourceType::ContextBlock => crate::harness::manifest::sync_tree(
             &manifests_dir.join("context_blocks"),
             &manifest.context_blocks,
         ),
@@ -269,7 +275,7 @@ fn persist_cache(ctx: &CommandContext, rt: ResourceType) {
             atomic_write(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)
         }
         ResourceType::Domain => {
-            crate::manifest::sync_tree(&manifests_dir.join("domains"), &manifest.domains)
+            crate::harness::manifest::sync_tree(&manifests_dir.join("domains"), &manifest.domains)
         }
         ResourceType::Document => return,
     };
