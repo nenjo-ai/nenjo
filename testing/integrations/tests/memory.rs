@@ -44,6 +44,7 @@ fn make_model() -> ModelManifest {
         model_provider: "openrouter".into(),
         temperature: Some(0.0),
         tags: vec![],
+        base_url: None,
     }
 }
 

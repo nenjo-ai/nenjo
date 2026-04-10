@@ -54,6 +54,9 @@ pub enum ModelProviders {
     Moonshot,
     GLM,
     Google,
+    Minimax,
+    #[serde(rename = "openai-compatible")]
+    OpenAiCompatible,
 }
 
 impl std::fmt::Display for ModelProviders {
@@ -75,6 +78,8 @@ impl std::fmt::Display for ModelProviders {
             Self::Moonshot => "moonshot",
             Self::GLM => "glm",
             Self::Google => "google",
+            Self::Minimax => "minimax",
+            Self::OpenAiCompatible => "openai-compatible",
         };
         write!(f, "{name}")
     }
@@ -106,9 +111,14 @@ pub fn provider_env_vars() -> HashMap<ModelProviders, Vec<String>> {
     m.insert(ModelProviders::Cohere, vec!["COHERE_API_KEY".into()]);
     m.insert(ModelProviders::Moonshot, vec!["MOONSHOT_API_KEY".into()]);
     m.insert(ModelProviders::GLM, vec!["GLM_API_KEY".into()]);
+    m.insert(ModelProviders::Minimax, vec!["MINIMAX_API_KEY".into()]);
     m.insert(
         ModelProviders::Google,
         vec!["GOOGLE_AI_API_KEY".into(), "GEMINI_API_KEY".into()],
+    );
+    m.insert(
+        ModelProviders::OpenAiCompatible,
+        vec!["OPENAI_COMPATIBLE_API_KEY".into()],
     );
     m
 }

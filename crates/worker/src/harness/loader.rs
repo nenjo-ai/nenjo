@@ -166,6 +166,7 @@ mod tests {
             model_provider: "openai".into(),
             temperature: Some(0.7),
             tags: vec![],
+            base_url: None,
         };
         std::fs::write(
             dir.path().join("models.json"),

@@ -158,6 +158,7 @@ fn model(id: Uuid) -> ModelManifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     }
 }
 

@@ -38,6 +38,19 @@ use tracing::{debug, error};
 /// Implementations are responsible for API key resolution.
 pub trait ModelProviderFactory: Send + Sync {
     fn create(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>>;
+
+    /// Create a provider with an optional base URL override.
+    ///
+    /// Used for self-hosted providers like Ollama where the user configures
+    /// a custom endpoint. The default implementation ignores the URL.
+    fn create_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<dyn ModelProvider>> {
+        let _ = base_url;
+        self.create(provider_name)
+    }
 }
 
 /// Creates tools for an agent based on its bootstrap configuration.
@@ -239,7 +252,7 @@ impl Provider {
 
         let provider = self
             .model_factory
-            .create(&model.model_provider)
+            .create_with_base_url(&model.model_provider, model.base_url.as_deref())
             .map_err(|e| {
                 ProviderError::FactoryFailed(e.context(format!(
                     "failed to create LLM provider '{}' for agent '{}'",
@@ -570,6 +583,7 @@ mod tests {
             model_provider: "mock".into(),
             temperature: Some(0.5),
             tags: vec![],
+            base_url: None,
         };
         let agent = AgentManifest {
             id: Uuid::new_v4(),
