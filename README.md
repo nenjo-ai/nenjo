@@ -32,7 +32,7 @@ The `nenjo` CLI connects your agents to the Nenjo platform over NATS, processing
 nenjo run
 
 # With verbose logging
-nenjo run --log-level debug
+nenjo run --log-level "info,nenjo=debug"
 ```
 
 The runner is resilient to outages — startup and the event loop use exponential backoff so the worker automatically recovers when services come back online.
