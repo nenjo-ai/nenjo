@@ -12,6 +12,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 use crate::doc_sync;
@@ -20,6 +21,8 @@ use nenjo::manifest::LambdaManifest;
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+static TREE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Trait for manifest items that can be stored as tree files.
 pub trait TreeItem: serde::Serialize {
@@ -286,7 +289,7 @@ pub fn sync_tree<T: TreeItem>(base_dir: &Path, items: &[T]) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dir: {}", parent.display()))?;
         }
-        let tmp = file_path.with_extension("json.tmp");
+        let tmp = unique_tree_tmp_path(&file_path);
         let json = serde_json::to_string_pretty(item)
             .with_context(|| format!("Failed to serialize tree item: {}", file_path.display()))?;
         std::fs::write(&tmp, json.as_bytes())
@@ -311,6 +314,16 @@ pub fn tree_item_path(base_dir: &Path, path: &str, name: &str) -> PathBuf {
     } else {
         base_dir.join(path).join(format!("{name}.json"))
     }
+}
+
+fn unique_tree_tmp_path(file_path: &Path) -> PathBuf {
+    let nonce = TREE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let filename = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("resource.json");
+    file_path.with_file_name(format!(".{filename}.{pid}.{nonce}.tmp"))
 }
 
 /// Recursively remove files in `dir` that are not in the expected set, and clean up
