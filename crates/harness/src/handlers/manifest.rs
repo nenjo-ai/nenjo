@@ -1,6 +1,7 @@
 //! Manifest change handler — incremental resource updates.
 
 use anyhow::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -8,6 +9,8 @@ use nenjo_events::{ResourceAction, ResourceType};
 
 use crate::harness::CommandContext;
 use crate::loader::FileSystemManifestLoader;
+
+static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Handle a manifest.changed event.
 ///
@@ -283,9 +286,15 @@ fn atomic_write<T: serde::Serialize>(
 ) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let target = dir.join(filename);
-    let tmp = dir.join(format!(".{filename}.tmp"));
+    let tmp = unique_tmp_path(&target, filename);
     let json = serde_json::to_string_pretty(value)?;
     std::fs::write(&tmp, json.as_bytes())?;
     std::fs::rename(&tmp, &target)?;
     Ok(())
+}
+
+fn unique_tmp_path(target: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let nonce = CACHE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    target.with_file_name(format!(".{filename}.{pid}.{nonce}.tmp"))
 }
