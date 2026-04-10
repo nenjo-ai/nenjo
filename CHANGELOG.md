@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/nenjo-ai/nenjo/compare/v0.7.0...v0.7.1) - 2026-04-10
+
+### Added
+
+- added configurable nenjo dir
+
+### Fixed
+
+- release worker to crates io ([#31](https://github.com/nenjo-ai/nenjo/pull/31))
+- address dependabot and codeql findings
+- clean up log output
+
 ## [0.7.0](https://github.com/nenjo-ai/nenjo/compare/v0.6.0...v0.7.0) - 2026-04-09
 
 ### Added
