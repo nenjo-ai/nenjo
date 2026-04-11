@@ -54,11 +54,13 @@ pub enum ExecutionKind {
     Chat,
     Task,
     Cron,
+    Heartbeat,
 }
 
 /// Tracks an active execution so it can be cancelled or paused.
 pub struct ActiveExecution {
     pub kind: ExecutionKind,
+    pub registry_token: uuid::Uuid,
     pub execution_run_id: Option<uuid::Uuid>,
     pub cancel: CancellationToken,
     pub pause: Option<nenjo::agents::runner::types::PauseToken>,
@@ -381,6 +383,21 @@ impl Harness {
             }
         });
 
+        let restore_ctx = CommandContext {
+            provider: self.provider.clone(),
+            response_tx: response_tx.clone(),
+            chat_history: self.chat_history.clone(),
+            domain_session_store: self.domain_session_store.clone(),
+            api: self.api.clone(),
+            config: self.config.clone(),
+            external_mcp: self.external_mcp.clone(),
+            executions: self.executions.clone(),
+            domains: self.domains.clone(),
+            git_locks: self.git_locks.clone(),
+        };
+        restore_active_cron_schedules(&restore_ctx).await;
+        restore_active_agent_heartbeats(&restore_ctx).await;
+
         info!("Nenjo harness event loop started");
 
         // Main loop: dispatch commands to independent tasks.
@@ -419,6 +436,67 @@ impl Harness {
         let _ = io_handle.await;
 
         Ok(())
+    }
+}
+
+async fn restore_active_cron_schedules(ctx: &CommandContext) {
+    let routines = match ctx.api.list_active_cron_routines().await {
+        Ok(routines) => routines,
+        Err(e) => {
+            warn!(error = %e, "Failed to restore active cron schedules");
+            return;
+        }
+    };
+
+    for routine in routines {
+        let start_at = routine
+            .next_run_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc));
+        if let Err(e) = handlers::cron::handle_cron_enable(
+            ctx,
+            routine.id,
+            routine.project_id,
+            &routine.schedule,
+            start_at,
+        )
+        .await
+        {
+            warn!(error = %e, routine_id = %routine.id, "Failed to restore cron schedule");
+        }
+    }
+}
+
+async fn restore_active_agent_heartbeats(ctx: &CommandContext) {
+    let heartbeats = match ctx.api.list_active_agent_heartbeats().await {
+        Ok(heartbeats) => heartbeats,
+        Err(e) => {
+            warn!(error = %e, "Failed to restore active agent heartbeats");
+            return;
+        }
+    };
+
+    for heartbeat in heartbeats {
+        let start_at = heartbeat
+            .next_run_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc));
+        if let Err(e) = handlers::heartbeat::handle_agent_heartbeat_enable(
+            ctx,
+            heartbeat.agent_id,
+            &heartbeat.interval,
+            start_at,
+        )
+        .await
+        {
+            warn!(
+                error = %e,
+                agent_id = %heartbeat.agent_id,
+                "Failed to restore agent heartbeat"
+            );
+        }
     }
 }
 

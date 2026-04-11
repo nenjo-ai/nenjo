@@ -52,7 +52,7 @@ run *args:
     cargo run --bin nenjo -- {{args}}
 
 # Run the harness in watch mode
-dev:
+nenjo:
     cargo watch -x 'run --bin nenjo -- run --log-level "info,nenjo=debug"'
 
 # Clean all build artifacts

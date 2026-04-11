@@ -97,6 +97,20 @@ impl RenderContextExt for RenderContextVars {
                     ctx.task = task_to_context(t);
                 }
             }
+            TaskType::Heartbeat {
+                project_id,
+                previous_output,
+                last_run_at,
+                next_run_at,
+                ..
+            } => {
+                ctx.project.id = project_id.map(|id| id.to_string()).unwrap_or_default();
+                ctx.heartbeat_previous_output = previous_output.clone().unwrap_or_default();
+                ctx.heartbeat_last_run_at =
+                    last_run_at.map(|ts| ts.to_rfc3339()).unwrap_or_default();
+                ctx.heartbeat_next_run_at =
+                    next_run_at.map(|ts| ts.to_rfc3339()).unwrap_or_default();
+            }
         }
         ctx
     }
@@ -153,14 +167,26 @@ pub enum TaskType {
         project_id: Uuid,
     },
     /// A cron-triggered routine execution. Runs the routine on a repeating
-    /// interval until a completion signal is received or the timeout expires.
+    /// schedule until a completion signal is received or the timeout expires.
     Cron {
         /// Optional task context — present when a cron step runs inside a
         /// task-triggered routine, absent for standalone cron routines.
         task: Option<Task>,
         project_id: Uuid,
-        interval: Duration,
+        schedule: crate::routines::types::CronSchedule,
+        /// Optional persisted next fire time used when restoring active
+        /// schedules after a worker restart.
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
         timeout: Duration,
+    },
+    Heartbeat {
+        agent_id: Uuid,
+        project_id: Option<Uuid>,
+        interval: Duration,
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
+        previous_output: Option<String>,
+        last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+        next_run_at: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
@@ -210,6 +236,8 @@ pub struct PromptTemplates {
     pub gate_eval: String,
     #[serde(default)]
     pub cron_task: String,
+    #[serde(default)]
+    pub heartbeat_task: String,
 }
 
 /// Tracks delegation depth and prevents cycles in agent-to-agent delegation.

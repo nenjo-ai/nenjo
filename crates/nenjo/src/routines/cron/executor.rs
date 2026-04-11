@@ -10,29 +10,60 @@ use tracing::{debug, info};
 use crate::manifest::RoutineManifest;
 use crate::provider::Provider;
 use crate::routines::RoutineEvent;
-use crate::routines::types::{RoutineState, StepResult};
+use crate::routines::types::{CronSchedule, RoutineState, StepResult};
 
-/// Execute a routine on a repeating interval until a completion signal
+pub(crate) struct CronExecutionConfig<'a> {
+    pub events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    pub cancel: &'a CancellationToken,
+    pub schedule: &'a CronSchedule,
+    pub start_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub timeout: Duration,
+}
+
+/// Execute a routine on a repeating schedule until a completion signal
 /// is received, the timeout expires, or the execution is cancelled.
 pub(crate) async fn execute_routine_cron(
     provider: &Provider,
     routine: &RoutineManifest,
     state: &mut RoutineState,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-    interval: Duration,
-    timeout: Duration,
+    config: CronExecutionConfig<'_>,
 ) -> Result<StepResult> {
+    let CronExecutionConfig {
+        events_tx,
+        cancel,
+        schedule,
+        start_at,
+        timeout,
+    } = config;
     let deadline = tokio::time::Instant::now() + timeout;
     let mut cycle = 0u32;
     let mut last_result;
 
     info!(
         routine = %routine.name,
-        interval_secs = interval.as_secs(),
         timeout_secs = timeout.as_secs(),
         "Starting cron routine execution"
     );
+
+    if let Some(start_at) = start_at {
+        let delay = (start_at - chrono::Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        if !delay.is_zero() {
+            debug!(routine = %routine.name, delay_secs = delay.as_secs(), "Waiting for restored cron schedule");
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = cancel.cancelled() => {
+                    info!(routine = %routine.name, "Cron routine cancelled before first restored run");
+                    return Ok(StepResult {
+                        passed: false,
+                        output: format!("Cron routine '{}' cancelled before first cycle", routine.name),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
 
     loop {
         cycle += 1;
@@ -60,17 +91,15 @@ pub(crate) async fn execute_routine_cron(
         if let Some(verdict) = last_result.data.get("verdict").and_then(|v| v.as_str()) {
             match verdict {
                 "pass" => {
-                    info!(cycle, routine = %routine.name, "Cron routine completed (pass)");
+                    info!(cycle, routine = %routine.name, "Cron routine step completed (pass)");
                     return Ok(last_result);
                 }
                 "fail" => {
-                    info!(cycle, routine = %routine.name, "Cron routine completed (fail)");
+                    info!(cycle, routine = %routine.name, "Cron routine step completed (fail)");
                     last_result.passed = false;
                     return Ok(last_result);
                 }
-                _ => {
-                    debug!(cycle, routine = %routine.name, verdict, "Unknown verdict, will retry");
-                }
+                _ => {}
             }
         } else {
             debug!(cycle, routine = %routine.name, "No verdict, will retry");
@@ -94,9 +123,16 @@ pub(crate) async fn execute_routine_cron(
         // Reset step results for next cycle
         state.step_results.clear();
 
-        // Cancellable sleep between cycles
+        // Cancellable sleep between cycles — computed dynamically for cron
+        // expressions so the next fire aligns with the wall-clock schedule.
+        let delay = schedule.next_delay();
+        debug!(
+            cycle,
+            delay_secs = delay.as_secs(),
+            "Sleeping until next cron cycle"
+        );
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(delay) => {}
             _ = cancel.cancelled() => {
                 info!(cycle, routine = %routine.name, "Cron routine cancelled");
                 return Ok(StepResult {

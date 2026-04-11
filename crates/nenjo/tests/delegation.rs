@@ -185,6 +185,7 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     }
 }
 

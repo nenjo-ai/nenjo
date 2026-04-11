@@ -215,6 +215,22 @@ pub struct AgentManifest {
     /// When true, prompt_config updates are blocked.
     #[serde(default)]
     pub prompt_locked: bool,
+    #[serde(default)]
+    pub heartbeat: Option<AgentHeartbeatManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHeartbeatManifest {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub interval: String,
+    pub is_active: bool,
+    #[serde(default)]
+    pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// An ability — a sub-execution mode with its own prompt and filtered tools.

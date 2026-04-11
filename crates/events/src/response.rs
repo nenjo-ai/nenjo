@@ -15,6 +15,7 @@ use crate::Capability;
 pub enum ExecutionType {
     Cron,
     Task,
+    Heartbeat,
 }
 
 /// Agent identity attached to step events so the frontend can render identicons.
@@ -82,6 +83,40 @@ pub enum Response {
         active_schedules: Vec<CronScheduleStatus>,
     },
 
+    /// Confirms that a cron schedule was enabled by the worker.
+    #[serde(rename = "cron.scheduled")]
+    CronScheduled {
+        routine_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_run_at: Option<String>,
+    },
+
+    /// Confirms that a cron schedule was disabled by the worker.
+    #[serde(rename = "cron.stopped")]
+    CronStopped { routine_id: Uuid },
+
+    /// Periodic heartbeat from the agent heartbeat scheduler.
+    #[serde(rename = "agent_heartbeat.heartbeat")]
+    AgentHeartbeatHeartbeat {
+        agent_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_run_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_run_at: Option<String>,
+    },
+
+    /// Confirms that an agent heartbeat schedule was enabled by the worker.
+    #[serde(rename = "agent_heartbeat.scheduled")]
+    AgentHeartbeatScheduled {
+        agent_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_run_at: Option<String>,
+    },
+
+    /// Confirms that an agent heartbeat schedule was disabled by the worker.
+    #[serde(rename = "agent_heartbeat.stopped")]
+    AgentHeartbeatStopped { agent_id: Uuid },
+
     /// Signals that a new execution run is starting (e.g. a cron cycle).
     /// The worker pre-generates the UUID; the backend creates the row.
     #[serde(rename = "execution.started")]
@@ -89,8 +124,12 @@ pub enum Response {
         id: Uuid,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
-        routine_id: Uuid,
-        routine_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routine_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routine_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<Uuid>,
         config: serde_json::Value,
     },
 
@@ -111,6 +150,8 @@ pub enum Response {
         routine_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routine_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<Uuid>,
     },
 
     /// Repo sync completed (or failed) for a project.
@@ -186,11 +227,49 @@ impl std::fmt::Display for Response {
             Self::CronHeartbeat { active_schedules } => {
                 write!(f, "cron.heartbeat(schedules={})", active_schedules.len())
             }
-            Self::ExecutionStarted {
-                id, routine_name, ..
+            Self::CronScheduled {
+                routine_id,
+                next_run_at,
             } => {
-                write!(f, "execution.started(id={id}, routine={routine_name})")
+                write!(
+                    f,
+                    "cron.scheduled(routine={routine_id}, next_run_at={})",
+                    next_run_at.as_deref().unwrap_or("none")
+                )
             }
+            Self::CronStopped { routine_id } => write!(f, "cron.stopped(routine={routine_id})"),
+            Self::AgentHeartbeatHeartbeat {
+                agent_id,
+                next_run_at,
+                ..
+            } => write!(
+                f,
+                "agent_heartbeat.heartbeat(agent={agent_id}, next_run_at={})",
+                next_run_at.as_deref().unwrap_or("none")
+            ),
+            Self::AgentHeartbeatScheduled {
+                agent_id,
+                next_run_at,
+            } => write!(
+                f,
+                "agent_heartbeat.scheduled(agent={agent_id}, next_run_at={})",
+                next_run_at.as_deref().unwrap_or("none")
+            ),
+            Self::AgentHeartbeatStopped { agent_id } => {
+                write!(f, "agent_heartbeat.stopped(agent={agent_id})")
+            }
+            Self::ExecutionStarted {
+                id,
+                routine_name,
+                agent_id,
+                ..
+            } => match (routine_name, agent_id) {
+                (Some(routine_name), _) => {
+                    write!(f, "execution.started(id={id}, routine={routine_name})")
+                }
+                (None, Some(agent_id)) => write!(f, "execution.started(id={id}, agent={agent_id})"),
+                (None, None) => write!(f, "execution.started(id={id})"),
+            },
             Self::ExecutionCompleted { id, success, .. } => {
                 write!(f, "execution.completed(id={id}, success={success})")
             }
@@ -660,8 +739,9 @@ mod tests {
         let resp = Response::ExecutionStarted {
             id,
             project_id: None,
-            routine_id: Uuid::nil(),
-            routine_name: "deploy".into(),
+            routine_id: Some(Uuid::nil()),
+            routine_name: Some("deploy".into()),
+            agent_id: None,
             config: serde_json::json!({}),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -674,7 +754,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(parsed_id, id);
-                assert_eq!(routine_name, "deploy");
+                assert_eq!(routine_name.as_deref(), Some("deploy"));
             }
             _ => panic!("wrong variant"),
         }
@@ -691,6 +771,7 @@ mod tests {
             execution_type: Some(ExecutionType::Task),
             routine_id: Some(Uuid::nil()),
             routine_name: Some("Test Routine".to_string()),
+            agent_id: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"execution.completed""#));

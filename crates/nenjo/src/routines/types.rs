@@ -229,6 +229,11 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
             project_id,
             ..
         } => RoutineInput::new(*project_id, "Cron", "Cron-triggered routine").with_cron_trigger(),
+        crate::types::TaskType::Heartbeat { project_id, .. } => RoutineInput::new(
+            project_id.unwrap_or(Uuid::nil()),
+            "Heartbeat",
+            "Scheduled agent heartbeat",
+        ),
         crate::types::TaskType::Chat {
             project_id,
             user_message,
@@ -417,6 +422,69 @@ impl LambdaStepConfig {
     }
 }
 
+/// A cron schedule — either a fixed interval or a cron expression.
+#[derive(Debug, Clone)]
+pub enum CronSchedule {
+    /// Fixed interval between cycles (e.g. "30s", "5m").
+    Interval(Duration),
+    /// Standard cron expression (e.g. "0 9 * * *").
+    Expression(Box<cron::Schedule>),
+}
+
+impl CronSchedule {
+    /// Compute the next fire time in UTC.
+    pub fn next_fire_at(&self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            CronSchedule::Interval(d) => {
+                chrono::Utc::now()
+                    + chrono::Duration::from_std(*d)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(60))
+            }
+            CronSchedule::Expression(schedule) => schedule
+                .upcoming(chrono::Utc)
+                .next()
+                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::seconds(60)),
+        }
+    }
+
+    /// Compute the duration to sleep until the next fire time.
+    /// For fixed intervals this returns the interval directly.
+    /// For cron expressions it computes the delay until the next upcoming time.
+    pub fn next_delay(&self) -> Duration {
+        let delta = self.next_fire_at() - chrono::Utc::now();
+        delta.to_std().unwrap_or(Duration::from_secs(60))
+    }
+}
+
+/// Parse a schedule string — either a cron expression ("0 9 * * *") or a
+/// simple duration string ("30s", "5m", "1h", "2d").
+///
+/// Cron expressions are detected by the presence of spaces (at least 4
+/// space-separated fields). Everything else is parsed as a duration.
+pub fn parse_schedule(s: &str) -> Result<CronSchedule> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("Empty schedule string");
+    }
+
+    // Cron expressions have at least 4 space-separated fields.
+    if s.split_whitespace().count() >= 4 {
+        // The `cron` crate expects a 7-field format (sec min hour dom month dow year).
+        // Standard 5-field cron ("min hour dom month dow") needs sec + year padding.
+        let expr = match s.split_whitespace().count() {
+            5 => format!("0 {s} *"), // sec=0, append year=*
+            6 => format!("0 {s}"),   // prepend sec=0
+            _ => s.to_string(),      // already 7-field
+        };
+        let schedule: cron::Schedule = expr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", s, e))?;
+        Ok(CronSchedule::Expression(Box::new(schedule)))
+    } else {
+        parse_duration(s).map(CronSchedule::Interval)
+    }
+}
+
 /// Parse a simple duration string: "30s", "5m", "1h", "2d".
 pub fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
@@ -567,6 +635,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_schedule_interval() {
+        let s = parse_schedule("30s").unwrap();
+        assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(30)));
+        let s = parse_schedule("5m").unwrap();
+        assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_schedule_cron_expression() {
+        // Standard 5-field cron
+        let s = parse_schedule("0 9 * * *").unwrap();
+        assert!(matches!(s, CronSchedule::Expression(_)));
+        // Every 5 minutes
+        let s = parse_schedule("*/5 * * * *").unwrap();
+        assert!(matches!(s, CronSchedule::Expression(_)));
+        // Next delay should be positive and finite
+        let delay = s.next_delay();
+        assert!(delay.as_secs() > 0);
+        assert!(delay.as_secs() <= 300);
+    }
+
+    #[test]
+    fn parse_schedule_invalid() {
+        assert!(parse_schedule("").is_err());
+        assert!(parse_schedule("not a schedule").is_err());
+    }
+
+    #[test]
     fn cron_config_defaults() {
         let id = Uuid::new_v4();
         let config = serde_json::json!({});
@@ -647,7 +743,8 @@ mod tests {
                 git: Some(git),
             }),
             project_id: Uuid::new_v4(),
-            interval: Duration::from_secs(60),
+            schedule: CronSchedule::Interval(Duration::from_secs(60)),
+            start_at: None,
             timeout: Duration::from_secs(300),
         };
         let input = routine_input_from_task(&task);

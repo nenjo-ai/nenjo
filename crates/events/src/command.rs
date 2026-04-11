@@ -161,6 +161,18 @@ pub enum Command {
         project_id: Option<Uuid>,
     },
 
+    /// Enable a recurring heartbeat schedule for an agent.
+    #[serde(rename = "agent_heartbeat.enable")]
+    AgentHeartbeatEnable { agent_id: Uuid, interval: String },
+
+    /// Disable a recurring heartbeat schedule for an agent.
+    #[serde(rename = "agent_heartbeat.disable")]
+    AgentHeartbeatDisable { agent_id: Uuid },
+
+    /// Trigger a one-time heartbeat run for an agent.
+    #[serde(rename = "agent_heartbeat.trigger")]
+    AgentHeartbeatTrigger { agent_id: Uuid },
+
     // -----------------------------------------------------------------
     // Bootstrap
     // -----------------------------------------------------------------
@@ -230,6 +242,15 @@ impl std::fmt::Display for Command {
                 write!(f, "cron.disable(routine={routine_id})")
             }
             Self::CronTrigger { routine_id, .. } => write!(f, "cron.trigger(routine={routine_id})"),
+            Self::AgentHeartbeatEnable { agent_id, .. } => {
+                write!(f, "agent_heartbeat.enable(agent={agent_id})")
+            }
+            Self::AgentHeartbeatDisable { agent_id } => {
+                write!(f, "agent_heartbeat.disable(agent={agent_id})")
+            }
+            Self::AgentHeartbeatTrigger { agent_id } => {
+                write!(f, "agent_heartbeat.trigger(agent={agent_id})")
+            }
             Self::WorkerPing => write!(f, "worker.ping"),
             Self::ManifestChanged {
                 resource_type,
@@ -260,7 +281,10 @@ impl Command {
 
             Command::CronEnable { .. }
             | Command::CronDisable { .. }
-            | Command::CronTrigger { .. } => Capability::Cron,
+            | Command::CronTrigger { .. }
+            | Command::AgentHeartbeatEnable { .. }
+            | Command::AgentHeartbeatDisable { .. }
+            | Command::AgentHeartbeatTrigger { .. } => Capability::Cron,
 
             Command::WorkerPing => Capability::Ping,
 

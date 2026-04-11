@@ -81,6 +81,7 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     }
 }
 

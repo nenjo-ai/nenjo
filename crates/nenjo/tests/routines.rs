@@ -237,6 +237,7 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     }
 }
 
@@ -1054,7 +1055,8 @@ async fn cron_execution() {
     let task = TaskType::Cron {
         task: None,
         project_id,
-        interval: Duration::from_millis(50),
+        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
+        start_at: None,
         timeout: Duration::from_secs(5),
     };
 
@@ -1141,7 +1143,8 @@ async fn cron_cancellation() {
     let task = TaskType::Cron {
         task: None,
         project_id,
-        interval: Duration::from_millis(50),
+        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
+        start_at: None,
         timeout: Duration::from_secs(30),
     };
 

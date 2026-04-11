@@ -1,5 +1,6 @@
 //! HTTP client implementation.
 
+use super::types::ActiveAgentHeartbeatState;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -112,6 +113,26 @@ impl NenjoClient {
 
     pub async fn fetch_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
         self.fetch_resource(&format!("/api/v1/routines/{id}")).await
+    }
+
+    pub async fn list_active_cron_routines(&self) -> Result<Vec<ActiveCronRoutineState>> {
+        let url = format!("{}/api/v1/routines/cron-state", self.base_url);
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => resp.json().await.map_err(ApiClientError::Http),
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    pub async fn list_active_agent_heartbeats(&self) -> Result<Vec<ActiveAgentHeartbeatState>> {
+        let url = format!("{}/api/v1/agents/heartbeat-state", self.base_url);
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => resp.json().await.map_err(ApiClientError::Http),
+            status => Err(self.api_error(status, resp).await),
+        }
     }
 
     pub async fn fetch_lambda(&self, id: Uuid) -> Result<Option<LambdaManifest>> {

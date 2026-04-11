@@ -188,6 +188,7 @@ mod tests {
             mcp_server_ids: vec![],
             abilities: vec![],
             prompt_locked: false,
+            heartbeat: None,
         };
         std::fs::write(
             dir.path().join("agents.json"),

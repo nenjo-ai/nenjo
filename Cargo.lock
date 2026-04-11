@@ -1763,6 +1763,7 @@ dependencies = [
  "async-trait",
  "bon",
  "chrono",
+ "cron",
  "futures-util",
  "nenjo-events",
  "nenjo-models",

@@ -207,6 +207,9 @@ impl AgentInstance {
                 ("CouncilSubtask", &self.prompt_config.templates.chat_task)
             }
             TaskType::Cron { .. } => ("Cron", &self.prompt_config.templates.cron_task),
+            TaskType::Heartbeat { .. } => {
+                ("Heartbeat", &self.prompt_config.templates.heartbeat_task)
+            }
         };
         tracing::debug!(
             agent = %self.name,
