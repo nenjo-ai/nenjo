@@ -2,7 +2,7 @@
 
 use nenjo_events::{Command, Envelope, Response};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
 use crate::error::EventBusError;
@@ -64,7 +64,14 @@ impl<T: Transport> EventBus<T> {
         let subject = nenjo_events::responses_subject(self.user_id);
 
         self.transport.publish(&subject, &bytes).await?;
-        debug!(user_id = %self.user_id, "response sent");
+        match response {
+            Response::WorkerPong => {
+                trace!(user_id = %self.user_id, response = "worker.pong", "response sent");
+            }
+            _ => {
+                debug!(user_id = %self.user_id, "response sent");
+            }
+        }
         Ok(())
     }
 
