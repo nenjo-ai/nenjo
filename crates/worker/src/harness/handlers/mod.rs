@@ -4,6 +4,7 @@ pub mod chat;
 pub mod cron;
 pub mod domain;
 pub mod event_bridge;
+pub mod heartbeat;
 pub mod manifest;
 pub mod repo;
 pub mod task;
@@ -117,7 +118,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             routine_id,
             project_id,
             schedule,
-        } => cron::handle_cron_enable(&ctx, routine_id, project_id, &schedule).await,
+        } => cron::handle_cron_enable(&ctx, routine_id, project_id, &schedule, None).await,
 
         Command::CronDisable { routine_id } => cron::handle_cron_disable(&ctx, routine_id).await,
 
@@ -126,6 +127,18 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             project_id,
             ..
         } => cron::handle_cron_trigger(&ctx, routine_id, project_id).await,
+
+        Command::AgentHeartbeatEnable { agent_id, interval } => {
+            heartbeat::handle_agent_heartbeat_enable(&ctx, agent_id, &interval, None).await
+        }
+
+        Command::AgentHeartbeatDisable { agent_id } => {
+            heartbeat::handle_agent_heartbeat_disable(&ctx, agent_id).await
+        }
+
+        Command::AgentHeartbeatTrigger { agent_id } => {
+            heartbeat::handle_agent_heartbeat_trigger(&ctx, agent_id).await
+        }
 
         Command::RepoSync {
             project_id,

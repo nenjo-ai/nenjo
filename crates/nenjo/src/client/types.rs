@@ -73,3 +73,21 @@ pub struct ApiErrorDetail {
     #[serde(default)]
     pub details: Option<serde_json::Value>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveCronRoutineState {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub schedule: String,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActiveAgentHeartbeatState {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub interval: String,
+    pub last_run_at: Option<String>,
+    pub next_run_at: Option<String>,
+}

@@ -97,6 +97,7 @@ fn test_manifest() -> Manifest {
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     };
 
     let project = ProjectManifest {
@@ -649,6 +650,7 @@ async fn ability_inherits_memory_vars() {
         mcp_server_ids: vec![],
         abilities: vec![ability.id],
         prompt_locked: false,
+        heartbeat: None,
     };
 
     let project = nenjo::manifest::ProjectManifest {
@@ -773,6 +775,7 @@ async fn domain_expansion_preserves_memory() {
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     };
 
     let project = nenjo::manifest::ProjectManifest {

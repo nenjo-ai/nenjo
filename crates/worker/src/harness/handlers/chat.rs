@@ -180,6 +180,7 @@ pub async fn handle_chat(
         session_id,
         ActiveExecution {
             kind: ExecutionKind::Chat,
+            registry_token: Uuid::new_v4(),
             execution_run_id: None,
             cancel: cancel.clone(),
             pause: None,

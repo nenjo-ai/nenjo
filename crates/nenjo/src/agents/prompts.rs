@@ -36,6 +36,8 @@ pub struct PromptTemplates {
     pub gate_eval: String,
     #[serde(default)]
     pub cron_task: String,
+    #[serde(default)]
+    pub heartbeat_task: String,
 }
 
 /// Configures what a role wants its memory system to focus on.

@@ -161,6 +161,7 @@ pub async fn handle_task_execute(
         task_id,
         ActiveExecution {
             kind: crate::harness::ExecutionKind::Task,
+            registry_token: Uuid::new_v4(),
             execution_run_id: Some(execution_run_id),
             cancel: cancel.clone(),
             pause: Some(pause.clone()),

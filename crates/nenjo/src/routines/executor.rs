@@ -355,7 +355,10 @@ async fn execute_agent_step(
         crate::types::TaskType::Cron {
             task: inner_task,
             project_id: state.input.project_id,
-            interval: std::time::Duration::from_secs(0),
+            schedule: crate::routines::types::CronSchedule::Interval(
+                std::time::Duration::from_secs(0),
+            ),
+            start_at: None,
             timeout: std::time::Duration::from_secs(0),
         }
     } else {
@@ -571,7 +574,8 @@ async fn execute_cron_step(
                 let task = crate::types::TaskType::Cron {
                     task: inner_task,
                     project_id: state.input.project_id,
-                    interval: config.interval,
+                    schedule: crate::routines::types::CronSchedule::Interval(config.interval),
+                    start_at: None,
                     timeout: config.timeout,
                 };
 

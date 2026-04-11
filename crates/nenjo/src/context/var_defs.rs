@@ -224,6 +224,26 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             ],
         },
         TemplateVarGroup {
+            name: "Heartbeat",
+            variables: vec![
+                TemplateVarDef {
+                    name: "heartbeat.previous_output",
+                    description: "Final output from the previous heartbeat run, if any",
+                    group: "Heartbeat",
+                },
+                TemplateVarDef {
+                    name: "heartbeat.last_run_at",
+                    description: "Timestamp of the previous heartbeat run, if any",
+                    group: "Heartbeat",
+                },
+                TemplateVarDef {
+                    name: "heartbeat.next_run_at",
+                    description: "Scheduled timestamp for the next heartbeat run",
+                    group: "Heartbeat",
+                },
+            ],
+        },
+        TemplateVarGroup {
             name: "Subtask",
             variables: vec![
                 TemplateVarDef {

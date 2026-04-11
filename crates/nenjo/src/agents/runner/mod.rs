@@ -471,6 +471,7 @@ impl AgentRunner {
             TaskType::Chat { .. } => "chat",
             TaskType::Task(_) => "task",
             TaskType::Cron { .. } => "cron",
+            TaskType::Heartbeat { .. } => "heartbeat",
             TaskType::Gate { .. } => "gate",
             TaskType::CouncilSubtask { .. } => "council_subtask",
         };
@@ -539,6 +540,7 @@ impl AgentRunner {
                     }
                 }
                 TaskType::Cron { task: None, .. } => String::new(),
+                TaskType::Heartbeat { .. } => String::new(),
                 TaskType::Gate { criteria, .. } => criteria.clone(),
                 TaskType::CouncilSubtask {
                     subtask_description,

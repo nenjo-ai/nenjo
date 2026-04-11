@@ -163,6 +163,7 @@ fn test_manifest() -> Manifest {
         mcp_server_ids: vec![],
         abilities: vec![],
         prompt_locked: false,
+        heartbeat: None,
     };
 
     Manifest {
@@ -512,6 +513,7 @@ fn manifest_with_abilities_and_domains(
         mcp_server_ids: vec![],
         abilities: agent_abilities,
         prompt_locked: false,
+        heartbeat: None,
     };
 
     Manifest {

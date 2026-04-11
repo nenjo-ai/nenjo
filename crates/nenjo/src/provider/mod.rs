@@ -488,8 +488,11 @@ impl Provider {
 
         let cron_schedule = match &task {
             crate::types::TaskType::Cron {
-                interval, timeout, ..
-            } => Some((*interval, *timeout)),
+                schedule,
+                start_at,
+                timeout,
+                ..
+            } => Some((schedule.clone(), *start_at, *timeout)),
             _ => None,
         };
 
@@ -507,15 +510,18 @@ impl Provider {
             let mut state = routines::types::RoutineState::new(routine_id, input, max_retries);
             state.routine_name = Some(routine_name);
 
-            if let Some((interval, timeout)) = cron_schedule {
+            if let Some((schedule, start_at, timeout)) = cron_schedule {
                 routines::cron::executor::execute_routine_cron(
                     &provider,
                     &routine,
                     &mut state,
-                    &events_tx,
-                    &cancel_inner,
-                    interval,
-                    timeout,
+                    routines::cron::executor::CronExecutionConfig {
+                        events_tx: &events_tx,
+                        cancel: &cancel_inner,
+                        schedule: &schedule,
+                        start_at,
+                        timeout,
+                    },
                 )
                 .await
             } else {
@@ -599,6 +605,7 @@ mod tests {
             mcp_server_ids: vec![],
             abilities: vec![],
             prompt_locked: false,
+            heartbeat: None,
         };
         Manifest {
             agents: vec![agent],
@@ -719,5 +726,125 @@ mod tests {
             .await
             .unwrap();
         assert!(provider.agent_by_name("agent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
+        let model = ModelManifest {
+            id: Uuid::new_v4(),
+            name: "m".into(),
+            description: None,
+            model: "mock".into(),
+            model_provider: "mock".into(),
+            temperature: Some(0.5),
+            tags: vec![],
+            base_url: None,
+        };
+        let original_agent_id = Uuid::new_v4();
+        let updated_agent_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+
+        let original_agent = AgentManifest {
+            id: original_agent_id,
+            name: "agent-old".into(),
+            description: Some("old".into()),
+            is_system: false,
+            prompt_config: serde_json::json!({}),
+            color: None,
+            model_id: Some(model.id),
+            model_name: Some("m".into()),
+            domains: vec![],
+            platform_scopes: vec![],
+            mcp_server_ids: vec![],
+            abilities: vec![],
+            prompt_locked: false,
+            heartbeat: None,
+        };
+        let updated_agent = AgentManifest {
+            id: updated_agent_id,
+            name: "agent-new".into(),
+            description: Some("new".into()),
+            is_system: false,
+            prompt_config: serde_json::json!({}),
+            color: None,
+            model_id: Some(model.id),
+            model_name: Some("m".into()),
+            domains: vec![],
+            platform_scopes: vec![],
+            mcp_server_ids: vec![],
+            abilities: vec![],
+            prompt_locked: false,
+            heartbeat: None,
+        };
+        let routine = RoutineManifest {
+            id: routine_id,
+            name: "routine".into(),
+            description: None,
+            trigger: "manual".into(),
+            is_active: true,
+            is_default: false,
+            max_retries: 0,
+            metadata: serde_json::json!({}),
+            steps: vec![crate::manifest::RoutineStepManifest {
+                id: step_id,
+                routine_id,
+                name: "step".into(),
+                step_type: "agent".into(),
+                model_id: None,
+                council_id: None,
+                agent_id: Some(original_agent_id),
+                lambda_id: None,
+                config: serde_json::json!({}),
+                order_index: 0,
+            }],
+            edges: vec![],
+        };
+
+        let original_manifest = Manifest {
+            agents: vec![original_agent.clone()],
+            models: vec![model.clone()],
+            routines: vec![routine.clone()],
+            projects: vec![ProjectManifest {
+                id: Uuid::new_v4(),
+                name: "p".into(),
+                slug: "p".into(),
+                description: None,
+                is_system: false,
+                settings: serde_json::Value::Null,
+            }],
+            ..Default::default()
+        };
+
+        let provider = Provider::builder()
+            .with_manifest(original_manifest)
+            .with_model_factory(MockFactory)
+            .with_tool_factory(NoopToolFactory)
+            .build()
+            .await
+            .unwrap();
+
+        let original_runner = provider.routine_by_id(routine_id).unwrap();
+
+        let mut updated_manifest = provider.manifest().clone();
+        updated_manifest.agents = vec![updated_agent.clone()];
+        updated_manifest.routines[0].steps[0].agent_id = Some(updated_agent_id);
+
+        let updated_provider = provider.with_manifest(updated_manifest);
+        let updated_runner = updated_provider.routine_by_id(routine_id).unwrap();
+
+        assert_eq!(
+            original_runner.routine.steps[0].agent_id,
+            Some(original_agent_id)
+        );
+        assert_eq!(
+            updated_runner.routine.steps[0].agent_id,
+            Some(updated_agent_id)
+        );
+        assert_eq!(
+            original_runner.provider.manifest.agents[0].name,
+            "agent-old"
+        );
+        assert_eq!(updated_runner.provider.manifest.agents[0].name, "agent-new");
     }
 }

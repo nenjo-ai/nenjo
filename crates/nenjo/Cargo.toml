@@ -16,6 +16,7 @@ nenjo-events = { workspace = true }
 nenjo-tools = { workspace = true }
 nenjo-xml = { workspace = true }
 chrono = "0.4"
+cron = "0.15"
 bon = "3"
 async-trait = "0.1"
 tokio = { version = "1.49", features = ["sync", "time"] }

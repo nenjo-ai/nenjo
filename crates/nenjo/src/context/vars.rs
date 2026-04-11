@@ -32,6 +32,9 @@ pub struct RenderContextVars {
     pub chat_message: String,
     pub gate_criteria: String,
     pub gate_previous_output: String,
+    pub heartbeat_previous_output: String,
+    pub heartbeat_last_run_at: String,
+    pub heartbeat_next_run_at: String,
     pub subtask_parent_task: String,
     pub subtask_description: String,
     pub timestamp: String,
@@ -167,6 +170,10 @@ impl RenderContextVars {
             // Gate
             ("gate.criteria", &self.gate_criteria),
             ("gate.previous_output", &self.gate_previous_output),
+            // Heartbeat
+            ("heartbeat.previous_output", &self.heartbeat_previous_output),
+            ("heartbeat.last_run_at", &self.heartbeat_last_run_at),
+            ("heartbeat.next_run_at", &self.heartbeat_next_run_at),
             // Subtask
             ("subtask.parent_task", &self.subtask_parent_task),
             ("subtask.description", &self.subtask_description),
