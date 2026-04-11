@@ -325,7 +325,7 @@ impl ModelProvider for GeminiProvider {
             system_instruction,
             generation_config: GenerationConfig {
                 temperature,
-                max_output_tokens: 8192,
+                max_output_tokens: 65536,
             },
         };
 
@@ -337,9 +337,7 @@ impl ModelProvider for GeminiProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Gemini API error ({status}): {error_text}");
+            return Err(crate::api_error("Gemini", response).await);
         }
 
         let result: GenerateContentResponse = response.json().await?;
@@ -503,7 +501,7 @@ mod tests {
             system_instruction: None,
             generation_config: GenerationConfig {
                 temperature: 0.7,
-                max_output_tokens: 8192,
+                max_output_tokens: 65536,
             },
         };
 
@@ -539,7 +537,7 @@ mod tests {
             system_instruction: None,
             generation_config: GenerationConfig {
                 temperature: 0.7,
-                max_output_tokens: 8192,
+                max_output_tokens: 65536,
             },
         };
 
@@ -568,7 +566,7 @@ mod tests {
             }),
             generation_config: GenerationConfig {
                 temperature: 0.7,
-                max_output_tokens: 8192,
+                max_output_tokens: 65536,
             },
         };
 
@@ -576,7 +574,7 @@ mod tests {
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("\"text\":\"Hello\""));
         assert!(json.contains("\"temperature\":0.7"));
-        assert!(json.contains("\"maxOutputTokens\":8192"));
+        assert!(json.contains("\"maxOutputTokens\":65536"));
     }
 
     #[test]

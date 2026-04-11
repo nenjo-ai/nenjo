@@ -76,17 +76,15 @@ impl OpenAiCompatibleProvider {
     /// This allows custom providers with non-standard endpoints (e.g., VolcEngine ARK uses
     /// `/api/coding/v3/chat/completions` instead of `/v1/chat/completions`).
     fn chat_completions_url(&self) -> String {
-        let has_full_endpoint = reqwest::Url::parse(&self.base_url)
-            .map(|url| {
-                url.path()
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            })
-            .unwrap_or_else(|_| {
-                self.base_url
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            });
+        let path = reqwest::Url::parse(&self.base_url)
+            .map(|url| url.path().trim_end_matches('/').to_string())
+            .unwrap_or_else(|_| self.base_url.trim_end_matches('/').to_string());
+
+        // If the base URL already contains a full chat endpoint path, use as-is.
+        // Covers standard `/chat/completions` and provider-specific paths like
+        // MiniMax's `/text/chatcompletion_v2`.
+        let has_full_endpoint =
+            path.ends_with("/chat/completions") || path.contains("/chatcompletion");
 
         if has_full_endpoint {
             self.base_url.clone()
@@ -325,7 +323,7 @@ impl OpenAiCompatibleProvider {
                 .map(|tool| NativeToolSpec {
                     kind: "function".to_string(),
                     function: NativeToolFunctionSpec {
-                        name: tool.name.clone(),
+                        name: crate::sanitize_tool_name(&tool.name),
                         description: tool.description.clone(),
                         parameters: tool.parameters.clone(),
                     },
@@ -738,7 +736,7 @@ mod tests {
             make_provider("Venice", "https://api.venice.ai", None),
             make_provider("Moonshot", "https://api.moonshot.cn", None),
             make_provider("GLM", "https://open.bigmodel.cn", None),
-            make_provider("MiniMax", "https://api.minimaxi.com/v1", None),
+            make_provider("MiniMax", "https://api.minimax.io/v1", None),
             make_provider("Groq", "https://api.groq.com/openai", None),
             make_provider("Mistral", "https://api.mistral.ai", None),
             make_provider("xAI", "https://api.x.ai", None),
@@ -954,11 +952,15 @@ mod tests {
 
     #[test]
     fn chat_completions_url_minimax() {
-        // MiniMax OpenAI-compatible endpoint requires /v1 base path.
-        let p = make_provider("minimax", "https://api.minimaxi.com/v1", None);
+        // MiniMax uses /v1/text/chatcompletion_v2 — non-standard path used as-is.
+        let p = make_provider(
+            "minimax",
+            "https://api.minimax.io/v1/text/chatcompletion_v2",
+            None,
+        );
         assert_eq!(
             p.chat_completions_url(),
-            "https://api.minimaxi.com/v1/chat/completions"
+            "https://api.minimax.io/v1/text/chatcompletion_v2"
         );
     }
 

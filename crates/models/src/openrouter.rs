@@ -359,9 +359,17 @@ impl ModelProvider for OpenRouterProvider {
     fn context_window(&self, model: &str) -> Option<usize> {
         // OpenRouter routes to many models. Match on the model slug.
         let m = model.to_lowercase();
-        if m.contains("claude-opus-4") || m.contains("claude-sonnet-4") {
+        if m.contains("claude-opus-4")
+            || m.contains("claude-sonnet-4.6")
+            || m.contains("claude-sonnet-4-6")
+        {
             Some(1_000_000)
-        } else if m.contains("claude-3.5") || m.contains("claude-3-") {
+        } else if m.contains("claude-sonnet-4")
+            || m.contains("claude-haiku-4")
+            || m.contains("claude-3.5")
+            || m.contains("claude-3-")
+            || m.contains("claude-3.7")
+        {
             Some(200_000)
         } else if m.contains("gpt-5") {
             Some(1_000_000)

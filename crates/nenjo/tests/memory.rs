@@ -72,6 +72,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     };
 
     let agent = AgentManifest {
@@ -609,6 +610,7 @@ async fn ability_inherits_memory_vars() {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     };
 
     let ability = AbilityManifest {
@@ -726,6 +728,7 @@ async fn domain_expansion_preserves_memory() {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     };
 
     let domain = DomainManifest {

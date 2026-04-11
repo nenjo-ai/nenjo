@@ -137,6 +137,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     };
 
     let agent = AgentManifest {
@@ -485,6 +486,7 @@ fn manifest_with_abilities_and_domains(
         model_provider: "mock".into(),
         temperature: Some(0.5),
         tags: vec![],
+        base_url: None,
     };
 
     let agent = AgentManifest {

@@ -134,7 +134,18 @@ pub async fn run(
                     tools: tools_ref,
                 };
 
-                let response = provider.chat(request, model, temperature).await?;
+                let mut response = provider.chat(request, model, temperature).await?;
+
+                // Strip <think>…</think> blocks from reasoning models
+                // (DeepSeek, MiniMax, etc.) before text enters messages or NATS.
+                if let Some(ref text) = response.text {
+                    let stripped = nenjo_models::strip_thinking(text);
+                    response.text = if stripped.is_empty() {
+                        None
+                    } else {
+                        Some(stripped)
+                    };
+                }
 
                 // Accumulate token usage
                 total_input_tokens += response.usage.input_tokens;
@@ -391,8 +402,14 @@ async fn execute_tool(
         "Tool call"
     );
 
-    // Find the tool
-    let tool = match tools.iter().find(|t| t.name() == tool_call.name) {
+    // Find the tool — also match against sanitized names since strict providers
+    // (DeepSeek, OpenAI) replace dots/slashes (e.g. "app.nenjo.platform/x" → "app_nenjo_platform_x").
+    let tool = match tools.iter().find(|t| {
+        let name = t.name();
+        name == tool_call.name
+            || nenjo_models::sanitize_tool_name(name) == tool_call.name
+            || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
+    }) {
         Some(t) => t,
         None => {
             return nenjo_tools::ToolResult {

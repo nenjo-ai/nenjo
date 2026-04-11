@@ -134,7 +134,7 @@ impl AnthropicProvider {
             items
                 .iter()
                 .map(|tool| NativeToolSpec {
-                    name: tool.name.clone(),
+                    name: crate::sanitize_tool_name(&tool.name),
                     description: tool.description.clone(),
                     input_schema: tool.parameters.clone(),
                 })
@@ -315,10 +315,11 @@ impl ModelProvider for AnthropicProvider {
         let (system_prompt, messages) = Self::convert_messages(request.messages);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: system_prompt,
             messages,
-            temperature,
+            // Anthropic caps temperature at 1.0.
+            temperature: temperature.min(1.0),
             tools: Self::convert_tools(request.tools),
         };
 
@@ -340,16 +341,19 @@ impl ModelProvider for AnthropicProvider {
 
     fn context_window(&self, model: &str) -> Option<usize> {
         let m = model.to_lowercase();
-        Some(if m.contains("opus-4") || m.contains("sonnet-4") {
-            // Claude Opus 4.x / Sonnet 4.x: 1M
+        Some(if m.contains("opus-4") {
+            // Claude Opus 4.x: 1M
             1_000_000
-        } else if m.contains("3.5") || m.contains("3-5") {
-            // Claude 3.5 Sonnet/Haiku: 200K
+        } else if m.contains("sonnet-4-6") || m.contains("sonnet-4.6") {
+            // Claude Sonnet 4.6: 1M
+            1_000_000
+        } else if m.contains("sonnet-4") || m.contains("haiku-4") {
+            // Claude Sonnet 4.0/4.5, Haiku 4.5: 200K
             200_000
-        } else if m.contains("3-opus") || m.contains("3-haiku") || m.contains("3-sonnet") {
+        } else if m.contains("3.5") || m.contains("3-5") {
             200_000
         } else {
-            // Conservative fallback for unknown Anthropic models
+            // Conservative fallback
             200_000
         })
     }
@@ -447,5 +451,91 @@ mod tests {
         };
         let result = p.chat(request, "claude-3-opus", 0.7).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn temperature_clamped_to_1() {
+        // Anthropic caps temperature at 1.0; verify our request builder clamps it.
+        let messages = vec![
+            ChatMessage::system("You are helpful"),
+            ChatMessage::user("hello"),
+        ];
+        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
+        assert!(system.is_some());
+        assert_eq!(native_msgs.len(), 1);
+
+        // Build the request with temperature > 1.0
+        let req = NativeChatRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            max_tokens: 16384,
+            system,
+            messages: native_msgs,
+            temperature: 1.8_f64.min(1.0),
+            tools: None,
+        };
+        assert!((req.temperature - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn convert_messages_combines_system_and_developer() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::developer("Developer instructions"),
+            ChatMessage::user("hello"),
+        ];
+        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
+        assert_eq!(
+            system.as_deref(),
+            Some("System prompt\n\nDeveloper instructions")
+        );
+        assert_eq!(native_msgs.len(), 1);
+        assert_eq!(native_msgs[0].role, "user");
+    }
+
+    #[test]
+    fn convert_tools_sanitizes_names() {
+        let tools = vec![nenjo_tools::ToolSpec {
+            name: "app.nenjo.platform/tasks".into(),
+            description: "Manage tasks".into(),
+            parameters: serde_json::json!({}),
+            category: Default::default(),
+        }];
+        let converted = AnthropicProvider::convert_tools(Some(&tools)).unwrap();
+        assert_eq!(converted[0].name, "app_nenjo_platform_tasks");
+    }
+
+    #[test]
+    fn parse_tool_call_roundtrip() {
+        // Simulate assistant response with tool_use, then tool result
+        let response = NativeChatResponse {
+            content: vec![
+                NativeContentIn {
+                    kind: "text".into(),
+                    text: Some("Let me check.".into()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                NativeContentIn {
+                    kind: "tool_use".into(),
+                    text: None,
+                    id: Some("toolu_01".into()),
+                    name: Some("shell".into()),
+                    input: Some(serde_json::json!({"command": "ls"})),
+                },
+            ],
+            usage: Some(NativeUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            }),
+        };
+        let parsed = AnthropicProvider::parse_native_response(response);
+        assert_eq!(parsed.text.as_deref(), Some("Let me check."));
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].id, "toolu_01");
+        assert_eq!(parsed.tool_calls[0].name, "shell");
+        assert!(parsed.tool_calls[0].arguments.contains("ls"));
+        assert_eq!(parsed.usage.input_tokens, 100);
+        assert_eq!(parsed.usage.output_tokens, 50);
     }
 }

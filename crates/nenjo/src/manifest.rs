@@ -183,6 +183,8 @@ pub struct ModelManifest {
     pub model_provider: String,
     pub temperature: Option<f64>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 fn default_model_provider() -> String {

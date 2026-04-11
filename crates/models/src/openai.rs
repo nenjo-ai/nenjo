@@ -15,7 +15,10 @@ pub struct OpenAiProvider {
 struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
-    temperature: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,6 +105,11 @@ impl OpenAiProvider {
         }
     }
 
+    fn is_reasoning_model(model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+    }
+
     fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
         tools.map(|items| {
             items
@@ -109,7 +117,7 @@ impl OpenAiProvider {
                 .map(|tool| NativeToolSpec {
                     kind: "function".to_string(),
                     function: NativeToolFunctionSpec {
-                        name: tool.name.clone(),
+                        name: crate::sanitize_tool_name(&tool.name),
                         description: tool.description.clone(),
                         parameters: tool.parameters.clone(),
                     },
@@ -212,11 +220,18 @@ impl ModelProvider for OpenAiProvider {
             anyhow::anyhow!("OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml.")
         })?;
 
+        let is_reasoning = Self::is_reasoning_model(model);
         let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
-            temperature,
+            // Reasoning models (o1/o3/o4) require temperature=1; omit it to use the default.
+            temperature: if is_reasoning {
+                None
+            } else {
+                Some(temperature)
+            },
+            max_completion_tokens: Some(if is_reasoning { 65536 } else { 16384 }),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
         };
@@ -273,8 +288,7 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn supports_developer_role(&self, model: &str) -> bool {
-        let m = model.to_lowercase();
-        m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+        Self::is_reasoning_model(model)
     }
 }
 
