@@ -7,7 +7,10 @@ use uuid::Uuid;
 use nenjo_events::{Response, StreamEvent};
 use nenjo_models::ChatMessage;
 
-use super::event_bridge::{agent_name, project_slug, turn_event_to_stream_event};
+use super::event_bridge::{
+    agent_name, project_slug, summarize_stream_event, summarize_turn_event,
+    turn_event_to_stream_event,
+};
 use crate::harness::domain_session_store::PersistedDomainSession;
 use crate::harness::execution_trace::ExecutionTraceRecorder;
 use crate::harness::{ActiveExecution, CommandContext, DomainSession, ExecutionKind};
@@ -193,7 +196,11 @@ pub async fn handle_chat(
             event = handle.recv() => {
                 match event {
                     Some(ev) => {
-                        debug!(event = ?ev, agent = %aname, "Chat handler received turn event");
+                        debug!(
+                            event = %summarize_turn_event(&ev),
+                            agent = %aname,
+                            "Chat handler received turn event"
+                        );
                         let _ = trace_recorder.record(&ev);
                         if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
                             let se = match se {
@@ -205,7 +212,11 @@ pub async fn handle_chat(
                                 },
                                 other => other,
                             };
-                            debug!(stream_event = %se, agent = %aname, "Chat handler sending stream event");
+                            debug!(
+                                stream_event = %summarize_stream_event(&se),
+                                agent = %aname,
+                                "Chat handler sending stream event"
+                            );
                             let _ = ctx.response_tx.send(Response::AgentResponse { payload: se });
                         }
                     }

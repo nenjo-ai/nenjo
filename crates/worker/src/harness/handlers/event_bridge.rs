@@ -123,12 +123,181 @@ pub fn turn_event_to_stream_event(
     };
 
     if let Some(ref stream_event) = stream_event {
-        debug!(turn_event = ?event, stream_event = %stream_event, agent = agent_name, "Bridged turn event to stream event");
+        debug!(
+            turn_event = %summarize_turn_event(event),
+            stream_event = %summarize_stream_event(stream_event),
+            agent = agent_name,
+            "Bridged turn event to stream event"
+        );
     } else {
-        debug!(turn_event = ?event, agent = agent_name, "Turn event did not produce a stream event");
+        debug!(
+            turn_event = %summarize_turn_event(event),
+            agent = agent_name,
+            "Turn event did not produce a stream event"
+        );
     }
 
     stream_event
+}
+
+pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
+    match event {
+        nenjo::TurnEvent::AbilityStarted {
+            ability_tool_name,
+            ability_name,
+            task_input,
+            caller_history,
+        } => format!(
+            "ability_started(tool={ability_tool_name}, ability={ability_name}, task_preview={:?}, task_len={}, caller_messages={})",
+            truncate_preview(task_input, 80),
+            task_input.len(),
+            caller_history.len()
+        ),
+        nenjo::TurnEvent::ToolCallStart {
+            parent_tool_name,
+            calls,
+        } => format!(
+            "tool_call_start(parent={}, tools=[{}], count={})",
+            parent_tool_name.as_deref().unwrap_or("-"),
+            calls
+                .iter()
+                .map(|call| call.tool_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            calls.len()
+        ),
+        nenjo::TurnEvent::ToolCallEnd {
+            parent_tool_name,
+            tool_name,
+            result,
+        } => format!(
+            "tool_call_end(parent={}, tool={tool_name}, success={}, output_len={}, error={})",
+            parent_tool_name.as_deref().unwrap_or("-"),
+            result.success,
+            result.output.len(),
+            result
+                .error
+                .as_deref()
+                .map(|err| truncate_preview(err, 80))
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        nenjo::TurnEvent::AbilityCompleted {
+            ability_tool_name,
+            ability_name,
+            success,
+            final_output,
+        } => format!(
+            "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
+            final_output.len()
+        ),
+        nenjo::TurnEvent::Paused => "paused".to_string(),
+        nenjo::TurnEvent::Resumed => "resumed".to_string(),
+        nenjo::TurnEvent::Done { output } => format!(
+            "done(text_len={}, input_tokens={}, output_tokens={}, tool_calls={}, messages={})",
+            output.text.len(),
+            output.input_tokens,
+            output.output_tokens,
+            output.tool_calls,
+            output.messages.len()
+        ),
+    }
+}
+
+pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
+    match event {
+        StreamEvent::Token { text } => format!("token(len={})", text.len()),
+        StreamEvent::ToolInvoked {
+            tool_name,
+            agent_name,
+            parent_tool_name,
+            ..
+        } => format!(
+            "tool_invoked(tool={tool_name}, agent={agent_name}, parent={})",
+            parent_tool_name.as_deref().unwrap_or("-")
+        ),
+        StreamEvent::ToolsInvoked {
+            tool_names,
+            agent_name,
+            parent_tool_name,
+            ..
+        } => format!(
+            "tools_invoked(count={}, agent={agent_name}, parent={}, tools=[{}])",
+            tool_names.len(),
+            parent_tool_name.as_deref().unwrap_or("-"),
+            tool_names.join(", ")
+        ),
+        StreamEvent::ToolCompleted {
+            tool_name, success, ..
+        } => format!("tool_completed(tool={tool_name}, success={success})"),
+        StreamEvent::AbilityActivated {
+            agent,
+            ability,
+            ability_tool_name,
+            task_preview,
+        } => format!(
+            "ability_activated(agent={agent}, ability={ability}, tool={ability_tool_name}, task_len={})",
+            task_preview.len()
+        ),
+        StreamEvent::AbilityCompleted {
+            agent,
+            ability,
+            ability_tool_name,
+            success,
+            result_preview,
+        } => format!(
+            "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success}, result_len={})",
+            result_preview.len()
+        ),
+        StreamEvent::Error { message } => {
+            format!(
+                "error(message={:?}, len={})",
+                truncate_preview(message, 80),
+                message.len()
+            )
+        }
+        StreamEvent::Done {
+            final_output,
+            project_id,
+            agent_id,
+            session_id,
+        } => format!(
+            "done(output_len={}, project_id={}, agent_id={}, session_id={})",
+            final_output.len(),
+            project_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            agent_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            session_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        StreamEvent::DomainEntered {
+            session_id,
+            domain_name,
+        } => format!("domain_entered(name={domain_name}, session={session_id})"),
+        StreamEvent::DomainExited {
+            session_id,
+            artifact_id,
+            document_id,
+        } => format!(
+            "domain_exited(session={}, artifact_id={}, document_id={})",
+            session_id,
+            artifact_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            document_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        StreamEvent::MessageCompacted {
+            messages_before,
+            messages_after,
+        } => format!("message_compacted({messages_before}->{messages_after})"),
+        StreamEvent::Paused => "paused".to_string(),
+        StreamEvent::Resumed => "resumed".to_string(),
+    }
 }
 
 fn truncate_preview(s: &str, max_chars: usize) -> String {

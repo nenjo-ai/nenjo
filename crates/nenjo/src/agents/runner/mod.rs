@@ -8,7 +8,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use nenjo_models::ChatMessage;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use super::abilities::AbilityTool;
@@ -490,7 +490,7 @@ impl AgentRunner {
             "Executing agent"
         );
 
-        debug!(
+        trace!(
             agent = inst.name,
             "--- System Prompt ---\n{}\n--- Developer Prompt ---\n{}\n--- User Message ---\n{}",
             prompts.system,
