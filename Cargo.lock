@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-cli"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-eventbus"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "async-nats",
  "bytes",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-events"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-integration-tests"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-models"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-tools"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-worker"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-xml"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "minijinja",
  "quick-xml",
