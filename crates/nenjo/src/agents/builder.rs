@@ -47,6 +47,7 @@ pub struct AgentBuilder {
     context_renderer: ContextRenderer,
     memory_vars: HashMap<String, String>,
     memory: Option<Arc<dyn Memory>>,
+    memory_scope_override: Option<MemoryScope>,
     // For DelegateToTool construction — set by Provider::build_agent().
     manifest: Option<Arc<Manifest>>,
     model_factory: Option<Arc<dyn ModelProviderFactory>>,
@@ -73,6 +74,7 @@ impl AgentBuilder {
             context_renderer: params.context_renderer,
             memory_vars: HashMap::new(),
             memory: None,
+            memory_scope_override: None,
             manifest: None,
             model_factory: None,
             tool_factory: None,
@@ -94,6 +96,15 @@ impl AgentBuilder {
     /// to get project-scoped memories.
     pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// Override the resolved memory scope for this agent.
+    ///
+    /// Use this when the caller has already resolved the exact namespace
+    /// mapping to apply, such as restoring a persisted session.
+    pub fn with_memory_scope(mut self, scope: MemoryScope) -> Self {
+        self.memory_scope_override = Some(scope);
         self
     }
 
@@ -218,13 +229,17 @@ impl AgentBuilder {
         // where memory/resource tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
         let memory_scope = if let Some(ref mem) = self.memory {
-            let slug = &self.prompt_context.render_ctx_extra.project.slug;
-            let project_slug = if slug.is_empty() {
-                None
+            let scope = if let Some(scope) = self.memory_scope_override.clone() {
+                scope
             } else {
-                Some(slug.as_str())
+                let slug = &self.prompt_context.render_ctx_extra.project.slug;
+                let project_slug = if slug.is_empty() {
+                    None
+                } else {
+                    Some(slug.as_str())
+                };
+                MemoryScope::new(&self.agent.name, project_slug)
             };
-            let scope = MemoryScope::new(&self.agent.name, project_slug);
             self.tools.extend(crate::memory::tools::memory_tools(
                 mem.clone(),
                 scope.clone(),

@@ -232,6 +232,9 @@ impl Tool for AbilityTool {
                         TurnEvent::AbilityCompleted { .. } => {
                             let _ = parent_tx.send(event);
                         }
+                        TurnEvent::MessageCompacted { .. } => {
+                            let _ = parent_tx.send(event);
+                        }
                         _ => {}
                     }
                 }

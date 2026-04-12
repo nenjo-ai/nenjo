@@ -57,6 +57,13 @@ pub struct RoutineInput {
     pub project_description: Option<String>,
     pub project_metadata: Option<String>,
     pub is_cron_trigger: bool,
+    pub session_binding: Option<SessionBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionBinding {
+    pub session_id: Uuid,
+    pub memory_namespace: Option<String>,
 }
 
 impl RoutineInput {
@@ -80,6 +87,7 @@ impl RoutineInput {
             project_description: None,
             project_metadata: None,
             is_cron_trigger: false,
+            session_binding: None,
         }
     }
 
@@ -150,6 +158,11 @@ impl RoutineInput {
 
     pub fn with_cron_trigger(mut self) -> Self {
         self.is_cron_trigger = true;
+        self
+    }
+
+    pub fn with_session_binding(mut self, binding: SessionBinding) -> Self {
+        self.session_binding = Some(binding);
         self
     }
 }

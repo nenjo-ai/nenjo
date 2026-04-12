@@ -79,6 +79,38 @@ impl MemoryScope {
         }
     }
 
+    /// Reconstruct a full memory scope from a resolved namespace string when possible.
+    ///
+    /// Supported forms:
+    /// - `agent_<name>_project_<slug>`
+    /// - `agent_<name>_core`
+    pub fn from_namespace(ns: &str) -> Option<Self> {
+        if let Some((agent_prefix, slug)) = ns.rsplit_once("_project_")
+            && agent_prefix.starts_with("agent_")
+            && !slug.is_empty()
+        {
+            return Some(Self {
+                project: ns.to_string(),
+                core: format!("{agent_prefix}_core"),
+                shared: format!("project_{slug}"),
+                resources_project: format!("{slug}/resources"),
+                resources_global: "resources".to_string(),
+            });
+        }
+
+        if ns.starts_with("agent_") && ns.ends_with("_core") {
+            return Some(Self {
+                project: ns.to_string(),
+                core: ns.to_string(),
+                shared: "shared".to_string(),
+                resources_project: "resources".to_string(),
+                resources_global: "resources".to_string(),
+            });
+        }
+
+        None
+    }
+
     /// Resolve a memory scope name ("project", "core", "shared") to a namespace string.
     pub fn resolve(&self, scope: &str) -> &str {
         match scope {
@@ -108,4 +140,42 @@ fn sanitize_name(name: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryScope;
+
+    #[test]
+    fn reconstructs_project_scope_from_namespace() {
+        let scope = MemoryScope::from_namespace("agent_researcher_project_docs")
+            .expect("project namespace should parse");
+        assert_eq!(scope.project, "agent_researcher_project_docs");
+        assert_eq!(scope.core, "agent_researcher_core");
+        assert_eq!(scope.shared, "project_docs");
+        assert_eq!(scope.resources_project, "docs/resources");
+        assert_eq!(scope.resources_global, "resources");
+        assert_eq!(scope.resolve_resource("project"), "docs/resources");
+        assert_eq!(scope.resolve_resource("workspace"), "resources");
+    }
+
+    #[test]
+    fn reconstructs_core_scope_from_namespace() {
+        let scope =
+            MemoryScope::from_namespace("agent_ops_core").expect("core namespace should parse");
+        assert_eq!(scope.project, "agent_ops_core");
+        assert_eq!(scope.core, "agent_ops_core");
+        assert_eq!(scope.shared, "shared");
+        assert_eq!(scope.resources_project, "resources");
+        assert_eq!(scope.resources_global, "resources");
+        assert_eq!(scope.resolve_resource("project"), "resources");
+        assert_eq!(scope.resolve_resource("workspace"), "resources");
+    }
+
+    #[test]
+    fn rejects_unknown_namespace_shapes() {
+        assert!(MemoryScope::from_namespace("project_docs").is_none());
+        assert!(MemoryScope::from_namespace("agent__project_").is_none());
+        assert!(MemoryScope::from_namespace("totally_invalid").is_none());
+    }
 }

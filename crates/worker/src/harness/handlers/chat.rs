@@ -1,6 +1,11 @@
 //! Chat command handlers.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use nenjo::memory::MemoryScope;
+use nenjo_sessions::{
+    ExecutionPhase, SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionSummary,
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -11,29 +16,166 @@ use super::event_bridge::{
     agent_name, project_slug, summarize_stream_event, summarize_turn_event,
     turn_event_to_stream_event,
 };
-use crate::harness::domain_session_store::PersistedDomainSession;
 use crate::harness::execution_trace::ExecutionTraceRecorder;
+use crate::harness::session::{
+    apply_session_memory_scope, lease_for_status, read_json_blob, transition_session_state,
+    update_session_status,
+};
 use crate::harness::{ActiveExecution, CommandContext, DomainSession, ExecutionKind};
 
+fn chat_history_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
+    if project_slug.is_empty() {
+        format!("chat_history/{}_{}.json", agent_name, session_id)
+    } else {
+        format!(
+            "{project_slug}/chat_history/{}_{}.json",
+            agent_name, session_id
+        )
+    }
+}
+
+fn chat_trace_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
+    if project_slug.is_empty() {
+        format!(
+            "chat_history/traces/{}_{}.trace.json",
+            agent_name, session_id
+        )
+    } else {
+        format!(
+            "{project_slug}/chat_history/traces/{}_{}.trace.json",
+            agent_name, session_id
+        )
+    }
+}
+
+fn chat_checkpoint_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
+    if project_slug.is_empty() {
+        format!(
+            "chat_history/checkpoints/{}_{}.checkpoint.json",
+            agent_name, session_id
+        )
+    } else {
+        format!(
+            "{project_slug}/chat_history/checkpoints/{}_{}.checkpoint.json",
+            agent_name, session_id
+        )
+    }
+}
+
+fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
+    MemoryScope::new(
+        agent_name,
+        if project_slug.is_empty() {
+            None
+        } else {
+            Some(project_slug)
+        },
+    )
+    .project
+}
+
+struct ChatSessionUpsert {
+    session_id: Uuid,
+    project_id: Uuid,
+    agent_id: Uuid,
+    project_slug: String,
+    agent_name: String,
+    history_ref: String,
+    trace_ref: String,
+    checkpoint_ref: String,
+    status: SessionStatus,
+}
+
+fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
+    let ChatSessionUpsert {
+        session_id,
+        project_id,
+        agent_id,
+        project_slug,
+        agent_name,
+        history_ref,
+        trace_ref,
+        checkpoint_ref,
+        status,
+    } = params;
+    let now = Utc::now();
+    let mut record = ctx
+        .session_store
+        .get(session_id)
+        .ok()
+        .flatten()
+        .unwrap_or(SessionRecord {
+            session_id,
+            kind: SessionKind::Chat,
+            status,
+            project_id: Some(project_id),
+            agent_id: Some(agent_id),
+            task_id: None,
+            routine_id: None,
+            execution_run_id: None,
+            parent_session_id: None,
+            version: 0,
+            refs: SessionRefs::default(),
+            lease: Default::default(),
+            scheduler: None,
+            domain: None,
+            summary: SessionSummary::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        });
+
+    record.kind = SessionKind::Chat;
+    record.status = status;
+    record.project_id = Some(project_id);
+    record.agent_id = Some(agent_id);
+    record.version += 1;
+    record.updated_at = now;
+    record.refs.history_ref = Some(history_ref);
+    record.refs.trace_ref = Some(trace_ref);
+    record.refs.checkpoint_ref = Some(checkpoint_ref);
+    record.refs.memory_namespace = Some(chat_memory_namespace(&agent_name, &project_slug));
+    if matches!(
+        status,
+        SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
+    ) {
+        record.completed_at = Some(now);
+    }
+    record.lease = lease_for_status(
+        &*ctx.session_coordinator,
+        session_id,
+        &ctx.worker_id,
+        status,
+        &record.lease,
+    );
+    let _ = ctx.session_store.put(&record);
+}
+
 async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Result<bool> {
-    let Some(persisted) = ctx.domain_session_store.load(session_id)? else {
+    let Some(persisted) = ctx.session_store.get(session_id)? else {
         return Ok(false);
     };
+    if persisted.kind != SessionKind::Domain {
+        return Ok(false);
+    }
+    let Some(domain) = persisted.domain else {
+        return Ok(false);
+    };
+    let agent_id = persisted
+        .agent_id
+        .context("domain session missing agent_id")?;
+    let project_id = persisted
+        .project_id
+        .context("domain session missing project_id")?;
 
     let provider = ctx.provider();
-    let base_runner = provider
-        .agent_by_id(persisted.agent_id)
-        .await?
-        .build()
-        .await?;
-    let domain_runner = base_runner
-        .domain_expansion(&persisted.domain_command)
-        .await?;
+    let base_runner = provider.agent_by_id(agent_id).await?.build().await?;
+    let domain_runner = base_runner.domain_expansion(&domain.domain_command).await?;
 
     let mut instance = domain_runner.instance().clone();
     if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
         active_domain.session_id = persisted.session_id;
-        active_domain.turn_number = persisted.turn_number;
+        active_domain.turn_number = domain.turn_number;
     }
 
     let restored_runner = nenjo::AgentRunner::from_instance(
@@ -46,10 +188,10 @@ async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Resul
         persisted.session_id,
         DomainSession {
             runner: restored_runner,
-            agent_id: persisted.agent_id,
-            project_id: persisted.project_id,
-            domain_command: persisted.domain_command,
-            turn_number: persisted.turn_number,
+            agent_id,
+            project_id,
+            domain_command: domain.domain_command,
+            turn_number: domain.turn_number,
         },
     );
 
@@ -84,17 +226,42 @@ pub async fn handle_chat(
     let agent_id = resolved_agent_id.context("No agent found for chat")?;
     let slug = project_slug(manifest, effective_project_id);
     let aname = agent_name(manifest, agent_id);
+    let history_ref = chat_history_ref(&slug, &aname, session_id);
+    let trace_ref = chat_trace_ref(&slug, &aname, session_id);
+    let checkpoint_ref = chat_checkpoint_ref(&slug, &aname, session_id);
+    upsert_chat_session(
+        ctx,
+        ChatSessionUpsert {
+            session_id,
+            project_id: effective_project_id,
+            agent_id,
+            project_slug: slug.clone(),
+            agent_name: aname.clone(),
+            history_ref: history_ref.clone(),
+            trace_ref,
+            checkpoint_ref: checkpoint_ref.clone(),
+            status: SessionStatus::Active,
+        },
+    );
+    let _ = transition_session_state(
+        &*ctx.session_store,
+        &*ctx.session_content,
+        &*ctx.session_coordinator,
+        session_id,
+        &ctx.worker_id,
+        Some(ExecutionPhase::CallingModel),
+        SessionStatus::Active,
+    );
 
-    let history: Vec<ChatMessage> = ctx
-        .chat_history
-        .read(&slug, &aname, session_id)
-        .unwrap_or_default();
-    let mut trace_recorder = ExecutionTraceRecorder::for_chat(
+    let history: Vec<ChatMessage> =
+        read_json_blob(&*ctx.session_content, &history_ref)?.unwrap_or_default();
+    let mut trace_recorder = ExecutionTraceRecorder::for_chat_with_store(
         &ctx.config.workspace_dir,
         &slug,
         &aname,
         agent_id,
         session_id,
+        ctx.session_content.clone(),
     );
 
     info!(
@@ -128,13 +295,15 @@ pub async fn handle_chat(
         match ctx.domains.get_mut(&dsid) {
             Some(mut session) => {
                 session.turn_number += 1;
-                let _ = ctx.domain_session_store.save(&PersistedDomainSession {
-                    session_id: dsid,
-                    project_id: session.project_id,
-                    agent_id: session.agent_id,
-                    domain_command: session.domain_command.clone(),
-                    turn_number: session.turn_number,
-                });
+                if let Ok(Some(mut record)) = ctx.session_store.get(dsid) {
+                    record.version += 1;
+                    record.updated_at = Utc::now();
+                    record.status = SessionStatus::Active;
+                    if let Some(ref mut domain) = record.domain {
+                        domain.turn_number = session.turn_number;
+                    }
+                    let _ = ctx.session_store.put(&record);
+                }
                 let instance = session.runner.instance().clone();
                 nenjo::AgentRunner::from_instance(
                     instance,
@@ -145,7 +314,13 @@ pub async fn handle_chat(
             None => {
                 // Domain session still could not be restored, so it is genuinely stale.
                 warn!(%dsid, "Domain session not found after restore attempt");
-                let _ = ctx.domain_session_store.delete(dsid);
+                let _ = update_session_status(
+                    &*ctx.session_store,
+                    &*ctx.session_coordinator,
+                    dsid,
+                    &ctx.worker_id,
+                    SessionStatus::Failed,
+                );
                 let _ = ctx.response_tx.send(Response::AgentResponse {
                     payload: StreamEvent::DomainExited {
                         session_id: dsid,
@@ -162,7 +337,13 @@ pub async fn handle_chat(
             }
         }
     } else {
-        ctx.provider().agent_by_id(agent_id).await?.build().await?
+        apply_session_memory_scope(
+            ctx.provider().agent_by_id(agent_id).await?,
+            &*ctx.session_store,
+            session_id,
+        )
+        .build()
+        .await?
     };
 
     // Start streaming execution
@@ -227,6 +408,15 @@ pub async fn handle_chat(
                 info!(agent = %aname, session = %session_id, "Chat execution cancelled");
                 handle.abort();
                 let _ = trace_recorder.finalize_with_error("Cancelled");
+                let _ = transition_session_state(
+                    &*ctx.session_store,
+                    &*ctx.session_content,
+                    &*ctx.session_coordinator,
+                    session_id,
+                    &ctx.worker_id,
+                    Some(ExecutionPhase::Finalizing),
+                    SessionStatus::Cancelled,
+                );
                 let _ = ctx.response_tx.send(Response::AgentResponse {
                     payload: StreamEvent::Error { message: "Cancelled".to_string() },
                 });
@@ -254,12 +444,22 @@ pub async fn handle_chat(
                 .cloned()
                 .collect();
             if !conversation.is_empty() {
-                let max_turns = ctx.provider().agent_config().max_history_messages;
-                let _ = ctx
-                    .chat_history
-                    .write(&slug, &aname, session_id, &conversation, max_turns);
+                let _ = crate::harness::session::write_json_blob(
+                    &*ctx.session_content,
+                    &history_ref,
+                    &conversation,
+                );
             }
         }
+        let _ = transition_session_state(
+            &*ctx.session_store,
+            &*ctx.session_content,
+            &*ctx.session_coordinator,
+            session_id,
+            &ctx.worker_id,
+            Some(ExecutionPhase::Finalizing),
+            SessionStatus::Completed,
+        );
     }
 
     Ok(())
@@ -286,6 +486,13 @@ pub async fn handle_chat_cancel(
     for key in keys_to_cancel {
         if let Some((_, exec)) = ctx.executions.remove(&key) {
             exec.cancel.cancel();
+            let _ = update_session_status(
+                &*ctx.session_store,
+                &*ctx.session_coordinator,
+                key,
+                &ctx.worker_id,
+                SessionStatus::Cancelled,
+            );
             cancelled += 1;
         }
     }
@@ -304,9 +511,23 @@ pub async fn handle_session_delete(
     session_id: Uuid,
 ) -> Result<()> {
     let provider = ctx.provider();
-    let manifest = provider.manifest();
-    let slug = project_slug(manifest, project_id);
-    let name = agent_name(manifest, agent_id);
-    let _ = ctx.chat_history.delete(&slug, &name, session_id);
+    if let Ok(Some(record)) = ctx.session_store.get(session_id) {
+        if let Some(history_ref) = record.refs.history_ref.as_deref() {
+            let _ = ctx.session_content.delete_blob(history_ref);
+        }
+        if let Some(trace_ref) = record.refs.trace_ref.as_deref() {
+            let _ = ctx.session_content.delete_blob(trace_ref);
+        }
+        if let Some(checkpoint_ref) = record.refs.checkpoint_ref.as_deref() {
+            let _ = ctx.session_content.delete_blob(checkpoint_ref);
+        }
+    } else {
+        let manifest = provider.manifest();
+        let slug = project_slug(manifest, project_id);
+        let name = agent_name(manifest, agent_id);
+        let history_ref = chat_history_ref(&slug, &name, session_id);
+        let _ = ctx.session_content.delete_blob(&history_ref);
+    }
+    let _ = ctx.session_store.delete(session_id);
     Ok(())
 }

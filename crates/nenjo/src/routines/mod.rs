@@ -31,14 +31,33 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::AgentBuilder;
+use crate::memory::MemoryScope;
+
 use crate::agents::runner::types::TurnEvent;
 
 // Re-export key types at module level.
 pub use traits::{LambdaOutput, LambdaRunner};
 pub use types::{
     CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics,
-    StepMetrics, StepResult, StepType,
+    SessionBinding, StepMetrics, StepResult, StepType,
 };
+
+pub(crate) fn apply_session_binding_memory_scope(
+    builder: AgentBuilder,
+    binding: Option<&SessionBinding>,
+) -> AgentBuilder {
+    let Some(binding) = binding else {
+        return builder;
+    };
+    let Some(namespace) = binding.memory_namespace.as_deref() else {
+        return builder;
+    };
+    let Some(scope) = MemoryScope::from_namespace(namespace) else {
+        return builder;
+    };
+    builder.with_memory_scope(scope)
+}
 
 /// Events emitted during routine execution.
 #[derive(Debug, Clone)]

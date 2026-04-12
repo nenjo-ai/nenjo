@@ -240,6 +240,7 @@ impl Provider {
         Ok(RoutineRunner {
             provider: self.clone(),
             routine,
+            session_binding: None,
         })
     }
 
@@ -439,6 +440,7 @@ use crate::manifest::RoutineManifest;
 pub struct RoutineRunner {
     provider: Provider,
     routine: RoutineManifest,
+    session_binding: Option<crate::routines::SessionBinding>,
 }
 
 impl std::fmt::Debug for RoutineRunner {
@@ -461,6 +463,11 @@ impl RoutineRunner {
         self.routine.id
     }
 
+    pub fn with_session_binding(mut self, binding: crate::routines::SessionBinding) -> Self {
+        self.session_binding = Some(binding);
+        self
+    }
+
     /// Run the routine to completion and return the final result.
     pub async fn run(&self, task: crate::types::TaskType) -> Result<StepResult> {
         self.run_stream(task).await?.output().await
@@ -468,7 +475,9 @@ impl RoutineRunner {
 
     /// Run the routine with streaming events.
     pub async fn run_stream(&self, task: crate::types::TaskType) -> Result<RoutineExecutionHandle> {
-        self.provider.run_routine_inner(&self.routine, task).await
+        self.provider
+            .run_routine_inner(&self.routine, task, self.session_binding.clone())
+            .await
     }
 }
 
@@ -478,6 +487,7 @@ impl Provider {
         &self,
         routine: &RoutineManifest,
         task: crate::types::TaskType,
+        session_binding: Option<crate::routines::SessionBinding>,
     ) -> Result<RoutineExecutionHandle> {
         let routine = routine.clone();
         let max_retries = routine.max_retries;
@@ -498,7 +508,10 @@ impl Provider {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel::<RoutineEvent>();
 
-        let input = routines::types::routine_input_from_task(&task);
+        let mut input = routines::types::routine_input_from_task(&task);
+        if let Some(binding) = session_binding {
+            input = input.with_session_binding(binding);
+        }
         tracing::debug!(
             is_cron = input.is_cron_trigger,
             "RoutineInput built from task"
