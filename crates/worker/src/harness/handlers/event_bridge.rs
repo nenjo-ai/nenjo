@@ -1,10 +1,12 @@
 //! Event bridging — converts SDK events to NATS response types.
 
 use nenjo::manifest::Manifest;
-use nenjo_events::{Response, StepAgent, StreamEvent};
+use nenjo_events::{Response, StepAgent, StreamEvent, ToolCall};
 use serde::Serialize;
 use tracing::debug;
 use uuid::Uuid;
+
+use crate::harness::preview::{summarize_preview, truncate_preview};
 
 // ---------------------------------------------------------------------------
 // Typed step-event data payloads
@@ -58,25 +60,18 @@ pub fn turn_event_to_stream_event(
         nenjo::TurnEvent::ToolCallStart {
             parent_tool_name,
             calls,
-        } => {
-            if calls.len() == 1 {
-                Some(StreamEvent::ToolInvoked {
-                    tool_name: calls[0].tool_name.clone(),
-                    tool_args: calls[0].tool_args.clone(),
-                    agent_name: agent_name.to_string(),
-                    text_preview: calls[0].text_preview.clone(),
-                    parent_tool_name: parent_tool_name.clone(),
+        } => Some(StreamEvent::ToolCalls {
+            tool_calls: calls
+                .iter()
+                .map(|call| ToolCall {
+                    tool_name: call.tool_name.clone(),
+                    tool_args: call.tool_args.clone(),
                 })
-            } else {
-                Some(StreamEvent::ToolsInvoked {
-                    tool_names: calls.iter().map(|c| c.tool_name.clone()).collect(),
-                    tool_args: calls.iter().map(|c| c.tool_args.clone()).collect(),
-                    agent_name: agent_name.to_string(),
-                    text_preview: calls.first().and_then(|c| c.text_preview.clone()),
-                    parent_tool_name: parent_tool_name.clone(),
-                })
-            }
-        }
+                .collect(),
+            agent_name: agent_name.to_string(),
+            text_preview: calls.first().and_then(|c| c.text_preview.clone()),
+            parent_tool_name: parent_tool_name.clone(),
+        }),
         nenjo::TurnEvent::ToolCallEnd {
             parent_tool_name,
             tool_name,
@@ -84,20 +79,8 @@ pub fn turn_event_to_stream_event(
         } => Some(StreamEvent::ToolCompleted {
             tool_name: tool_name.clone(),
             success: result.success,
-            output_preview: result
-                .output
-                .lines()
-                .next()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(|line| truncate_preview(line, 160)),
-            error_preview: result
-                .error
-                .as_deref()
-                .and_then(|err| err.lines().next())
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(|line| truncate_preview(line, 160)),
+            output_preview: summarize_preview(&result.output),
+            error_preview: result.error.as_deref().and_then(summarize_preview),
             parent_tool_name: parent_tool_name.clone(),
         }),
         nenjo::TurnEvent::AbilityCompleted {
@@ -217,25 +200,20 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
 pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
     match event {
         StreamEvent::Token { text } => format!("token(len={})", text.len()),
-        StreamEvent::ToolInvoked {
-            tool_name,
+        StreamEvent::ToolCalls {
+            tool_calls,
             agent_name,
             parent_tool_name,
             ..
         } => format!(
-            "tool_invoked(tool={tool_name}, agent={agent_name}, parent={})",
-            parent_tool_name.as_deref().unwrap_or("-")
-        ),
-        StreamEvent::ToolsInvoked {
-            tool_names,
-            agent_name,
-            parent_tool_name,
-            ..
-        } => format!(
-            "tools_invoked(count={}, agent={agent_name}, parent={}, tools=[{}])",
-            tool_names.len(),
+            "tool_calls(count={}, agent={agent_name}, parent={}, tools=[{}])",
+            tool_calls.len(),
             parent_tool_name.as_deref().unwrap_or("-"),
-            tool_names.join(", ")
+            tool_calls
+                .iter()
+                .map(|call| call.tool_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         StreamEvent::ToolCompleted {
             tool_name, success, ..
@@ -308,13 +286,6 @@ pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
         } => format!("message_compacted({messages_before}->{messages_after})"),
         StreamEvent::Paused => "paused".to_string(),
         StreamEvent::Resumed => "resumed".to_string(),
-    }
-}
-
-fn truncate_preview(s: &str, max_chars: usize) -> String {
-    match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => format!("{}...", &s[..idx]),
-        None => s.to_string(),
     }
 }
 
@@ -460,7 +431,10 @@ fn routine_agent_event_to_response(
     let agent = resolve_agent(manifest, current_agent_id);
 
     match event {
-        nenjo::TurnEvent::ToolCallStart { calls, .. } => Some(Response::TaskStepEvent {
+        nenjo::TurnEvent::ToolCallStart {
+            parent_tool_name,
+            calls,
+        } => Some(Response::TaskStepEvent {
             execution_run_id: execution_run_id.to_string(),
             task_id: task_id.map(|id| id.to_string()),
             event_type: "step_started".to_string(),
@@ -471,13 +445,17 @@ fn routine_agent_event_to_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: serde_json::json!({
+                "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
                 "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
             }),
             agent,
         }),
         nenjo::TurnEvent::ToolCallEnd {
-            tool_name, result, ..
+            parent_tool_name,
+            tool_name,
+            result,
+            ..
         } => Some(Response::TaskStepEvent {
             execution_run_id: execution_run_id.to_string(),
             task_id: task_id.map(|id| id.to_string()),
@@ -490,8 +468,9 @@ fn routine_agent_event_to_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: serde_json::json!({
+                "parent_tool_name": parent_tool_name,
                 "success": result.success,
-                "output_preview": result.output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "output_preview": summarize_preview(&result.output),
                 "error": result.error,
             }),
             agent,
@@ -530,7 +509,7 @@ fn routine_agent_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "success": success,
-                "output_preview": final_output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "output_preview": summarize_preview(final_output),
             }),
             agent,
         }),

@@ -38,7 +38,11 @@ pub struct StepAgent {
 pub enum Response {
     /// Wraps a [`StreamEvent`] for real-time streaming to the frontend.
     #[serde(rename = "agent_response")]
-    AgentResponse { payload: StreamEvent },
+    AgentResponse {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
+        payload: StreamEvent,
+    },
 
     /// A routine step lifecycle event (started, completed, failed, etc.).
     #[serde(rename = "task.step_event")]
@@ -202,7 +206,13 @@ pub enum Response {
 impl std::fmt::Display for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AgentResponse { payload } => write!(f, "agent_response({payload})"),
+            Self::AgentResponse {
+                session_id,
+                payload,
+            } => match session_id {
+                Some(session_id) => write!(f, "agent_response(session={session_id}, {payload})"),
+                None => write!(f, "agent_response({payload})"),
+            },
             Self::TaskStepEvent {
                 execution_run_id,
                 event_type,
@@ -307,21 +317,9 @@ pub enum StreamEvent {
     /// An incremental LLM output token.
     Token { text: String },
 
-    /// A single tool invocation.
-    ToolInvoked {
-        tool_name: String,
-        tool_args: String,
-        agent_name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        text_preview: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_tool_name: Option<String>,
-    },
-
-    /// Batch tool invocation (parallel tool calls).
-    ToolsInvoked {
-        tool_names: Vec<String>,
-        tool_args: Vec<String>,
+    /// One or more tool invocations.
+    ToolCalls {
+        tool_calls: Vec<ToolCall>,
         agent_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_preview: Option<String>,
@@ -404,19 +402,18 @@ impl std::fmt::Display for StreamEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Token { text } => write!(f, "token({}B)", text.len()),
-            Self::ToolInvoked {
-                tool_name,
-                agent_name,
-                ..
-            } => write!(f, "tool_invoked({tool_name}, agent={agent_name})"),
-            Self::ToolsInvoked {
-                tool_names,
+            Self::ToolCalls {
+                tool_calls,
                 agent_name,
                 ..
             } => write!(
                 f,
-                "tools_invoked([{}], agent={agent_name})",
-                tool_names.join(", ")
+                "tool_calls([{}], agent={agent_name})",
+                tool_calls
+                    .iter()
+                    .map(|call| call.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Self::ToolCompleted {
                 tool_name, success, ..
@@ -450,6 +447,12 @@ impl std::fmt::Display for StreamEvent {
             Self::Resumed => write!(f, "resumed"),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub tool_name: String,
+    pub tool_args: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -542,10 +545,12 @@ mod tests {
     }
 
     #[test]
-    fn stream_event_tool_invoked_roundtrip() {
-        let event = StreamEvent::ToolInvoked {
-            tool_name: "shell".into(),
-            tool_args: r#"{"cmd":"ls"}"#.into(),
+    fn stream_event_tool_calls_roundtrip() {
+        let event = StreamEvent::ToolCalls {
+            tool_calls: vec![ToolCall {
+                tool_name: "shell".into(),
+                tool_args: r#"{"cmd":"ls"}"#.into(),
+            }],
             agent_name: "coder".into(),
             text_preview: Some("Running a quick command".into()),
             parent_tool_name: Some("ability/test.builder".into()),
@@ -553,14 +558,15 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
         match parsed {
-            StreamEvent::ToolInvoked {
-                tool_name,
+            StreamEvent::ToolCalls {
+                tool_calls,
                 agent_name,
                 text_preview,
                 parent_tool_name,
                 ..
             } => {
-                assert_eq!(tool_name, "shell");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].tool_name, "shell");
                 assert_eq!(agent_name, "coder");
                 assert_eq!(text_preview.as_deref(), Some("Running a quick command"));
                 assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
@@ -651,6 +657,7 @@ mod tests {
     #[test]
     fn response_agent_response_roundtrip() {
         let resp = Response::AgentResponse {
+            session_id: Some(Uuid::nil()),
             payload: StreamEvent::Done {
                 final_output: "result".into(),
                 project_id: None,
@@ -662,8 +669,14 @@ mod tests {
         assert!(json.contains(r#""type":"agent_response""#));
         let parsed: Response = serde_json::from_str(&json).unwrap();
         match parsed {
-            Response::AgentResponse { payload } => match payload {
-                StreamEvent::Done { final_output, .. } => assert_eq!(final_output, "result"),
+            Response::AgentResponse {
+                session_id,
+                payload,
+            } => match payload {
+                StreamEvent::Done { final_output, .. } => {
+                    assert_eq!(session_id, Some(Uuid::nil()));
+                    assert_eq!(final_output, "result")
+                }
                 _ => panic!("wrong stream event"),
             },
             _ => panic!("wrong variant"),

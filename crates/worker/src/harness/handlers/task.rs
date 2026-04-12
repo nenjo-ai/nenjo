@@ -18,6 +18,7 @@ use nenjo_events::{Response, StepAgent};
 
 use super::event_bridge::{agent_name, project_slug, routine_event_to_response};
 use crate::harness::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
+use crate::harness::preview::summarize_preview;
 use crate::harness::session::{
     apply_session_memory_scope, lease_for_status, read_json_blob, session_memory_namespace,
     transition_session_state, update_checkpoint_with_worktree,
@@ -892,7 +893,10 @@ fn direct_task_turn_event_to_response(
     });
 
     match event {
-        nenjo::TurnEvent::ToolCallStart { calls, .. } => Some(Response::TaskStepEvent {
+        nenjo::TurnEvent::ToolCallStart {
+            parent_tool_name,
+            calls,
+        } => Some(Response::TaskStepEvent {
             execution_run_id: eid,
             task_id: tid,
             event_type: "step_started".to_string(),
@@ -903,13 +907,17 @@ fn direct_task_turn_event_to_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: serde_json::json!({
+                "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
                 "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
             }),
             agent,
         }),
         nenjo::TurnEvent::ToolCallEnd {
-            tool_name, result, ..
+            parent_tool_name,
+            tool_name,
+            result,
+            ..
         } => Some(Response::TaskStepEvent {
             execution_run_id: eid,
             task_id: tid,
@@ -922,8 +930,9 @@ fn direct_task_turn_event_to_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: serde_json::json!({
+                "parent_tool_name": parent_tool_name,
                 "success": result.success,
-                "output_preview": result.output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "output_preview": summarize_preview(&result.output),
                 "error": result.error,
             }),
             agent,
@@ -962,7 +971,7 @@ fn direct_task_turn_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "success": success,
-                "output_preview": final_output.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "output_preview": summarize_preview(final_output),
             }),
             agent,
         }),
@@ -974,7 +983,7 @@ fn direct_task_turn_event_to_response(
             step_type: "agent".to_string(),
             duration_ms: None,
             data: serde_json::json!({
-                "output_preview": output.text.lines().next().map(str::trim).filter(|s| !s.is_empty()),
+                "output_preview": summarize_preview(&output.text),
                 "input_tokens": output.input_tokens,
                 "output_tokens": output.output_tokens,
             }),

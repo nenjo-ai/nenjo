@@ -16,6 +16,8 @@ use nenjo_sessions::SessionContentStore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::harness::preview::summarize_preview;
+
 /// Controls whether traces are stored for a chat session or a task execution.
 #[derive(Debug, Clone, Copy)]
 pub enum TraceMode {
@@ -540,21 +542,9 @@ fn sanitize(s: &str) -> String {
 }
 
 fn first_preview(s: &str) -> Option<String> {
-    first_preview_str(s)
+    summarize_preview(s)
 }
 
 fn first_preview_str(s: &str) -> Option<String> {
-    let first = s.lines().next()?.trim();
-    if first.is_empty() {
-        None
-    } else {
-        Some(truncate(first, 200))
-    }
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => format!("{}...", &s[..idx]),
-        None => s.to_string(),
-    }
+    summarize_preview(s)
 }

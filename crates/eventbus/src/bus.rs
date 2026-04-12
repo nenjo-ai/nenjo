@@ -61,7 +61,7 @@ impl<T: Transport> EventBus<T> {
         let payload = serde_json::to_value(&response)?;
         let envelope = Envelope::new(self.user_id, payload);
         let bytes = serde_json::to_vec(&envelope)?;
-        let subject = nenjo_events::responses_subject(self.user_id);
+        let subject = nenjo_events::response_subject(self.user_id, &response);
 
         self.transport.publish(&subject, &bytes).await?;
         match response {
