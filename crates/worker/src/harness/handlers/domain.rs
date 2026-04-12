@@ -110,6 +110,7 @@ pub async fn handle_domain_enter(
             );
 
             let _ = ctx.response_tx.send(Response::AgentResponse {
+                session_id: None,
                 payload: StreamEvent::DomainEntered {
                     session_id,
                     domain_name,
@@ -119,6 +120,7 @@ pub async fn handle_domain_enter(
         Err(e) => {
             warn!(agent = %aname, error = %e, "Domain expansion failed");
             let _ = ctx.response_tx.send(Response::AgentResponse {
+                session_id: None,
                 payload: StreamEvent::Error {
                     message: format!("Domain expansion failed: {e}"),
                 },
@@ -169,6 +171,7 @@ pub async fn handle_domain_exit(
             );
 
             let _ = ctx.response_tx.send(Response::AgentResponse {
+                session_id: None,
                 payload: StreamEvent::DomainExited {
                     session_id: domain_session_id,
                     artifact_id: None,
@@ -179,6 +182,7 @@ pub async fn handle_domain_exit(
         None => {
             warn!(%domain_session_id, "Domain exit for unknown session");
             let _ = ctx.response_tx.send(Response::AgentResponse {
+                session_id: None,
                 payload: StreamEvent::DomainExited {
                     session_id: domain_session_id,
                     artifact_id: None,

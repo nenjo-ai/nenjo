@@ -27,6 +27,7 @@ pub mod external_mcp;
 pub mod handlers;
 pub mod loader;
 pub mod manifest;
+pub mod preview;
 pub mod prompt;
 pub mod providers;
 pub mod security;

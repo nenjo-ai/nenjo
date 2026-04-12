@@ -322,6 +322,7 @@ pub async fn handle_chat(
                     SessionStatus::Failed,
                 );
                 let _ = ctx.response_tx.send(Response::AgentResponse {
+                    session_id: Some(session_id),
                     payload: StreamEvent::DomainExited {
                         session_id: dsid,
                         artifact_id: None,
@@ -329,6 +330,7 @@ pub async fn handle_chat(
                     },
                 });
                 let _ = ctx.response_tx.send(Response::AgentResponse {
+                    session_id: Some(session_id),
                     payload: StreamEvent::Error {
                         message: "Domain session expired. Please re-enter the domain.".into(),
                     },
@@ -398,7 +400,10 @@ pub async fn handle_chat(
                                 agent = %aname,
                                 "Chat handler sending stream event"
                             );
-                            let _ = ctx.response_tx.send(Response::AgentResponse { payload: se });
+                            let _ = ctx.response_tx.send(Response::AgentResponse {
+                                session_id: Some(session_id),
+                                payload: se,
+                            });
                         }
                     }
                     None => break,
@@ -418,6 +423,7 @@ pub async fn handle_chat(
                     SessionStatus::Cancelled,
                 );
                 let _ = ctx.response_tx.send(Response::AgentResponse {
+                    session_id: Some(session_id),
                     payload: StreamEvent::Error { message: "Cancelled".to_string() },
                 });
                 break;

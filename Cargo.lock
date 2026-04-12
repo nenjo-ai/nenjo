@@ -1769,6 +1769,7 @@ dependencies = [
  "nenjo-models",
  "nenjo-tools",
  "nenjo-xml",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

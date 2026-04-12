@@ -5,8 +5,10 @@
 //! Callers build prompts and pass pre-built messages to [`run()`].
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use anyhow::Result;
+use regex::Regex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -37,6 +39,26 @@ pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
 
 /// Conservative fallback context window when the provider doesn't report one.
 const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
+
+fn sanitize_tool_text_preview(text: &str) -> Option<String> {
+    static XML_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    let xml_tag_re = XML_TAG_RE.get_or_init(|| {
+        Regex::new(r"</?[A-Za-z][A-Za-z0-9:_-]*[^>]*>").expect("xml tag regex must be valid")
+    });
+
+    let without_tags = xml_tag_re.replace_all(text, " ");
+    let collapsed = without_tags
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = collapsed.trim();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(truncate_str(cleaned, 240).to_string())
+    }
+}
 
 /// Run the agentic turn loop.
 ///
@@ -226,9 +248,7 @@ pub async fn run(
                     let tool_text_preview = response
                         .text
                         .as_deref()
-                        .map(str::trim)
-                        .filter(|text| !text.is_empty())
-                        .map(str::to_string);
+                        .and_then(sanitize_tool_text_preview);
 
                     // Emit a single start event with all tool calls.
                     let _ = events_tx.as_ref().map(|tx| {

@@ -20,8 +20,8 @@ use crate::transport::{AckHandle, Message, Transport};
 // ---------------------------------------------------------------------------
 
 const DEFAULT_URL: &str = "nats://localhost:4222";
-const DEFAULT_STREAM_NAME: &str = "AGENT_EVENTS";
-const DEFAULT_STREAM_SUBJECTS: &[&str] = &["requests.>", "responses.>"];
+const DEFAULT_STREAM_NAME: &str = "AGENT_REQUESTS";
+const DEFAULT_STREAM_SUBJECTS: &[&str] = &["requests.>"];
 const DEFAULT_MAX_AGE_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_DELIVER: i64 = 3;
 const DEFAULT_ACK_WAIT_SECS: u64 = 10;
@@ -98,8 +98,6 @@ impl Transport for NatsTransport {
             // doesn't need user_id — the account provides the namespace.
             let consumer_name = if subject.starts_with("requests.") {
                 "worker-requests".to_string()
-            } else if subject == "responses" || subject.starts_with("responses.") {
-                "worker-responses".to_string()
             } else {
                 subject.replace('.', "-")
             };
@@ -419,7 +417,7 @@ mod tests {
     fn builder_defaults() {
         let builder = NatsTransport::builder();
         assert_eq!(builder.url, "nats://localhost:4222");
-        assert_eq!(builder.stream_name, "AGENT_EVENTS");
+        assert_eq!(builder.stream_name, "AGENT_REQUESTS");
         assert_eq!(builder.max_deliver, 3);
         assert_ne!(builder.worker_id, uuid::Uuid::nil());
     }
