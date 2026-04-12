@@ -10,8 +10,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::RoutineEvent;
-use super::gate;
 use super::types::RoutineState;
+use super::{apply_session_binding_memory_scope, gate};
 use crate::manifest::{CouncilManifest, RoutineStepManifest};
 use crate::provider::Provider;
 use crate::routines::types::StepResult;
@@ -57,12 +57,14 @@ async fn execute_dynamic(
         "Starting dynamic council execution"
     );
 
-    let runner = provider
+    let runner_builder = provider
         .agent_by_id(leader_agent_id)
         .await?
-        .with_tool(gate::GateVerdictTool::new())
-        .build()
-        .await?;
+        .with_tool(gate::GateVerdictTool::new());
+    let runner =
+        apply_session_binding_memory_scope(runner_builder, state.input.session_binding.as_ref())
+            .build()
+            .await?;
 
     let task = TaskType::Chat {
         user_message: state.initial_input.clone(),
@@ -129,7 +131,12 @@ async fn execute_decompose(
     );
 
     // Step 1: Leader decomposes
-    let leader = provider.agent_by_id(leader_agent_id).await?.build().await?;
+    let leader = apply_session_binding_memory_scope(
+        provider.agent_by_id(leader_agent_id).await?,
+        state.input.session_binding.as_ref(),
+    )
+    .build()
+    .await?;
 
     let decompose_message = format!(
         "You are the leader of a team of {} agents. Decompose the following work \
@@ -167,7 +174,11 @@ async fn execute_decompose(
         );
 
         let member_runner = match provider.agent_by_id(*agent_id).await {
-            Ok(builder) => builder.build().await?,
+            Ok(builder) => {
+                apply_session_binding_memory_scope(builder, state.input.session_binding.as_ref())
+                    .build()
+                    .await?
+            }
             Err(e) => {
                 warn!(agent_id = %agent_id, error = %e, "Failed to build member agent");
                 member_results.push(StepResult {

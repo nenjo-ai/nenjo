@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nenjo",
     "crates/worker",
+    "crates/sessions",
     "crates/events",
     "crates/eventbus",
     "crates/tools",
@@ -26,4 +27,5 @@ nenjo-models = { path = "crates/models", version = "0.9.0" }
 nenjo-tools = { path = "crates/tools", version = "0.9.0" }
 nenjo-events = { path = "crates/events", version = "0.9.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.9.0" }
+nenjo-sessions = { path = "crates/sessions", version = "0.9.0" }
 nenjo-worker = { path = "crates/worker" }

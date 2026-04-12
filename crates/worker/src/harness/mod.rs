@@ -5,10 +5,12 @@
 //! execution handles for cancellation and lifecycle tracking.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use nenjo_sessions::{ScheduleState, SessionKind, SessionRecord, SessionStatus};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -18,10 +20,8 @@ use nenjo_eventbus::{EventBus, Transport};
 use nenjo_events::Response;
 
 pub mod agent;
-pub mod chat_history;
 pub mod config;
 pub mod doc_sync;
-pub mod domain_session_store;
 pub mod execution_trace;
 pub mod external_mcp;
 pub mod handlers;
@@ -30,18 +30,21 @@ pub mod manifest;
 pub mod prompt;
 pub mod providers;
 pub mod security;
+pub mod session;
 pub mod stream;
 pub mod tools;
 
 pub use nenjo::client as api_client;
 
 use api_client::NenjoClient;
-use chat_history::ChatHistory;
 use config::Config;
-use domain_session_store::DomainSessionStore;
 use external_mcp::ExternalMcpPool;
 use loader::FileSystemManifestLoader;
 use providers::registry::ProviderRegistry;
+use session::local_content::FileSessionContentStore;
+use session::local_coordinator::LocalSessionCoordinator;
+use session::local_store::FileSessionStore;
+use session::reconcile_recoverable_session;
 use tools::{HarnessToolFactory, NativeRuntime};
 
 // ---------------------------------------------------------------------------
@@ -92,8 +95,10 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 pub struct CommandContext {
     pub provider: Arc<ArcSwap<Provider>>,
     pub response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
-    pub chat_history: Arc<ChatHistory>,
-    pub domain_session_store: Arc<DomainSessionStore>,
+    pub worker_id: String,
+    pub session_store: Arc<dyn nenjo_sessions::SessionStore>,
+    pub session_content: Arc<dyn nenjo_sessions::SessionContentStore>,
+    pub session_coordinator: Arc<dyn nenjo_sessions::SessionCoordinator>,
     pub api: Arc<NenjoClient>,
     pub config: Config,
     pub external_mcp: Arc<ExternalMcpPool>,
@@ -123,8 +128,10 @@ pub struct Harness {
     provider: Arc<ArcSwap<Provider>>,
     config: Config,
     api: Arc<NenjoClient>,
-    chat_history: Arc<ChatHistory>,
-    domain_session_store: Arc<DomainSessionStore>,
+    worker_id: String,
+    session_store: Arc<dyn nenjo_sessions::SessionStore>,
+    session_content: Arc<dyn nenjo_sessions::SessionContentStore>,
+    session_coordinator: Arc<dyn nenjo_sessions::SessionCoordinator>,
     external_mcp: Arc<ExternalMcpPool>,
     executions: ExecutionRegistry,
     domains: DomainRegistry,
@@ -132,7 +139,231 @@ pub struct Harness {
     shutdown: CancellationToken,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchedulerRestoreAction {
+    Cron {
+        session_id: Uuid,
+        project_id: Option<Uuid>,
+        schedule_expr: String,
+        next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    Heartbeat {
+        session_id: Uuid,
+        interval: Duration,
+        next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+        previous_output_ref: Option<String>,
+        last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+        start_paused: bool,
+    },
+}
+
+fn scheduler_restore_action(record: &SessionRecord) -> Option<SchedulerRestoreAction> {
+    if !matches!(record.status, SessionStatus::Active | SessionStatus::Paused) {
+        return None;
+    }
+
+    match record.scheduler.clone()? {
+        ScheduleState::Cron(state) => {
+            if record.status != SessionStatus::Active {
+                return None;
+            }
+            Some(SchedulerRestoreAction::Cron {
+                session_id: record.session_id,
+                project_id: record.project_id,
+                schedule_expr: state.schedule_expr,
+                next_run_at: state.next_run_at,
+            })
+        }
+        ScheduleState::Heartbeat(state) => Some(SchedulerRestoreAction::Heartbeat {
+            session_id: record.session_id,
+            interval: Duration::from_secs(state.interval_secs.max(1)),
+            next_run_at: state.next_run_at,
+            previous_output_ref: state.previous_output_ref,
+            last_run_at: state.last_run_at,
+            start_paused: record.status == SessionStatus::Paused,
+        }),
+    }
+}
+
 impl Harness {
+    async fn restore_domain_sessions(
+        provider: &Arc<ArcSwap<Provider>>,
+        session_store: &Arc<dyn nenjo_sessions::SessionStore>,
+        domains: &DomainRegistry,
+    ) {
+        for persisted in session_store
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                record.kind == SessionKind::Domain
+                    && matches!(record.status, SessionStatus::Active | SessionStatus::Paused)
+            })
+        {
+            let Some(domain) = persisted.domain.clone() else {
+                continue;
+            };
+            let Some(agent_id) = persisted.agent_id else {
+                continue;
+            };
+            let Some(project_id) = persisted.project_id else {
+                continue;
+            };
+
+            let provider_snapshot = provider.load_full();
+            let base_runner = match provider_snapshot.agent_by_id(agent_id).await {
+                Ok(builder) => match builder.build().await {
+                    Ok(runner) => runner,
+                    Err(e) => {
+                        warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain base runner");
+                        let _ = session_store.delete(persisted.session_id);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    warn!(session_id = %persisted.session_id, error = %e, "Failed to find agent for persisted domain session");
+                    let _ = session_store.delete(persisted.session_id);
+                    continue;
+                }
+            };
+
+            let domain_runner = match base_runner.domain_expansion(&domain.domain_command).await {
+                Ok(runner) => runner,
+                Err(e) => {
+                    warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain session");
+                    let _ = session_store.delete(persisted.session_id);
+                    continue;
+                }
+            };
+
+            let mut instance = domain_runner.instance().clone();
+            if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
+                active_domain.session_id = persisted.session_id;
+                active_domain.turn_number = domain.turn_number;
+            }
+            let restored_runner = nenjo::AgentRunner::from_instance(
+                instance,
+                domain_runner.memory().cloned(),
+                domain_runner.memory_scope().cloned(),
+            );
+            domains.insert(
+                persisted.session_id,
+                DomainSession {
+                    runner: restored_runner,
+                    agent_id,
+                    project_id,
+                    domain_command: domain.domain_command,
+                    turn_number: domain.turn_number,
+                },
+            );
+        }
+    }
+
+    fn reconcile_recoverable_sessions(
+        session_store: &Arc<dyn nenjo_sessions::SessionStore>,
+        session_content: &Arc<dyn nenjo_sessions::SessionContentStore>,
+        session_coordinator: &Arc<dyn nenjo_sessions::SessionCoordinator>,
+    ) {
+        for persisted in session_store
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                matches!(record.kind, SessionKind::Chat | SessionKind::Task)
+                    && matches!(record.status, SessionStatus::Active | SessionStatus::Paused)
+            })
+        {
+            if let Err(e) = reconcile_recoverable_session(
+                &**session_store,
+                &**session_content,
+                &**session_coordinator,
+                persisted.session_id,
+            ) {
+                warn!(
+                    session_id = %persisted.session_id,
+                    error = %e,
+                    "Failed to reconcile recoverable session state"
+                );
+            }
+        }
+    }
+
+    fn restore_context(
+        &self,
+        response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
+    ) -> CommandContext {
+        CommandContext {
+            provider: self.provider.clone(),
+            response_tx,
+            worker_id: self.worker_id.clone(),
+            session_store: self.session_store.clone(),
+            session_content: self.session_content.clone(),
+            session_coordinator: self.session_coordinator.clone(),
+            api: self.api.clone(),
+            config: self.config.clone(),
+            external_mcp: self.external_mcp.clone(),
+            executions: self.executions.clone(),
+            domains: self.domains.clone(),
+            git_locks: self.git_locks.clone(),
+        }
+    }
+
+    async fn restore_scheduler_sessions(&self, restore_ctx: &CommandContext) {
+        for persisted in self.session_store.list().unwrap_or_default().into_iter() {
+            match scheduler_restore_action(&persisted) {
+                Some(SchedulerRestoreAction::Cron {
+                    session_id,
+                    project_id,
+                    schedule_expr,
+                    next_run_at,
+                }) => {
+                    if let Err(e) = crate::harness::handlers::cron::handle_cron_enable(
+                        restore_ctx,
+                        session_id,
+                        project_id,
+                        &schedule_expr,
+                        next_run_at,
+                    )
+                    .await
+                    {
+                        warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to restore cron schedule"
+                        );
+                    }
+                }
+                Some(SchedulerRestoreAction::Heartbeat {
+                    session_id,
+                    interval,
+                    next_run_at,
+                    previous_output_ref,
+                    last_run_at,
+                    start_paused,
+                }) => {
+                    if let Err(e) = crate::harness::handlers::heartbeat::restore_agent_heartbeat(
+                        restore_ctx,
+                        session_id,
+                        interval,
+                        next_run_at,
+                        previous_output_ref,
+                        last_run_at,
+                        start_paused,
+                    )
+                    .await
+                    {
+                        warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to restore heartbeat schedule"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Create a new Harness.
     pub async fn new(config: Config) -> Result<Self> {
         let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
@@ -187,71 +418,39 @@ impl Harness {
             .context("Failed to build Provider")?;
 
         let provider = Arc::new(ArcSwap::from_pointee(provider));
-        let chat_history = Arc::new(ChatHistory::new(&config.workspace_dir));
-        let domain_session_store = Arc::new(DomainSessionStore::new(&config.workspace_dir));
+        let worker_id = provider
+            .load_full()
+            .manifest()
+            .api_key_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "local-worker".to_string());
+        let session_store: Arc<dyn nenjo_sessions::SessionStore> =
+            Arc::new(FileSessionStore::new(&config.state_dir.join("sessions")));
+        let session_content: Arc<dyn nenjo_sessions::SessionContentStore> = Arc::new(
+            FileSessionContentStore::new(&config.state_dir.join("session_content")),
+        );
+        let session_coordinator: Arc<dyn nenjo_sessions::SessionCoordinator> =
+            Arc::new(LocalSessionCoordinator::new());
         let executions = Arc::new(DashMap::new());
         let domains = Arc::new(DashMap::new());
         let git_locks = Arc::new(DashMap::new());
         let shutdown = CancellationToken::new();
 
-        for persisted in domain_session_store.load_all().unwrap_or_default() {
-            let provider_snapshot = provider.load_full();
-            let base_runner = match provider_snapshot.agent_by_id(persisted.agent_id).await {
-                Ok(builder) => match builder.build().await {
-                    Ok(runner) => runner,
-                    Err(e) => {
-                        warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain base runner");
-                        let _ = domain_session_store.delete(persisted.session_id);
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    warn!(session_id = %persisted.session_id, error = %e, "Failed to find agent for persisted domain session");
-                    let _ = domain_session_store.delete(persisted.session_id);
-                    continue;
-                }
-            };
-
-            let domain_runner = match base_runner
-                .domain_expansion(&persisted.domain_command)
-                .await
-            {
-                Ok(runner) => runner,
-                Err(e) => {
-                    warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain session");
-                    let _ = domain_session_store.delete(persisted.session_id);
-                    continue;
-                }
-            };
-
-            let mut instance = domain_runner.instance().clone();
-            if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
-                active_domain.session_id = persisted.session_id;
-                active_domain.turn_number = persisted.turn_number;
-            }
-            let restored_runner = nenjo::AgentRunner::from_instance(
-                instance,
-                domain_runner.memory().cloned(),
-                domain_runner.memory_scope().cloned(),
-            );
-            domains.insert(
-                persisted.session_id,
-                DomainSession {
-                    runner: restored_runner,
-                    agent_id: persisted.agent_id,
-                    project_id: persisted.project_id,
-                    domain_command: persisted.domain_command,
-                    turn_number: persisted.turn_number,
-                },
-            );
-        }
+        Self::restore_domain_sessions(&provider, &session_store, &domains).await;
+        Self::reconcile_recoverable_sessions(
+            &session_store,
+            &session_content,
+            &session_coordinator,
+        );
 
         Ok(Self {
             provider,
             config,
             api,
-            chat_history,
-            domain_session_store,
+            worker_id,
+            session_store,
+            session_content,
+            session_coordinator,
             external_mcp,
             executions,
             domains,
@@ -296,7 +495,7 @@ impl Harness {
             %user_id,
             %worker_id,
             ?capabilities,
-            "Subscribing to NATS events"
+            "Subscribing to eventbus"
         );
 
         let mut bus = EventBus::builder()
@@ -322,6 +521,9 @@ impl Harness {
             capabilities: capabilities.clone(),
             version: app_version.clone(),
         });
+
+        let restore_ctx = self.restore_context(response_tx.clone());
+        self.restore_scheduler_sessions(&restore_ctx).await;
 
         // Periodic heartbeat task.
         let heartbeat_tx = response_tx.clone();
@@ -383,21 +585,6 @@ impl Harness {
             }
         });
 
-        let restore_ctx = CommandContext {
-            provider: self.provider.clone(),
-            response_tx: response_tx.clone(),
-            chat_history: self.chat_history.clone(),
-            domain_session_store: self.domain_session_store.clone(),
-            api: self.api.clone(),
-            config: self.config.clone(),
-            external_mcp: self.external_mcp.clone(),
-            executions: self.executions.clone(),
-            domains: self.domains.clone(),
-            git_locks: self.git_locks.clone(),
-        };
-        restore_active_cron_schedules(&restore_ctx).await;
-        restore_active_agent_heartbeats(&restore_ctx).await;
-
         info!("Nenjo harness event loop started");
 
         // Main loop: dispatch commands to independent tasks.
@@ -410,8 +597,10 @@ impl Harness {
             let ctx = CommandContext {
                 provider: self.provider.clone(),
                 response_tx: response_tx.clone(),
-                chat_history: self.chat_history.clone(),
-                domain_session_store: self.domain_session_store.clone(),
+                worker_id: self.worker_id.clone(),
+                session_store: self.session_store.clone(),
+                session_content: self.session_content.clone(),
+                session_coordinator: self.session_coordinator.clone(),
                 api: self.api.clone(),
                 config: self.config.clone(),
                 external_mcp: self.external_mcp.clone(),
@@ -439,67 +628,6 @@ impl Harness {
     }
 }
 
-async fn restore_active_cron_schedules(ctx: &CommandContext) {
-    let routines = match ctx.api.list_active_cron_routines().await {
-        Ok(routines) => routines,
-        Err(e) => {
-            warn!(error = %e, "Failed to restore active cron schedules");
-            return;
-        }
-    };
-
-    for routine in routines {
-        let start_at = routine
-            .next_run_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.with_timezone(&chrono::Utc));
-        if let Err(e) = handlers::cron::handle_cron_enable(
-            ctx,
-            routine.id,
-            routine.project_id,
-            &routine.schedule,
-            start_at,
-        )
-        .await
-        {
-            warn!(error = %e, routine_id = %routine.id, "Failed to restore cron schedule");
-        }
-    }
-}
-
-async fn restore_active_agent_heartbeats(ctx: &CommandContext) {
-    let heartbeats = match ctx.api.list_active_agent_heartbeats().await {
-        Ok(heartbeats) => heartbeats,
-        Err(e) => {
-            warn!(error = %e, "Failed to restore active agent heartbeats");
-            return;
-        }
-    };
-
-    for heartbeat in heartbeats {
-        let start_at = heartbeat
-            .next_run_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.with_timezone(&chrono::Utc));
-        if let Err(e) = handlers::heartbeat::handle_agent_heartbeat_enable(
-            ctx,
-            heartbeat.agent_id,
-            &heartbeat.interval,
-            start_at,
-        )
-        .await
-        {
-            warn!(
-                error = %e,
-                agent_id = %heartbeat.agent_id,
-                "Failed to restore agent heartbeat"
-            );
-        }
-    }
-}
-
 /// Override the platform MCP server URL to match the configured backend.
 ///
 /// The manifest may contain a hardcoded production URL for the platform server,
@@ -523,4 +651,120 @@ pub fn override_platform_mcp_url(
         }
     }
     servers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchedulerRestoreAction, scheduler_restore_action};
+    use chrono::Utc;
+    use nenjo_sessions::{
+        CronScheduleState, HeartbeatScheduleState, ScheduleState, SessionRecord, SessionRefs,
+        SessionStatus, SessionSummary,
+    };
+    use uuid::Uuid;
+
+    fn base_record(status: SessionStatus) -> SessionRecord {
+        let now = Utc::now();
+        SessionRecord {
+            session_id: Uuid::new_v4(),
+            kind: nenjo_sessions::SessionKind::CronSchedule,
+            status,
+            project_id: Some(Uuid::new_v4()),
+            agent_id: None,
+            task_id: None,
+            routine_id: None,
+            execution_run_id: None,
+            parent_session_id: None,
+            version: 0,
+            refs: SessionRefs::default(),
+            lease: Default::default(),
+            scheduler: None,
+            domain: None,
+            summary: SessionSummary::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn scheduler_restore_plans_active_cron() {
+        let next_run_at = Some(Utc::now());
+        let mut record = base_record(SessionStatus::Active);
+        record.scheduler = Some(ScheduleState::Cron(CronScheduleState {
+            schedule_expr: "*/5 * * * *".to_string(),
+            next_run_at,
+            last_run_at: None,
+            last_completion: None,
+            paused: false,
+        }));
+
+        let action = scheduler_restore_action(&record);
+        assert!(matches!(
+            action,
+            Some(SchedulerRestoreAction::Cron {
+                session_id,
+                project_id,
+                schedule_expr,
+                next_run_at: planned_next_run_at,
+            }) if session_id == record.session_id
+                && project_id == record.project_id
+                && schedule_expr == "*/5 * * * *"
+                && planned_next_run_at == next_run_at
+        ));
+    }
+
+    #[test]
+    fn scheduler_restore_skips_paused_cron() {
+        let mut record = base_record(SessionStatus::Paused);
+        record.scheduler = Some(ScheduleState::Cron(CronScheduleState {
+            schedule_expr: "*/5 * * * *".to_string(),
+            next_run_at: Some(Utc::now()),
+            last_run_at: None,
+            last_completion: None,
+            paused: true,
+        }));
+
+        assert!(scheduler_restore_action(&record).is_none());
+    }
+
+    #[test]
+    fn scheduler_restore_plans_paused_heartbeat() {
+        let next_run_at = Some(Utc::now());
+        let last_run_at = Some(Utc::now());
+        let mut record = base_record(SessionStatus::Paused);
+        record.kind = nenjo_sessions::SessionKind::HeartbeatSchedule;
+        record.scheduler = Some(ScheduleState::Heartbeat(HeartbeatScheduleState {
+            interval_secs: 0,
+            next_run_at,
+            last_run_at,
+            previous_output_ref: Some("heartbeat/out.txt".to_string()),
+            last_completion: None,
+            run_in_progress: false,
+            paused: true,
+        }));
+
+        let action = scheduler_restore_action(&record);
+        assert!(matches!(
+            action,
+            Some(SchedulerRestoreAction::Heartbeat {
+                session_id,
+                interval,
+                next_run_at: planned_next_run_at,
+                previous_output_ref,
+                last_run_at: planned_last_run_at,
+                start_paused: true,
+            }) if session_id == record.session_id
+                && interval == std::time::Duration::from_secs(1)
+                && planned_next_run_at == next_run_at
+                && planned_last_run_at == last_run_at
+                && previous_output_ref.as_deref() == Some("heartbeat/out.txt")
+        ));
+    }
+
+    #[test]
+    fn scheduler_restore_skips_non_scheduler_records() {
+        let record = base_record(SessionStatus::Active);
+        assert!(scheduler_restore_action(&record).is_none());
+    }
 }

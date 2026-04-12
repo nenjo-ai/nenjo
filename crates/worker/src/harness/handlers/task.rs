@@ -3,6 +3,12 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
+use nenjo::memory::MemoryScope;
+use nenjo_sessions::{
+    ExecutionPhase, SessionCheckpoint, SessionKind, SessionRecord, SessionRefs, SessionStatus,
+    SessionSummary, WorktreeSnapshot,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -12,7 +18,148 @@ use nenjo_events::{Response, StepAgent};
 
 use super::event_bridge::{agent_name, project_slug, routine_event_to_response};
 use crate::harness::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
+use crate::harness::session::{
+    apply_session_memory_scope, lease_for_status, read_json_blob, session_memory_namespace,
+    transition_session_state, update_checkpoint_with_worktree,
+};
 use crate::harness::{ActiveExecution, CommandContext};
+
+fn task_trace_ref(project_slug: &str, task_slug: &str, agent_name: &str, agent_id: Uuid) -> String {
+    format!(
+        "{project_slug}/execution_traces/{task_slug}/{}_{}.json",
+        agent_name, agent_id
+    )
+}
+
+fn task_checkpoint_ref(project_slug: &str, task_slug: &str, task_id: Uuid) -> String {
+    format!("{project_slug}/task_checkpoints/{task_slug}_{task_id}.json")
+}
+
+fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
+    agent_name.map(|agent_name| {
+        MemoryScope::new(
+            agent_name,
+            if project_slug.is_empty() {
+                None
+            } else {
+                Some(project_slug)
+            },
+        )
+        .project
+    })
+}
+
+fn restore_task_git_context(ctx: &CommandContext, task_id: Uuid) -> Option<GitContext> {
+    let record = ctx.session_store.get(task_id).ok().flatten()?;
+    let checkpoint_ref = record.refs.checkpoint_ref?;
+    let checkpoint: SessionCheckpoint = read_json_blob(&*ctx.session_content, &checkpoint_ref)
+        .ok()
+        .flatten()?;
+    let worktree = checkpoint.worktree?;
+    if worktree.work_dir.is_empty()
+        || worktree.repo_dir.is_empty()
+        || !Path::new(&worktree.work_dir).exists()
+        || !Path::new(&worktree.repo_dir).exists()
+    {
+        return None;
+    }
+    Some(GitContext {
+        branch: worktree.branch,
+        target_branch: worktree.target_branch.unwrap_or_else(|| "main".to_string()),
+        work_dir: worktree.work_dir,
+        repo_url: String::new(),
+    })
+}
+
+fn upsert_task_session(
+    ctx: &CommandContext,
+    task_id: Uuid,
+    project_id: Uuid,
+    agent_id: Option<Uuid>,
+    memory_namespace: Option<&str>,
+    execution_run_id: Uuid,
+    trace_ref: Option<String>,
+    checkpoint_ref: Option<String>,
+    status: SessionStatus,
+) {
+    let now = Utc::now();
+    let mut record = ctx
+        .session_store
+        .get(task_id)
+        .ok()
+        .flatten()
+        .unwrap_or(SessionRecord {
+            session_id: task_id,
+            kind: SessionKind::Task,
+            status,
+            project_id: Some(project_id),
+            agent_id,
+            task_id: Some(task_id),
+            routine_id: None,
+            execution_run_id: Some(execution_run_id),
+            parent_session_id: None,
+            version: 0,
+            refs: SessionRefs::default(),
+            lease: Default::default(),
+            scheduler: None,
+            domain: None,
+            summary: SessionSummary::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        });
+
+    record.kind = SessionKind::Task;
+    record.status = status;
+    record.project_id = Some(project_id);
+    record.agent_id = agent_id;
+    record.task_id = Some(task_id);
+    record.execution_run_id = Some(execution_run_id);
+    record.version += 1;
+    record.updated_at = now;
+    if let Some(trace_ref) = trace_ref {
+        record.refs.trace_ref = Some(trace_ref);
+    }
+    if let Some(checkpoint_ref) = checkpoint_ref {
+        record.refs.checkpoint_ref = Some(checkpoint_ref);
+    }
+    if let Some(memory_namespace) = memory_namespace {
+        record.refs.memory_namespace = Some(memory_namespace.to_string());
+    }
+    if matches!(
+        status,
+        SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
+    ) {
+        record.completed_at = Some(now);
+    }
+    record.lease = lease_for_status(
+        &*ctx.session_coordinator,
+        task_id,
+        &ctx.worker_id,
+        status,
+        &record.lease,
+    );
+
+    let _ = ctx.session_store.put(&record);
+}
+
+fn task_worktree_snapshot(
+    repo_dir: Option<&Path>,
+    git_ctx: Option<&GitContext>,
+) -> Option<WorktreeSnapshot> {
+    git_ctx.map(|git| WorktreeSnapshot {
+        repo_dir: repo_dir
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+        work_dir: git.work_dir.clone(),
+        branch: git.branch.clone(),
+        target_branch: if git.target_branch.is_empty() {
+            None
+        } else {
+            Some(git.target_branch.clone())
+        },
+    })
+}
 
 /// Handle a task execution command.
 ///
@@ -41,6 +188,7 @@ pub async fn handle_task_execute(
     let pslug = project_slug(manifest, project_id);
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.config.workspace_dir.join(&pslug).join("repo");
+    let checkpoint_ref = task_checkpoint_ref(&pslug, task_slug, task_id);
 
     // Resolve target branch from project settings.
     let target_branch = manifest
@@ -52,6 +200,25 @@ pub async fn handle_task_execute(
         .filter(|s| !s.is_empty());
 
     let aname = assigned_agent_id.map(|id| agent_name(manifest, id));
+    let task_memory_namespace = task_memory_namespace(aname.as_deref(), &pslug);
+    upsert_task_session(
+        ctx,
+        task_id,
+        project_id,
+        assigned_agent_id,
+        task_memory_namespace.as_deref(),
+        execution_run_id,
+        None,
+        Some(checkpoint_ref.clone()),
+        SessionStatus::Active,
+    );
+    let _ = update_checkpoint_with_worktree(
+        &*ctx.session_store,
+        &*ctx.session_content,
+        task_id,
+        ExecutionPhase::Preparing,
+        task_worktree_snapshot(Some(&repo_dir), None),
+    );
 
     info!(
         agent = ?aname,
@@ -76,7 +243,25 @@ pub async fn handle_task_execute(
         .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
         .clone();
 
-    let git_ctx = if repo_dir.join(".git").exists() {
+    let restored_git_ctx = restore_task_git_context(ctx, task_id);
+    let git_ctx = if let Some(wt) = restored_git_ctx {
+        info!(branch = %wt.branch, work_dir = %wt.work_dir, "Restored git worktree from task checkpoint");
+        let _ = ctx.response_tx.send(Response::TaskStepEvent {
+            execution_run_id: eid.clone(),
+            task_id: tid.clone(),
+            event_type: "step_completed".to_string(),
+            step_name: "worktree_restore".to_string(),
+            step_type: "worktree".to_string(),
+            duration_ms: Some(0),
+            data: serde_json::json!({
+                "branch": wt.branch,
+                "target_branch": wt.target_branch,
+                "work_dir": wt.work_dir,
+            }),
+            agent: None,
+        });
+        Some(wt)
+    } else if repo_dir.join(".git").exists() {
         let _ = ctx.response_tx.send(Response::TaskStepEvent {
             execution_run_id: eid.clone(),
             task_id: tid.clone(),
@@ -132,6 +317,24 @@ pub async fn handle_task_execute(
                 });
 
                 send_task_failed(ctx, &eid, &tid, &error_msg);
+                let _ = update_checkpoint_with_worktree(
+                    &*ctx.session_store,
+                    &*ctx.session_content,
+                    task_id,
+                    ExecutionPhase::Finalizing,
+                    task_worktree_snapshot(Some(&repo_dir), None),
+                );
+                upsert_task_session(
+                    ctx,
+                    task_id,
+                    project_id,
+                    assigned_agent_id,
+                    task_memory_namespace.as_deref(),
+                    execution_run_id,
+                    None,
+                    Some(checkpoint_ref.clone()),
+                    SessionStatus::Failed,
+                );
                 return Ok(());
             }
         }
@@ -167,6 +370,13 @@ pub async fn handle_task_execute(
             pause: Some(pause.clone()),
         },
     );
+    let _ = update_checkpoint_with_worktree(
+        &*ctx.session_store,
+        &*ctx.session_content,
+        task_id,
+        ExecutionPhase::CallingModel,
+        task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
+    );
 
     let result = if let Some(rid) = routine_id {
         execute_routine_task(ctx, rid, task, execution_run_id, task_id, &cancel).await
@@ -183,6 +393,24 @@ pub async fn handle_task_execute(
     if let Err(ref e) = result {
         let error_msg = format!("{e:#}");
         send_task_failed(ctx, &eid, &tid, &error_msg);
+        upsert_task_session(
+            ctx,
+            task_id,
+            project_id,
+            assigned_agent_id,
+            task_memory_namespace.as_deref(),
+            execution_run_id,
+            None,
+            Some(checkpoint_ref.clone()),
+            SessionStatus::Failed,
+        );
+        let _ = update_checkpoint_with_worktree(
+            &*ctx.session_store,
+            &*ctx.session_content,
+            task_id,
+            ExecutionPhase::Finalizing,
+            task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
+        );
         ctx.executions.remove(&task_id);
         // Still clean up worktree even on failure.
         if let Some(ref wt) = git_ctx {
@@ -197,9 +425,36 @@ pub async fn handle_task_execute(
 
     // Unregister execution
     ctx.executions.remove(&task_id);
+    let final_status = if cancel.is_cancelled() {
+        SessionStatus::Cancelled
+    } else {
+        SessionStatus::Completed
+    };
+    upsert_task_session(
+        ctx,
+        task_id,
+        project_id,
+        assigned_agent_id,
+        task_memory_namespace.as_deref(),
+        execution_run_id,
+        None,
+        Some(checkpoint_ref.clone()),
+        final_status,
+    );
+    if final_status != SessionStatus::Cancelled {
+        let _ = update_checkpoint_with_worktree(
+            &*ctx.session_store,
+            &*ctx.session_content,
+            task_id,
+            ExecutionPhase::Finalizing,
+            task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
+        );
+    }
 
     // Clean up worktree after execution
-    if let Some(ref wt) = git_ctx {
+    if let Some(ref wt) = git_ctx
+        && final_status != SessionStatus::Cancelled
+    {
         let _ = ctx.response_tx.send(Response::TaskStepEvent {
             execution_run_id: eid.clone(),
             task_id: tid.clone(),
@@ -265,6 +520,15 @@ pub async fn handle_execution_cancel(ctx: &CommandContext, execution_run_id: Uui
     for key in keys {
         if let Some((_, exec)) = ctx.executions.remove(&key) {
             exec.cancel.cancel();
+            let _ = transition_session_state(
+                &*ctx.session_store,
+                &*ctx.session_content,
+                &*ctx.session_coordinator,
+                key,
+                &ctx.worker_id,
+                Some(ExecutionPhase::Waiting),
+                SessionStatus::Cancelled,
+            );
             cancelled += 1;
         }
     }
@@ -282,6 +546,15 @@ pub async fn handle_execution_pause(ctx: &CommandContext, execution_run_id: Uuid
             && let Some(ref pt) = entry.pause
         {
             pt.pause();
+            let _ = transition_session_state(
+                &*ctx.session_store,
+                &*ctx.session_content,
+                &*ctx.session_coordinator,
+                *entry.key(),
+                &ctx.worker_id,
+                Some(ExecutionPhase::Waiting),
+                SessionStatus::Paused,
+            );
             paused += 1;
         }
     }
@@ -299,6 +572,15 @@ pub async fn handle_execution_resume(ctx: &CommandContext, execution_run_id: Uui
             && let Some(ref pt) = entry.pause
         {
             pt.resume();
+            let _ = transition_session_state(
+                &*ctx.session_store,
+                &*ctx.session_content,
+                &*ctx.session_coordinator,
+                *entry.key(),
+                &ctx.worker_id,
+                Some(ExecutionPhase::CallingModel),
+                SessionStatus::Active,
+            );
             resumed += 1;
         }
     }
@@ -332,6 +614,10 @@ async fn execute_routine_task(
     let mut handle = ctx
         .provider()
         .routine_by_id(routine_id)?
+        .with_session_binding(nenjo::routines::SessionBinding {
+            session_id: task_id,
+            memory_namespace: session_memory_namespace(&*ctx.session_store, task_id),
+        })
         .run_stream(task)
         .await?;
 
@@ -376,7 +662,7 @@ async fn execute_routine_task(
                                 let agent_name = agent
                                     .map(|a| a.name.as_str())
                                     .unwrap_or("agent");
-                                ExecutionTraceRecorder::for_task(
+                                ExecutionTraceRecorder::for_task_with_store(
                                     &ctx.config.workspace_dir,
                                     agent_name,
                                     *agent_id,
@@ -387,6 +673,7 @@ async fn execute_routine_task(
                                         step_id: Some(*step_id),
                                     },
                                     ctx.config.agent.execution_traces,
+                                    ctx.session_content.clone(),
                                 )
                             });
                             let _ = recorder.record(event);
@@ -442,7 +729,9 @@ async fn execute_direct_task(
     {
         builder = builder.with_work_dir(&git.work_dir);
     }
-    let runner = builder.build().await?;
+    let runner = apply_session_memory_scope(builder, &*ctx.session_store, task_id)
+        .build()
+        .await?;
     let provider = ctx.provider();
     let manifest = provider.manifest().clone();
     let aname = agent_name(&manifest, agent_id);
@@ -454,7 +743,23 @@ async fn execute_direct_task(
         nenjo::types::TaskType::Task(t) => t.slug.clone(),
         _ => "task".to_string(),
     };
-    let mut trace_recorder = ExecutionTraceRecorder::for_task(
+    let task_project_id = match &task {
+        nenjo::types::TaskType::Task(t) => t.project_id,
+        _ => Uuid::nil(),
+    };
+    let trace_ref = task_trace_ref(&project_slug, &task_slug, &aname, agent_id);
+    upsert_task_session(
+        ctx,
+        task_id,
+        task_project_id,
+        Some(agent_id),
+        task_memory_namespace(Some(&aname), &project_slug).as_deref(),
+        execution_run_id,
+        Some(trace_ref),
+        None,
+        SessionStatus::Active,
+    );
+    let mut trace_recorder = ExecutionTraceRecorder::for_task_with_store(
         &ctx.config.workspace_dir,
         &aname,
         agent_id,
@@ -465,6 +770,7 @@ async fn execute_direct_task(
             step_id: None,
         },
         ctx.config.agent.execution_traces,
+        ctx.session_content.clone(),
     );
 
     let mut handle = runner.task_stream(task).await?;
@@ -523,6 +829,21 @@ async fn execute_direct_task(
         total_input_tokens,
         total_output_tokens,
     });
+    upsert_task_session(
+        ctx,
+        task_id,
+        task_project_id,
+        Some(agent_id),
+        task_memory_namespace(Some(&aname), &project_slug).as_deref(),
+        execution_run_id,
+        None,
+        None,
+        if success {
+            SessionStatus::Completed
+        } else {
+            SessionStatus::Cancelled
+        },
+    );
 
     Ok(())
 }

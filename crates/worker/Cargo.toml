@@ -29,6 +29,7 @@ nenjo-tools = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
+nenjo-sessions = { workspace = true }
 
 # WebSocket client
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }

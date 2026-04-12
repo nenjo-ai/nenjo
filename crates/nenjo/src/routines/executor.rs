@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::manifest::{RoutineManifest, RoutineStepManifest};
 use crate::provider::Provider;
-use crate::routines::gate;
 use crate::routines::types::StepResult;
+use crate::routines::{apply_session_binding_memory_scope, gate};
 use crate::types::TaskType;
 
 use super::RoutineEvent;
@@ -310,7 +310,10 @@ async fn execute_agent_step(
         .or_else(|| resolve_agent_from_model(provider, step.model_id))
         .with_context(|| format!("No agent found for step '{}'", step.name))?;
 
-    let mut builder = provider.agent_by_id(agent_id).await?;
+    let mut builder = apply_session_binding_memory_scope(
+        provider.agent_by_id(agent_id).await?,
+        state.input.session_binding.as_ref(),
+    );
 
     // Resolve project context from manifest so agent prompts can reference
     // {{ project.name }}, {{ project.description }}, etc.

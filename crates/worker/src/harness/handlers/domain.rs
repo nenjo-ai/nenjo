@@ -1,14 +1,31 @@
 //! Domain session handlers.
 
 use anyhow::Result;
+use chrono::Utc;
+use nenjo::memory::MemoryScope;
+use nenjo_sessions::{
+    DomainState, SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionSummary,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use nenjo_events::{Response, StreamEvent};
 
 use super::event_bridge::agent_name;
-use crate::harness::domain_session_store::PersistedDomainSession;
+use crate::harness::session::{lease_for_status, update_session_status};
 use crate::harness::{CommandContext, DomainSession};
+
+fn domain_memory_namespace(agent_name: &str, project_slug: &str) -> String {
+    MemoryScope::new(
+        agent_name,
+        if project_slug.is_empty() {
+            None
+        } else {
+            Some(project_slug)
+        },
+    )
+    .project
+}
 
 /// Enter a domain session — creates a domain-expanded runner with escalated scopes.
 ///
@@ -25,6 +42,7 @@ pub async fn handle_domain_enter(
     let provider = ctx.provider();
     let manifest = provider.manifest();
     let aname = agent_name(manifest, agent_id);
+    let pslug = super::event_bridge::project_slug(manifest, project_id);
 
     // First do the domain expansion to get the session config + filtered tools.
     let base_runner = provider.agent_by_id(agent_id).await?.build().await?;
@@ -49,12 +67,38 @@ pub async fn handle_domain_enter(
                     turn_number: 0,
                 },
             );
-            let _ = ctx.domain_session_store.save(&PersistedDomainSession {
+            let now = Utc::now();
+            let _ = ctx.session_store.put(&SessionRecord {
                 session_id,
-                project_id,
-                agent_id,
-                domain_command: domain_command.to_string(),
-                turn_number: 0,
+                kind: SessionKind::Domain,
+                status: SessionStatus::Active,
+                project_id: Some(project_id),
+                agent_id: Some(agent_id),
+                task_id: None,
+                routine_id: None,
+                execution_run_id: None,
+                parent_session_id: None,
+                version: 1,
+                refs: SessionRefs {
+                    memory_namespace: Some(domain_memory_namespace(&aname, &pslug)),
+                    ..SessionRefs::default()
+                },
+                lease: lease_for_status(
+                    &*ctx.session_coordinator,
+                    session_id,
+                    &ctx.worker_id,
+                    SessionStatus::Active,
+                    &nenjo_sessions::SessionLease::default(),
+                ),
+                scheduler: None,
+                domain: Some(DomainState {
+                    domain_command: domain_command.to_string(),
+                    turn_number: 0,
+                }),
+                summary: SessionSummary::default(),
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
             });
 
             info!(
@@ -97,7 +141,13 @@ pub async fn handle_domain_exit(
     let aname = agent_name(manifest, agent_id);
 
     let session = ctx.domains.remove(&domain_session_id).map(|(_, v)| v);
-    let _ = ctx.domain_session_store.delete(domain_session_id);
+    let _ = update_session_status(
+        &*ctx.session_store,
+        &*ctx.session_coordinator,
+        domain_session_id,
+        &ctx.worker_id,
+        SessionStatus::Completed,
+    );
 
     match session {
         Some(session) => {

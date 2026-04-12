@@ -6,11 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
 use nenjo::TurnEvent;
 use nenjo_models::ChatMessage;
+use nenjo_sessions::SessionContentStore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -82,7 +84,7 @@ pub struct TaskTraceLocation<'a> {
     pub step_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct TraceInit {
     mode: TraceMode,
     project_slug: String,
@@ -91,6 +93,8 @@ struct TraceInit {
     step_id: Option<Uuid>,
     workspace_dir: PathBuf,
     agent_trace_path: PathBuf,
+    agent_trace_key: Option<String>,
+    content_store: Option<Arc<dyn SessionContentStore>>,
     agent_name: String,
     agent_id: Uuid,
 }
@@ -104,6 +108,8 @@ pub struct ExecutionTraceRecorder {
     step_id: Option<Uuid>,
     workspace_dir: PathBuf,
     agent_trace_path: PathBuf,
+    agent_trace_key: Option<String>,
+    content_store: Option<Arc<dyn SessionContentStore>>,
     agent_trace: AgentExecutionTrace,
     ability_traces: HashMap<String, AbilityExecutionTrace>,
     active_ability_invocations: HashMap<String, usize>,
@@ -127,6 +133,26 @@ impl ExecutionTraceRecorder {
         ))
     }
 
+    pub fn for_chat_with_store(
+        workspace_dir: &Path,
+        project_slug: &str,
+        agent_name: &str,
+        agent_id: Uuid,
+        session_id: Uuid,
+        content_store: Arc<dyn SessionContentStore>,
+    ) -> Self {
+        Self::new(
+            TraceInit::for_chat(
+                workspace_dir,
+                project_slug,
+                agent_name,
+                agent_id,
+                session_id,
+            )
+            .with_content_store(content_store),
+        )
+    }
+
     /// Create a trace recorder for a task or routine-driven agent execution.
     pub fn for_task(
         workspace_dir: &Path,
@@ -144,6 +170,20 @@ impl ExecutionTraceRecorder {
         ))
     }
 
+    pub fn for_task_with_store(
+        workspace_dir: &Path,
+        agent_name: &str,
+        agent_id: Uuid,
+        location: TaskTraceLocation<'_>,
+        enabled: bool,
+        content_store: Arc<dyn SessionContentStore>,
+    ) -> Self {
+        Self::new(
+            TraceInit::for_task(workspace_dir, location, agent_name, agent_id, enabled)
+                .with_content_store(content_store),
+        )
+    }
+
     fn new(init: TraceInit) -> Self {
         Self {
             mode: init.mode,
@@ -153,6 +193,8 @@ impl ExecutionTraceRecorder {
             step_id: init.step_id,
             workspace_dir: init.workspace_dir,
             agent_trace_path: init.agent_trace_path,
+            agent_trace_key: init.agent_trace_key,
+            content_store: init.content_store,
             agent_trace: AgentExecutionTrace {
                 trace_type: "agent".into(),
                 agent_name: init.agent_name,
@@ -305,15 +347,49 @@ impl ExecutionTraceRecorder {
     }
 
     fn flush_agent(&self) -> Result<()> {
-        write_json(&self.agent_trace_path, &self.agent_trace)?;
+        write_json(
+            &self.agent_trace_path,
+            self.agent_trace_key.as_deref(),
+            self.content_store.as_deref(),
+            &self.agent_trace,
+        )?;
         Ok(())
     }
 
     fn flush_ability(&self, ability_tool_name: &str) -> Result<()> {
         if let Some(trace) = self.ability_traces.get(ability_tool_name) {
-            write_json(&self.ability_trace_path(ability_tool_name), trace)?;
+            let path = self.ability_trace_path(ability_tool_name);
+            let key = self.ability_trace_key(ability_tool_name);
+            write_json(&path, key.as_deref(), self.content_store.as_deref(), trace)?;
         }
         Ok(())
+    }
+
+    fn ability_trace_key(&self, ability_tool_name: &str) -> Option<String> {
+        let safe_agent = sanitize(&self.agent_trace.agent_name);
+        let safe_ability = sanitize(ability_tool_name.trim_start_matches("ability/"));
+        let step_suffix = match (&self.step_name, self.step_id) {
+            (Some(name), Some(id)) => format!("_{}_{}", sanitize(name), id),
+            _ => String::new(),
+        };
+        match self.mode {
+            TraceMode::Chat { session_id } => Some(if self.project_slug.is_empty() {
+                format!("chat_history/traces/{safe_agent}_{session_id}_{safe_ability}.json")
+            } else {
+                format!(
+                    "{}/chat_history/traces/{safe_agent}_{session_id}_{safe_ability}.json",
+                    self.project_slug
+                )
+            }),
+            TraceMode::Task { .. } => Some(format!(
+                "{}/execution_traces/{}/{}_{}{}.json",
+                self.project_slug,
+                self.task_slug.as_deref().unwrap_or("task"),
+                safe_agent,
+                safe_ability,
+                step_suffix
+            )),
+        }
     }
 
     fn ability_trace_path(&self, ability_tool_name: &str) -> PathBuf {
@@ -349,6 +425,11 @@ impl ExecutionTraceRecorder {
 }
 
 impl TraceInit {
+    fn with_content_store(mut self, content_store: Arc<dyn SessionContentStore>) -> Self {
+        self.content_store = Some(content_store);
+        self
+    }
+
     fn for_chat(
         workspace_dir: &Path,
         project_slug: &str,
@@ -377,6 +458,12 @@ impl TraceInit {
             step_id: None,
             workspace_dir: workspace_dir.to_path_buf(),
             agent_trace_path,
+            agent_trace_key: Some(if project_slug.is_empty() {
+                format!("chat_history/traces/{safe_agent}_{session_id}.trace.json")
+            } else {
+                format!("{project_slug}/chat_history/traces/{safe_agent}_{session_id}.trace.json")
+            }),
+            content_store: None,
             agent_name: agent_name.to_string(),
             agent_id,
         }
@@ -407,13 +494,28 @@ impl TraceInit {
             step_id: location.step_id,
             workspace_dir: workspace_dir.to_path_buf(),
             agent_trace_path,
+            agent_trace_key: Some(format!(
+                "{}/execution_traces/{}/{}_{}{}.json",
+                location.project_slug, location.task_slug, safe_agent, agent_id, step_suffix
+            )),
+            content_store: None,
             agent_name: agent_name.to_string(),
             agent_id,
         }
     }
 }
 
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+fn write_json(
+    path: &Path,
+    key: Option<&str>,
+    content_store: Option<&dyn SessionContentStore>,
+    value: &impl Serialize,
+) -> Result<()> {
+    if let (Some(key), Some(store)) = (key, content_store) {
+        let json = serde_json::to_vec_pretty(value)?;
+        store.write_blob(key, &json)?;
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
