@@ -69,12 +69,9 @@ fn load_heartbeat_task_state(
     }
 }
 
-fn upsert_heartbeat_session(
-    session_store: &dyn SessionStore,
-    session_coordinator: &dyn SessionCoordinator,
-    worker_id: &str,
+struct HeartbeatSessionUpsert<'a> {
     agent_id: Uuid,
-    memory_namespace: Option<&str>,
+    memory_namespace: Option<&'a str>,
     interval: Duration,
     status: SessionStatus,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -82,7 +79,25 @@ fn upsert_heartbeat_session(
     previous_output_ref: Option<String>,
     run_in_progress: bool,
     last_completion: Option<RunCompletion>,
+}
+
+fn upsert_heartbeat_session(
+    session_store: &dyn SessionStore,
+    session_coordinator: &dyn SessionCoordinator,
+    worker_id: &str,
+    params: HeartbeatSessionUpsert<'_>,
 ) {
+    let HeartbeatSessionUpsert {
+        agent_id,
+        memory_namespace,
+        interval,
+        status,
+        next_run_at,
+        last_run_at,
+        previous_output_ref,
+        run_in_progress,
+        last_completion,
+    } = params;
     let now = Utc::now();
     let mut record = session_store
         .get(agent_id)
@@ -218,19 +233,21 @@ async fn spawn_agent_heartbeat(
         &*session_store,
         &*session_coordinator,
         &worker_id,
-        agent_id,
-        Some(&heartbeat_memory_namespace),
-        interval,
-        if start_paused {
-            SessionStatus::Paused
-        } else {
-            SessionStatus::Active
+        HeartbeatSessionUpsert {
+            agent_id,
+            memory_namespace: Some(&heartbeat_memory_namespace),
+            interval,
+            status: if start_paused {
+                SessionStatus::Paused
+            } else {
+                SessionStatus::Active
+            },
+            next_run_at: Some(initial_next_run_at),
+            last_run_at: restored_last_run_at,
+            previous_output_ref: restored_previous_output_ref,
+            run_in_progress: false,
+            last_completion: None,
         },
-        Some(initial_next_run_at),
-        restored_last_run_at,
-        restored_previous_output_ref,
-        false,
-        None,
     );
 
     tokio::spawn(async move {
@@ -264,15 +281,17 @@ async fn spawn_agent_heartbeat(
                         &*session_store,
                         &*session_coordinator,
                         &worker_id,
-                        agent_id,
-                        Some(&heartbeat_memory_namespace),
-                        interval,
-                        SessionStatus::Active,
-                        Some(scheduled_next_run_at),
-                        None,
-                        None,
-                        true,
-                        None,
+                        HeartbeatSessionUpsert {
+                            agent_id,
+                            memory_namespace: Some(&heartbeat_memory_namespace),
+                            interval,
+                            status: SessionStatus::Active,
+                            next_run_at: Some(scheduled_next_run_at),
+                            last_run_at: None,
+                            previous_output_ref: None,
+                            run_in_progress: true,
+                            last_completion: None,
+                        },
                     );
                     next_run_at = scheduled_next_run_at;
                     continue;
@@ -303,15 +322,17 @@ async fn spawn_agent_heartbeat(
                 &*session_store,
                 &*session_coordinator,
                 &worker_id,
-                agent_id,
-                Some(&heartbeat_memory_namespace),
-                interval,
-                SessionStatus::Active,
-                Some(run_next_run_at),
-                state_snapshot.last_run_at,
-                state_snapshot.previous_output_ref.clone(),
-                true,
-                None,
+                HeartbeatSessionUpsert {
+                    agent_id,
+                    memory_namespace: Some(&heartbeat_memory_namespace),
+                    interval,
+                    status: SessionStatus::Active,
+                    next_run_at: Some(run_next_run_at),
+                    last_run_at: state_snapshot.last_run_at,
+                    previous_output_ref: state_snapshot.previous_output_ref.clone(),
+                    run_in_progress: true,
+                    last_completion: None,
+                },
             );
             let mut active_run_guard = active_run_for_schedule.lock().await;
             *active_run_guard = Some(tokio::spawn(async move {
@@ -389,19 +410,21 @@ async fn spawn_agent_heartbeat(
                             &*session_store_for_run,
                             &*session_coordinator_for_run,
                             &worker_id_for_run,
-                            agent_id,
-                            Some(&heartbeat_memory_namespace_for_run),
-                            interval,
-                            SessionStatus::Active,
-                            Some(run_next_run_at),
-                            Some(completed_at),
-                            Some(output_ref),
-                            false,
-                            Some(RunCompletion {
-                                success: true,
-                                error_summary: None,
-                                completed_at,
-                            }),
+                            HeartbeatSessionUpsert {
+                                agent_id,
+                                memory_namespace: Some(&heartbeat_memory_namespace_for_run),
+                                interval,
+                                status: SessionStatus::Active,
+                                next_run_at: Some(run_next_run_at),
+                                last_run_at: Some(completed_at),
+                                previous_output_ref: Some(output_ref),
+                                run_in_progress: false,
+                                last_completion: Some(RunCompletion {
+                                    success: true,
+                                    error_summary: None,
+                                    completed_at,
+                                }),
+                            },
                         );
                     }
                     Err(e) => {
@@ -431,19 +454,21 @@ async fn spawn_agent_heartbeat(
                             &*session_store_for_run,
                             &*session_coordinator_for_run,
                             &worker_id_for_run,
-                            agent_id,
-                            Some(&heartbeat_memory_namespace_for_run),
-                            interval,
-                            SessionStatus::Active,
-                            Some(run_next_run_at),
-                            Some(completed_at),
-                            Some(output_ref),
-                            false,
-                            Some(RunCompletion {
-                                success: false,
-                                error_summary: Some(error_text),
-                                completed_at,
-                            }),
+                            HeartbeatSessionUpsert {
+                                agent_id,
+                                memory_namespace: Some(&heartbeat_memory_namespace_for_run),
+                                interval,
+                                status: SessionStatus::Active,
+                                next_run_at: Some(run_next_run_at),
+                                last_run_at: Some(completed_at),
+                                previous_output_ref: Some(output_ref),
+                                run_in_progress: false,
+                                last_completion: Some(RunCompletion {
+                                    success: false,
+                                    error_summary: Some(error_text),
+                                    completed_at,
+                                }),
+                            },
                         );
                     }
                 }
@@ -531,15 +556,17 @@ pub async fn handle_agent_heartbeat_disable(ctx: &CommandContext, agent_id: Uuid
             &*ctx.session_store,
             &*ctx.session_coordinator,
             &ctx.worker_id,
-            agent_id,
-            None,
-            Duration::from_secs(0),
-            SessionStatus::Cancelled,
-            None,
-            None,
-            None,
-            false,
-            None,
+            HeartbeatSessionUpsert {
+                agent_id,
+                memory_namespace: None,
+                interval: Duration::from_secs(0),
+                status: SessionStatus::Cancelled,
+                next_run_at: None,
+                last_run_at: None,
+                previous_output_ref: None,
+                run_in_progress: false,
+                last_completion: None,
+            },
         );
     }
     Ok(())

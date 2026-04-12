@@ -112,6 +112,13 @@ pub fn turn_event_to_stream_event(
             success: *success,
             result_preview: final_output.clone(),
         }),
+        nenjo::TurnEvent::MessageCompacted {
+            messages_before,
+            messages_after,
+        } => Some(StreamEvent::MessageCompacted {
+            messages_before: *messages_before,
+            messages_after: *messages_after,
+        }),
         nenjo::TurnEvent::Paused => Some(StreamEvent::Paused),
         nenjo::TurnEvent::Resumed => Some(StreamEvent::Resumed),
         nenjo::TurnEvent::Done { output } => Some(StreamEvent::Done {
@@ -190,6 +197,10 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
+        nenjo::TurnEvent::MessageCompacted {
+            messages_before,
+            messages_after,
+        } => format!("message_compacted({messages_before}->{messages_after})"),
         nenjo::TurnEvent::Paused => "paused".to_string(),
         nenjo::TurnEvent::Resumed => "resumed".to_string(),
         nenjo::TurnEvent::Done { output } => format!(
@@ -527,6 +538,7 @@ fn routine_agent_event_to_response(
         // Suppress the nested agent Done event here to avoid a duplicate
         // synthetic "agent_response" step in task timelines.
         nenjo::TurnEvent::Done { .. } => None,
+        nenjo::TurnEvent::MessageCompacted { .. } => None,
         nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
     }
 }

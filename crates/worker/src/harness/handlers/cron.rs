@@ -18,19 +18,33 @@ use super::event_bridge::{project_slug, routine_event_to_response};
 use crate::harness::session::lease_for_status;
 use crate::harness::{ActiveExecution, CommandContext};
 
-fn upsert_cron_session(
-    session_store: &dyn SessionStore,
-    session_coordinator: &dyn SessionCoordinator,
-    worker_id: &str,
+struct CronSessionUpsert<'a> {
     routine_id: Uuid,
     project_id: Option<Uuid>,
-    memory_namespace: Option<&str>,
-    schedule: &str,
+    memory_namespace: Option<&'a str>,
+    schedule: &'a str,
     status: SessionStatus,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
     last_completion: Option<RunCompletion>,
+}
+
+fn upsert_cron_session(
+    session_store: &dyn SessionStore,
+    session_coordinator: &dyn SessionCoordinator,
+    worker_id: &str,
+    params: CronSessionUpsert<'_>,
 ) {
+    let CronSessionUpsert {
+        routine_id,
+        project_id,
+        memory_namespace,
+        schedule,
+        status,
+        last_run_at,
+        next_run_at,
+        last_completion,
+    } = params;
     let now = Utc::now();
     let mut record = session_store
         .get(routine_id)
@@ -209,14 +223,16 @@ pub async fn handle_cron_enable(
         &*session_store,
         &*session_coordinator,
         &worker_id,
-        routine_id,
-        project_id,
-        cron_memory_namespace.as_deref(),
-        schedule,
-        SessionStatus::Active,
-        None,
-        Some(initial_next_run_at),
-        None,
+        CronSessionUpsert {
+            routine_id,
+            project_id,
+            memory_namespace: cron_memory_namespace.as_deref(),
+            schedule,
+            status: SessionStatus::Active,
+            last_run_at: None,
+            next_run_at: Some(initial_next_run_at),
+            last_completion: None,
+        },
     );
 
     tokio::spawn(async move {
@@ -305,22 +321,24 @@ pub async fn handle_cron_enable(
                                                             &*session_store,
                                                             &*session_coordinator,
                                                             &worker_id,
-                                                            routine_id,
-                                                            opt_project_id,
-                                                            cron_memory_namespace.as_deref(),
-                                                            &schedule_owned,
-                                                            SessionStatus::Active,
-                                                            last_run_at,
-                                                            Some(next_run_at),
-                                                            Some(RunCompletion {
-                                                                success: result.passed,
-                                                                error_summary: if result.passed {
-                                                                    None
-                                                                } else {
-                                                                    Some(result.output.clone())
-                                                                },
-                                                                completed_at,
-                                                            }),
+                                                            CronSessionUpsert {
+                                                                routine_id,
+                                                                project_id: opt_project_id,
+                                                                memory_namespace: cron_memory_namespace.as_deref(),
+                                                                schedule: &schedule_owned,
+                                                                status: SessionStatus::Active,
+                                                                last_run_at,
+                                                                next_run_at: Some(next_run_at),
+                                                                last_completion: Some(RunCompletion {
+                                                                    success: result.passed,
+                                                                    error_summary: if result.passed {
+                                                                        None
+                                                                    } else {
+                                                                        Some(result.output.clone())
+                                                                    },
+                                                                    completed_at,
+                                                                }),
+                                                            },
                                                         );
                                                     }
                                                 }
@@ -385,14 +403,16 @@ pub async fn handle_cron_enable(
                 &*session_store,
                 &*session_coordinator,
                 &worker_id,
-                routine_id,
-                opt_project_id,
-                cron_memory_namespace.as_deref(),
-                &schedule_owned,
-                SessionStatus::Active,
-                last_run_at,
-                Some(next_run_at),
-                None,
+                CronSessionUpsert {
+                    routine_id,
+                    project_id: opt_project_id,
+                    memory_namespace: cron_memory_namespace.as_deref(),
+                    schedule: &schedule_owned,
+                    status: SessionStatus::Active,
+                    last_run_at,
+                    next_run_at: Some(next_run_at),
+                    last_completion: None,
+                },
             );
         }
 
@@ -416,14 +436,16 @@ pub async fn handle_cron_disable(ctx: &CommandContext, routine_id: Uuid) -> Resu
             &*ctx.session_store,
             &*ctx.session_coordinator,
             &ctx.worker_id,
-            routine_id,
-            None,
-            None,
-            "",
-            SessionStatus::Cancelled,
-            None,
-            None,
-            None,
+            CronSessionUpsert {
+                routine_id,
+                project_id: None,
+                memory_namespace: None,
+                schedule: "",
+                status: SessionStatus::Cancelled,
+                last_run_at: None,
+                next_run_at: None,
+                last_completion: None,
+            },
         );
         info!(%routine_id, "Disabled cron schedule");
     }

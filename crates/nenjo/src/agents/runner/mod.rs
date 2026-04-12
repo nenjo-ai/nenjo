@@ -1,4 +1,5 @@
 //! AgentRunner — executes agent tasks through the turn loop.
+pub(crate) mod compaction;
 pub(crate) mod turn_loop;
 pub mod types;
 

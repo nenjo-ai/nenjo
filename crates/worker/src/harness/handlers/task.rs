@@ -71,17 +71,28 @@ fn restore_task_git_context(ctx: &CommandContext, task_id: Uuid) -> Option<GitCo
     })
 }
 
-fn upsert_task_session(
-    ctx: &CommandContext,
+struct TaskSessionUpsert<'a> {
     task_id: Uuid,
     project_id: Uuid,
     agent_id: Option<Uuid>,
-    memory_namespace: Option<&str>,
+    memory_namespace: Option<&'a str>,
     execution_run_id: Uuid,
     trace_ref: Option<String>,
     checkpoint_ref: Option<String>,
     status: SessionStatus,
-) {
+}
+
+fn upsert_task_session(ctx: &CommandContext, params: TaskSessionUpsert<'_>) {
+    let TaskSessionUpsert {
+        task_id,
+        project_id,
+        agent_id,
+        memory_namespace,
+        execution_run_id,
+        trace_ref,
+        checkpoint_ref,
+        status,
+    } = params;
     let now = Utc::now();
     let mut record = ctx
         .session_store
@@ -203,14 +214,16 @@ pub async fn handle_task_execute(
     let task_memory_namespace = task_memory_namespace(aname.as_deref(), &pslug);
     upsert_task_session(
         ctx,
-        task_id,
-        project_id,
-        assigned_agent_id,
-        task_memory_namespace.as_deref(),
-        execution_run_id,
-        None,
-        Some(checkpoint_ref.clone()),
-        SessionStatus::Active,
+        TaskSessionUpsert {
+            task_id,
+            project_id,
+            agent_id: assigned_agent_id,
+            memory_namespace: task_memory_namespace.as_deref(),
+            execution_run_id,
+            trace_ref: None,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            status: SessionStatus::Active,
+        },
     );
     let _ = update_checkpoint_with_worktree(
         &*ctx.session_store,
@@ -326,14 +339,16 @@ pub async fn handle_task_execute(
                 );
                 upsert_task_session(
                     ctx,
-                    task_id,
-                    project_id,
-                    assigned_agent_id,
-                    task_memory_namespace.as_deref(),
-                    execution_run_id,
-                    None,
-                    Some(checkpoint_ref.clone()),
-                    SessionStatus::Failed,
+                    TaskSessionUpsert {
+                        task_id,
+                        project_id,
+                        agent_id: assigned_agent_id,
+                        memory_namespace: task_memory_namespace.as_deref(),
+                        execution_run_id,
+                        trace_ref: None,
+                        checkpoint_ref: Some(checkpoint_ref.clone()),
+                        status: SessionStatus::Failed,
+                    },
                 );
                 return Ok(());
             }
@@ -395,14 +410,16 @@ pub async fn handle_task_execute(
         send_task_failed(ctx, &eid, &tid, &error_msg);
         upsert_task_session(
             ctx,
-            task_id,
-            project_id,
-            assigned_agent_id,
-            task_memory_namespace.as_deref(),
-            execution_run_id,
-            None,
-            Some(checkpoint_ref.clone()),
-            SessionStatus::Failed,
+            TaskSessionUpsert {
+                task_id,
+                project_id,
+                agent_id: assigned_agent_id,
+                memory_namespace: task_memory_namespace.as_deref(),
+                execution_run_id,
+                trace_ref: None,
+                checkpoint_ref: Some(checkpoint_ref.clone()),
+                status: SessionStatus::Failed,
+            },
         );
         let _ = update_checkpoint_with_worktree(
             &*ctx.session_store,
@@ -432,14 +449,16 @@ pub async fn handle_task_execute(
     };
     upsert_task_session(
         ctx,
-        task_id,
-        project_id,
-        assigned_agent_id,
-        task_memory_namespace.as_deref(),
-        execution_run_id,
-        None,
-        Some(checkpoint_ref.clone()),
-        final_status,
+        TaskSessionUpsert {
+            task_id,
+            project_id,
+            agent_id: assigned_agent_id,
+            memory_namespace: task_memory_namespace.as_deref(),
+            execution_run_id,
+            trace_ref: None,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            status: final_status,
+        },
     );
     if final_status != SessionStatus::Cancelled {
         let _ = update_checkpoint_with_worktree(
@@ -750,14 +769,16 @@ async fn execute_direct_task(
     let trace_ref = task_trace_ref(&project_slug, &task_slug, &aname, agent_id);
     upsert_task_session(
         ctx,
-        task_id,
-        task_project_id,
-        Some(agent_id),
-        task_memory_namespace(Some(&aname), &project_slug).as_deref(),
-        execution_run_id,
-        Some(trace_ref),
-        None,
-        SessionStatus::Active,
+        TaskSessionUpsert {
+            task_id,
+            project_id: task_project_id,
+            agent_id: Some(agent_id),
+            memory_namespace: task_memory_namespace(Some(&aname), &project_slug).as_deref(),
+            execution_run_id,
+            trace_ref: Some(trace_ref),
+            checkpoint_ref: None,
+            status: SessionStatus::Active,
+        },
     );
     let mut trace_recorder = ExecutionTraceRecorder::for_task_with_store(
         &ctx.config.workspace_dir,
@@ -831,17 +852,19 @@ async fn execute_direct_task(
     });
     upsert_task_session(
         ctx,
-        task_id,
-        task_project_id,
-        Some(agent_id),
-        task_memory_namespace(Some(&aname), &project_slug).as_deref(),
-        execution_run_id,
-        None,
-        None,
-        if success {
-            SessionStatus::Completed
-        } else {
-            SessionStatus::Cancelled
+        TaskSessionUpsert {
+            task_id,
+            project_id: task_project_id,
+            agent_id: Some(agent_id),
+            memory_namespace: task_memory_namespace(Some(&aname), &project_slug).as_deref(),
+            execution_run_id,
+            trace_ref: None,
+            checkpoint_ref: None,
+            status: if success {
+                SessionStatus::Completed
+            } else {
+                SessionStatus::Cancelled
+            },
         },
     );
 
@@ -957,6 +980,7 @@ fn direct_task_turn_event_to_response(
             }),
             agent,
         }),
+        nenjo::TurnEvent::MessageCompacted { .. } => None,
         nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
     }
 }

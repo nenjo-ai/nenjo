@@ -314,6 +314,7 @@ impl ExecutionTraceRecorder {
                 self.agent_trace.final_output = Some(output.text.clone());
                 self.flush_agent()?;
             }
+            TurnEvent::MessageCompacted { .. } => {}
             TurnEvent::Paused | TurnEvent::Resumed => {}
         }
         Ok(())

@@ -43,6 +43,11 @@ pub enum TurnEvent {
         success: bool,
         final_output: String,
     },
+    /// Older history was compacted into a summary.
+    MessageCompacted {
+        messages_before: usize,
+        messages_after: usize,
+    },
     /// Execution was paused by the caller.
     Paused,
     /// Execution was resumed after a pause.

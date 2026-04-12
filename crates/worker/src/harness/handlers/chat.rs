@@ -74,18 +74,30 @@ fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
     .project
 }
 
-fn upsert_chat_session(
-    ctx: &CommandContext,
+struct ChatSessionUpsert {
     session_id: Uuid,
     project_id: Uuid,
     agent_id: Uuid,
-    project_slug: &str,
-    agent_name: &str,
+    project_slug: String,
+    agent_name: String,
     history_ref: String,
     trace_ref: String,
     checkpoint_ref: String,
     status: SessionStatus,
-) {
+}
+
+fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
+    let ChatSessionUpsert {
+        session_id,
+        project_id,
+        agent_id,
+        project_slug,
+        agent_name,
+        history_ref,
+        trace_ref,
+        checkpoint_ref,
+        status,
+    } = params;
     let now = Utc::now();
     let mut record = ctx
         .session_store
@@ -122,7 +134,7 @@ fn upsert_chat_session(
     record.refs.history_ref = Some(history_ref);
     record.refs.trace_ref = Some(trace_ref);
     record.refs.checkpoint_ref = Some(checkpoint_ref);
-    record.refs.memory_namespace = Some(chat_memory_namespace(agent_name, project_slug));
+    record.refs.memory_namespace = Some(chat_memory_namespace(&agent_name, &project_slug));
     if matches!(
         status,
         SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Failed
@@ -219,15 +231,17 @@ pub async fn handle_chat(
     let checkpoint_ref = chat_checkpoint_ref(&slug, &aname, session_id);
     upsert_chat_session(
         ctx,
-        session_id,
-        effective_project_id,
-        agent_id,
-        &slug,
-        &aname,
-        history_ref.clone(),
-        trace_ref,
-        checkpoint_ref.clone(),
-        SessionStatus::Active,
+        ChatSessionUpsert {
+            session_id,
+            project_id: effective_project_id,
+            agent_id,
+            project_slug: slug.clone(),
+            agent_name: aname.clone(),
+            history_ref: history_ref.clone(),
+            trace_ref,
+            checkpoint_ref: checkpoint_ref.clone(),
+            status: SessionStatus::Active,
+        },
     );
     let _ = transition_session_state(
         &*ctx.session_store,

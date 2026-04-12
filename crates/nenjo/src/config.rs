@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub compact_context: bool,
+    #[serde(default = "default_context_compaction_trigger_percent")]
+    pub context_compaction_trigger_percent: u8,
     pub parallel_tools: bool,
     #[serde(default)]
     pub execution_traces: bool,
@@ -21,6 +23,10 @@ pub struct AgentConfig {
 
 fn default_max_delegation_depth() -> u32 {
     3
+}
+
+fn default_context_compaction_trigger_percent() -> u8 {
+    60
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -39,6 +45,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             compact_context: false,
+            context_compaction_trigger_percent: default_context_compaction_trigger_percent(),
             execution_traces: false,
             max_tool_iterations: default_agent_max_tool_iterations(),
             max_history_messages: default_agent_max_history_messages(),
