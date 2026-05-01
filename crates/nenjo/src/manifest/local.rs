@@ -56,7 +56,6 @@ impl LocalManifestStore {
 
     fn auth(&self) -> Option<ManifestAuth> {
         let auth_path = self.root.join("auth.json");
-        let legacy_path = self.root.join("user_id.json");
 
         if let Ok(s) = std::fs::read_to_string(&auth_path) {
             let value: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -64,31 +63,24 @@ impl LocalManifestStore {
                 .get("user_id")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
+            let org_id: Uuid = value
+                .get("org_id")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             let api_key_id = value
                 .get("api_key_id")
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
-            if user_id.is_nil() && api_key_id.is_none() {
-                None
+            if user_id.is_nil() && org_id.is_nil() && api_key_id.is_none() {
+                return None;
             } else {
-                Some(ManifestAuth {
+                return Some(ManifestAuth {
                     user_id,
+                    org_id,
                     api_key_id,
-                })
-            }
-        } else {
-            let user_id: Uuid = std::fs::read_to_string(&legacy_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            if user_id.is_nil() {
-                None
-            } else {
-                Some(ManifestAuth {
-                    user_id,
-                    api_key_id: None,
-                })
+                });
             }
         }
+        None
     }
 }
 
@@ -233,6 +225,7 @@ impl ManifestWriter for LocalManifestStore {
             "auth.json",
             &serde_json::json!({
                 "user_id": manifest.auth.as_ref().map(|auth| auth.user_id),
+                "org_id": manifest.auth.as_ref().map(|auth| auth.org_id),
                 "api_key_id": manifest.auth.as_ref().and_then(|auth| auth.api_key_id),
             }),
         )?;
@@ -464,6 +457,7 @@ mod tests {
         Manifest {
             auth: Some(ManifestAuth {
                 user_id: Uuid::new_v4(),
+                org_id: Uuid::new_v4(),
                 api_key_id: Some(Uuid::new_v4()),
             }),
             models: vec![model],
@@ -489,6 +483,10 @@ mod tests {
         assert_eq!(
             loaded.auth.as_ref().and_then(|auth| auth.api_key_id),
             manifest.auth.as_ref().and_then(|auth| auth.api_key_id)
+        );
+        assert_eq!(
+            loaded.auth.as_ref().map(|auth| auth.org_id),
+            manifest.auth.as_ref().map(|auth| auth.org_id)
         );
         assert_eq!(loaded.models.len(), 1);
         assert_eq!(loaded.agents.len(), 1);

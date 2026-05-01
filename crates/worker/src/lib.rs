@@ -2,26 +2,28 @@
 //!
 //! Agent worker for the Nenjo platform.
 //!
-//! Boots the harness, connects to NATS via the event-bus transport layer,
+//! Boots the harness, composes the raw event bus with the secure-envelope layer,
 //! and runs the agent event loop. This is the implementation behind `nenjo run`.
 //!
 //! The worker is resilient to backend and NATS outages: startup and the event
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
-pub mod codec;
 pub mod crypto;
 pub mod harness;
 
 use std::time::Duration;
 
-use crate::codec::{EnrollmentBackedKeyProvider, SecureEnvelopeCodec};
 use crate::crypto::{EnrollmentStatus, WorkerAuthProvider};
 use crate::harness::Harness;
 use crate::harness::config::Config;
 use anyhow::Result;
 use clap::Args;
+use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_eventbus::EventBus;
+use nenjo_secure_envelope::{SecureEnvelopeBus, SecureEnvelopeCodec};
+use serde_json::json;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -61,6 +63,14 @@ pub struct RunArgs {
     /// Override the .nenjo directory path (default: ~/.nenjo).
     #[arg(long, env = "NENJO_DIR")]
     pub nenjo_dir: Option<String>,
+
+    /// Optional harness display name shown in the platform UI.
+    #[arg(long, env = "NENJO_HARNESS_NAME")]
+    pub harness_name: Option<String>,
+
+    /// Optional harness labels shown in the platform UI.
+    #[arg(long, env = "NENJO_HARNESS_LABELS", value_delimiter = ',')]
+    pub harness_labels: Option<Vec<String>>,
 }
 
 /// Initialize tracing, load config, boot harness, connect NATS, and run.
@@ -86,6 +96,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
             parsed.push(cap);
         }
         config.capabilities = parsed;
+    }
+    if let Some(ref name) = args.harness_name {
+        config.harness_name = Some(name.clone());
+    }
+    if let Some(ref labels) = args.harness_labels {
+        config.harness_labels = labels.clone();
     }
 
     info!(
@@ -165,7 +181,10 @@ pub async fn run_with_config(config: Config) -> Result<()> {
 /// Returns `Err` on any transient failure so the caller can retry.
 async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     // Create harness — runs bootstrap, builds Provider, connects MCP servers
-    let harness = Harness::new(config.clone()).await?;
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(
+        config.state_dir.join("crypto"),
+    )?);
+    let harness = Harness::new(config.clone(), auth_provider.clone()).await?;
 
     // The api_key_id is the stable worker identifier used for presence tracking.
     let auth = harness.provider().manifest().auth.clone().ok_or_else(|| {
@@ -179,8 +198,6 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     })?;
     debug!(%api_key_id, "Using API key ID as stable worker identifier");
 
-    let auth_provider = WorkerAuthProvider::load_or_create(config.state_dir.join("crypto"))?;
-
     let identity = auth_provider.identity();
     match auth_provider.enrollment_status().await {
         EnrollmentStatus::Pending => {
@@ -192,14 +209,22 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         EnrollmentStatus::Active => {
             info!(
                 worker_crypto_id = %identity.worker_id,
-                "Worker crypto identity loaded; wrapped ACK available"
+                "Worker crypto identity loaded; user-routed ACK available"
             );
         }
     }
 
     let user_id = auth.user_id;
-    wait_for_enrollment_approval(harness.api().as_ref(), &auth_provider, api_key_id, shutdown)
-        .await?;
+    let org_id = auth.org_id;
+    wait_for_enrollment_approval(
+        harness.api().as_ref(),
+        auth_provider.as_ref(),
+        api_key_id,
+        user_id,
+        build_harness_metadata(config),
+        shutdown,
+    )
+    .await?;
 
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
         .url(config.nats_url())
@@ -210,17 +235,16 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))?;
 
     let codec = SecureEnvelopeCodec::new(
-        EnrollmentBackedKeyProvider::new(auth_provider, harness.api(), api_key_id),
-        user_id,
+        EnrollmentBackedKeyProvider::new(auth_provider, harness.api(), api_key_id, user_id),
+        org_id,
     );
 
     let bus = EventBus::builder()
         .transport(transport)
-        .user_id(user_id)
-        .with_codec(codec)
         .build()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
+    let secure_bus = SecureEnvelopeBus::new(bus, codec);
 
     info!(nats_url = %config.nats_url(), "Eventbus transport connected");
 
@@ -233,7 +257,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     });
 
     // Run the event loop — blocks until the bus stream ends or shutdown.
-    let result = harness.run(bus).await;
+    let result = harness.run(secure_bus, user_id).await;
 
     link.abort();
 
@@ -252,17 +276,12 @@ async fn wait_for_enrollment_approval(
     api: &nenjo::client::NenjoClient,
     auth_provider: &WorkerAuthProvider,
     api_key_id: uuid::Uuid,
+    bootstrap_user_id: uuid::Uuid,
+    metadata: Option<serde_json::Value>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
-    if matches!(
-        auth_provider.enrollment_status().await,
-        EnrollmentStatus::Active
-    ) {
-        return Ok(());
-    }
-
     auth_provider
-        .sync_worker_enrollment(api, api_key_id)
+        .sync_worker_enrollment(api, api_key_id, bootstrap_user_id, metadata.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize worker enrollment: {error}"))?;
 
@@ -288,6 +307,7 @@ async fn wait_for_enrollment_approval(
         match api.fetch_worker_enrollment_status(api_key_id).await {
             Ok(Some(status)) => match status.state {
                 nenjo::client::WorkerEnrollmentState::Active => {
+                    let _ = bootstrap_user_id;
                     auth_provider.apply_backend_enrollment(&status).await?;
                     info!(%api_key_id, "Worker enrollment approved");
                     return Ok(());
@@ -319,6 +339,36 @@ async fn wait_for_enrollment_approval(
             _ = shutdown.cancelled() => return Ok(()),
         }
     }
+}
+
+fn build_harness_metadata(config: &Config) -> Option<serde_json::Value> {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .filter(|value| !value.trim().is_empty());
+    let version = Some(env!("CARGO_PKG_VERSION").to_string());
+    let name = config
+        .harness_name
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let labels: Vec<String> = config
+        .harness_labels
+        .iter()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect();
+
+    if name.is_none() && labels.is_empty() && host.is_none() && version.is_none() {
+        return None;
+    }
+
+    Some(json!({
+        "name": name,
+        "labels": labels,
+        "host": host,
+        "version": version,
+    }))
 }
 
 /// Wait for SIGINT or SIGTERM.

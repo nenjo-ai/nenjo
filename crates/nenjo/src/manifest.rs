@@ -42,6 +42,7 @@ pub struct Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestAuth {
     pub user_id: uuid::Uuid,
+    pub org_id: uuid::Uuid,
     #[serde(default)]
     pub api_key_id: Option<uuid::Uuid>,
 }

@@ -1,148 +1,85 @@
-use aes_gcm::{
-    Aes256Gcm, Nonce as AesNonce,
-    aead::{Aead as AesAead, KeyInit as AesKeyInit, OsRng as AesOsRng},
-};
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use nenjo_crypto_auth::{ContentScope, WorkerAuthProvider};
 use nenjo_events::EncryptedPayload;
-use rand_core::RngCore;
+use nenjo_secure_envelope::{decrypt_text, encrypt_text_for_scope};
 use uuid::Uuid;
 
-use super::provider::AccountContentKey;
-
-const CONTENT_ALGORITHM_AES_256_GCM: &str = "aes-256-gcm";
-
-pub fn encrypt_text(
-    key: &AccountContentKey,
+pub async fn encrypt_text_with_provider(
+    auth_provider: &WorkerAuthProvider,
+    scope: ContentScope,
     account_id: Uuid,
     object_id: Uuid,
     object_type: impl Into<String>,
     plaintext: &str,
-    key_version: u32,
 ) -> Result<EncryptedPayload> {
-    encrypt_with_aes_256_gcm(
-        key,
+    let key = match scope {
+        ContentScope::User => auth_provider.load_ack_for_user(account_id).await?,
+        ContentScope::Org => auth_provider.load_ock().await?,
+    }
+    .with_context(|| match scope {
+        ContentScope::User => format!("worker has no enrolled ACK for user {account_id}"),
+        ContentScope::Org => "worker has no enrolled OCK".to_string(),
+    })?;
+    let key_version = match scope {
+        ContentScope::User => auth_provider.current_key_version_for_user(account_id).await,
+        ContentScope::Org => auth_provider.current_ock_key_version().await,
+    }
+    .unwrap_or(1);
+    encrypt_text_for_scope(
+        &key,
+        scope,
         account_id,
         object_id,
-        object_type.into(),
+        object_type,
         plaintext,
         key_version,
     )
 }
 
-pub fn decrypt_text(key: &AccountContentKey, payload: &EncryptedPayload) -> Result<String> {
-    let ciphertext = BASE64
-        .decode(&payload.ciphertext)
-        .context("Invalid base64 ciphertext")?;
-    let aad = payload_aad(payload.account_id, payload.object_id, &payload.object_type);
-    let plaintext = match payload.algorithm.as_str() {
-        CONTENT_ALGORITHM_AES_256_GCM => {
-            decrypt_with_aes_256_gcm(key, &payload.nonce, ciphertext.as_ref(), &aad)?
+pub async fn decrypt_text_with_provider(
+    auth_provider: &WorkerAuthProvider,
+    payload: &EncryptedPayload,
+) -> Result<String> {
+    let scope = ContentScope::from_payload(payload);
+    if scope == ContentScope::Org {
+        let enrollment = auth_provider.enrollment().await;
+        let enrolled_org_id = enrollment
+            .certificate
+            .as_ref()
+            .map(|certificate| certificate.account_id)
+            .context("worker enrollment missing org certificate")?;
+        if payload.account_id != enrolled_org_id {
+            bail!(
+                "org-scoped payload account mismatch: payload={}, worker={}",
+                payload.account_id,
+                enrolled_org_id
+            );
         }
-        other => bail!("Unsupported encrypted payload algorithm: {other}"),
-    };
-
-    String::from_utf8(plaintext).context("Decrypted payload was not valid UTF-8")
-}
-
-fn payload_aad(account_id: Uuid, object_id: Uuid, object_type: &str) -> Vec<u8> {
-    format!("{account_id}:{object_id}:{object_type}").into_bytes()
-}
-
-fn build_encrypted_payload(
-    account_id: Uuid,
-    object_id: Uuid,
-    object_type: String,
-    algorithm: &str,
-    key_version: u32,
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> EncryptedPayload {
-    EncryptedPayload {
-        account_id,
-        object_id,
-        object_type,
-        algorithm: algorithm.to_string(),
-        key_version,
-        nonce: BASE64.encode(nonce),
-        ciphertext: BASE64.encode(ciphertext),
     }
-}
-
-fn encrypt_with_aes_256_gcm(
-    key: &AccountContentKey,
-    account_id: Uuid,
-    object_id: Uuid,
-    object_type: String,
-    plaintext: &str,
-    key_version: u32,
-) -> Result<EncryptedPayload> {
-    let aad = payload_aad(account_id, object_id, &object_type);
-    let cipher = Aes256Gcm::new(key.as_bytes().into());
-    let mut nonce_bytes = [0_u8; 12];
-    AesOsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = AesNonce::from(nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            aes_gcm::aead::Payload {
-                msg: plaintext.as_bytes(),
-                aad: &aad,
-            },
-        )
-        .context("Failed to encrypt AES-GCM content payload")?;
-
-    Ok(build_encrypted_payload(
-        account_id,
-        object_id,
-        object_type,
-        CONTENT_ALGORITHM_AES_256_GCM,
-        key_version,
-        &nonce_bytes,
-        &ciphertext,
-    ))
-}
-
-fn decode_fixed<const N: usize>(raw: &str, field: &str) -> Result<[u8; N]> {
-    let bytes = BASE64
-        .decode(raw)
-        .with_context(|| format!("Invalid base64 in {field}"))?;
-    if bytes.len() != N {
-        bail!("Invalid {field} length: expected {N}, got {}", bytes.len());
+    let key = match scope {
+        ContentScope::User => auth_provider.load_ack_for_user(payload.account_id).await?,
+        ContentScope::Org => auth_provider.load_ock().await?,
     }
-    let mut out = [0_u8; N];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
-
-fn decrypt_with_aes_256_gcm(
-    key: &AccountContentKey,
-    nonce_b64: &str,
-    ciphertext: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>> {
-    let nonce = AesNonce::from(decode_fixed::<12>(nonce_b64, "nonce")?);
-    let cipher = Aes256Gcm::new(key.as_bytes().into());
-    cipher
-        .decrypt(
-            &nonce,
-            aes_gcm::aead::Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .context("Failed to decrypt AES-256-GCM content payload")
+    .with_context(|| match scope {
+        ContentScope::User => format!("worker has no enrolled ACK for user {}", payload.account_id),
+        ContentScope::Org => "worker has no enrolled OCK".to_string(),
+    })?;
+    decrypt_text(&key, payload)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt_text, encrypt_text};
-    use crate::crypto::AccountContentKey;
+    use super::decrypt_text_with_provider;
+    use crate::crypto::{
+        ContentKey, ContentScope, WorkerAuthProvider, WorkerCertificate, decrypt_text,
+        encrypt_text, encrypt_text_for_scope,
+    };
+    use chrono::Utc;
     use uuid::Uuid;
 
     #[test]
     fn aad_mismatch_fails() {
-        let key = AccountContentKey::from_bytes([8_u8; 32]);
+        let key = ContentKey::from_bytes([8_u8; 32]);
         let mut payload = encrypt_text(
             &key,
             Uuid::new_v4(),
@@ -159,7 +96,7 @@ mod tests {
 
     #[test]
     fn round_trip_text_payload_aes_gcm() {
-        let key = AccountContentKey::from_bytes([4_u8; 32]);
+        let key = ContentKey::from_bytes([4_u8; 32]);
         let payload = encrypt_text(
             &key,
             Uuid::new_v4(),
@@ -172,5 +109,50 @@ mod tests {
 
         let decrypted = decrypt_text(&key, &payload).unwrap();
         assert_eq!(decrypted, "hello from browser crypto");
+    }
+
+    #[tokio::test]
+    async fn rejects_foreign_org_scoped_payload_for_enrolled_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = WorkerAuthProvider::load_or_create(dir.path()).unwrap();
+        let identity = provider.identity().clone();
+        let enrolled_org_id = Uuid::new_v4();
+        provider
+            .store_enrollment(
+                Some(WorkerCertificate {
+                    account_id: enrolled_org_id,
+                    api_key_id: Uuid::new_v4(),
+                    issued_at: Utc::now(),
+                    enc_public_key: identity.enc_public_key.clone(),
+                    sign_public_key: identity.sign_public_key.clone(),
+                    signature: "test-signature".into(),
+                }),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let payload = encrypt_text_for_scope(
+            &ContentKey::from_bytes([5_u8; 32]),
+            ContentScope::Org,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "manifest.agent.prompt",
+            "foreign-org secret",
+            1,
+        )
+        .unwrap();
+
+        let error = decrypt_text_with_provider(&provider, &payload)
+            .await
+            .expect_err("foreign org payload should be rejected before decrypt");
+        assert!(
+            error
+                .to_string()
+                .contains("org-scoped payload account mismatch"),
+            "unexpected error: {error:#}",
+        );
     }
 }

@@ -77,6 +77,32 @@ pub enum ToolCategory {
     ReadWrite,
 }
 
+impl ToolCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Read => "READ",
+            Self::Write => "WRITE",
+            Self::ReadWrite => "READ/WRITE",
+        }
+    }
+
+    pub fn guidance(self) -> &'static str {
+        match self {
+            Self::Read => "Inspects or verifies state without persistent side effects.",
+            Self::Write => {
+                "Mutates persistent state. Use sparingly and avoid repeated calls in one turn."
+            }
+            Self::ReadWrite => {
+                "Can read and mutate state. Use carefully and avoid repeated calls in one turn."
+            }
+        }
+    }
+
+    pub fn is_write_like(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
 /// Full specification of a tool for LLM registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -126,11 +152,17 @@ pub trait Tool: Send + Sync {
 
     /// Build the full spec for LLM registration.
     fn spec(&self) -> ToolSpec {
+        let category = self.category();
         ToolSpec {
             name: self.name().to_string(),
-            description: self.description().to_string(),
+            description: format!(
+                "[{}] {} {}",
+                category.label(),
+                category.guidance(),
+                self.description()
+            ),
             parameters: self.parameters_schema(),
-            category: self.category(),
+            category,
         }
     }
 }

@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
 
-use crate::crypto::decrypt_text;
-use crate::crypto::provider::WorkerAuthProvider;
+use crate::crypto::WorkerAuthProvider;
+use crate::crypto::decrypt_text_with_provider;
 use crate::harness::CommandContext;
 use crate::harness::loader::FileSystemManifestLoader;
 
@@ -85,7 +85,6 @@ pub async fn handle_manifest_changed(
             let manifest = ctx.provider().manifest().clone();
             ctx.external_mcp.reconcile(&manifest.mcp_servers).await;
         }
-        ResourceType::Lambda => {}
         ResourceType::Document => {
             if let Some(pid) = project_id {
                 let manifest = ctx.provider().manifest().clone();
@@ -275,19 +274,7 @@ async fn apply_inline_encrypted_upsert(
         }
     };
 
-    let ack = match auth_provider.load_ack().await {
-        Ok(Some(ack)) => ack,
-        Ok(None) => {
-            warn!(%rt, %id, "Manifest encrypted payload received before ACK enrollment");
-            return false;
-        }
-        Err(error) => {
-            warn!(%rt, %id, error = %error, "Failed to load ACK for manifest decrypt");
-            return false;
-        }
-    };
-
-    let plaintext = match decrypt_text(&ack, encrypted_payload) {
+    let plaintext = match decrypt_text_with_provider(&auth_provider, encrypted_payload).await {
         Ok(plaintext) => plaintext,
         Err(error) => {
             warn!(%rt, %id, error = %error, "Failed to decrypt inline manifest payload");
@@ -577,6 +564,55 @@ async fn apply_inline_encrypted_upsert(
     }
 }
 
+async fn decrypt_prompt_payload(
+    ctx: &CommandContext,
+    encrypted_payload: &EncryptedPayload,
+) -> Option<PromptConfig> {
+    let plaintext =
+        decrypt_string_payload(ctx, encrypted_payload, "manifest.agent.prompt", "prompt").await?;
+
+    match serde_json::from_str::<PromptConfig>(&plaintext) {
+        Ok(prompt_config) => Some(prompt_config),
+        Err(error) => {
+            warn!(error = %error, "Failed to parse decrypted prompt config JSON");
+            None
+        }
+    }
+}
+
+async fn decrypt_string_payload(
+    ctx: &CommandContext,
+    encrypted_payload: &EncryptedPayload,
+    expected_object_type: &str,
+    label: &str,
+) -> Option<String> {
+    if encrypted_payload.object_type != expected_object_type {
+        warn!(
+            object_type = %encrypted_payload.object_type,
+            expected_object_type,
+            "Encrypted payload object type mismatch during fallback fetch"
+        );
+        return None;
+    }
+
+    let auth_provider =
+        match WorkerAuthProvider::load_or_create(ctx.config.state_dir.join("crypto")) {
+            Ok(provider) => provider,
+            Err(error) => {
+                warn!(error = %error, "Failed to load worker auth provider for payload decrypt");
+                return None;
+            }
+        };
+
+    match decrypt_text_with_provider(&auth_provider, encrypted_payload).await {
+        Ok(plaintext) => Some(plaintext),
+        Err(error) => {
+            warn!(error = %error, label = label, "Failed to decrypt encrypted payload");
+            None
+        }
+    }
+}
+
 /// Apply an inline payload directly to the manifest without an API fetch.
 /// Returns `true` if the payload was successfully applied, `false` if
 /// deserialization failed (caller should fall back to API fetch).
@@ -715,7 +751,6 @@ fn apply_inline_upsert(
                 },
             }
         }
-        ResourceType::Lambda => return false,
         ResourceType::Ability => {
             return match serde_json::from_value::<nenjo::manifest::AbilityManifest>(data.clone()) {
                 Ok(ability) => {
@@ -932,7 +967,6 @@ fn apply_delete(ctx: &CommandContext, rt: ResourceType, id: Uuid) {
         ResourceType::Routine => manifest.routines.retain(|r| r.id != id),
         ResourceType::Project => manifest.projects.retain(|r| r.id != id),
         ResourceType::Council => manifest.councils.retain(|r| r.id != id),
-        ResourceType::Lambda => return,
         ResourceType::Ability => manifest.abilities.retain(|r| r.id != id),
         ResourceType::ContextBlock => manifest.context_blocks.retain(|r| r.id != id),
         ResourceType::McpServer => manifest.mcp_servers.retain(|r| r.id != id),
@@ -971,8 +1005,24 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
     match rt {
         ResourceType::Agent => match ctx.api.fetch_agent(id).await? {
             Some(mut item) => {
-                if let Some(prompt_config) = ctx.api.fetch_agent_prompt_config(id).await? {
-                    item.prompt_config = prompt_config;
+                if let Some(prompt_response) = ctx.api.fetch_agent_prompt_config(id).await? {
+                    if let Some(encrypted_payload) = prompt_response.encrypted_payload.as_ref() {
+                        if let Some(prompt_config) =
+                            decrypt_prompt_payload(ctx, encrypted_payload).await
+                        {
+                            item.prompt_config = prompt_config;
+                        } else if let Some(existing) =
+                            manifest.agents.iter().find(|agent| agent.id == id)
+                        {
+                            item.prompt_config = existing.prompt_config.clone();
+                        }
+                    } else if let Some(prompt_config) = prompt_response.prompt_config {
+                        item.prompt_config = prompt_config;
+                    } else if let Some(existing) =
+                        manifest.agents.iter().find(|agent| agent.id == id)
+                    {
+                        item.prompt_config = existing.prompt_config.clone();
+                    }
                 } else if let Some(existing) = manifest.agents.iter().find(|agent| agent.id == id) {
                     item.prompt_config = existing.prompt_config.clone();
                 }
@@ -993,9 +1043,56 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
         ResourceType::Routine => upsert!(routines, fetch_routine),
         ResourceType::Project => upsert!(projects, fetch_project),
         ResourceType::Council => upsert!(councils, fetch_council),
-        ResourceType::Lambda => return Ok(()),
         ResourceType::Ability => upsert!(abilities, fetch_ability),
-        ResourceType::ContextBlock => upsert!(context_blocks, fetch_context_block),
+        ResourceType::ContextBlock => match ctx.api.fetch_context_block_summary(id).await? {
+            Some(summary) => {
+                let existing_template = manifest
+                    .context_blocks
+                    .iter()
+                    .find(|block| block.id == id)
+                    .map(|block| block.template.clone())
+                    .unwrap_or_default();
+                let content = ctx.api.fetch_context_block_content(id).await?;
+                let template = match content {
+                    Some(content) => {
+                        if let Some(encrypted_payload) = content.encrypted_payload.as_ref() {
+                            decrypt_string_payload(
+                                ctx,
+                                encrypted_payload,
+                                "manifest.context_block.content",
+                                "context block content",
+                            )
+                            .await
+                            .unwrap_or(existing_template)
+                        } else {
+                            content.template.unwrap_or(existing_template)
+                        }
+                    }
+                    None => existing_template,
+                };
+
+                let block = nenjo::manifest::ContextBlockManifest {
+                    id: summary.id,
+                    name: summary.name,
+                    path: summary.path,
+                    display_name: summary.display_name,
+                    description: summary.description,
+                    template,
+                };
+
+                if let Some(pos) = manifest.context_blocks.iter().position(|r| r.id == id) {
+                    manifest.context_blocks[pos] = block;
+                    debug!(%rt, %id, "Updated existing resource");
+                } else {
+                    manifest.context_blocks.push(block);
+                    debug!(%rt, %id, "Added new resource");
+                }
+            }
+            None => {
+                manifest.context_blocks.retain(|r| r.id != id);
+                debug!(%rt, %id, "Resource returned 404, removing");
+            }
+        },
         ResourceType::McpServer => upsert!(mcp_servers, fetch_mcp_server),
         ResourceType::Domain => upsert!(domains, fetch_domain),
         ResourceType::Document => return Ok(()),
@@ -1037,7 +1134,6 @@ fn persist_cache(ctx: &CommandContext, rt: ResourceType) {
         ResourceType::Routine => atomic_write(manifests_dir, "routines.json", &manifest.routines),
         ResourceType::Project => atomic_write(manifests_dir, "projects.json", &manifest.projects),
         ResourceType::Council => atomic_write(manifests_dir, "councils.json", &manifest.councils),
-        ResourceType::Lambda => return,
         ResourceType::Ability => crate::harness::manifest::sync_tree(
             &manifests_dir.join("abilities"),
             &manifest.abilities,

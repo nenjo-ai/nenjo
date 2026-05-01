@@ -159,7 +159,7 @@ fn upsert_heartbeat_session(
 }
 
 fn emit_heartbeat_state(
-    response_tx: &tokio::sync::mpsc::UnboundedSender<Response>,
+    response_tx: &crate::harness::ResponseSender,
     agent_id: Uuid,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_run_at: chrono::DateTime<chrono::Utc>,

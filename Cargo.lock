@@ -1833,6 +1833,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-crypto-auth"
+version = "0.10.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "dashmap",
+ "ed25519-dalek",
+ "hkdf",
+ "nenjo",
+ "nenjo-events",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "nenjo-eventbus"
 version = "0.10.0"
 dependencies = [
@@ -1908,6 +1934,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-secure-envelope"
+version = "0.10.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "nenjo-crypto-auth",
+ "nenjo-eventbus",
+ "nenjo-events",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nenjo-sessions"
 version = "0.10.0"
 dependencies = [
@@ -1964,10 +2010,12 @@ dependencies = [
  "hkdf",
  "nanohtml2text",
  "nenjo",
+ "nenjo-crypto-auth",
  "nenjo-eventbus",
  "nenjo-events",
  "nenjo-models",
  "nenjo-platform",
+ "nenjo-secure-envelope",
  "nenjo-sessions",
  "nenjo-tools",
  "nenjo-xml",

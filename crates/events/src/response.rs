@@ -574,6 +574,7 @@ mod tests {
             payload: None,
             encrypted_payload: Some(EncryptedPayload {
                 account_id: Uuid::nil(),
+                encryption_scope: None,
                 object_id: Uuid::new_v4(),
                 object_type: "tool_call_preview".into(),
                 algorithm: "aes-256-gcm".into(),
@@ -611,6 +612,7 @@ mod tests {
             payload: None,
             encrypted_payload: Some(EncryptedPayload {
                 account_id: Uuid::nil(),
+                encryption_scope: None,
                 object_id: Uuid::new_v4(),
                 object_type: "tool_error_preview".into(),
                 algorithm: "aes-256-gcm".into(),
@@ -670,6 +672,7 @@ mod tests {
     fn command_chat_message_with_encrypted_content_roundtrip() {
         let payload = EncryptedPayload {
             account_id: Uuid::nil(),
+            encryption_scope: None,
             object_id: Uuid::new_v4(),
             object_type: "agent_prompt".into(),
             algorithm: "aes-256-gcm".into(),
@@ -775,6 +778,7 @@ mod tests {
                 payload: Some(serde_json::Value::String("compat".into())),
                 encrypted_payload: Some(EncryptedPayload {
                     account_id: Uuid::nil(),
+                    encryption_scope: None,
                     object_id: Uuid::new_v4(),
                     object_type: "agent_response".into(),
                     algorithm: "aes-256-gcm".into(),

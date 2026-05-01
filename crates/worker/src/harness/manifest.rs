@@ -15,8 +15,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
 
-use crate::crypto::decrypt_text;
-use crate::crypto::provider::WorkerAuthProvider;
+use crate::crypto::WorkerAuthProvider;
+use crate::crypto::decrypt_text_with_provider;
 use crate::harness::doc_sync;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::NenjoClient;
@@ -31,6 +31,7 @@ static TREE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Deserialize)]
 struct BootstrapManifestResponse {
     user_id: Uuid,
+    org_id: Uuid,
     #[serde(default)]
     api_key_id: Option<Uuid>,
     #[serde(default)]
@@ -55,6 +56,8 @@ struct BootstrapManifestResponse {
 
 #[derive(Debug, Deserialize)]
 struct BootstrapAuthResponse {
+    #[serde(default)]
+    user_id: Option<Uuid>,
     #[serde(default)]
     api_key_id: Option<Uuid>,
 }
@@ -112,39 +115,6 @@ impl TreeItem for ContextBlockManifest {
     }
     fn name(&self) -> &str {
         &self.name
-    }
-}
-
-/// File-backed template source that reads context block templates from the
-/// tree structure on disk: `{base_dir}/{path}/{name}.json`.
-///
-/// Used by [`ContextRenderer`] for lazy template loading — templates are read
-/// from disk only when rendering is requested, rather than held in memory.
-pub struct FileTemplateSource {
-    base_dir: PathBuf,
-}
-
-impl FileTemplateSource {
-    /// Create a new file template source rooted at the given directory.
-    ///
-    /// `base_dir` is typically `{manifests_dir}/context_blocks/`.
-    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            base_dir: base_dir.into(),
-        }
-    }
-}
-
-impl nenjo::context::TemplateSource for FileTemplateSource {
-    fn load_template(&self, path: &str, name: &str) -> Option<String> {
-        let file_path = tree_item_path(&self.base_dir, path, name);
-        let content = std::fs::read_to_string(&file_path).ok()?;
-        // Parse the JSON and extract the "template" field.
-        let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-        value
-            .get("template")
-            .and_then(|v| v.as_str())
-            .map(String::from)
     }
 }
 
@@ -239,10 +209,10 @@ pub async fn sync(
 
     let auth: BootstrapAuthResponse = serde_json::from_value(bootstrap.clone())
         .context("Failed to deserialize bootstrap auth response")?;
-    let ack = ensure_worker_ack(api, state_dir, auth.api_key_id)
+    ensure_worker_ack(api, state_dir, auth.user_id, auth.api_key_id)
         .await
         .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
-    let data = hydrate_bootstrap_manifest(api, bootstrap, &ack).await?;
+    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
 
     info!(
         projects = data.projects.len(),
@@ -267,6 +237,7 @@ pub async fn sync(
         "auth.json",
         &serde_json::json!({
             "user_id": auth.map(|auth| auth.user_id),
+            "org_id": auth.map(|auth| auth.org_id),
             "api_key_id": auth.and_then(|auth| auth.api_key_id),
         }),
     )?;
@@ -275,8 +246,8 @@ pub async fn sync(
     atomic_write_json(manifests_dir, "models.json", &data.models)?;
     atomic_write_json(manifests_dir, "agents.json", &data.agents)?;
     atomic_write_json(manifests_dir, "councils.json", &data.councils)?;
-    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &data.mcp_servers)?;
+    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
     sync_tree(&manifests_dir.join("abilities"), &data.abilities)?;
     sync_tree(&manifests_dir.join("context_blocks"), &data.context_blocks)?;
 
@@ -289,7 +260,7 @@ pub async fn sync(
 async fn hydrate_bootstrap_manifest(
     api: &NenjoClient,
     bootstrap: serde_json::Value,
-    ack: &crate::crypto::AccountContentKey,
+    state_dir: &Path,
 ) -> Result<Manifest> {
     let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
         Ok(value) => value,
@@ -301,7 +272,7 @@ async fn hydrate_bootstrap_manifest(
 
     let mut agents = Vec::with_capacity(bootstrap.agents.len());
     for agent in bootstrap.agents {
-        let prompt_config = resolve_bootstrap_prompt_config(api, ack, &agent).await?;
+        let prompt_config = resolve_bootstrap_prompt_config(api, &agent, state_dir).await?;
         agents.push(nenjo::manifest::AgentManifest {
             id: agent.id,
             name: agent.name,
@@ -321,6 +292,7 @@ async fn hydrate_bootstrap_manifest(
     Ok(Manifest {
         auth: Some(ManifestAuth {
             user_id: bootstrap.user_id,
+            org_id: bootstrap.org_id,
             api_key_id: bootstrap.api_key_id,
         }),
         routines: bootstrap.routines,
@@ -383,18 +355,21 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
 async fn ensure_worker_ack(
     api: &NenjoClient,
     state_dir: &Path,
+    user_id: Option<Uuid>,
     api_key_id: Option<Uuid>,
-) -> Result<crate::crypto::AccountContentKey> {
+) -> Result<crate::crypto::ContentKey> {
+    let user_id =
+        user_id.context("Bootstrap response did not include auth.user_id for ACK routing")?;
     let api_key_id =
         api_key_id.context("Bootstrap response did not include auth.api_key_id for enrollment")?;
     let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
         .context("Failed to load worker auth provider for bootstrap")?;
     auth_provider
-        .sync_worker_enrollment(api, api_key_id)
+        .sync_worker_enrollment(api, api_key_id, user_id, None)
         .await
         .context("Failed to sync worker enrollment before bootstrap")?;
     auth_provider
-        .load_ack()
+        .load_ack_for_user(user_id)
         .await
         .context("Failed to load ACK for bootstrap decrypt")?
         .context("Worker has no enrolled ACK yet")
@@ -402,35 +377,52 @@ async fn ensure_worker_ack(
 
 async fn resolve_bootstrap_prompt_config(
     api: &NenjoClient,
-    ack: &crate::crypto::AccountContentKey,
     agent: &BootstrapAgentManifest,
+    state_dir: &Path,
 ) -> Result<PromptConfig> {
     let Some(payload) = agent.encrypted_payload.as_ref() else {
-        return Ok(api
-            .fetch_agent_prompt_config(agent.id)
-            .await?
-            .unwrap_or_default());
+        let Some(response) = api.fetch_agent_prompt_config(agent.id).await? else {
+            return Ok(PromptConfig::default());
+        };
+
+        if let Some(payload) = response.encrypted_payload.as_ref() {
+            return decrypt_prompt_config_payload(payload, state_dir, agent.id).await;
+        }
+
+        return Ok(response.prompt_config.unwrap_or_default());
     };
 
+    decrypt_prompt_config_payload(payload, state_dir, agent.id).await
+}
+
+async fn decrypt_prompt_config_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    agent_id: Uuid,
+) -> Result<PromptConfig> {
     if payload.object_type != "manifest.agent.prompt" {
         anyhow::bail!(
             "Unsupported encrypted bootstrap payload type '{}' for agent {}",
             payload.object_type,
-            agent.id
+            agent_id
         );
     }
 
-    let plaintext = decrypt_text(ack, payload).with_context(|| {
-        format!(
-            "Failed to decrypt bootstrap prompt payload for agent {}",
-            agent.id
-        )
-    })?;
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap prompt decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap prompt payload for agent {}",
+                agent_id
+            )
+        })?;
 
     serde_json::from_str::<PromptConfig>(&plaintext).with_context(|| {
         format!(
             "Failed to parse decrypted bootstrap prompt config JSON for agent {}",
-            agent.id
+            agent_id
         )
     })
 }

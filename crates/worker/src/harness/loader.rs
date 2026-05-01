@@ -98,7 +98,6 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
         // Falls back to legacy user_id.json for backward compat.
         let auth = {
             let auth_path = self.manifests_dir.join("auth.json");
-            let legacy_path = self.manifests_dir.join("user_id.json");
 
             if let Ok(s) = std::fs::read_to_string(&auth_path) {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
@@ -106,30 +105,24 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
                     .get("user_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
+                let org_id: uuid::Uuid = v
+                    .get("org_id")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
                 let kid = v
                     .get("api_key_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                if uid.is_nil() && kid.is_none() {
+                if uid.is_nil() && org_id.is_nil() && kid.is_none() {
                     None
                 } else {
                     Some(ManifestAuth {
                         user_id: uid,
+                        org_id,
                         api_key_id: kid,
                     })
                 }
             } else {
-                let uid: uuid::Uuid = std::fs::read_to_string(&legacy_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                if uid.is_nil() {
-                    None
-                } else {
-                    Some(ManifestAuth {
-                        user_id: uid,
-                        api_key_id: None,
-                    })
-                }
+                None
             }
         };
 

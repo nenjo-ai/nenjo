@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod cron;
+pub mod crypto;
 pub mod domain;
 pub mod event_bridge;
 pub mod heartbeat;
@@ -147,6 +148,10 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::WorkerPing => {
             let _ = ctx.response_tx.send(Response::WorkerPong);
             Ok(())
+        }
+
+        Command::WorkerAccountKeyUpdated { wrapped_ack } => {
+            crypto::handle_worker_account_key_updated(&ctx, wrapped_ack).await
         }
 
         Command::ManifestChanged {

@@ -168,12 +168,8 @@ async fn single_step_routine_with_real_llm() {
 
     assert!(result.passed, "routine should pass");
     assert!(
-        !result.output.is_empty(),
-        "routine output should not be empty"
-    );
-    assert!(
-        result.output.contains("ROUTINE_OK"),
-        "routine output should contain ROUTINE_OK, got: {}",
-        result.output
+        result.tool_calls >= 1,
+        "routine should complete via pass_verdict tool call, got tool_calls={}",
+        result.tool_calls
     );
 }

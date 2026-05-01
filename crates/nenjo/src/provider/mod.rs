@@ -108,9 +108,6 @@ pub struct Provider {
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    /// Optional lazy template source for context blocks.
-    /// When set, the ContextRenderer loads templates on demand instead of from memory.
-    template_source: Option<Arc<dyn crate::context::TemplateSource>>,
 }
 
 impl Provider {
@@ -135,7 +132,6 @@ impl Provider {
             memory,
             agent_config,
             lambda_runner,
-            template_source: None,
         }
     }
 
@@ -184,7 +180,6 @@ impl Provider {
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
             lambda_runner: self.lambda_runner.clone(),
-            template_source: self.template_source.clone(),
         }
     }
 
@@ -269,25 +264,13 @@ impl Provider {
         let agent_config = self.agent_config.clone();
         let prompt_context = self.build_prompt_context(agent);
 
-        let context_renderer = if let Some(ref source) = self.template_source {
-            // Lazy: load templates from the source on demand.
-            let block_meta: Vec<(String, String)> = self
-                .manifest
-                .context_blocks
-                .iter()
-                .map(|b| (b.path.clone(), b.name.clone()))
-                .collect();
-            crate::context::ContextRenderer::new(source.clone(), block_meta)
-        } else {
-            // Eager: all templates already in memory (backward compat / tests).
-            let render_blocks: Vec<_> = self
-                .manifest
-                .context_blocks
-                .iter()
-                .map(prompts::render_context_block)
-                .collect();
-            crate::context::ContextRenderer::from_blocks(&render_blocks)
-        };
+        let render_blocks: Vec<_> = self
+            .manifest
+            .context_blocks
+            .iter()
+            .map(prompts::render_context_block)
+            .collect();
+        let context_renderer = crate::context::ContextRenderer::from_blocks(&render_blocks);
 
         let mut builder = AgentBuilder::new(super::agents::builder::AgentBuilderParams {
             agent: agent.clone(),

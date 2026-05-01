@@ -135,7 +135,7 @@ fn resolve_cron_memory_namespace(
 }
 
 fn emit_cron_heartbeat(
-    response_tx: &tokio::sync::mpsc::UnboundedSender<Response>,
+    response_tx: &crate::harness::ResponseSender,
     routine_id: Uuid,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_fire_at: chrono::DateTime<chrono::Utc>,

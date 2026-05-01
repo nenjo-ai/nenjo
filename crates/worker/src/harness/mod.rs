@@ -11,13 +11,15 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nenjo_sessions::{ScheduleState, SessionKind, SessionRecord, SessionStatus};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::crypto::WorkerAuthProvider;
 use nenjo::Provider;
-use nenjo_eventbus::ReceivedCommand;
-use nenjo_events::Response;
+use nenjo_events::{Response, StreamEvent};
+use nenjo_secure_envelope::{DecodingError, ReceivedInput, SecureEnvelopeBus};
 
 pub mod agent;
 pub mod config;
@@ -47,6 +49,48 @@ use session::local_coordinator::LocalSessionCoordinator;
 use session::local_store::FileSessionStore;
 use session::reconcile_recoverable_session;
 use tools::{HarnessToolFactory, NativeRuntime};
+
+#[derive(Debug, Clone)]
+struct RoutedResponse {
+    user_id: Uuid,
+    response: Response,
+}
+
+#[derive(Clone)]
+pub struct ResponseSender {
+    tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>,
+    user_id: Uuid,
+}
+
+impl ResponseSender {
+    fn new(tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>, user_id: Uuid) -> Self {
+        Self { tx, user_id }
+    }
+
+    pub fn send(&self, response: Response) -> Result<(), ()> {
+        self.tx
+            .send(RoutedResponse {
+                user_id: self.user_id,
+                response,
+            })
+            .map_err(|_| ())
+    }
+}
+
+fn response_for_decode_failure(failure: &DecodingError) -> Option<Response> {
+    let session_id = failure.session_id?;
+    Some(Response::AgentResponse {
+        session_id: Some(session_id),
+        payload: StreamEvent::Error {
+            message: "Execution failed".to_string(),
+            payload: Some(json!({
+                "code": failure.code,
+                "message": failure.message,
+            })),
+            encrypted_payload: None,
+        },
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Shared types used by handlers
@@ -95,7 +139,9 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 /// Responses are sent via `response_tx` (never touch the bus directly).
 pub struct CommandContext {
     pub provider: Arc<ArcSwap<Provider>>,
-    pub response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
+    pub actor_user_id: Uuid,
+    pub response_tx: ResponseSender,
+    pub auth_provider: Arc<WorkerAuthProvider>,
     pub worker_id: String,
     pub session_store: Arc<dyn nenjo_sessions::SessionStore>,
     pub session_content: Arc<dyn nenjo_sessions::SessionContentStore>,
@@ -129,6 +175,7 @@ pub struct Harness {
     provider: Arc<ArcSwap<Provider>>,
     config: Config,
     api: Arc<NenjoClient>,
+    auth_provider: Arc<WorkerAuthProvider>,
     worker_id: String,
     session_store: Arc<dyn nenjo_sessions::SessionStore>,
     session_content: Arc<dyn nenjo_sessions::SessionContentStore>,
@@ -297,13 +344,12 @@ impl Harness {
         }
     }
 
-    fn restore_context(
-        &self,
-        response_tx: tokio::sync::mpsc::UnboundedSender<Response>,
-    ) -> CommandContext {
+    fn restore_context(&self, response_tx: ResponseSender) -> CommandContext {
         CommandContext {
             provider: self.provider.clone(),
+            actor_user_id: Uuid::nil(),
             response_tx,
+            auth_provider: self.auth_provider.clone(),
             worker_id: self.worker_id.clone(),
             session_store: self.session_store.clone(),
             session_content: self.session_content.clone(),
@@ -374,7 +420,7 @@ impl Harness {
     }
 
     /// Create a new Harness.
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: Config, auth_provider: Arc<WorkerAuthProvider>) -> Result<Self> {
         let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
 
         manifest::sync(
@@ -407,17 +453,12 @@ impl Harness {
 
         let agent_config = config.agent.clone();
 
-        let template_source: Arc<dyn nenjo::context::TemplateSource> = Arc::new(
-            manifest::FileTemplateSource::new(config.manifests_dir.join("context_blocks")),
-        );
-
         let provider = Provider::builder()
             .with_loader(loader)
             .with_model_factory(provider_registry)
             .with_tool_factory(tool_factory)
             .with_memory(mem)
             .with_agent_config(agent_config)
-            .with_template_source(template_source)
             .build()
             .await
             .context("Failed to build Provider")?;
@@ -454,6 +495,7 @@ impl Harness {
             provider,
             config,
             api,
+            auth_provider,
             worker_id,
             session_store,
             session_content,
@@ -497,43 +539,43 @@ impl Harness {
     }
 
     /// Run the event loop until shutdown.
-    pub async fn run<T>(&self, mut bus: nenjo_eventbus::EventBus<T>) -> Result<()>
+    pub async fn run<T>(&self, mut bus: SecureEnvelopeBus<T>, bootstrap_user_id: Uuid) -> Result<()>
     where
         T: nenjo_eventbus::Transport + 'static,
     {
-        let user_id = bus.user_id();
         let worker_id = bus.transport().worker_id();
         let capabilities = self.resolved_capabilities();
 
         info!(
-            %user_id,
+            user_id = %bootstrap_user_id,
             %worker_id,
             ?capabilities,
             "Subscribing to eventbus"
         );
 
-        let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
-        let (command_tx, mut command_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ReceivedCommand>();
+        let (response_tx, mut response_rx) =
+            tokio::sync::mpsc::unbounded_channel::<RoutedResponse>();
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedInput>();
+        let system_response_tx = ResponseSender::new(response_tx.clone(), bootstrap_user_id);
 
         // Send initial worker registration + heartbeat.
         let app_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        let _ = response_tx.send(Response::WorkerRegistered {
+        let _ = system_response_tx.send(Response::WorkerRegistered {
             worker_id,
             capabilities: capabilities.clone(),
             version: app_version.clone(),
         });
-        let _ = response_tx.send(Response::WorkerHeartbeat {
+        let _ = system_response_tx.send(Response::WorkerHeartbeat {
             worker_id,
             capabilities: capabilities.clone(),
             version: app_version.clone(),
         });
 
-        let restore_ctx = self.restore_context(response_tx.clone());
+        let restore_ctx = self.restore_context(system_response_tx.clone());
         self.restore_scheduler_sessions(&restore_ctx).await;
 
         // Periodic heartbeat task.
-        let heartbeat_tx = response_tx.clone();
+        let heartbeat_tx = system_response_tx.clone();
         let heartbeat_shutdown = self.shutdown.clone();
         let heartbeat_caps = capabilities;
         tokio::spawn(async move {
@@ -563,8 +605,8 @@ impl Harness {
                     biased;
                     msg = response_rx.recv() => {
                         match msg {
-                            Some(response) => {
-                                if let Err(e) = bus.send_response(response).await {
+                            Some(routed) => {
+                                if let Err(e) = bus.send_response_for(routed.user_id, routed.response).await {
                                     warn!(error = %e, "Failed to send response");
                                 }
                             }
@@ -573,8 +615,8 @@ impl Harness {
                     }
                     result = bus.recv_command() => {
                         match result {
-                            Ok(Some(cmd)) => {
-                                if command_tx.send(cmd).is_err() {
+                            Ok(Some(item)) => {
+                                if command_tx.send(item).is_err() {
                                     break;
                                 }
                             }
@@ -596,31 +638,57 @@ impl Harness {
 
         // Main loop: dispatch commands to independent tasks.
         while let Some(received) = command_rx.recv().await {
-            let command = received.command.clone();
-            if let Err(e) = received.ack().await {
-                warn!(error = %e, "Failed to ack command");
-            }
+            match received {
+                ReceivedInput::Command(received) => {
+                    let command = received.command.clone();
+                    let actor_user_id = received.envelope.user_id;
+                    if let Err(e) = received.ack().await {
+                        warn!(error = %e, "Failed to ack command");
+                    }
 
-            let ctx = CommandContext {
-                provider: self.provider.clone(),
-                response_tx: response_tx.clone(),
-                worker_id: self.worker_id.clone(),
-                session_store: self.session_store.clone(),
-                session_content: self.session_content.clone(),
-                session_coordinator: self.session_coordinator.clone(),
-                api: self.api.clone(),
-                config: self.config.clone(),
-                external_mcp: self.external_mcp.clone(),
-                executions: self.executions.clone(),
-                domains: self.domains.clone(),
-                git_locks: self.git_locks.clone(),
-            };
+                    let ctx = CommandContext {
+                        provider: self.provider.clone(),
+                        actor_user_id,
+                        response_tx: ResponseSender::new(response_tx.clone(), actor_user_id),
+                        auth_provider: self.auth_provider.clone(),
+                        worker_id: self.worker_id.clone(),
+                        session_store: self.session_store.clone(),
+                        session_content: self.session_content.clone(),
+                        session_coordinator: self.session_coordinator.clone(),
+                        api: self.api.clone(),
+                        config: self.config.clone(),
+                        external_mcp: self.external_mcp.clone(),
+                        executions: self.executions.clone(),
+                        domains: self.domains.clone(),
+                        git_locks: self.git_locks.clone(),
+                    };
 
-            tokio::spawn(async move {
-                if let Err(e) = handlers::route_command(command, ctx).await {
-                    error!(error = %e, "Error handling command");
+                    tokio::spawn(async move {
+                        if let Err(e) = handlers::route_command(command, ctx).await {
+                            error!(error = %e, "Error handling command");
+                        }
+                    });
                 }
-            });
+                ReceivedInput::DecodeFailure(received) => {
+                    let actor_user_id = received.envelope.user_id;
+                    let failure = received.failure.clone();
+                    if let Err(e) = received.ack().await {
+                        warn!(error = %e, "Failed to ack decode failure");
+                    }
+                    if let Some(response) = response_for_decode_failure(&failure) {
+                        let _ = response_tx.send(RoutedResponse {
+                            user_id: actor_user_id,
+                            response,
+                        });
+                    } else {
+                        warn!(
+                            user_id = %actor_user_id,
+                            code = failure.code,
+                            "Dropping user-facing decode failure without session context"
+                        );
+                    }
+                }
+            }
         }
 
         // Shutdown: cancel all active executions

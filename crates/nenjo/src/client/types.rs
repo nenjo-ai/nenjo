@@ -3,13 +3,15 @@
 use chrono::{DateTime, Utc};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::manifest::{
-    AgentHeartbeatManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
-    CouncilManifest, CouncilMemberManifest, DomainManifest, DomainPromptConfig, PromptConfig,
-    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    AgentHeartbeatManifest, AgentManifest, CouncilDelegationStrategy, CouncilManifest,
+    CouncilMemberManifest, DomainManifest, DomainPromptConfig, PromptConfig, RoutineEdgeCondition,
+    RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
+    RoutineTrigger,
 };
 
 /// Metadata for a project document, used during doc sync.
@@ -104,6 +106,14 @@ impl From<AgentDetailResponse> for AgentManifest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentPromptConfigResponse {
+    #[serde(default)]
+    pub prompt_config: Option<PromptConfig>,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
+}
+
 // ---------------------------------------------------------------------------
 // Council detail response (from GET /councils/{id}) → conversion to Manifest
 // ---------------------------------------------------------------------------
@@ -190,31 +200,25 @@ impl From<DomainManifestResponse> for DomainManifest {
 }
 
 // ---------------------------------------------------------------------------
-// Context block content response (from GET /context-blocks/{id}/content)
+// Context block responses
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ContextBlockContentResponse {
+pub struct ContextBlockSummaryResponse {
     pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub path: String,
     pub display_name: Option<String>,
     pub description: Option<String>,
-    pub template: String,
 }
 
-impl From<ContextBlockContentResponse> for ContextBlockManifest {
-    fn from(d: ContextBlockContentResponse) -> Self {
-        Self {
-            id: d.id,
-            name: d.name,
-            path: d.path,
-            display_name: d.display_name,
-            description: d.description,
-            template: d.template,
-        }
-    }
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextBlockContentResponse {
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +338,8 @@ pub struct WorkerEnrollmentRequest {
     pub enc_public_key: String,
     pub sign_public_key: String,
     pub verification_code: String,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +363,17 @@ pub struct WrappedAccountContentKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedOrgContentKey {
+    pub key_version: u32,
+    pub algorithm: String,
+    #[serde(default)]
+    pub ephemeral_public_key: Option<String>,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerEnrollmentState {
     Pending,
@@ -367,9 +384,13 @@ pub enum WorkerEnrollmentState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerEnrollmentStatusResponse {
     pub api_key_id: Uuid,
+    #[serde(default)]
+    pub metadata: Option<Value>,
     pub state: WorkerEnrollmentState,
     #[serde(default)]
     pub certificate: Option<WorkerCertificate>,
     #[serde(default)]
-    pub wrapped_ack: Option<WrappedAccountContentKey>,
+    pub user_wrapped_acks: HashMap<Uuid, WrappedAccountContentKey>,
+    #[serde(default)]
+    pub wrapped_ock: Option<WrappedOrgContentKey>,
 }

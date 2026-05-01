@@ -191,11 +191,20 @@ impl NenjoClient {
             .await
     }
 
-    pub async fn fetch_context_block(&self, id: Uuid) -> Result<Option<ContextBlockManifest>> {
-        let detail: Option<ContextBlockContentResponse> = self
-            .fetch_resource(&format!("/api/v1/context-blocks/{id}/content"))
-            .await?;
-        Ok(detail.map(Into::into))
+    pub async fn fetch_context_block_summary(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ContextBlockSummaryResponse>> {
+        self.fetch_resource(&format!("/api/v1/context-blocks/{id}"))
+            .await
+    }
+
+    pub async fn fetch_context_block_content(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ContextBlockContentResponse>> {
+        self.fetch_resource(&format!("/api/v1/context-blocks/{id}/content"))
+            .await
     }
 
     pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
@@ -204,24 +213,19 @@ impl NenjoClient {
         Ok(detail.map(Into::into))
     }
 
-    pub async fn fetch_agent_prompt_config(&self, id: Uuid) -> Result<Option<PromptConfig>> {
+    pub async fn fetch_agent_prompt_config(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<AgentPromptConfigResponse>> {
         let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, id);
         let resp = self.get(&url).await?;
 
         match resp.status() {
-            StatusCode::OK => {
-                let value: serde_json::Value = resp.json().await.map_err(ApiClientError::Http)?;
-                Ok(value
-                    .get("prompt_config")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|error| {
-                        ApiClientError::Parse(format!(
-                            "Failed to parse agent prompt config response: {error}"
-                        ))
-                    })?)
-            }
+            StatusCode::OK => resp
+                .json::<AgentPromptConfigResponse>()
+                .await
+                .map(Some)
+                .map_err(ApiClientError::Http),
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(self.api_error(status, resp).await),
         }

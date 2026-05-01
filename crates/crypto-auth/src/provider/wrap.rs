@@ -8,7 +8,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
-use super::types::{ACK_LEN, AccountContentKey, WrappedAccountContentKey};
+use super::types::{ACK_LEN, ContentKey, WrappedAccountContentKey, WrappedOrgContentKey};
 
 pub(super) const WRAP_ALGORITHM_AES_GCM: &str = "x25519-hkdf-sha256-aes-256-gcm";
 const HKDF_INFO: &[u8] = b"nenjo-worker-ack-wrap-v1";
@@ -16,7 +16,7 @@ const HKDF_INFO: &[u8] = b"nenjo-worker-ack-wrap-v1";
 pub(super) fn unwrap_ack(
     recipient_secret_key: &StaticSecret,
     wrapped: &WrappedAccountContentKey,
-) -> Result<AccountContentKey> {
+) -> Result<ContentKey> {
     let ephemeral_public_bytes =
         decode_fixed::<32>(&wrapped.ephemeral_public_key, "ephemeral_public_key")?;
     let ciphertext = decode_vec(&wrapped.ciphertext, "ciphertext")?;
@@ -39,7 +39,39 @@ pub(super) fn unwrap_ack(
 
     let mut ack = [0_u8; ACK_LEN];
     ack.copy_from_slice(&plaintext);
-    Ok(AccountContentKey::from_bytes(ack))
+    Ok(ContentKey::from_bytes(ack))
+}
+
+pub(super) fn unwrap_ock(
+    recipient_secret_key: &StaticSecret,
+    wrapped: &WrappedOrgContentKey,
+) -> Result<ContentKey> {
+    let ephemeral_public_key = wrapped
+        .ephemeral_public_key
+        .as_deref()
+        .context("Wrapped OCK is missing ephemeral_public_key")?;
+    let ephemeral_public_bytes = decode_fixed::<32>(ephemeral_public_key, "ephemeral_public_key")?;
+    let ciphertext = decode_vec(&wrapped.ciphertext, "ciphertext")?;
+
+    let ephemeral_public = X25519PublicKey::from(ephemeral_public_bytes);
+    let shared_secret = recipient_secret_key.diffie_hellman(&ephemeral_public);
+    let key = derive_wrap_key(shared_secret.as_bytes())?;
+    if wrapped.algorithm != WRAP_ALGORITHM_AES_GCM {
+        bail!("Unsupported OCK wrap algorithm: {}", wrapped.algorithm);
+    }
+    let nonce = Nonce::from(decode_fixed::<12>(&wrapped.nonce, "nonce")?);
+    let cipher = Aes256Gcm::new((&key).into());
+    let plaintext = cipher
+        .decrypt(&nonce, ciphertext.as_ref())
+        .context("Failed to decrypt wrapped OCK")?;
+
+    if plaintext.len() != ACK_LEN {
+        bail!("Unexpected OCK length: {}", plaintext.len());
+    }
+
+    let mut ock = [0_u8; ACK_LEN];
+    ock.copy_from_slice(&plaintext);
+    Ok(ContentKey::from_bytes(ock))
 }
 
 #[cfg(test)]

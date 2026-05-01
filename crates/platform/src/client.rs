@@ -141,6 +141,11 @@ struct ContentMutationEnvelope<T> {
     template: Option<T>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct AuthMeResponse {
+    org_id: Option<String>,
+}
+
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
     RoutineDocument {
         summary: crate::manifest_mcp::RoutineSummary {
@@ -1213,6 +1218,31 @@ impl PlatformManifestClient {
                 .await
                 .context("failed to decode task list"),
             status => bail!("project task list failed with status {status}"),
+        }
+    }
+
+    pub async fn current_org_id(&self) -> Result<Uuid> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/auth/me", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("failed to fetch authenticated org context")?;
+
+        match response.status() {
+            StatusCode::OK => {
+                let body: AuthMeResponse = response
+                    .json()
+                    .await
+                    .context("failed to decode authenticated org context")?;
+                let raw_org_id = body
+                    .org_id
+                    .filter(|value| !value.trim().is_empty())
+                    .context("authenticated org context did not include org_id")?;
+                Uuid::parse_str(&raw_org_id).context("authenticated org_id was not a valid UUID")
+            }
+            status => bail!("fetch authenticated org context failed with status {status}"),
         }
     }
 

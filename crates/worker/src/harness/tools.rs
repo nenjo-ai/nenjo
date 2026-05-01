@@ -28,8 +28,8 @@ use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::crypto::provider::WorkerAuthProvider;
-use crate::crypto::{decrypt_text, encrypt_text};
+use crate::crypto::WorkerAuthProvider;
+use crate::crypto::{ContentScope, decrypt_text_with_provider, encrypt_text_with_provider};
 
 // Re-export core tool types.
 pub use nenjo_tools::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
@@ -76,19 +76,15 @@ impl SensitivePayloadEncoder for WorkerAgentPromptPayloadEncoder {
     ) -> Result<Option<serde_json::Value>> {
         let auth_provider = WorkerAuthProvider::load_or_create(self.state_dir.join("crypto"))
             .context("failed to load worker auth provider")?;
-        let ack = auth_provider
-            .load_ack()
-            .await?
-            .ok_or_else(|| anyhow!("worker has no enrolled ACK"))?;
-        let key_version = auth_provider.current_key_version().await.unwrap_or(1);
-        let encrypted_payload = encrypt_text(
-            &ack,
+        let encrypted_payload = encrypt_text_with_provider(
+            &auth_provider,
+            ContentScope::User,
             account_id,
             object_id,
             object_type,
             &serde_json::to_string(payload)?,
-            key_version,
-        )?;
+        )
+        .await?;
         Ok(Some(serde_json::to_value(encrypted_payload)?))
     }
 
@@ -100,12 +96,41 @@ impl SensitivePayloadEncoder for WorkerAgentPromptPayloadEncoder {
             serde_json::from_value(payload.clone()).context("invalid encrypted payload JSON")?;
         let auth_provider = WorkerAuthProvider::load_or_create(self.state_dir.join("crypto"))
             .context("failed to load worker auth provider")?;
-        let ack = auth_provider
-            .load_ack()
-            .await?
-            .ok_or_else(|| anyhow!("worker has no enrolled ACK"))?;
-        let plaintext = decrypt_text(&ack, &encrypted_payload)?;
+        let plaintext = decrypt_text_with_provider(&auth_provider, &encrypted_payload).await?;
         Ok(Some(serde_json::from_str(&plaintext)?))
+    }
+}
+
+impl WorkerAgentPromptPayloadEncoder {
+    async fn encode_org_payload(
+        &self,
+        org_id: uuid::Uuid,
+        object_id: uuid::Uuid,
+        object_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let auth_provider = WorkerAuthProvider::load_or_create(self.state_dir.join("crypto"))
+            .context("failed to load worker auth provider")?;
+        let encrypted_payload = encrypt_text_with_provider(
+            &auth_provider,
+            ContentScope::Org,
+            org_id,
+            object_id,
+            object_type,
+            &serde_json::to_string(payload)?,
+        )
+        .await?;
+        serde_json::to_value(encrypted_payload).context("failed to serialize encrypted org payload")
+    }
+
+    async fn decode_task_payload(
+        &self,
+        payload: &nenjo_events::EncryptedPayload,
+    ) -> Result<serde_json::Value> {
+        let auth_provider = WorkerAuthProvider::load_or_create(self.state_dir.join("crypto"))
+            .context("failed to load worker auth provider")?;
+        let plaintext = decrypt_text_with_provider(&auth_provider, payload).await?;
+        serde_json::from_str(&plaintext).context("failed to decode encrypted task payload JSON")
     }
 }
 
@@ -765,20 +790,27 @@ struct TaskContentPayload {
     acceptance_criteria: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct CurrentTaskState {
     description: Option<String>,
     acceptance_criteria: Option<String>,
 }
 
 impl PlatformProjectToolsBackend {
-    async fn account_id(&self) -> Result<Uuid> {
+    async fn org_id(&self) -> Result<Uuid> {
         let manifest = self.manifest_store.load_manifest().await?;
-        manifest
+        if let Some(org_id) = manifest
             .auth
-            .map(|auth| auth.user_id)
-            .filter(|user_id| !user_id.is_nil())
-            .ok_or_else(|| anyhow!("worker manifest is missing auth.user_id"))
+            .map(|auth| auth.org_id)
+            .filter(|org_id| !org_id.is_nil())
+        {
+            return Ok(org_id);
+        }
+
+        self.client
+            .current_org_id()
+            .await
+            .context("failed to derive org_id from authenticated API key")
     }
 
     async fn encode_task_payload(
@@ -786,16 +818,15 @@ impl PlatformProjectToolsBackend {
         task_id: Uuid,
         payload: &TaskContentPayload,
     ) -> Result<serde_json::Value> {
-        let account_id = self.account_id().await?;
+        let org_id = self.org_id().await?;
         self.payload_encoder
-            .encode_payload(
-                account_id,
+            .encode_org_payload(
+                org_id,
                 task_id,
                 "task_content",
                 &serde_json::to_value(payload).context("failed to encode task content payload")?,
             )
-            .await?
-            .ok_or_else(|| anyhow!("task encryption did not return a payload"))
+            .await
     }
 
     async fn maybe_encode_task_payload(
@@ -898,15 +929,36 @@ impl PlatformProjectToolsBackend {
             args.description.is_some() || args.acceptance_criteria.is_some();
 
         if needs_encrypted_payload {
-            let current = self.client.get_project_task(args.task_id).await?;
-            let current: CurrentTaskState =
-                serde_json::from_value(current).context("failed to decode current task state")?;
+            let current_state = if args.description.is_some() && args.acceptance_criteria.is_some()
+            {
+                CurrentTaskState::default()
+            } else {
+                let current = self.client.get_project_task(args.task_id).await?;
+                let mut current_state: CurrentTaskState =
+                    serde_json::from_value(current.clone())
+                        .context("failed to decode current task state")?;
+                if let Some(encrypted_payload) = current
+                    .get("encrypted_payload")
+                    .cloned()
+                    .map(serde_json::from_value::<nenjo_events::EncryptedPayload>)
+                    .transpose()
+                    .context("failed to parse current task encrypted payload")?
+                {
+                    current_state = serde_json::from_value(
+                        self.payload_encoder
+                            .decode_task_payload(&encrypted_payload)
+                            .await?,
+                    )
+                    .context("failed to decode current task encrypted state")?;
+                }
+                current_state
+            };
             let payload = TaskContentPayload {
-                description: args.description.clone().or(current.description),
+                description: args.description.clone().or(current_state.description),
                 acceptance_criteria: args
                     .acceptance_criteria
                     .clone()
-                    .or(current.acceptance_criteria),
+                    .or(current_state.acceptance_criteria),
             };
             body.insert(
                 "encrypted_payload".into(),
@@ -1441,6 +1493,7 @@ mod tests {
             .replace_manifest(&Manifest {
                 auth: Some(nenjo::manifest::ManifestAuth {
                     user_id: Uuid::new_v4(),
+                    org_id: Uuid::new_v4(),
                     api_key_id: Some(Uuid::new_v4()),
                 }),
                 agents: vec![visible_agent.clone(), hidden_agent.clone()],

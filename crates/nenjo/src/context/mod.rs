@@ -9,7 +9,7 @@ pub mod types;
 pub mod var_defs;
 pub mod vars;
 
-pub use renderer::{ContextRenderer, InMemoryTemplateSource, TemplateSource};
+pub use renderer::ContextRenderer;
 pub use types::*;
 pub use var_defs::{TemplateVarDef, TemplateVarGroup, template_var_defs, template_var_groups};
 pub use vars::RenderContextVars;

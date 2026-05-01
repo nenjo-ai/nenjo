@@ -24,12 +24,14 @@ serde_yaml = "0.9"
 
 # Workspace crates
 nenjo = { workspace = true }
+nenjo-crypto-auth = { workspace = true }
 nenjo-platform = { workspace = true }
 nenjo-xml = { workspace = true }
 nenjo-tools = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
+nenjo-secure-envelope = { workspace = true }
 nenjo-sessions = { workspace = true }
 
 # HTTP client

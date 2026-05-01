@@ -75,6 +75,14 @@ pub struct Config {
     /// Empty means all capabilities (full runner mode).
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+
+    /// Optional user-defined harness name shown in the platform UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_name: Option<String>,
+
+    /// Optional user-defined harness labels shown in the platform UI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_labels: Vec<String>,
 }
 
 const DEFAULT_BACKEND_API_URL: &str = "https://api.nenjo.ai";
@@ -717,6 +725,8 @@ impl Default for Config {
             web_fetch: WebFetchConfig::default(),
             git: GitConfig::default(),
             capabilities: Vec::new(),
+            harness_name: None,
+            harness_labels: Vec::new(),
         }
     }
 }

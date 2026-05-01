@@ -5,6 +5,16 @@ use uuid::Uuid;
 
 use crate::{Capability, EncryptedPayload, TaskExecuteContent};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedAccountContentKey {
+    pub key_version: u32,
+    pub algorithm: String,
+    pub ephemeral_public_key: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A command dispatched to an agent harness.
 ///
 /// Discriminated by the `type` field in JSON.
@@ -174,6 +184,13 @@ pub enum Command {
     #[serde(rename = "worker.ping")]
     WorkerPing,
 
+    /// Push a user-scoped wrapped account content key to a specific worker so
+    /// it can decrypt/encrypt that user's private chat traffic.
+    #[serde(rename = "worker.account_key_updated")]
+    WorkerAccountKeyUpdated {
+        wrapped_ack: WrappedAccountContentKey,
+    },
+
     // -----------------------------------------------------------------
     // Bootstrap
     // -----------------------------------------------------------------
@@ -246,6 +263,7 @@ impl std::fmt::Display for Command {
                 write!(f, "agent_heartbeat.trigger(agent={agent_id})")
             }
             Self::WorkerPing => write!(f, "worker.ping"),
+            Self::WorkerAccountKeyUpdated { .. } => write!(f, "worker.account_key_updated"),
             Self::ManifestChanged {
                 resource_type,
                 action,
@@ -281,6 +299,7 @@ impl Command {
             | Command::AgentHeartbeatTrigger { .. } => Capability::Cron,
 
             Command::WorkerPing => Capability::Ping,
+            Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
             Command::ManifestChanged { .. } => Capability::Manifest,
 
@@ -298,7 +317,6 @@ pub enum ResourceType {
     Routine,
     Project,
     Council,
-    Lambda,
     Ability,
     ContextBlock,
     McpServer,
@@ -314,7 +332,6 @@ impl std::fmt::Display for ResourceType {
             Self::Routine => write!(f, "routine"),
             Self::Project => write!(f, "project"),
             Self::Council => write!(f, "council"),
-            Self::Lambda => write!(f, "lambda"),
             Self::Ability => write!(f, "ability"),
             Self::ContextBlock => write!(f, "context_block"),
             Self::McpServer => write!(f, "mcp_server"),

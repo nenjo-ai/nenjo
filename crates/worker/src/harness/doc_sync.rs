@@ -13,8 +13,8 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::crypto::decrypt_text;
-use crate::crypto::provider::WorkerAuthProvider;
+use crate::crypto::WorkerAuthProvider;
+use crate::crypto::decrypt_text_with_provider;
 use crate::harness::api_client::{DocumentSyncEdge, DocumentSyncMeta, NenjoClient};
 
 // ---------------------------------------------------------------------------
@@ -824,11 +824,7 @@ pub async fn resolve_document_content(
 
     let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
         .context("failed to initialize worker auth provider")?;
-    let ack = auth_provider
-        .load_ack()
-        .await?
-        .context("worker has no enrolled ACK for document decrypt")?;
-    let plaintext = decrypt_text(&ack, encrypted_payload)?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, encrypted_payload).await?;
     let value: serde_json::Value = serde_json::from_str(&plaintext)
         .context("decrypted document content was not valid JSON")?;
     value
