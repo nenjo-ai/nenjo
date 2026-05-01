@@ -74,8 +74,6 @@ pub struct DomainContext {
     pub command: String,
     #[serde(rename = "@description", skip_serializing_if = "str_is_empty")]
     pub description: Option<String>,
-    #[serde(rename = "@category", skip_serializing_if = "str_is_empty")]
-    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,14 +536,14 @@ mod tests {
         let abilities = AvailableAbilitiesContext {
             abilities: vec![AbilityContext {
                 name: "search".into(),
-                tool_name: "ability/search".into(),
+                tool_name: "search".into(),
                 activate_when: "user asks to find something".into(),
             }],
         };
         let xml = nenjo_xml::to_xml_pretty(&abilities, 2);
         assert!(xml.contains("<available_abilities>"));
         assert!(xml.contains("name=\"search\""));
-        assert!(xml.contains("tool=\"ability/search\""));
+        assert!(xml.contains("tool=\"search\""));
         assert!(xml.contains("use_when=\"user asks to find something\""));
     }
 
@@ -557,7 +555,6 @@ mod tests {
                 display_name: "PRD Mode".into(),
                 command: "/prd".into(),
                 description: Some("Product requirements".into()),
-                category: None,
             }],
         };
         let xml = nenjo_xml::to_xml_pretty(&domains, 2);

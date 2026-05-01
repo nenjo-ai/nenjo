@@ -722,6 +722,16 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn new_for_dir(nenjo_dir: PathBuf) -> Self {
+        Self {
+            config_dir: nenjo_dir.clone(),
+            workspace_dir: nenjo_dir.join("workspace"),
+            state_dir: nenjo_dir.join("state"),
+            manifests_dir: nenjo_dir.join("manifests"),
+            ..Self::default()
+        }
+    }
+
     /// Resolved backend API URL (falls back to production default).
     pub fn backend_api_url(&self) -> &str {
         self.backend_api_url
@@ -767,13 +777,7 @@ impl Config {
             config.manifests_dir = nenjo_dir.join("manifests");
             config
         } else {
-            let config = Config {
-                config_dir: nenjo_dir.clone(),
-                workspace_dir: nenjo_dir.join("workspace"),
-                state_dir: nenjo_dir.join("state"),
-                manifests_dir: nenjo_dir.join("manifests"),
-                ..Config::default()
-            };
+            let config = Config::new_for_dir(nenjo_dir.clone());
             config.save()?;
             config
         };

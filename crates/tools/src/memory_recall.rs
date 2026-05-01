@@ -64,7 +64,7 @@ impl Tool for MemoryRecallTool {
     }
 
     fn name(&self) -> &str {
-        "memory_recall"
+        "recall_memory"
     }
 
     fn description(&self) -> &str {

@@ -5,9 +5,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use nenjo::manifest::{
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+};
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
+use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 
 // ---------------------------------------------------------------------------
@@ -71,7 +74,6 @@ fn test_manifest() -> Manifest {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     };
 
@@ -79,23 +81,23 @@ fn test_manifest() -> Manifest {
         id: Uuid::new_v4(),
         name: "memory-agent".into(),
         description: Some("An agent with memory".into()),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": "You are a helpful assistant.\n{{ memories }}",
-            "templates": {
-                "chat_task": "{{ chat.message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: "You are a helpful assistant.\n{{ memories }}".into(),
+            templates: PromptTemplates {
+                task_execution: String::new(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model.id),
-        model_name: Some("test-model".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -105,7 +107,6 @@ fn test_manifest() -> Manifest {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     };
 
@@ -149,26 +150,26 @@ async fn provider_with_memory_adds_tools() {
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(names.contains(&"memory_store"), "should have memory_store");
+    assert!(names.contains(&"save_memory"), "should have save_memory");
     assert!(
-        names.contains(&"memory_recall"),
-        "should have memory_recall"
+        names.contains(&"recall_memory"),
+        "should have recall_memory"
     );
     assert!(
-        names.contains(&"memory_forget"),
-        "should have memory_forget"
+        names.contains(&"forget_memory"),
+        "should have forget_memory"
     );
     assert!(
-        names.contains(&"resource_save"),
-        "should have resource_save"
+        names.contains(&"save_resource"),
+        "should have save_resource"
     );
     assert!(
-        names.contains(&"resource_read"),
-        "should have resource_read"
+        names.contains(&"read_resource"),
+        "should have read_resource"
     );
     assert!(
-        names.contains(&"resource_delete"),
-        "should have resource_delete"
+        names.contains(&"delete_resource"),
+        "should have delete_resource"
     );
 }
 
@@ -194,7 +195,7 @@ async fn provider_without_memory_has_no_memory_tools() {
 
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(!names.contains(&"memory_store"));
+    assert!(!names.contains(&"save_memory"));
 }
 
 #[tokio::test]
@@ -610,45 +611,45 @@ async fn ability_inherits_memory_vars() {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     };
 
     let ability = AbilityManifest {
         id: Uuid::new_v4(),
         name: "code-review".into(),
+        tool_name: "code_review".into(),
         path: String::new(),
         display_name: None,
         description: Some("Reviews code".into()),
         activation_condition: "when code review is needed".into(),
-        prompt: "You review code.".into(),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: "You review code.".into(),
+        },
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        tool_filter: serde_json::json!({}),
-        is_system: false,
     };
 
     let agent = nenjo::manifest::AgentManifest {
         id: Uuid::new_v4(),
         name: "ability-agent".into(),
         description: Some("Agent with abilities".into()),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": "You are helpful.\n{{ memories }}",
-            "templates": {
-                "chat_task": "{{ chat.message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: "You are helpful.\n{{ memories }}".into(),
+            templates: PromptTemplates {
+                task_execution: String::new(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model.id),
-        model_name: Some("test-model".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![ability.id],
+        ability_ids: vec![ability.id],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -658,7 +659,6 @@ async fn ability_inherits_memory_vars() {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     };
 
@@ -692,11 +692,8 @@ async fn ability_inherits_memory_vars() {
     // The agent should have per-ability tool
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(
-        names.contains(&"ability/code-review"),
-        "should have ability/code-review"
-    );
-    assert!(names.contains(&"memory_store"), "should have memory_store");
+    assert!(names.contains(&"code_review"), "should have code_review");
+    assert!(names.contains(&"save_memory"), "should have save_memory");
 
     // Memory vars should be empty on the instance (loaded at execution time)
     // but the memory backend is configured on the runner
@@ -729,7 +726,6 @@ async fn domain_expansion_preserves_memory() {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     };
 
@@ -740,40 +736,35 @@ async fn domain_expansion_preserves_memory() {
         display_name: "PRD Mode".into(),
         description: Some("Product requirements".into()),
         command: "/prd".into(),
-        manifest: serde_json::json!({
-            "tools": {
-                "additional_scopes": [],
-                "activate_abilities": [],
-            },
-            "prompt": {}
-        }),
-        category: None,
-        tags: vec![],
-        is_system: false,
-        source_domain_id: None,
+        platform_scopes: vec![],
+        ability_ids: vec![],
+        mcp_server_ids: vec![],
+        prompt_config: DomainPromptConfig {
+            developer_prompt_addon: Some("PRD mode".into()),
+        },
     };
 
     let agent = nenjo::manifest::AgentManifest {
         id: Uuid::new_v4(),
         name: "domain-agent".into(),
         description: Some("Agent with domains".into()),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": "You are helpful.\n{{ memories }}",
-            "templates": {
-                "chat_task": "{{ chat.message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: "You are helpful.\n{{ memories }}".into(),
+            templates: PromptTemplates {
+                task_execution: String::new(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model.id),
-        model_name: Some("test-model".into()),
-        domains: vec![domain.id],
+        domain_ids: vec![domain.id],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -783,7 +774,6 @@ async fn domain_expansion_preserves_memory() {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     };
 
@@ -831,12 +821,12 @@ async fn domain_expansion_preserves_memory() {
     let specs = domain_runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        names.contains(&"memory_store"),
-        "domain runner should have memory_store"
+        names.contains(&"save_memory"),
+        "domain runner should have save_memory"
     );
     assert!(
-        names.contains(&"resource_save"),
-        "domain runner should have resource_save"
+        names.contains(&"save_resource"),
+        "domain runner should have save_resource"
     );
 }
 

@@ -63,7 +63,7 @@ impl Tool for MemoryForgetTool {
     }
 
     fn name(&self) -> &str {
-        "memory_forget"
+        "forget_memory"
     }
 
     fn description(&self) -> &str {

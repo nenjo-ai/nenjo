@@ -564,7 +564,6 @@ pub fn project_slug(manifest: &Manifest, project_id: Uuid) -> String {
         return String::new();
     }
     match manifest.projects.iter().find(|p| p.id == project_id) {
-        Some(p) if p.is_system => String::new(),
         Some(p) => p.slug.clone(),
         None => project_id.to_string(),
     }

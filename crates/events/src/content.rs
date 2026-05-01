@@ -37,3 +37,12 @@ pub struct TaskExecuteContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complexity: Option<String>,
 }
+
+/// Encrypted task content fields stored outside the plaintext task row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskEncryptedContent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<String>,
+}

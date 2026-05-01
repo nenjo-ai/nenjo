@@ -86,7 +86,7 @@ pub(crate) async fn execute_routine_cron(
         last_result = result;
 
         // Check for a structured verdict in the final step result.
-        // A gate_verdict tool call in any step produces {"verdict": "pass"|"fail"}
+        // A pass_verdict tool call in any step produces {"verdict": "pass"|"fail"}
         // in the step's data, which propagates to the routine result.
         if let Some(verdict) = last_result.data.get("verdict").and_then(|v| v.as_str()) {
             match verdict {

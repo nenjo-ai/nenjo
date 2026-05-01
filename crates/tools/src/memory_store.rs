@@ -45,7 +45,7 @@ impl Tool for MemoryStoreTool {
     }
 
     fn name(&self) -> &str {
-        "memory_store"
+        "save_memory"
     }
 
     fn description(&self) -> &str {

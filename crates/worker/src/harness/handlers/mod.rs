@@ -155,6 +155,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             action,
             project_id,
             payload,
+            encrypted_payload,
         } => {
             manifest::handle_manifest_changed(
                 &ctx,
@@ -163,6 +164,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 action,
                 project_id,
                 payload,
+                encrypted_payload,
             )
             .await
         }

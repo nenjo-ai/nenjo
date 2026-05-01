@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nenjo_sessions::{ScheduleState, SessionKind, SessionRecord, SessionStatus};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use nenjo::Provider;
@@ -187,6 +187,42 @@ fn scheduler_restore_action(record: &SessionRecord) -> Option<SchedulerRestoreAc
 }
 
 impl Harness {
+    pub(crate) async fn rebuild_domain_session(
+        provider: &Arc<ArcSwap<Provider>>,
+        session_id: Uuid,
+        agent_id: Uuid,
+        project_id: Uuid,
+        domain_command: &str,
+        turn_number: u32,
+    ) -> Result<DomainSession> {
+        let provider_snapshot = provider.load_full();
+        let base_runner = provider_snapshot
+            .agent_by_id(agent_id)
+            .await?
+            .build()
+            .await?;
+        let domain_runner = base_runner.domain_expansion(domain_command).await?;
+
+        let mut instance = domain_runner.instance().clone();
+        if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
+            active_domain.session_id = session_id;
+        }
+
+        let runner = nenjo::AgentRunner::from_instance(
+            instance,
+            domain_runner.memory().cloned(),
+            domain_runner.memory_scope().cloned(),
+        );
+
+        Ok(DomainSession {
+            runner,
+            agent_id,
+            project_id,
+            domain_command: domain_command.to_string(),
+            turn_number,
+        })
+    }
+
     async fn restore_domain_sessions(
         provider: &Arc<ArcSwap<Provider>>,
         session_store: &Arc<dyn nenjo_sessions::SessionStore>,
@@ -211,52 +247,24 @@ impl Harness {
                 continue;
             };
 
-            let provider_snapshot = provider.load_full();
-            let base_runner = match provider_snapshot.agent_by_id(agent_id).await {
-                Ok(builder) => match builder.build().await {
-                    Ok(runner) => runner,
-                    Err(e) => {
-                        warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain base runner");
-                        let _ = session_store.delete(persisted.session_id);
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    warn!(session_id = %persisted.session_id, error = %e, "Failed to find agent for persisted domain session");
-                    let _ = session_store.delete(persisted.session_id);
-                    continue;
+            match Self::rebuild_domain_session(
+                provider,
+                persisted.session_id,
+                agent_id,
+                project_id,
+                &domain.domain_command,
+                domain.turn_number,
+            )
+            .await
+            {
+                Ok(session) => {
+                    domains.insert(persisted.session_id, session);
                 }
-            };
-
-            let domain_runner = match base_runner.domain_expansion(&domain.domain_command).await {
-                Ok(runner) => runner,
                 Err(e) => {
                     warn!(session_id = %persisted.session_id, error = %e, "Failed to rebuild persisted domain session");
                     let _ = session_store.delete(persisted.session_id);
-                    continue;
                 }
-            };
-
-            let mut instance = domain_runner.instance().clone();
-            if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
-                active_domain.session_id = persisted.session_id;
-                active_domain.turn_number = domain.turn_number;
             }
-            let restored_runner = nenjo::AgentRunner::from_instance(
-                instance,
-                domain_runner.memory().cloned(),
-                domain_runner.memory_scope().cloned(),
-            );
-            domains.insert(
-                persisted.session_id,
-                DomainSession {
-                    runner: restored_runner,
-                    agent_id,
-                    project_id,
-                    domain_command: domain.domain_command,
-                    turn_number: domain.turn_number,
-                },
-            );
         }
     }
 
@@ -369,13 +377,18 @@ impl Harness {
     pub async fn new(config: Config) -> Result<Self> {
         let api = Arc::new(NenjoClient::new(config.backend_api_url(), &config.api_key));
 
-        manifest::sync(&api, &config.manifests_dir, &config.workspace_dir).await?;
+        manifest::sync(
+            &api,
+            &config.manifests_dir,
+            &config.workspace_dir,
+            &config.state_dir,
+        )
+        .await?;
 
         let loader = FileSystemManifestLoader::new(&config.manifests_dir);
         let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
-        let mcp_servers =
-            override_platform_mcp_url(manifest.mcp_servers.clone(), config.backend_api_url());
+        let mcp_servers = manifest.mcp_servers.clone();
 
         let external_mcp = Arc::new(ExternalMcpPool::new());
         external_mcp.reconcile(&mcp_servers).await;
@@ -386,16 +399,8 @@ impl Harness {
             config.workspace_dir.clone(),
         ));
         let runtime: Arc<dyn nenjo_tools::runtime::RuntimeAdapter> = Arc::new(NativeRuntime);
-        let platform_resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(
-            nenjo::PlatformMcpResolver::new(config.backend_api_url(), &config.api_key),
-        );
-        let tool_factory = HarnessToolFactory::new(
-            security,
-            runtime,
-            config.clone(),
-            external_mcp.clone(),
-            platform_resolver.clone(),
-        );
+        let tool_factory =
+            HarnessToolFactory::new(security, runtime, config.clone(), external_mcp.clone());
 
         let memory_dir = config.state_dir.join("memory");
         let mem = nenjo::memory::MarkdownMemory::new(&memory_dir, &config.state_dir);
@@ -412,7 +417,6 @@ impl Harness {
             .with_tool_factory(tool_factory)
             .with_memory(mem)
             .with_agent_config(agent_config)
-            .with_platform_resolver(platform_resolver)
             .with_template_source(template_source)
             .build()
             .await
@@ -422,7 +426,9 @@ impl Harness {
         let worker_id = provider
             .load_full()
             .manifest()
-            .api_key_id
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.api_key_id)
             .map(|id| id.to_string())
             .unwrap_or_else(|| "local-worker".to_string());
         let session_store: Arc<dyn nenjo_sessions::SessionStore> =
@@ -627,31 +633,6 @@ impl Harness {
 
         Ok(())
     }
-}
-
-/// Override the platform MCP server URL to match the configured backend.
-///
-/// The manifest may contain a hardcoded production URL for the platform server,
-/// but the worker might be running against a different backend (e.g. localhost).
-pub fn override_platform_mcp_url(
-    mut servers: Vec<nenjo::manifest::McpServerManifest>,
-    backend_api_url: &str,
-) -> Vec<nenjo::manifest::McpServerManifest> {
-    let backend_mcp = format!("{}/mcp", backend_api_url.trim_end_matches('/'));
-    for server in &mut servers {
-        if server.name == external_mcp::PLATFORM_SERVER_NAME
-            && server.url.as_deref() != Some(&backend_mcp)
-        {
-            debug!(
-                old_url = ?server.url,
-                new_url = %backend_mcp,
-                "Overriding platform MCP server URL to match backend"
-            );
-            server.url = Some(backend_mcp);
-            break;
-        }
-    }
-    servers
 }
 
 #[cfg(test)]

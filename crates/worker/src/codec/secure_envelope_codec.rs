@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use nenjo_eventbus::{CodecResult, EventCodec};
 use nenjo_events::{
-    Command, EncryptedPayload, Response, StreamEvent, TaskExecuteContent, ToolCall,
+    Command, EncryptedPayload, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    ToolCall,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -240,7 +241,7 @@ impl EventCodec for SecureEnvelopeCodec {
                 execution_run_id,
                 routine_id,
                 assigned_agent_id,
-                payload: _,
+                payload,
                 encrypted_payload: Some(encrypted_payload),
             } => Ok(Some(Command::TaskExecute {
                 task_id,
@@ -248,10 +249,20 @@ impl EventCodec for SecureEnvelopeCodec {
                 execution_run_id,
                 routine_id,
                 assigned_agent_id,
-                payload: Some(
-                    self.decode_json_payload::<TaskExecuteContent>(&encrypted_payload)
-                        .await?,
-                ),
+                payload: match payload {
+                    Some(mut payload) => {
+                        let encrypted = self
+                            .decode_json_payload::<TaskEncryptedContent>(&encrypted_payload)
+                            .await?;
+                        payload.description = encrypted.description;
+                        payload.acceptance_criteria = encrypted.acceptance_criteria;
+                        Some(payload)
+                    }
+                    None => Some(
+                        self.decode_json_payload::<TaskExecuteContent>(&encrypted_payload)
+                            .await?,
+                    ),
+                },
                 encrypted_payload: None,
             })),
             other => Ok(Some(other)),

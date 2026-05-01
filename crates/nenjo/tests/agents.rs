@@ -5,12 +5,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::PlatformToolResolver;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, Manifest, ModelManifest,
-    ProjectManifest,
+    ProjectManifest, PromptConfig, PromptTemplates,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
+use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
@@ -136,7 +136,6 @@ fn test_manifest() -> Manifest {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     };
 
@@ -144,24 +143,26 @@ fn test_manifest() -> Manifest {
         id: Uuid::new_v4(),
         name: "test-coder".into(),
         description: Some("A test coding agent".into()),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": "You are a helpful coding assistant.",
-            "developer_prompt": "Focus on writing clean, idiomatic Rust.",
-            "templates": {
-                "task_execution": "Execute the following task:\n\nTitle: {{ task.title }}\nDescription: {{ task.description }}",
-                "chat_task": "{{ chat.message }}",
-                "gate_eval": "Evaluate: {{ gate.criteria }}",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: "You are a helpful coding assistant.".into(),
+            developer_prompt: "Focus on writing clean, idiomatic Rust.".into(),
+            templates: PromptTemplates {
+                task_execution:
+                    "Execute the following task:\n\nTitle: {{ task.title }}\nDescription: {{ task.description }}"
+                        .into(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: "Evaluate: {{ gate.criteria }}".into(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model.id),
-        model_name: Some("test-model".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -174,7 +175,6 @@ fn test_manifest() -> Manifest {
             name: "test-project".into(),
             slug: "test-project".into(),
             description: Some("A test project".into()),
-            is_system: false,
             settings: serde_json::Value::Null,
         }],
         context_blocks: vec![ContextBlockManifest {
@@ -184,7 +184,6 @@ fn test_manifest() -> Manifest {
             display_name: None,
             description: None,
             template: "<available_agents>\n{{items}}\n</available_agents>".into(),
-            is_system: true,
         }],
         ..Default::default()
     }
@@ -353,79 +352,8 @@ async fn instance_builds_prompts() {
 }
 
 // ---------------------------------------------------------------------------
-// Mock PlatformToolResolver for scope tests
+// Helpers for ability/domain tool exposure tests
 // ---------------------------------------------------------------------------
-
-/// A fake platform tool that carries its name. Does nothing on execute.
-struct FakePlatformTool {
-    tool_name: String,
-}
-
-#[async_trait::async_trait]
-impl Tool for FakePlatformTool {
-    fn name(&self) -> &str {
-        &self.tool_name
-    }
-    fn description(&self) -> &str {
-        "fake platform tool"
-    }
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult {
-            success: true,
-            output: String::new(),
-            error: None,
-        })
-    }
-}
-
-/// Tool factory that uses MockPlatformResolver to create platform tools for the agent.
-struct MockPlatformToolFactory;
-
-#[async_trait::async_trait]
-impl ToolFactory for MockPlatformToolFactory {
-    async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
-        let resolver = MockPlatformResolver;
-        resolver.resolve_tools(&agent.platform_scopes).await
-    }
-}
-
-/// Mock resolver that returns platform tools based on scope matching.
-struct MockPlatformResolver;
-
-#[async_trait::async_trait]
-impl nenjo::PlatformToolResolver for MockPlatformResolver {
-    async fn resolve_tools(&self, platform_scopes: &[String]) -> Vec<Arc<dyn Tool>> {
-        let mut tool_names: Vec<&str> = Vec::new();
-        for scope in platform_scopes {
-            let tool_name = match scope.split(':').next().unwrap_or_default() {
-                "agents" => "app.nenjo.platform/agents",
-                "projects" => "app.nenjo.platform/projects",
-                "routines" => "app.nenjo.platform/routines",
-                "mcp_servers" => "app.nenjo.platform/mcp_servers",
-                "chat" => "app.nenjo.platform/chat",
-                "models" => "app.nenjo.platform/models",
-                _ => continue,
-            };
-            if !tool_names.contains(&tool_name) {
-                tool_names.push(tool_name);
-            }
-        }
-        tool_names
-            .into_iter()
-            .map(|tool_name| {
-                Arc::new(FakePlatformTool {
-                    tool_name: tool_name.to_string(),
-                }) as Arc<dyn Tool>
-            })
-            .collect()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers for ability/domain tests
@@ -435,22 +363,25 @@ fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
     AbilityManifest {
         id: Uuid::new_v4(),
         name: name.into(),
+        tool_name: name.replace('-', "_"),
         path: String::new(),
         display_name: None,
         description: Some(format!("{name} ability")),
         activation_condition: format!("when {name} is needed"),
-        prompt: format!("You are the {name} ability."),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: format!("You are the {name} ability."),
+        },
         platform_scopes: scopes.into_iter().map(String::from).collect(),
         mcp_server_ids: vec![],
-        tool_filter: serde_json::json!({}),
-        is_system: false,
     }
 }
 
 fn domain_manifest_with_config(
     name: &str,
-    abilities: Vec<&str>,
-    scopes: Vec<&str>,
+    developer_prompt_addon: Option<&str>,
+    platform_scopes: Vec<String>,
+    ability_ids: Vec<Uuid>,
+    mcp_server_ids: Vec<Uuid>,
 ) -> DomainManifest {
     DomainManifest {
         id: Uuid::new_v4(),
@@ -459,16 +390,12 @@ fn domain_manifest_with_config(
         display_name: name.into(),
         description: Some(format!("{name} domain")),
         command: name.into(),
-        manifest: serde_json::json!({
-            "tools": {
-                "additional_scopes": scopes,
-                "activate_abilities": abilities,
-            },
-        }),
-        category: None,
-        tags: vec![],
-        is_system: false,
-        source_domain_id: None,
+        platform_scopes,
+        ability_ids,
+        mcp_server_ids,
+        prompt_config: DomainPromptConfig {
+            developer_prompt_addon: developer_prompt_addon.map(str::to_string),
+        },
     }
 }
 
@@ -486,7 +413,6 @@ fn manifest_with_abilities_and_domains(
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     };
 
@@ -494,24 +420,24 @@ fn manifest_with_abilities_and_domains(
         id: Uuid::new_v4(),
         name: "test-agent".into(),
         description: Some("Test agent".into()),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": "You are a test agent.",
-            "developer_prompt": "Be helpful.",
-            "templates": {
-                "task_execution": "",
-                "chat_task": "{{ chat.message }}",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: "You are a test agent.".into(),
+            developer_prompt: "Be helpful.".into(),
+            templates: PromptTemplates {
+                task_execution: String::new(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model.id),
-        model_name: Some("test-model".into()),
-        domains: agent_domains,
+        domain_ids: agent_domains,
         platform_scopes: agent_scopes.into_iter().map(String::from).collect(),
         mcp_server_ids: vec![],
-        abilities: agent_abilities,
+        ability_ids: agent_abilities,
         prompt_locked: false,
         heartbeat: None,
     };
@@ -526,7 +452,6 @@ fn manifest_with_abilities_and_domains(
             name: "test-project".into(),
             slug: "test-project".into(),
             description: None,
-            is_system: false,
             settings: serde_json::Value::Null,
         }],
         ..Default::default()
@@ -538,7 +463,7 @@ fn manifest_with_abilities_and_domains(
 // ===========================================================================
 
 #[tokio::test]
-async fn ability_agent_has_per_ability_tools_and_platform_tools() {
+async fn ability_agent_has_ability_invoke_tool_only() {
     let ability = ability_manifest("writer", vec!["agents:write"]);
     let manifest = manifest_with_abilities_and_domains(
         vec![ability.id],
@@ -548,13 +473,10 @@ async fn ability_agent_has_per_ability_tools_and_platform_tools() {
         vec![],
     );
 
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -571,23 +493,36 @@ async fn ability_agent_has_per_ability_tools_and_platform_tools() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"app.nenjo.platform/projects"),
-        "base agent should have platform/projects, got: {tool_names:?}"
+        tool_names.contains(&"writer"),
+        "base agent should have assigned ability tool, got: {tool_names:?}"
+    );
+
+    let writer_spec = specs
+        .iter()
+        .find(|spec| spec.name == "writer")
+        .expect("missing writer ability tool");
+    assert!(
+        writer_spec.description.contains("writer ability"),
+        "ability tool description should include ability description, got: {}",
+        writer_spec.description
     );
     assert!(
-        tool_names.contains(&"ability/writer"),
-        "base agent should have ability/writer, got: {tool_names:?}"
+        writer_spec.description.contains("when writer is needed"),
+        "ability tool description should include activation condition, got: {}",
+        writer_spec.description
     );
 }
 
 #[tokio::test]
-async fn abilities_with_same_name_in_different_paths_get_distinct_tool_names() {
+async fn assigned_abilities_register_distinct_tool_names() {
     let mut frontend = ability_manifest("review", vec!["projects:read"]);
     frontend.path = "frontend".into();
+    frontend.tool_name = "frontend_review".into();
     let frontend_id = frontend.id;
 
     let mut backend = ability_manifest("review", vec!["projects:read"]);
     backend.path = "backend".into();
+    backend.tool_name = "backend_review".into();
     let backend_id = backend.id;
 
     let manifest = manifest_with_abilities_and_domains(
@@ -598,13 +533,10 @@ async fn abilities_with_same_name_in_different_paths_get_distinct_tool_names() {
         vec![],
     );
 
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -620,14 +552,8 @@ async fn abilities_with_same_name_in_different_paths_get_distinct_tool_names() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(
-        tool_names.contains(&"ability/frontend.review"),
-        "missing frontend review tool: {tool_names:?}"
-    );
-    assert!(
-        tool_names.contains(&"ability/backend.review"),
-        "missing backend review tool: {tool_names:?}"
-    );
+    assert!(tool_names.contains(&"frontend_review"));
+    assert!(tool_names.contains(&"backend_review"));
 }
 
 #[tokio::test]
@@ -635,13 +561,10 @@ async fn agent_without_abilities_has_no_ability_tools() {
     let manifest =
         manifest_with_abilities_and_domains(vec![], vec![], vec!["projects:read"], vec![], vec![]);
 
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -657,10 +580,9 @@ async fn agent_without_abilities_has_no_ability_tools() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        !tool_names.iter().any(|n| n.starts_with("ability/")),
+        !tool_names.contains(&"writer"),
         "agent without abilities should not have ability tools, got: {tool_names:?}"
     );
-    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
 }
 
 // ===========================================================================
@@ -668,8 +590,14 @@ async fn agent_without_abilities_has_no_ability_tools() {
 // ===========================================================================
 
 #[tokio::test]
-async fn domain_expansion_adds_scopes_and_tools() {
-    let domain = domain_manifest_with_config("creator", vec![], vec!["agents:write"]);
+async fn domain_expansion_preserves_tool_set() {
+    let domain = domain_manifest_with_config(
+        "creator",
+        Some("Creator mode enabled."),
+        vec![],
+        vec![],
+        vec![],
+    );
     let manifest = manifest_with_abilities_and_domains(
         vec![],
         vec![domain.id],
@@ -678,13 +606,10 @@ async fn domain_expansion_adds_scopes_and_tools() {
         vec![domain],
     );
 
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -697,53 +622,49 @@ async fn domain_expansion_adds_scopes_and_tools() {
         .await
         .unwrap();
 
-    // Before: only platform/projects
-    let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
-    assert!(!tool_names.contains(&"app.nenjo.platform/agents"));
-
-    // After: also platform/agents
     let domain_runner = runner.domain_expansion("creator").await.unwrap();
-    let specs = domain_runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(
-        tool_names.contains(&"app.nenjo.platform/projects"),
-        "domain should preserve parent tools, got: {tool_names:?}"
+    let before_specs = runner.instance().tool_specs();
+    let after_specs = domain_runner.instance().tool_specs();
+    let before_names: Vec<&str> = before_specs.iter().map(|s| s.name.as_str()).collect();
+    let after_names: Vec<&str> = after_specs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        before_names, after_names,
+        "domain expansion should not change tools"
     );
-    assert!(
-        tool_names.contains(&"app.nenjo.platform/agents"),
-        "domain should add scope-resolved tools, got: {tool_names:?}"
-    );
+
     assert!(
         domain_runner
             .instance()
             .prompt_context
-            .platform_scopes
-            .contains(&"agents:write".to_string()),
-        "domain should merge scopes into prompt_context"
+            .active_domain
+            .as_ref()
+            .and_then(|domain| domain
+                .manifest
+                .prompt_config
+                .developer_prompt_addon
+                .as_deref())
+            == Some("Creator mode enabled."),
+        "domain should expose the configured prompt addon"
     );
 }
 
 #[tokio::test]
-async fn domain_expansion_activates_abilities_and_injects_ability_tools() {
+async fn domain_expansion_preserves_existing_abilities() {
     let ability = ability_manifest("code-review", vec!["projects:write"]);
-    let domain = domain_manifest_with_config("reviewer", vec!["code-review"], vec![]);
+    let domain =
+        domain_manifest_with_config("reviewer", Some("Review mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![], // agent has no abilities
+        vec![ability.id],
         vec![domain.id],
         vec!["projects:read"],
-        vec![ability],
+        vec![ability.clone()],
         vec![domain],
     );
-
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
 
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -756,25 +677,16 @@ async fn domain_expansion_activates_abilities_and_injects_ability_tools() {
         .await
         .unwrap();
 
-    // Before: no abilities, no ability tools
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(!tool_names.iter().any(|n| n.starts_with("ability/")));
-    assert!(
-        runner
-            .instance()
-            .prompt_context
-            .available_abilities
-            .is_empty()
-    );
+    assert!(tool_names.contains(&"code_review"));
 
-    // After: ability activated, per-ability tool injected
     let domain_runner = runner.domain_expansion("reviewer").await.unwrap();
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"ability/code-review"),
-        "domain should inject ability/code-review, got: {tool_names:?}"
+        tool_names.contains(&"code_review"),
+        "domain expansion should preserve assigned ability tools, got: {tool_names:?}"
     );
 
     let ability_names: Vec<&str> = domain_runner
@@ -786,29 +698,26 @@ async fn domain_expansion_activates_abilities_and_injects_ability_tools() {
         .collect();
     assert!(
         ability_names.contains(&"code-review"),
-        "domain should activate ability, got: {ability_names:?}"
+        "domain expansion should preserve assigned abilities, got: {ability_names:?}"
     );
 }
 
 #[tokio::test]
-async fn domain_expansion_with_scopes_and_abilities() {
+async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     let ability = ability_manifest("deployer", vec!["projects:read"]);
-    let domain = domain_manifest_with_config("ops", vec!["deployer"], vec!["agents:write"]);
+    let domain = domain_manifest_with_config("ops", Some("Ops mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![],
+        vec![ability.id],
         vec![domain.id],
         vec!["projects:read"],
-        vec![ability],
+        vec![ability.clone()],
         vec![domain],
     );
-
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
 
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -825,9 +734,20 @@ async fn domain_expansion_with_scopes_and_abilities() {
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(tool_names.contains(&"app.nenjo.platform/projects"));
-    assert!(tool_names.contains(&"app.nenjo.platform/agents"));
-    assert!(tool_names.contains(&"ability/deployer"));
+    assert!(tool_names.contains(&"deployer"));
+    assert_eq!(
+        domain_runner
+            .instance()
+            .prompt_context
+            .active_domain
+            .as_ref()
+            .and_then(|domain| domain
+                .manifest
+                .prompt_config
+                .developer_prompt_addon
+                .as_deref()),
+        Some("Ops mode")
+    );
 
     let ability_names: Vec<&str> = domain_runner
         .instance()
@@ -840,9 +760,10 @@ async fn domain_expansion_with_scopes_and_abilities() {
 }
 
 #[tokio::test]
-async fn domain_expansion_does_not_duplicate_existing_abilities() {
+async fn domain_expansion_preserves_existing_ability_without_duplication() {
     let ability = ability_manifest("writer", vec!["agents:write"]);
-    let domain = domain_manifest_with_config("creator", vec!["writer"], vec![]);
+    let domain =
+        domain_manifest_with_config("creator", Some("Creator mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
         vec![ability.id], // agent already has this ability
         vec![domain.id],
@@ -851,13 +772,10 @@ async fn domain_expansion_does_not_duplicate_existing_abilities() {
         vec![domain],
     );
 
-    let resolver: Arc<dyn nenjo::PlatformToolResolver> = Arc::new(MockPlatformResolver);
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("ok"))
-        .with_tool_factory(MockPlatformToolFactory)
-        .with_platform_resolver(resolver)
+        .with_tool_factory(NoopToolFactory)
         .build()
         .await
         .unwrap();
@@ -880,4 +798,123 @@ async fn domain_expansion_does_not_duplicate_existing_abilities() {
         .filter(|a| a.name == "writer")
         .count();
     assert_eq!(ability_count, 1, "should not duplicate existing abilities");
+}
+
+#[tokio::test]
+async fn domain_expansion_adds_domain_scopes_and_abilities() {
+    let assigned_ability = ability_manifest("writer", vec!["agents:write"]);
+    let domain_ability = ability_manifest("reviewer", vec!["projects:read"]);
+    let domain = domain_manifest_with_config(
+        "review",
+        Some("Review mode"),
+        vec!["projects:write".into()],
+        vec![domain_ability.id],
+        vec![],
+    );
+    let manifest = manifest_with_abilities_and_domains(
+        vec![assigned_ability.id],
+        vec![domain.id],
+        vec!["projects:read"],
+        vec![assigned_ability, domain_ability],
+        vec![domain],
+    );
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let domain_runner = runner.domain_expansion("review").await.unwrap();
+
+    assert!(
+        domain_runner
+            .instance()
+            .prompt_context
+            .platform_scopes
+            .iter()
+            .any(|scope| scope == "projects:write")
+    );
+
+    let ability_names: Vec<&str> = domain_runner
+        .instance()
+        .prompt_context
+        .available_abilities
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert!(ability_names.contains(&"writer"));
+    assert!(ability_names.contains(&"reviewer"));
+
+    let specs = domain_runner.instance().tool_specs();
+    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(tool_names.contains(&"writer"));
+}
+
+#[tokio::test]
+async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
+    let github_id = Uuid::new_v4();
+    let domain = domain_manifest_with_config(
+        "github",
+        Some("GitHub mode"),
+        vec![],
+        vec![],
+        vec![github_id],
+    );
+    let mut manifest = manifest_with_abilities_and_domains(
+        vec![],
+        vec![domain.id],
+        vec!["projects:read"],
+        vec![],
+        vec![domain],
+    );
+    manifest
+        .mcp_servers
+        .push(nenjo::manifest::McpServerManifest {
+            id: github_id,
+            name: "github".into(),
+            display_name: "GitHub".into(),
+            description: Some("GitHub API".into()),
+            transport: "stdio".into(),
+            command: None,
+            args: None,
+            url: None,
+            env_schema: serde_json::Value::Null,
+        });
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let domain_runner = runner.domain_expansion("github").await.unwrap();
+    let mcp_names: Vec<&str> = domain_runner
+        .instance()
+        .prompt_context
+        .mcp_server_info
+        .iter()
+        .map(|entry| entry.0.as_str())
+        .collect();
+    assert!(mcp_names.contains(&"GitHub"));
 }

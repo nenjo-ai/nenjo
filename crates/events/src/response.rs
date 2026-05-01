@@ -1022,6 +1022,7 @@ mod tests {
             action: crate::ResourceAction::Updated,
             project_id: None,
             payload: None,
+            encrypted_payload: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"manifest.changed""#));

@@ -118,7 +118,7 @@ pub trait Tool: Send + Sync {
     ///
     /// When `true`, the turn loop will stop after executing this tool without
     /// pushing the tool result back into the conversation. This is useful for
-    /// tools like `gate_verdict` where the structured arguments are the signal
+    /// tools like `pass_verdict` where the structured arguments are the signal
     /// and no further LLM interaction is needed.
     fn is_terminal(&self) -> bool {
         false

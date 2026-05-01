@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/nenjo",
+    "crates/nenjo-platform",
     "crates/worker",
     "crates/sessions",
     "crates/events",
@@ -22,6 +23,7 @@ repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
 nenjo = { path = "crates/nenjo", version = "0.10.0" }
+nenjo-platform = { path = "crates/nenjo-platform", version = "0.10.0" }
 nenjo-xml = { path = "crates/xml", version = "0.10.0" }
 nenjo-models = { path = "crates/models", version = "0.10.0" }
 nenjo-tools = { path = "crates/tools", version = "0.10.0" }

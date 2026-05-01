@@ -79,11 +79,12 @@ fn encrypt_with_aes_256_gcm(
 ) -> Result<EncryptedPayload> {
     let aad = payload_aad(account_id, object_id, &object_type);
     let cipher = Aes256Gcm::new(key.as_bytes().into());
-    let mut nonce = [0_u8; 12];
-    AesOsRng.fill_bytes(&mut nonce);
+    let mut nonce_bytes = [0_u8; 12];
+    AesOsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = AesNonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(
-            AesNonce::from_slice(&nonce),
+            &nonce,
             aes_gcm::aead::Payload {
                 msg: plaintext.as_bytes(),
                 aad: &aad,
@@ -97,7 +98,7 @@ fn encrypt_with_aes_256_gcm(
         object_type,
         CONTENT_ALGORITHM_AES_256_GCM,
         key_version,
-        &nonce,
+        &nonce_bytes,
         &ciphertext,
     ))
 }
@@ -120,11 +121,11 @@ fn decrypt_with_aes_256_gcm(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let nonce = decode_fixed::<12>(nonce_b64, "nonce")?;
+    let nonce = AesNonce::from(decode_fixed::<12>(nonce_b64, "nonce")?);
     let cipher = Aes256Gcm::new(key.as_bytes().into());
     cipher
         .decrypt(
-            AesNonce::from_slice(&nonce),
+            &nonce,
             aes_gcm::aead::Payload {
                 msg: ciphertext,
                 aad,

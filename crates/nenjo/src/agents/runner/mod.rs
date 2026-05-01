@@ -12,17 +12,17 @@ use nenjo_models::ChatMessage;
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
-use super::abilities::AbilityTool;
+use super::abilities::{build_ability_tools, is_ability_tool};
 use super::delegation::DelegateToTool;
 use super::instance::{AgentInstance, build_document_listing};
 use anyhow::Context;
 
 use crate::config::AgentConfig;
-use crate::manifest::Manifest;
+use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, Memory, MemoryScope};
 use crate::provider::{ModelProviderFactory, ToolFactory};
 use crate::routines::LambdaRunner;
-use crate::types::{ActiveDomain, DelegationContext, DomainSessionManifest, TaskType};
+use crate::types::{ActiveDomain, DelegationContext, TaskType};
 use types::{TurnEvent, TurnOutput};
 
 /// Handle to a running agent execution.
@@ -94,7 +94,6 @@ pub struct DelegationSupport {
     pub memory: Option<Arc<dyn Memory>>,
     pub agent_config: AgentConfig,
     pub lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    pub platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     /// Pre-built delegation context from a parent delegation. When set,
     /// the runner uses this instead of creating a fresh one — this is how
     /// depth decrements across nested delegations.
@@ -109,7 +108,6 @@ pub struct AgentRunner {
     memory: Option<Arc<dyn Memory>>,
     memory_scope: Option<MemoryScope>,
     manifest: Option<Arc<Manifest>>,
-    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
 }
 
 impl AgentRunner {
@@ -127,32 +125,24 @@ impl AgentRunner {
             instance.documents_xml = build_document_listing(dir, slug);
         }
 
-        // Extract manifest and platform resolver before delegation is consumed —
-        // stored on the runner so domain_expansion can pass them to sub-runners.
+        // Extract manifest before delegation is consumed so domain_expansion can
+        // pass it to sub-runners.
         let manifest = delegation.as_ref().map(|ds| ds.manifest.clone());
-        let platform_resolver = delegation
+
+        // If the agent has abilities, register one tool per assigned ability
+        // resolved from the canonical manifest.
+        if let Some(active_abilities) = manifest
             .as_ref()
-            .and_then(|ds| ds.platform_resolver.clone());
-
-        let has_abilities = !instance.prompt_context.available_abilities.is_empty();
-
-        // If the agent has abilities, register each as a dedicated tool.
-        // Uses the manifest from DelegationSupport to resolve the ability's
-        // MCP servers the same way the Provider does for the base agent.
-        if has_abilities {
+            .map(|manifest| resolve_active_abilities(manifest, instance.agent_id, None))
+            .filter(|abilities| !abilities.is_empty())
+        {
             let m = manifest
                 .clone()
                 .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name.clone()))?;
             let base_instance = Arc::new(instance.clone());
-            for ability in &instance.prompt_context.available_abilities {
-                let tool = AbilityTool::new(
-                    ability.clone(),
-                    base_instance.clone(),
-                    m.clone(),
-                    platform_resolver.clone(),
-                );
-                instance.tools.push(Arc::new(tool));
-            }
+            instance
+                .tools
+                .extend(build_ability_tools(&active_abilities, base_instance, m));
         }
 
         // If delegation is enabled (other agents exist + max_depth > 0), add delegate_to.
@@ -177,7 +167,6 @@ impl AgentRunner {
                     memory: ds.memory,
                     agent_config: ds.agent_config,
                     lambda_runner: ds.lambda_runner,
-                    platform_resolver: ds.platform_resolver,
                     caller_agent_id: instance.agent_id.unwrap_or_else(Uuid::nil),
                     delegation_ctx: ctx,
                 });
@@ -192,7 +181,6 @@ impl AgentRunner {
             memory,
             memory_scope,
             manifest,
-            platform_resolver,
         })
     }
 
@@ -226,7 +214,6 @@ impl AgentRunner {
             memory,
             memory_scope,
             manifest: None,
-            platform_resolver: None,
         }
     }
 
@@ -243,11 +230,8 @@ impl AgentRunner {
     /// Activate a domain by name, returning a new runner with expanded config.
     ///
     /// The domain is looked up from the agent's assigned domains. The returned
-    /// runner has:
-    /// - The domain's `system_addon` appended to the developer prompt
-    /// - Tools filtered/expanded per the domain's `DomainToolConfig`
-    /// - Domain context (guidelines, artifact schema) injected into prompts
-    /// - A fresh session with turn counter at 0
+    /// runner appends the domain's `system_addon` to the developer prompt and
+    /// layers in any domain-scoped ability, scope, and MCP activations.
     ///
     /// ```ignore
     /// let domain_runner = runner.domain_expansion("prd")?;
@@ -271,10 +255,7 @@ impl AgentRunner {
                 format!("domain '{domain_name}' not found. Available: {available:?}")
             })?;
 
-        // Parse the domain's manifest JSON into the session config.
-        let session_manifest: DomainSessionManifest =
-            serde_json::from_value(domain.manifest.clone())
-                .with_context(|| format!("failed to parse manifest for domain '{domain_name}'"))?;
+        let session_manifest: DomainManifest = domain.clone();
 
         // Build the active domain session state.
         let active_domain = ActiveDomain {
@@ -282,14 +263,47 @@ impl AgentRunner {
             domain_id: domain.id,
             domain_name: domain.name.clone(),
             manifest: session_manifest.clone(),
-            turn_number: 0,
-            artifact_draft: serde_json::Value::Object(Default::default()),
         };
 
         // Clone the instance and apply domain expansion.
-        // Domains are additive — they add context, scopes, tools, and abilities.
         let mut instance = (*self.instance).clone();
+        let manifest = self
+            .manifest
+            .as_ref()
+            .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name.clone()))?;
+
+        merge_domain_scopes(
+            &mut instance.prompt_context.platform_scopes,
+            &session_manifest.platform_scopes,
+        );
+        merge_domain_abilities(
+            &mut instance.prompt_context.available_abilities,
+            manifest,
+            &session_manifest.ability_ids,
+        );
+        merge_domain_mcp_servers(
+            &mut instance.prompt_context.mcp_server_info,
+            manifest,
+            &session_manifest.mcp_server_ids,
+        );
         instance.prompt_context.active_domain = Some(active_domain);
+
+        let active_abilities =
+            resolve_active_abilities(manifest, instance.agent_id, Some(&session_manifest));
+
+        // Rebuild assigned ability tools so the visible set matches the
+        // effective domain-expanded ability assignments.
+        instance
+            .tools
+            .retain(|tool| !is_ability_tool(tool.name(), &active_abilities));
+        if !active_abilities.is_empty() {
+            let base_instance = Arc::new(instance.clone());
+            instance.tools.extend(build_ability_tools(
+                &active_abilities,
+                base_instance,
+                manifest.clone(),
+            ));
+        }
 
         info!(
             agent = instance.name,
@@ -298,88 +312,11 @@ impl AgentRunner {
             "Domain expansion started"
         );
 
-        let tool_config = &session_manifest.tools;
-
-        // Merge additional_scopes into the agent's platform_scopes.
-        if !tool_config.additional_scopes.is_empty() {
-            debug!(
-                agent = instance.name,
-                domain = domain_name,
-                scopes = ?tool_config.additional_scopes,
-                "Merging domain scopes"
-            );
-        }
-        for scope in &tool_config.additional_scopes {
-            if !instance.prompt_context.platform_scopes.contains(scope) {
-                instance.prompt_context.platform_scopes.push(scope.clone());
-            }
-        }
-
-        // Resolve and add platform tools for the expanded scopes.
-        if !tool_config.additional_scopes.is_empty()
-            && let Some(ref resolver) = self.platform_resolver
-        {
-            let scope_tools = resolver.resolve_tools(&tool_config.additional_scopes).await;
-            for tool in scope_tools {
-                let name = tool.name().to_string();
-                if !instance.tools.iter().any(|t| t.name() == name) {
-                    instance.tools.push(tool);
-                }
-            }
-        }
-
-        // Activate abilities listed in the domain config.
-        if !tool_config.activate_abilities.is_empty() {
-            debug!(
-                agent = instance.name,
-                domain = domain_name,
-                abilities = ?tool_config.activate_abilities,
-                "Activating domain abilities"
-            );
-            if let Some(ref manifest) = self.manifest {
-                for ability_name in &tool_config.activate_abilities {
-                    if let Some(ability) =
-                        manifest.abilities.iter().find(|a| a.name == *ability_name)
-                        && !instance
-                            .prompt_context
-                            .available_abilities
-                            .iter()
-                            .any(|a| a.id == ability.id)
-                    {
-                        instance
-                            .prompt_context
-                            .available_abilities
-                            .push(ability.clone());
-                    }
-                }
-            }
-        }
-
-        // If abilities are now available (either pre-existing or domain-activated),
-        // register any missing dedicated ability tools.
-        let has_abilities = !instance.prompt_context.available_abilities.is_empty();
-        if has_abilities && let Some(ref m) = self.manifest {
-            let base_instance = Arc::new(instance.clone());
-            for ability in &instance.prompt_context.available_abilities {
-                let tool_name = super::abilities::ability_tool_name(ability);
-                if !instance.tools.iter().any(|t| t.name() == tool_name) {
-                    let tool = AbilityTool::new(
-                        ability.clone(),
-                        base_instance.clone(),
-                        m.clone(),
-                        self.platform_resolver.clone(),
-                    );
-                    instance.tools.push(Arc::new(tool));
-                }
-            }
-        }
-
         Ok(Self {
             instance: Arc::new(instance),
             memory: self.memory.clone(),
             memory_scope: self.memory_scope.clone(),
             manifest: self.manifest.clone(),
-            platform_resolver: self.platform_resolver.clone(),
         })
     }
 
@@ -491,25 +428,21 @@ impl AgentRunner {
             "Executing agent"
         );
 
-        trace!(
-            agent = inst.name,
-            "--- System Prompt ---\n{}\n--- Developer Prompt ---\n{}\n--- User Message ---\n{}",
-            prompts.system,
-            prompts.developer,
-            prompts.user_message,
-        );
+        let system_prompt = prompts.system;
+        let developer_prompt = prompts.developer;
+        let templated_user_message = prompts.user_message;
 
         // 4. Build initial messages.
         let mut messages: Vec<ChatMessage> = Vec::new();
 
-        if inst.provider.supports_developer_role(&inst.model) && !prompts.developer.is_empty() {
-            messages.push(ChatMessage::system(&prompts.system));
-            messages.push(ChatMessage::developer(&prompts.developer));
+        if inst.provider.supports_developer_role(&inst.model) && !developer_prompt.is_empty() {
+            messages.push(ChatMessage::system(&system_prompt));
+            messages.push(ChatMessage::developer(&developer_prompt));
         } else {
-            let combined = if prompts.developer.is_empty() {
-                prompts.system
+            let combined = if developer_prompt.is_empty() {
+                system_prompt.clone()
             } else {
-                format!("{}\n\n{}", prompts.system, prompts.developer)
+                format!("{}\n\n{}", system_prompt, developer_prompt)
             };
             messages.push(ChatMessage::system(&combined));
         }
@@ -520,8 +453,8 @@ impl AgentRunner {
             }
         }
 
-        let user_message = if !prompts.user_message.is_empty() {
-            prompts.user_message
+        let user_message = if !templated_user_message.is_empty() {
+            templated_user_message
         } else {
             // Template rendered empty — fall back to the raw task content.
             match &task {
@@ -550,6 +483,14 @@ impl AgentRunner {
             }
         };
 
+        trace!(
+            agent = inst.name,
+            "--- System Prompt ---\n{}\n--- Developer Prompt ---\n{}\n--- User Message ---\n{}",
+            system_prompt,
+            developer_prompt,
+            user_message,
+        );
+
         if !user_message.is_empty() {
             debug!(agent = inst.name, user_message = %user_message, "Agent user message");
             messages.push(ChatMessage::user(&user_message));
@@ -569,5 +510,86 @@ impl AgentRunner {
             join,
             pause_token,
         })
+    }
+}
+
+fn resolve_active_abilities(
+    manifest: &Manifest,
+    agent_id: Option<Uuid>,
+    active_domain: Option<&DomainManifest>,
+) -> Vec<AbilityManifest> {
+    let mut ability_ids = Vec::new();
+
+    if let Some(agent_id) = agent_id
+        && let Some(agent) = manifest.agents.iter().find(|agent| agent.id == agent_id)
+    {
+        ability_ids.extend(agent.ability_ids.iter().copied());
+    }
+
+    if let Some(domain) = active_domain {
+        for ability_id in &domain.ability_ids {
+            if !ability_ids.contains(ability_id) {
+                ability_ids.push(*ability_id);
+            }
+        }
+    }
+
+    ability_ids
+        .into_iter()
+        .filter_map(|ability_id| {
+            manifest
+                .abilities
+                .iter()
+                .find(|ability| ability.id == ability_id)
+                .cloned()
+        })
+        .collect()
+}
+
+fn merge_domain_scopes(target: &mut Vec<String>, additional_scopes: &[String]) {
+    for scope in additional_scopes {
+        if !target.iter().any(|existing| existing == scope) {
+            target.push(scope.clone());
+        }
+    }
+}
+
+fn merge_domain_abilities(
+    target: &mut Vec<AbilityManifest>,
+    manifest: &Manifest,
+    activated_ids: &[Uuid],
+) {
+    for ability_id in activated_ids {
+        if let Some(ability) = manifest
+            .abilities
+            .iter()
+            .find(|candidate| &candidate.id == ability_id)
+            .cloned()
+            && !target.iter().any(|existing| existing.id == ability.id)
+        {
+            target.push(ability);
+        }
+    }
+}
+
+fn merge_domain_mcp_servers(
+    target: &mut Vec<(String, String)>,
+    manifest: &Manifest,
+    activated_ids: &[Uuid],
+) {
+    for server_id in activated_ids {
+        if let Some(server) = manifest
+            .mcp_servers
+            .iter()
+            .find(|candidate| &candidate.id == server_id)
+        {
+            let entry = (
+                server.display_name.clone(),
+                server.description.clone().unwrap_or_default(),
+            );
+            if !target.iter().any(|existing| existing.0 == entry.0) {
+                target.push(entry);
+            }
+        }
     }
 }

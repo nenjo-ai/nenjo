@@ -290,7 +290,7 @@ pub async fn run(
 
                     total_tool_calls += tool_results.len() as u32;
 
-                    // Check if any executed tool is terminal (e.g. gate_verdict).
+                    // Check if any executed tool is terminal (e.g. pass_verdict).
                     // Terminal tools signal that the turn loop should stop immediately
                     // without feeding the tool result back to the LLM.
                     let has_terminal = tool_results.iter().any(|(tc, _)| {

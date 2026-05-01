@@ -1,10 +1,16 @@
 //! Request and response types for the Nenjo backend API.
 
 use chrono::{DateTime, Utc};
+use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::manifest::{CouncilManifest, CouncilMemberManifest};
+use crate::manifest::{
+    AgentHeartbeatManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
+    CouncilManifest, CouncilMemberManifest, DomainManifest, DomainPromptConfig, PromptConfig,
+    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
+    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+};
 
 /// Metadata for a project document, used during doc sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +22,61 @@ pub struct DocumentSyncMeta {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSyncContent {
+    #[serde(default)]
+    pub content: Option<String>,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent detail response (from GET /agents/{id}) → conversion to Manifest
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentDetailResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: String,
+    pub model_id: Option<Uuid>,
+    #[serde(default)]
+    pub prompt_locked: bool,
+    #[serde(default)]
+    pub domain_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub platform_scopes: Vec<String>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub ability_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub heartbeat: Option<AgentHeartbeatManifest>,
+}
+
+impl From<AgentDetailResponse> for AgentManifest {
+    fn from(d: AgentDetailResponse) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            prompt_config: PromptConfig::default(),
+            color: Some(d.color),
+            model_id: d.model_id,
+            domain_ids: d.domain_ids,
+            platform_scopes: d.platform_scopes,
+            mcp_server_ids: d.mcp_server_ids,
+            ability_ids: d.ability_ids,
+            prompt_locked: d.prompt_locked,
+            heartbeat: d.heartbeat,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Council detail response (from GET /councils/{id}) → conversion to Manifest
 // ---------------------------------------------------------------------------
@@ -24,7 +85,7 @@ pub struct DocumentSyncMeta {
 pub struct CouncilDetailResponse {
     pub id: Uuid,
     pub name: String,
-    pub delegation_strategy: String,
+    pub delegation_strategy: CouncilDelegationStrategy,
     pub leader_agent_id: Uuid,
     pub members: Vec<CouncilMemberDetailResponse>,
 }
@@ -55,6 +116,151 @@ impl From<CouncilDetailResponse> for CouncilManifest {
                     agent_id: m.agent_id,
                     agent_name: m.agent.name,
                     priority: m.priority,
+                })
+                .collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Domain manifest response (from GET /domains/{id}/manifest) → conversion
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DomainManifestResponse {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub platform_scopes: Vec<String>,
+    #[serde(default)]
+    pub ability_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub prompt_config: DomainPromptConfig,
+}
+
+impl From<DomainManifestResponse> for DomainManifest {
+    fn from(d: DomainManifestResponse) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            path: d.path,
+            display_name: d.display_name,
+            description: d.description,
+            command: d.command,
+            platform_scopes: d.platform_scopes,
+            ability_ids: d.ability_ids,
+            mcp_server_ids: d.mcp_server_ids,
+            prompt_config: d.prompt_config,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context block content response (from GET /context-blocks/{id}/content)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextBlockContentResponse {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub template: String,
+}
+
+impl From<ContextBlockContentResponse> for ContextBlockManifest {
+    fn from(d: ContextBlockContentResponse) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            path: d.path,
+            display_name: d.display_name,
+            description: d.description,
+            template: d.template,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Routine detail response (from GET /routines/{id}) → conversion to Manifest
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutineDetailResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub trigger: RoutineTrigger,
+    #[serde(default)]
+    pub metadata: RoutineMetadata,
+    #[serde(default)]
+    pub steps: Vec<RoutineStepDetailResponse>,
+    #[serde(default)]
+    pub edges: Vec<RoutineEdgeDetailResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutineStepDetailResponse {
+    pub id: Uuid,
+    pub routine_id: Uuid,
+    pub name: String,
+    pub step_type: RoutineStepType,
+    pub council_id: Option<Uuid>,
+    pub agent_id: Option<Uuid>,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    pub order_index: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutineEdgeDetailResponse {
+    pub id: Uuid,
+    pub routine_id: Uuid,
+    pub source_step_id: Uuid,
+    pub target_step_id: Uuid,
+    pub condition: RoutineEdgeCondition,
+}
+
+impl From<RoutineDetailResponse> for RoutineManifest {
+    fn from(d: RoutineDetailResponse) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            trigger: d.trigger,
+            metadata: d.metadata,
+            steps: d
+                .steps
+                .into_iter()
+                .map(|step| RoutineStepManifest {
+                    id: step.id,
+                    routine_id: step.routine_id,
+                    name: step.name,
+                    step_type: step.step_type,
+                    council_id: step.council_id,
+                    agent_id: step.agent_id,
+                    config: step.config,
+                    order_index: step.order_index,
+                })
+                .collect(),
+            edges: d
+                .edges
+                .into_iter()
+                .map(|edge| RoutineEdgeManifest {
+                    id: edge.id,
+                    routine_id: edge.routine_id,
+                    source_step_id: edge.source_step_id,
+                    target_step_id: edge.target_step_id,
+                    condition: edge.condition,
                 })
                 .collect(),
         }

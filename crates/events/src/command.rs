@@ -192,6 +192,10 @@ pub enum Command {
         /// `None` means the harness should fetch from the detail endpoint (fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
+        /// Inline encrypted resource payload — preferred over plaintext `payload`
+        /// when the worker has an active ACK.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 }
 

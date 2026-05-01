@@ -16,3 +16,7 @@ nenjo-worker = { workspace = true }
 tokio = { version = "1.49", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
+dotenvy = "0.15"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

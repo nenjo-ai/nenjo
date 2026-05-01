@@ -24,17 +24,13 @@ serde_yaml = "0.9"
 
 # Workspace crates
 nenjo = { workspace = true }
+nenjo-platform = { workspace = true }
 nenjo-xml = { workspace = true }
 nenjo-tools = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
 nenjo-sessions = { workspace = true }
-
-# WebSocket client
-tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
-futures-util = "0.3"
-url = "2.5"
 
 # HTTP client
 reqwest = { version = "0.13", features = ["json", "stream"] }
@@ -66,8 +62,6 @@ parking_lot = "0.12.5"
 arc-swap = "1.9.0"
 dashmap = "6.1.0"
 base64 = "0.22.1"
-rusqlite = "0.38.0"
-sqlite-vec = "0.1"
 sha2 = "0.10.9"
 hkdf = "0.12"
 aes-gcm = { version = "0.10", features = ["std"] }

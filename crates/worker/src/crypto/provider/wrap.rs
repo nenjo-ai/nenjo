@@ -27,10 +27,10 @@ pub(super) fn unwrap_ack(
     if wrapped.algorithm != WRAP_ALGORITHM_AES_GCM {
         bail!("Unsupported ACK wrap algorithm: {}", wrapped.algorithm);
     }
-    let nonce = decode_fixed::<12>(&wrapped.nonce, "nonce")?;
+    let nonce = Nonce::from(decode_fixed::<12>(&wrapped.nonce, "nonce")?);
     let cipher = Aes256Gcm::new((&key).into());
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .decrypt(&nonce, ciphertext.as_ref())
         .context("Failed to decrypt wrapped ACK")?;
 
     if plaintext.len() != ACK_LEN {
@@ -56,17 +56,18 @@ pub(crate) fn wrap_ack_for_recipient(
     let wrap_key = derive_wrap_key(shared_secret.as_bytes())?;
 
     let cipher = Aes256Gcm::new((&wrap_key).into());
-    let mut nonce = [0_u8; 12];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
+    let mut nonce_bytes = [0_u8; 12];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), ack.as_ref())
+        .encrypt(&nonce, ack.as_ref())
         .context("Failed to wrap ACK for recipient")?;
 
     Ok(WrappedAccountContentKey {
         key_version,
         algorithm: WRAP_ALGORITHM_AES_GCM.to_string(),
         ephemeral_public_key: BASE64.encode(ephemeral_public.as_bytes()),
-        nonce: BASE64.encode(nonce),
+        nonce: BASE64.encode(nonce_bytes),
         ciphertext: BASE64.encode(ciphertext),
         created_at: chrono::Utc::now(),
     })

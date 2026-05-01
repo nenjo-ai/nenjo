@@ -13,7 +13,7 @@ use tracing::warn;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    LambdaManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
+    Manifest, ManifestAuth, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
 };
 
 /// Loads a [`Manifest`] from cached JSON files on disk.
@@ -96,39 +96,51 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
     async fn load(&self) -> Result<Manifest> {
         // Read auth info (user_id + api_key_id).
         // Falls back to legacy user_id.json for backward compat.
-        let (user_id, api_key_id) = {
+        let auth = {
             let auth_path = self.manifests_dir.join("auth.json");
             let legacy_path = self.manifests_dir.join("user_id.json");
 
             if let Ok(s) = std::fs::read_to_string(&auth_path) {
                 let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
-                let uid = v
+                let uid: uuid::Uuid = v
                     .get("user_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
                 let kid = v
                     .get("api_key_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                (uid, kid)
+                if uid.is_nil() && kid.is_none() {
+                    None
+                } else {
+                    Some(ManifestAuth {
+                        user_id: uid,
+                        api_key_id: kid,
+                    })
+                }
             } else {
-                let uid = std::fs::read_to_string(&legacy_path)
+                let uid: uuid::Uuid = std::fs::read_to_string(&legacy_path)
                     .ok()
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
-                (uid, None)
+                if uid.is_nil() {
+                    None
+                } else {
+                    Some(ManifestAuth {
+                        user_id: uid,
+                        api_key_id: None,
+                    })
+                }
             }
         };
 
         Ok(Manifest {
-            user_id,
-            api_key_id,
+            auth,
             projects: self.load_json::<ProjectManifest>("projects.json"),
             routines: self.load_json::<RoutineManifest>("routines.json"),
             models: self.load_json::<ModelManifest>("models.json"),
             agents: self.load_json::<AgentManifest>("agents.json"),
             councils: self.load_json::<CouncilManifest>("councils.json"),
             domains: self.load_tree::<DomainManifest>("domains", "domains.json"),
-            lambdas: self.load_json::<LambdaManifest>("lambdas.json"),
             mcp_servers: self.load_json::<McpServerManifest>("mcp_servers.json"),
             abilities: self.load_tree::<AbilityManifest>("abilities", "abilities.json"),
             context_blocks: self
@@ -141,6 +153,7 @@ impl nenjo::ManifestLoader for FileSystemManifestLoader {
 mod tests {
     use super::*;
     use nenjo::ManifestLoader;
+    use nenjo::agents::prompts::PromptConfig;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -165,7 +178,6 @@ mod tests {
             model: "gpt-4o".into(),
             model_provider: "openai".into(),
             temperature: Some(0.7),
-            tags: vec![],
             base_url: None,
         };
         std::fs::write(
@@ -178,15 +190,13 @@ mod tests {
             id: Uuid::new_v4(),
             name: "coder".into(),
             description: Some("A coder".into()),
-            is_system: false,
-            prompt_config: serde_json::json!({}),
+            prompt_config: PromptConfig::default(),
             color: None,
             model_id: Some(model.id),
-            model_name: Some("test-model".into()),
-            domains: vec![],
+            domain_ids: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
-            abilities: vec![],
+            ability_ids: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -201,7 +211,6 @@ mod tests {
             name: "test".into(),
             slug: "test".into(),
             description: None,
-            is_system: false,
             settings: serde_json::Value::Null,
         };
         std::fs::write(
@@ -215,7 +224,6 @@ mod tests {
             "routines.json",
             "councils.json",
             "domains.json",
-            "lambdas.json",
             "mcp_servers.json",
             "abilities.json",
             "context_blocks.json",

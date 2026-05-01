@@ -9,12 +9,12 @@ use nenjo_tools::Tool;
 use nenjo_tools::security::SecurityPolicy;
 
 use super::instance::AgentInstance;
-use super::prompts::{PromptConfig, PromptContext};
+use super::prompts::PromptContext;
 use super::runner::AgentRunner;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
-use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig};
 use crate::memory::Memory;
 use crate::memory::types::MemoryScope;
 use crate::provider::{ModelProviderFactory, ToolFactory};
@@ -53,7 +53,6 @@ pub struct AgentBuilder {
     model_factory: Option<Arc<dyn ModelProviderFactory>>,
     tool_factory: Option<Arc<dyn ToolFactory>>,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
@@ -79,7 +78,6 @@ impl AgentBuilder {
             model_factory: None,
             tool_factory: None,
             lambda_runner: None,
-            platform_resolver: None,
             child_delegation_ctx: None,
             work_dir: None,
         }
@@ -179,13 +177,11 @@ impl AgentBuilder {
         model_factory: Arc<dyn ModelProviderFactory>,
         tool_factory: Arc<dyn ToolFactory>,
         lambda_runner: Option<Arc<dyn LambdaRunner>>,
-        platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     ) -> Self {
         self.manifest = Some(manifest);
         self.model_factory = Some(model_factory);
         self.tool_factory = Some(tool_factory);
         self.lambda_runner = lambda_runner;
-        self.platform_resolver = platform_resolver;
         self
     }
 
@@ -232,7 +228,11 @@ impl AgentBuilder {
             let scope = if let Some(scope) = self.memory_scope_override.clone() {
                 scope
             } else {
-                let slug = &self.prompt_context.render_ctx_extra.project.slug;
+                let slug = if self.prompt_context.render_ctx_extra.project.slug.is_empty() {
+                    &self.prompt_context.current_project.slug
+                } else {
+                    &self.prompt_context.render_ctx_extra.project.slug
+                };
                 let project_slug = if slug.is_empty() {
                     None
                 } else {
@@ -258,7 +258,6 @@ impl AgentBuilder {
                 memory: self.memory.clone(),
                 agent_config: self.agent_config.clone(),
                 lambda_runner: self.lambda_runner,
-                platform_resolver: self.platform_resolver,
                 delegation_ctx: self.child_delegation_ctx,
             }),
             _ => None,
@@ -278,6 +277,10 @@ impl AgentBuilder {
             security,
             agent_config: self.agent_config,
             context_renderer: self.context_renderer,
+            source_manifest: Some(self.agent),
+            tool_factory: delegation_support
+                .as_ref()
+                .map(|ds| ds.tool_factory.clone()),
             memory_vars: self.memory_vars,
             resource_vars: HashMap::new(),
             documents_xml: String::new(),

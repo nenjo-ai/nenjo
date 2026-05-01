@@ -27,7 +27,7 @@ use crate::routines::{
 };
 use crate::types::RenderContextVars;
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // Factory traits
@@ -108,7 +108,6 @@ pub struct Provider {
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     /// Optional lazy template source for context blocks.
     /// When set, the ContextRenderer loads templates on demand instead of from memory.
     template_source: Option<Arc<dyn crate::context::TemplateSource>>,
@@ -128,7 +127,6 @@ impl Provider {
         memory: Option<Arc<dyn Memory>>,
         agent_config: AgentConfig,
         lambda_runner: Option<Arc<dyn LambdaRunner>>,
-        platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
     ) -> Self {
         Self {
             manifest,
@@ -137,7 +135,6 @@ impl Provider {
             memory,
             agent_config,
             lambda_runner,
-            platform_resolver,
             template_source: None,
         }
     }
@@ -187,7 +184,6 @@ impl Provider {
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
             lambda_runner: self.lambda_runner.clone(),
-            platform_resolver: self.platform_resolver.clone(),
             template_source: self.template_source.clone(),
         }
     }
@@ -210,11 +206,6 @@ impl Provider {
     /// Access the lambda runner, if configured.
     pub fn lambda_runner(&self) -> Option<&Arc<dyn LambdaRunner>> {
         self.lambda_runner.as_ref()
-    }
-
-    /// Access the platform tool resolver, if configured.
-    pub fn platform_resolver(&self) -> Option<&Arc<dyn crate::mcp::PlatformToolResolver>> {
-        self.platform_resolver.as_ref()
     }
 
     // -----------------------------------------------------------------------
@@ -266,30 +257,14 @@ impl Provider {
         // Memory backend is passed to the builder; scope and tools are
         // constructed in build() based on the project context set at that point.
 
-        let prompt_config: crate::agents::prompts::PromptConfig =
-            match serde_json::from_value::<crate::agents::prompts::PromptConfig>(
-                agent.prompt_config.clone(),
-            ) {
-                Ok(config) => {
-                    debug!(
-                        agent = %agent.name,
-                        system_prompt_len = config.system_prompt.len(),
-                        cron_task_len = config.templates.cron_task.len(),
-                        task_execution_len = config.templates.task_execution.len(),
-                        "Parsed prompt_config"
-                    );
-                    config
-                }
-                Err(e) => {
-                    error!(
-                        agent = %agent.name,
-                        error = %e,
-                        raw = %agent.prompt_config,
-                        "Failed to parse prompt_config, using defaults"
-                    );
-                    Default::default()
-                }
-            };
+        let prompt_config = agent.prompt_config.clone();
+        debug!(
+            agent = %agent.name,
+            system_prompt_len = prompt_config.system_prompt.len(),
+            cron_task_len = prompt_config.templates.cron_task.len(),
+            task_execution_len = prompt_config.templates.task_execution.len(),
+            "Loaded typed prompt_config"
+        );
 
         let agent_config = self.agent_config.clone();
         let prompt_context = self.build_prompt_context(agent);
@@ -335,7 +310,6 @@ impl Provider {
             self.model_factory.clone(),
             self.tool_factory.clone(),
             self.lambda_runner.clone(),
-            self.platform_resolver.clone(),
         );
 
         Ok(builder)
@@ -364,7 +338,7 @@ impl Provider {
             .manifest
             .abilities
             .iter()
-            .filter(|a| agent.abilities.contains(&a.id))
+            .filter(|a| agent.ability_ids.contains(&a.id))
             .cloned()
             .collect();
 
@@ -372,7 +346,7 @@ impl Provider {
             .manifest
             .domains
             .iter()
-            .filter(|d| agent.domains.contains(&d.id))
+            .filter(|d| agent.domain_ids.contains(&d.id))
             .cloned()
             .collect();
 
@@ -399,7 +373,6 @@ impl Provider {
                     name: String::new(),
                     slug: String::new(),
                     description: None,
-                    is_system: false,
                     settings: serde_json::Value::Null,
                 });
 
@@ -490,7 +463,6 @@ impl Provider {
         session_binding: Option<crate::routines::SessionBinding>,
     ) -> Result<RoutineExecutionHandle> {
         let routine = routine.clone();
-        let max_retries = routine.max_retries;
         let routine_name = routine.name.clone();
         let routine_id = routine.id;
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -520,7 +492,7 @@ impl Provider {
         let provider = self.clone();
 
         let join = tokio::spawn(async move {
-            let mut state = routines::types::RoutineState::new(routine_id, input, max_retries);
+            let mut state = routines::types::RoutineState::new(routine_id, input);
             state.routine_name = Some(routine_name);
 
             if let Some((schedule, start_at, timeout)) = cron_schedule {
@@ -556,6 +528,7 @@ impl Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::PromptConfig;
     use crate::manifest::{ContextBlockManifest, ManifestLoader};
 
     struct MockProvider;
@@ -601,22 +574,19 @@ mod tests {
             model: "mock".into(),
             model_provider: "mock".into(),
             temperature: Some(0.5),
-            tags: vec![],
             base_url: None,
         };
         let agent = AgentManifest {
             id: Uuid::new_v4(),
             name: "agent".into(),
             description: Some("test".into()),
-            is_system: false,
-            prompt_config: serde_json::json!({}),
+            prompt_config: PromptConfig::default(),
             color: None,
             model_id: Some(model.id),
-            model_name: None,
-            domains: vec![],
+            domain_ids: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
-            abilities: vec![],
+            ability_ids: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -628,7 +598,6 @@ mod tests {
                 name: "p".into(),
                 slug: "p".into(),
                 description: None,
-                is_system: false,
                 settings: serde_json::Value::Null,
             }],
             ..Default::default()
@@ -681,7 +650,6 @@ mod tests {
                 display_name: None,
                 description: None,
                 template: "local content".into(),
-                is_system: false,
             }],
             ..Default::default()
         };
@@ -750,7 +718,6 @@ mod tests {
             model: "mock".into(),
             model_provider: "mock".into(),
             temperature: Some(0.5),
-            tags: vec![],
             base_url: None,
         };
         let original_agent_id = Uuid::new_v4();
@@ -762,15 +729,13 @@ mod tests {
             id: original_agent_id,
             name: "agent-old".into(),
             description: Some("old".into()),
-            is_system: false,
-            prompt_config: serde_json::json!({}),
+            prompt_config: PromptConfig::default(),
             color: None,
             model_id: Some(model.id),
-            model_name: Some("m".into()),
-            domains: vec![],
+            domain_ids: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
-            abilities: vec![],
+            ability_ids: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -778,15 +743,13 @@ mod tests {
             id: updated_agent_id,
             name: "agent-new".into(),
             description: Some("new".into()),
-            is_system: false,
-            prompt_config: serde_json::json!({}),
+            prompt_config: PromptConfig::default(),
             color: None,
             model_id: Some(model.id),
-            model_name: Some("m".into()),
-            domains: vec![],
+            domain_ids: vec![],
             platform_scopes: vec![],
             mcp_server_ids: vec![],
-            abilities: vec![],
+            ability_ids: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -794,20 +757,15 @@ mod tests {
             id: routine_id,
             name: "routine".into(),
             description: None,
-            trigger: "manual".into(),
-            is_active: true,
-            is_default: false,
-            max_retries: 0,
-            metadata: serde_json::json!({}),
+            trigger: crate::manifest::RoutineTrigger::Task,
+            metadata: crate::manifest::RoutineMetadata::default(),
             steps: vec![crate::manifest::RoutineStepManifest {
                 id: step_id,
                 routine_id,
                 name: "step".into(),
-                step_type: "agent".into(),
-                model_id: None,
+                step_type: crate::manifest::RoutineStepType::Agent,
                 council_id: None,
                 agent_id: Some(original_agent_id),
-                lambda_id: None,
                 config: serde_json::json!({}),
                 order_index: 0,
             }],
@@ -823,7 +781,6 @@ mod tests {
                 name: "p".into(),
                 slug: "p".into(),
                 description: None,
-                is_system: false,
                 settings: serde_json::Value::Null,
             }],
             ..Default::default()

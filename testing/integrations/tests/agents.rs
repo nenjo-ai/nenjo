@@ -10,9 +10,11 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
+    PromptConfig, PromptTemplates,
 };
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
+use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 use nenjo_tools::{Tool, ToolCategory, ToolResult};
@@ -94,7 +96,6 @@ fn make_model() -> ModelManifest {
         model: "anthropic/claude-3-haiku".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.0),
-        tags: vec![],
         base_url: None,
     }
 }
@@ -105,7 +106,6 @@ fn make_project() -> ProjectManifest {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     }
 }
@@ -115,23 +115,23 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         id: Uuid::new_v4(),
         name: name.into(),
         description: Some(format!("Test agent: {name}")),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": system_prompt,
-            "templates": {
-                "chat_task": "{{ message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: system_prompt.into(),
+            templates: PromptTemplates {
+                chat_task: "{{ chat.message }}".into(),
+                task_execution: String::new(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model_id),
-        model_name: Some("claude-haiku".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -231,8 +231,8 @@ async fn memory_store_recall_with_real_llm() {
         "memory-agent",
         model.id,
         "You are a helpful assistant with persistent memory.\n\
-         When the user tells you something to remember, use memory_store.\n\
-         When asked what you know, use memory_recall first.\n\
+         When the user tells you something to remember, use save_memory.\n\
+         When asked what you know, use recall_memory first.\n\
          Always respond concisely.",
     );
 
@@ -268,12 +268,12 @@ async fn memory_store_recall_with_real_llm() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"memory_store"),
-        "should have memory_store, got: {tool_names:?}"
+        tool_names.contains(&"save_memory"),
+        "should have save_memory, got: {tool_names:?}"
     );
     assert!(
-        tool_names.contains(&"memory_recall"),
-        "should have memory_recall, got: {tool_names:?}"
+        tool_names.contains(&"recall_memory"),
+        "should have recall_memory, got: {tool_names:?}"
     );
 
     // Ask the agent to store something
@@ -288,7 +288,7 @@ async fn memory_store_recall_with_real_llm() {
 
     assert!(
         output.tool_calls >= 1,
-        "agent should have called memory_store, got: {}",
+        "agent should have called save_memory, got: {}",
         output.tool_calls
     );
 
@@ -309,7 +309,7 @@ async fn memory_store_recall_with_real_llm() {
 
     assert!(
         !cats.is_empty(),
-        "memory_store should have persisted facts to disk"
+        "save_memory should have persisted facts to disk"
     );
     let has_rust = cats
         .iter()
@@ -329,7 +329,7 @@ async fn memory_store_recall_with_real_llm() {
 
     assert!(
         output.tool_calls >= 1,
-        "agent should have called memory_forget, got: {}",
+        "agent should have called forget_memory, got: {}",
         output.tool_calls
     );
 
@@ -347,12 +347,12 @@ async fn memory_store_recall_with_real_llm() {
 
     assert!(
         !has_rust_after,
-        "memory_forget should have deleted the Rust fact"
+        "forget_memory should have deleted the Rust fact"
     );
 }
 
 #[tokio::test]
-async fn use_ability_with_real_llm() {
+async fn assigned_ability_tool_with_real_llm() {
     let api_key = match get_api_key() {
         Some(key) => key,
         None => {
@@ -371,26 +371,27 @@ async fn use_ability_with_real_llm() {
         "You are a senior software developer. \
          When asked to review code, use the code_review ability.",
     );
-    agent.abilities = vec![code_review_ability_id];
+    agent.ability_ids = vec![code_review_ability_id];
 
     // The ability: code review with specific instructions
     let ability = AbilityManifest {
         id: code_review_ability_id,
         name: "code_review".into(),
+        tool_name: "code_review".into(),
         path: String::new(),
         display_name: Some("Code Review".into()),
         description: Some("Reviews code for bugs, style issues, and improvements".into()),
         activation_condition: "When the user asks for a code review".into(),
-        prompt: "You are performing a code review. Analyze the code for:\n\
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: "You are performing a code review. Analyze the code for:\n\
                  1. Bugs and logic errors\n\
                  2. Style and naming issues\n\
                  3. Potential improvements\n\
                  Respond with a concise review in bullet points."
-            .into(),
+                .into(),
+        },
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        tool_filter: serde_json::json!({}),
-        is_system: false,
     };
 
     let manifest = Manifest {
@@ -421,8 +422,8 @@ async fn use_ability_with_real_llm() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"ability/code_review"),
-        "should have ability/code_review tool, got: {tool_names:?}"
+        tool_names.contains(&"code_review"),
+        "should have code_review tool, got: {tool_names:?}"
     );
 
     // Ask the agent to review some code — it should activate the code_review ability
@@ -431,7 +432,7 @@ async fn use_ability_with_real_llm() {
         .await
         .expect("chat should succeed");
 
-    println!("--- Use Ability Test ---");
+    println!("--- Assigned Ability Tool Test ---");
     println!("Response: {}", output.text);
     println!("Tool calls: {}", output.tool_calls);
 
@@ -474,7 +475,7 @@ async fn domain_expansion_with_real_llm() {
         model.id,
         "You are a product manager. You can enter domain modes for specialized work.",
     );
-    agent.domains = vec![prd_domain_id];
+    agent.domain_ids = vec![prd_domain_id];
 
     // The PRD domain with specific prompt overlay and guidelines
     let domain = DomainManifest {
@@ -484,26 +485,12 @@ async fn domain_expansion_with_real_llm() {
         display_name: "PRD Writer".into(),
         description: Some("Write product requirements documents".into()),
         command: "/prd".into(),
-        manifest: serde_json::json!({
-            "schema_version": 1,
-            "domain_type": "document",
-            "prompt": {
-                "system_addon": "You are now in PRD writing mode. Structure your response as a PRD with sections: Problem Statement, Goals, Non-Goals, User Stories, and Success Metrics. Be concise — one sentence per bullet point.",
-                "guidelines": [
-                    "Always include measurable success metrics",
-                    "Separate goals from non-goals explicitly"
-                ]
-            },
-            "tools": {},
-            "session": {
-                "max_turns": 20,
-                "exit_commands": ["/exit", "/done"]
-            }
-        }),
-        category: Some("documents".into()),
-        tags: vec!["prd".into()],
-        is_system: false,
-        source_domain_id: None,
+        platform_scopes: vec![],
+        ability_ids: vec![],
+        mcp_server_ids: vec![],
+        prompt_config: DomainPromptConfig {
+            developer_prompt_addon: Some("You are now in PRD writing mode. Structure your response as a PRD with sections: Problem Statement, Goals, Non-Goals, User Stories, and Success Metrics. Be concise — one sentence per bullet point.".into()),
+        },
     };
 
     let manifest = Manifest {

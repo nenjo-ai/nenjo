@@ -10,6 +10,8 @@
 //! - Tools are discovered via `tools/list` and cached per server.
 
 use async_trait::async_trait;
+use nenjo::manifest::McpServerManifest;
+use nenjo_tools::{Tool, ToolCategory, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,20 +20,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-
-use nenjo::manifest::McpServerManifest;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
-
-/// The name used for the Nenjo platform MCP server in the DB.
-pub const PLATFORM_SERVER_NAME: &str = "app.nenjo.platform";
-
-/// Find the platform server's UUID from a list of bootstrap servers.
-pub fn platform_server_id(servers: &[McpServerManifest]) -> Option<Uuid> {
-    servers
-        .iter()
-        .find(|s| s.name == PLATFORM_SERVER_NAME)
-        .map(|s| s.id)
-}
 
 // ---------------------------------------------------------------------------
 // MCP credential resolution
@@ -76,19 +64,6 @@ fn resolve_mcp_credentials(
     let mut credentials = HashMap::new();
 
     for field in &fields {
-        // 0. Platform server shortcut: use NENJO_API_KEY directly for the
-        //    built-in platform MCP server. This avoids requiring users to
-        //    set a separate NENJO_MCP_APP_NENJO_PLATFORM_API_KEY env var.
-        if server_name == PLATFORM_SERVER_NAME
-            && field == "api_key"
-            && let Ok(val) = std::env::var("NENJO_API_KEY")
-            && !val.is_empty()
-        {
-            debug!(server = %server_name, field = %field, source = "NENJO_API_KEY", "Platform MCP credential resolved");
-            credentials.insert(field.clone(), val);
-            continue;
-        }
-
         // 1. Try env var: NENJO_MCP_{SERVER_NAME}_{FIELD_KEY}
         let env_key = format!("NENJO_MCP_{}_{}", sanitized_name, field.to_uppercase());
         if let Ok(val) = std::env::var(&env_key)
@@ -702,16 +677,12 @@ impl ExternalMcpPool {
     }
 
     /// Get metadata about connected external servers (for McpIntegrationContext).
-    /// Skips the internal platform server.
     pub async fn server_info(&self, server_ids: &[Uuid]) -> Vec<(String, String)> {
         let servers = self.servers.read().await;
         let mut info = Vec::new();
         for id in server_ids {
             if let Some(server_mutex) = servers.get(id) {
                 let server = server_mutex.lock().await;
-                if server.server_def.name == PLATFORM_SERVER_NAME {
-                    continue;
-                }
                 info.push((
                     server.server_def.display_name.clone(),
                     server.server_def.description.clone().unwrap_or_default(),

@@ -21,7 +21,7 @@ use crate::harness::session::{
     apply_session_memory_scope, lease_for_status, read_json_blob, transition_session_state,
     update_session_status,
 };
-use crate::harness::{ActiveExecution, CommandContext, DomainSession, ExecutionKind};
+use crate::harness::{ActiveExecution, CommandContext, ExecutionKind};
 
 fn chat_history_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
     if project_slug.is_empty() {
@@ -168,32 +168,17 @@ async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Resul
         .project_id
         .context("domain session missing project_id")?;
 
-    let provider = ctx.provider();
-    let base_runner = provider.agent_by_id(agent_id).await?.build().await?;
-    let domain_runner = base_runner.domain_expansion(&domain.domain_command).await?;
-
-    let mut instance = domain_runner.instance().clone();
-    if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
-        active_domain.session_id = persisted.session_id;
-        active_domain.turn_number = domain.turn_number;
-    }
-
-    let restored_runner = nenjo::AgentRunner::from_instance(
-        instance,
-        domain_runner.memory().cloned(),
-        domain_runner.memory_scope().cloned(),
-    );
-
-    ctx.domains.insert(
+    let session = crate::harness::Harness::rebuild_domain_session(
+        &ctx.provider,
         persisted.session_id,
-        DomainSession {
-            runner: restored_runner,
-            agent_id,
-            project_id,
-            domain_command: domain.domain_command,
-            turn_number: domain.turn_number,
-        },
-    );
+        agent_id,
+        project_id,
+        &domain.domain_command,
+        domain.turn_number,
+    )
+    .await?;
+
+    ctx.domains.insert(persisted.session_id, session);
 
     Ok(true)
 }
@@ -222,9 +207,7 @@ pub async fn handle_chat(
     let effective_project_id = project_id.unwrap_or(Uuid::nil());
     let effective_content = content.to_string();
 
-    let resolved_agent_id =
-        agent_id.or_else(|| manifest.agents.iter().find(|a| a.is_system).map(|a| a.id));
-    let agent_id = resolved_agent_id.context("No agent found for chat")?;
+    let agent_id = agent_id.context("No agent_id provided for chat")?;
     let slug = project_slug(manifest, effective_project_id);
     let aname = agent_name(manifest, agent_id);
     let history_ref = chat_history_ref(&slug, &aname, session_id);
@@ -296,21 +279,36 @@ pub async fn handle_chat(
         match ctx.domains.get_mut(&dsid) {
             Some(mut session) => {
                 session.turn_number += 1;
+                let turn_number = session.turn_number;
+                let agent_id = session.agent_id;
+                let project_id = session.project_id;
+                let domain_command = session.domain_command.clone();
                 if let Ok(Some(mut record)) = ctx.session_store.get(dsid) {
                     record.version += 1;
                     record.updated_at = Utc::now();
                     record.status = SessionStatus::Active;
                     if let Some(ref mut domain) = record.domain {
-                        domain.turn_number = session.turn_number;
+                        domain.turn_number = turn_number;
                     }
                     let _ = ctx.session_store.put(&record);
                 }
-                let instance = session.runner.instance().clone();
-                nenjo::AgentRunner::from_instance(
-                    instance,
-                    session.runner.memory().cloned(),
-                    session.runner.memory_scope().cloned(),
+                drop(session);
+                let rebuilt = crate::harness::Harness::rebuild_domain_session(
+                    &ctx.provider,
+                    dsid,
+                    agent_id,
+                    project_id,
+                    &domain_command,
+                    turn_number,
                 )
+                .await?;
+                let runner = nenjo::AgentRunner::from_instance(
+                    rebuilt.runner.instance().clone(),
+                    rebuilt.runner.memory().cloned(),
+                    rebuilt.runner.memory_scope().cloned(),
+                );
+                ctx.domains.insert(dsid, rebuilt);
+                runner
             }
             None => {
                 // Domain session still could not be restored, so it is genuinely stale.

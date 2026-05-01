@@ -6,7 +6,31 @@ use anyhow::Result;
 use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 use super::Memory;
-use super::types::MemoryScope;
+use super::types::{MemoryCategory, MemoryScope};
+
+fn normalize_memory_fact(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fact_matches(query: &str, candidate: &str) -> bool {
+    let query = normalize_memory_fact(query);
+    let candidate = normalize_memory_fact(candidate);
+    !query.is_empty()
+        && !candidate.is_empty()
+        && (query == candidate || query.contains(&candidate) || candidate.contains(&query))
+}
 
 // ---------------------------------------------------------------------------
 // MemoryStoreTool
@@ -27,7 +51,7 @@ impl MemoryStoreTool {
 #[async_trait::async_trait]
 impl Tool for MemoryStoreTool {
     fn name(&self) -> &str {
-        "memory_store"
+        "save_memory"
     }
 
     fn description(&self) -> &str {
@@ -103,7 +127,7 @@ impl MemoryRecallTool {
 #[async_trait::async_trait]
 impl Tool for MemoryRecallTool {
     fn name(&self) -> &str {
-        "memory_recall"
+        "recall_memory"
     }
 
     fn description(&self) -> &str {
@@ -201,7 +225,7 @@ impl MemoryForgetTool {
 #[async_trait::async_trait]
 impl Tool for MemoryForgetTool {
     fn name(&self) -> &str {
-        "memory_forget"
+        "forget_memory"
     }
 
     fn description(&self) -> &str {
@@ -214,11 +238,11 @@ impl Tool for MemoryForgetTool {
             "properties": {
                 "fact": {
                     "type": "string",
-                    "description": "Exact text of the fact to remove"
+                    "description": "Fact to remove. Exact text is preferred, but close paraphrases are also accepted."
                 },
                 "category": {
                     "type": "string",
-                    "description": "Category the fact belongs to"
+                    "description": "Optional category the fact belongs to. Omit when unknown."
                 },
                 "scope": {
                     "type": "string",
@@ -226,7 +250,7 @@ impl Tool for MemoryForgetTool {
                     "description": "Scope to delete from (default: 'project')"
                 }
             },
-            "required": ["fact", "category"]
+            "required": ["fact"]
         })
     }
 
@@ -236,30 +260,77 @@ impl Tool for MemoryForgetTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let fact = args["fact"].as_str().unwrap_or("");
-        let category = args["category"].as_str().unwrap_or("");
+        let category = args["category"].as_str().filter(|value| !value.is_empty());
         let scope = args["scope"].as_str().unwrap_or("project");
 
-        if fact.is_empty() || category.is_empty() {
+        if fact.is_empty() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("fact and category are required".into()),
+                error: Some("fact is required".into()),
             });
         }
 
         let ns = self.scope.resolve(scope);
-        let deleted = self.memory.delete_fact(ns, category, fact).await?;
+        let deleted = if let Some(category) = category {
+            if self.memory.delete_fact(ns, category, fact).await? {
+                true
+            } else {
+                delete_matching_fact(&*self.memory, ns, Some(category), fact).await?
+            }
+        } else {
+            delete_matching_fact(&*self.memory, ns, None, fact).await?
+        };
 
         Ok(ToolResult {
             success: true,
             output: if deleted {
-                format!("Deleted fact from {scope}/{category}")
+                if let Some(category) = category {
+                    format!("Deleted fact from {scope}/{category}")
+                } else {
+                    format!("Deleted fact from {scope} memory")
+                }
             } else {
-                format!("Fact not found in {scope}/{category}")
+                if let Some(category) = category {
+                    format!("Fact not found in {scope}/{category}")
+                } else {
+                    format!("Fact not found in {scope} memory")
+                }
             },
             error: None,
         })
     }
+}
+
+async fn delete_matching_fact(
+    memory: &dyn Memory,
+    ns: &str,
+    category: Option<&str>,
+    fact: &str,
+) -> Result<bool> {
+    let categories: Vec<MemoryCategory> = if let Some(category) = category {
+        memory
+            .read_category(ns, category)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        memory.list_categories(ns).await?
+    };
+
+    for memory_category in categories {
+        if let Some(matching_fact) = memory_category
+            .facts
+            .iter()
+            .find(|candidate| fact_matches(fact, &candidate.text))
+        {
+            return memory
+                .delete_fact(ns, &memory_category.category, &matching_fact.text)
+                .await;
+        }
+    }
+
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +357,7 @@ impl ResourceSaveTool {
 #[async_trait::async_trait]
 impl Tool for ResourceSaveTool {
     fn name(&self) -> &str {
-        "resource_save"
+        "save_resource"
     }
 
     fn description(&self) -> &str {
@@ -369,7 +440,7 @@ impl ResourceReadTool {
 #[async_trait::async_trait]
 impl Tool for ResourceReadTool {
     fn name(&self) -> &str {
-        "resource_read"
+        "read_resource"
     }
 
     fn description(&self) -> &str {
@@ -445,7 +516,7 @@ impl ResourceDeleteTool {
 #[async_trait::async_trait]
 impl Tool for ResourceDeleteTool {
     fn name(&self) -> &str {
-        "resource_delete"
+        "delete_resource"
     }
 
     fn description(&self) -> &str {

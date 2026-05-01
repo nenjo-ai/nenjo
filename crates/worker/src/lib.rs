@@ -24,12 +24,15 @@ use clap::Args;
 use nenjo_eventbus::EventBus;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
 /// Maximum backoff between connection attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Initial backoff between connection attempts.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Poll interval while waiting for a worker enrollment to be approved.
+const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// CLI arguments for `nenjo run`.
 #[derive(Args, Debug, Default)]
@@ -62,38 +65,6 @@ pub struct RunArgs {
 
 /// Initialize tracing, load config, boot harness, connect NATS, and run.
 pub async fn run(args: RunArgs) -> Result<()> {
-    // Install rustls crypto provider before any TLS connections
-    if let Err(err) =
-        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-    {
-        debug!("Crypto provider installation failed (likely already installed): {err:?}");
-    }
-
-    // Load .env file FIRST so RUST_LOG and other env vars are available
-    dotenvy::dotenv().ok();
-
-    // Initialize tracing — CLI arg takes priority over RUST_LOG env var
-    let log_filter = args
-        .log_level
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "info".into());
-
-    // Build the env filter, suppressing noisy third-party crates at info level.
-    // async_nats logs connection events at info which duplicates our own logs.
-    let base_filter = tracing_subscriber::EnvFilter::new(&log_filter);
-    let filter = if base_filter.to_string().contains("async_nats") {
-        // User explicitly configured async_nats level — respect it.
-        base_filter
-    } else {
-        base_filter.add_directive("async_nats=warn".parse().expect("valid directive"))
-    };
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_target(args.log_target))
-        .init();
-
     info!("Starting Nenjo worker...");
 
     // Load configuration (config.toml + env overrides + API key validation)
@@ -121,6 +92,21 @@ pub async fn run(args: RunArgs) -> Result<()> {
         backend = %config.backend_api_url(),
         nats = %config.nats_url(),
         "Configuration loaded"
+    );
+
+    run_with_config(config).await
+}
+
+/// Run the worker using a fully constructed config.
+///
+/// This is the preferred entrypoint for embedded runtimes like tests, which
+/// already control the config directory and do not need the CLI-oriented
+/// `load_or_init` bootstrap path.
+pub async fn run_with_config(config: Config) -> Result<()> {
+    info!(
+        backend = %config.backend_api_url(),
+        nats = %config.nats_url(),
+        "Starting worker runtime"
     );
 
     // Shutdown token shared across retry iterations — a signal here means
@@ -182,19 +168,18 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     let harness = Harness::new(config.clone()).await?;
 
     // The api_key_id is the stable worker identifier used for presence tracking.
-    let api_key_id = harness.provider().manifest().api_key_id.ok_or_else(|| {
+    let auth = harness.provider().manifest().auth.clone().ok_or_else(|| {
+        anyhow::anyhow!("Backend did not return auth in manifest. Ensure bootstrap is up to date.")
+    })?;
+    let api_key_id = auth.api_key_id.ok_or_else(|| {
         anyhow::anyhow!(
-            "Backend did not return api_key_id in manifest. \
+            "Backend did not return auth.api_key_id in manifest. \
              Ensure the backend is updated and the API key is valid."
         )
     })?;
     debug!(%api_key_id, "Using API key ID as stable worker identifier");
 
     let auth_provider = WorkerAuthProvider::load_or_create(config.state_dir.join("crypto"))?;
-
-    auth_provider
-        .sync_worker_enrollment(harness.api().as_ref(), api_key_id)
-        .await?;
 
     let identity = auth_provider.identity();
     match auth_provider.enrollment_status().await {
@@ -212,7 +197,9 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         }
     }
 
-    let user_id = harness.provider().manifest().user_id;
+    let user_id = auth.user_id;
+    wait_for_enrollment_approval(harness.api().as_ref(), &auth_provider, api_key_id, shutdown)
+        .await?;
 
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
         .url(config.nats_url())
@@ -258,6 +245,79 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
             Err(anyhow::anyhow!("Event loop exited unexpectedly"))
         }
         Err(e) => Err(e),
+    }
+}
+
+async fn wait_for_enrollment_approval(
+    api: &nenjo::client::NenjoClient,
+    auth_provider: &WorkerAuthProvider,
+    api_key_id: uuid::Uuid,
+    shutdown: &CancellationToken,
+) -> Result<()> {
+    if matches!(
+        auth_provider.enrollment_status().await,
+        EnrollmentStatus::Active
+    ) {
+        return Ok(());
+    }
+
+    auth_provider
+        .sync_worker_enrollment(api, api_key_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to initialize worker enrollment: {error}"))?;
+
+    if matches!(
+        auth_provider.enrollment_status().await,
+        EnrollmentStatus::Active
+    ) {
+        info!(%api_key_id, "Worker enrollment approved");
+        return Ok(());
+    }
+
+    info!(
+        %api_key_id,
+        poll_every = ?APPROVAL_POLL_INTERVAL,
+        "Waiting for worker enrollment approval"
+    );
+
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+
+        match api.fetch_worker_enrollment_status(api_key_id).await {
+            Ok(Some(status)) => match status.state {
+                nenjo::client::WorkerEnrollmentState::Active => {
+                    auth_provider.apply_backend_enrollment(&status).await?;
+                    info!(%api_key_id, "Worker enrollment approved");
+                    return Ok(());
+                }
+                nenjo::client::WorkerEnrollmentState::Pending => {}
+                nenjo::client::WorkerEnrollmentState::Revoked => {
+                    return Err(anyhow::anyhow!(
+                        "Worker enrollment was revoked before approval completed"
+                    ));
+                }
+            },
+            Ok(None) => {
+                debug!(
+                    %api_key_id,
+                    "Worker enrollment status not found yet; continuing to wait"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    %api_key_id,
+                    error = %error,
+                    "Failed to fetch worker enrollment status; continuing to wait"
+                );
+            }
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(APPROVAL_POLL_INTERVAL) => {}
+            _ = shutdown.cancelled() => return Ok(()),
+        }
     }
 }
 

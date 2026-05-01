@@ -14,12 +14,13 @@ pub use nenjo::TurnOutput;
 // Task and step types
 pub use nenjo::StepResult;
 pub use nenjo::types::{
-    ActiveDomain, DelegationContext, DomainArtifactConfig, DomainPromptConfig, DomainSessionConfig,
-    DomainSessionManifest, DomainToolConfig, Task, TaskType, TurnOutcome,
+    ActiveDomain, DelegationContext, DomainPromptConfig, DomainSessionManifest, Task, TaskType,
+    TurnOutcome,
 };
 
 // Prompt types
-pub use nenjo::agents::prompts::{MemoryProfile, PromptConfig, PromptContext, PromptTemplates};
+pub use nenjo::agents::prompts::{PromptConfig, PromptContext};
+pub use nenjo::manifest::{MemoryProfile, PromptTemplates};
 
 // Render context
 pub use nenjo::context::RenderContextVars;
