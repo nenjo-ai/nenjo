@@ -1,9 +1,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use nenjo::AgentBuilder;
+use nenjo_models::ChatMessage;
 use nenjo_sessions::{
     ExecutionPhase, SessionCheckpoint, SessionContentStore, SessionCoordinator, SessionKind,
-    SessionLease, SessionStatus, SessionStore, WorktreeSnapshot,
+    SessionLease, SessionStatus, SessionStore, SessionTranscriptChatMessage,
+    SessionTranscriptEvent, SessionTranscriptEventPayload, TranscriptState, WorktreeSnapshot,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
@@ -61,6 +63,124 @@ pub fn write_checkpoint(
     checkpoint: &SessionCheckpoint,
 ) -> Result<()> {
     write_json_blob(store, key, checkpoint)
+}
+
+pub fn transcript_ref(session_id: Uuid) -> String {
+    format!("transcripts/{session_id}.jsonl")
+}
+
+pub fn append_jsonl_blob<T>(store: &dyn SessionContentStore, key: &str, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let mut body = serde_json::to_vec(value)?;
+    body.push(b'\n');
+    store.append_blob(key, &body)
+}
+
+pub fn read_jsonl_blob<T>(store: &dyn SessionContentStore, key: &str) -> Result<Vec<T>>
+where
+    T: DeserializeOwned,
+{
+    let Some(bytes) = store.read_blob(key)? else {
+        return Ok(Vec::new());
+    };
+
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<std::result::Result<Vec<T>, _>>()
+        .map_err(Into::into)
+}
+
+pub fn chat_message_to_transcript(message: &ChatMessage) -> SessionTranscriptChatMessage {
+    SessionTranscriptChatMessage {
+        role: message.role.clone(),
+        content: message.content.clone(),
+    }
+}
+
+pub fn transcript_message_to_chat(message: SessionTranscriptChatMessage) -> ChatMessage {
+    ChatMessage {
+        role: message.role,
+        content: message.content,
+    }
+}
+
+pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessage> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            SessionTranscriptEventPayload::ChatMessage { message } => {
+                Some(transcript_message_to_chat(message.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn load_chat_history(
+    store: &dyn SessionStore,
+    content: &dyn SessionContentStore,
+    session_id: Uuid,
+) -> Result<Vec<ChatMessage>> {
+    let Some(record) = store.get(session_id)? else {
+        return Ok(Vec::new());
+    };
+
+    if let Some(transcript_ref) = record.refs.transcript_ref.as_deref() {
+        let events: Vec<SessionTranscriptEvent> = read_jsonl_blob(content, transcript_ref)?;
+        return Ok(replay_transcript_history(&events));
+    }
+
+    Ok(Vec::new())
+}
+
+pub fn append_transcript_event(
+    store: &dyn SessionStore,
+    content: &dyn SessionContentStore,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+    payload: SessionTranscriptEventPayload,
+    transcript_state: TranscriptState,
+) -> Result<Option<SessionTranscriptEvent>> {
+    const MAX_CAS_RETRIES: usize = 8;
+
+    for _ in 0..MAX_CAS_RETRIES {
+        let Some(record) = store.get(session_id)? else {
+            return Ok(None);
+        };
+
+        let transcript_ref = record
+            .refs
+            .transcript_ref
+            .clone()
+            .unwrap_or_else(|| transcript_ref(session_id));
+        let event = SessionTranscriptEvent {
+            session_id,
+            seq: record.summary.last_transcript_seq + 1,
+            recorded_at: Utc::now(),
+            turn_id,
+            payload: payload.clone(),
+        };
+
+        let mut next = record.clone();
+        next.refs.transcript_ref = Some(transcript_ref.clone());
+        next.summary.last_transcript_seq = event.seq;
+        next.summary.transcript_state = transcript_state;
+        next.version += 1;
+        next.updated_at = event.recorded_at;
+
+        if !store.compare_and_swap(session_id, record.version, &next)? {
+            continue;
+        }
+
+        append_jsonl_blob(content, &transcript_ref, &event)?;
+        return Ok(Some(event));
+    }
+
+    anyhow::bail!("failed to append transcript event after compare-and-swap retries")
 }
 
 pub fn update_session_checkpoint<F>(
@@ -250,16 +370,19 @@ pub fn reconcile_recoverable_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_json_blob, reconcile_recoverable_session, transition_session_state,
-        update_checkpoint_phase, update_checkpoint_with_worktree, write_json_blob,
+        append_transcript_event, load_chat_history, read_json_blob, reconcile_recoverable_session,
+        transcript_ref, transition_session_state, update_checkpoint_phase,
+        update_checkpoint_with_worktree, write_json_blob,
     };
     use crate::harness::session::local_content::FileSessionContentStore;
     use crate::harness::session::local_coordinator::LocalSessionCoordinator;
     use crate::harness::session::local_store::FileSessionStore;
     use chrono::Utc;
+    use nenjo_models::ChatMessage;
     use nenjo_sessions::{
         ExecutionPhase, SessionCheckpoint, SessionKind, SessionRecord, SessionRefs, SessionStatus,
-        SessionStore, SessionSummary, WorktreeSnapshot,
+        SessionStore, SessionSummary, SessionTranscriptEventPayload, TranscriptState,
+        WorktreeSnapshot,
     };
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -278,7 +401,7 @@ mod tests {
             parent_session_id: None,
             version: 0,
             refs: SessionRefs {
-                history_ref: None,
+                transcript_ref: Some(transcript_ref(session_id)),
                 trace_ref: None,
                 checkpoint_ref: Some(format!("checkpoints/{session_id}.json")),
                 memory_namespace: Some("agent_tester_core".to_string()),
@@ -410,5 +533,119 @@ mod tests {
             Some("recoverable from tool execution checkpoint")
         );
         assert!(updated.completed_at.is_none());
+    }
+
+    #[test]
+    fn transcript_events_replay_into_chat_history() {
+        let dir = tempdir().unwrap();
+        let store = FileSessionStore::new(dir.path().join("sessions").as_path());
+        let content = FileSessionContentStore::new(dir.path().join("content").as_path());
+        let session_id = Uuid::new_v4();
+
+        store
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        append_transcript_event(
+            &store,
+            &content,
+            session_id,
+            None,
+            SessionTranscriptEventPayload::ChatMessage {
+                message: super::chat_message_to_transcript(&ChatMessage::user("first")),
+            },
+            TranscriptState::MidTurn,
+        )
+        .unwrap();
+
+        append_transcript_event(
+            &store,
+            &content,
+            session_id,
+            None,
+            SessionTranscriptEventPayload::ChatMessage {
+                message: super::chat_message_to_transcript(&ChatMessage::assistant("second")),
+            },
+            TranscriptState::Clean,
+        )
+        .unwrap();
+
+        let history = load_chat_history(&store, &content, session_id).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "first");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].content, "second");
+
+        let record = store.get(session_id).unwrap().unwrap();
+        assert_eq!(
+            record.refs.transcript_ref.as_deref(),
+            Some(transcript_ref(session_id).as_str())
+        );
+        assert_eq!(record.summary.last_transcript_seq, 2);
+        assert_eq!(record.summary.transcript_state, TranscriptState::Clean);
+    }
+
+    #[test]
+    fn transcript_replay_ignores_non_chat_events_and_preserves_mid_turn_state() {
+        let dir = tempdir().unwrap();
+        let store = FileSessionStore::new(dir.path().join("sessions").as_path());
+        let content = FileSessionContentStore::new(dir.path().join("content").as_path());
+        let session_id = Uuid::new_v4();
+
+        store
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        append_transcript_event(
+            &store,
+            &content,
+            session_id,
+            None,
+            SessionTranscriptEventPayload::ChatMessage {
+                message: super::chat_message_to_transcript(&ChatMessage::user("question")),
+            },
+            TranscriptState::MidTurn,
+        )
+        .unwrap();
+
+        append_transcript_event(
+            &store,
+            &content,
+            session_id,
+            None,
+            SessionTranscriptEventPayload::ToolCalls {
+                parent_tool_name: None,
+                tool_names: vec!["search_docs".to_string()],
+                text_preview: Some("checking docs".to_string()),
+            },
+            TranscriptState::MidTurn,
+        )
+        .unwrap();
+
+        append_transcript_event(
+            &store,
+            &content,
+            session_id,
+            None,
+            SessionTranscriptEventPayload::ToolResult {
+                parent_tool_name: None,
+                tool_name: "search_docs".to_string(),
+                success: true,
+                output_preview: Some("found 3 matches".to_string()),
+                error_preview: None,
+            },
+            TranscriptState::MidTurn,
+        )
+        .unwrap();
+
+        let history = load_chat_history(&store, &content, session_id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "question");
+
+        let record = store.get(session_id).unwrap().unwrap();
+        assert_eq!(record.summary.last_transcript_seq, 3);
+        assert_eq!(record.summary.transcript_state, TranscriptState::MidTurn);
     }
 }

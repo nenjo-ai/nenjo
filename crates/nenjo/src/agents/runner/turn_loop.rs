@@ -4,6 +4,7 @@
 //! It is independent of Nenjo platform concepts (NATS, streaming, bootstrap).
 //! Callers build prompts and pass pre-built messages to [`run()`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -13,13 +14,37 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use nenjo_models::{ChatMessage, ChatRequest};
-use nenjo_tools::Tool;
+use nenjo_tools::{Tool, ToolCategory};
 
 use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
 use crate::agents::instance::AgentInstance;
+
+fn dedupe_tool_calls(tool_calls: Vec<nenjo_models::ToolCall>) -> Vec<nenjo_models::ToolCall> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        let key = (tool_call.name.clone(), tool_call.arguments.clone());
+        if seen.insert(key) {
+            deduped.push(tool_call);
+        }
+    }
+    deduped
+}
+
+fn tool_for_call<'a>(
+    tools: &'a [Arc<dyn Tool>],
+    tool_call: &nenjo_models::ToolCall,
+) -> Option<&'a Arc<dyn Tool>> {
+    tools.iter().find(|t| {
+        let name = t.name();
+        name == tool_call.name
+            || nenjo_models::sanitize_tool_name(name) == tool_call.name
+            || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
+    })
+}
 
 tokio::task_local! {
     static CURRENT_EVENTS_TX: Option<mpsc::UnboundedSender<TurnEvent>>;
@@ -171,6 +196,17 @@ pub async fn run(
                 };
 
                 let mut response = provider.chat(request, model, temperature).await?;
+                let original_tool_call_count = response.tool_calls.len();
+                response.tool_calls = dedupe_tool_calls(response.tool_calls);
+                if response.tool_calls.len() != original_tool_call_count {
+                    warn!(
+                        agent = agent_name,
+                        model,
+                        original_tool_call_count,
+                        deduped_tool_call_count = response.tool_calls.len(),
+                        "Deduped repeated tool calls from a single LLM response"
+                    );
+                }
 
                 // Strip <think>…</think> blocks from reasoning models
                 // (DeepSeek, MiniMax, etc.) before text enters messages or NATS.
@@ -239,12 +275,33 @@ pub async fn run(
                         agent = agent_name,
                         model, "Tool call response: {assistant_content}"
                     );
-                    messages.push(ChatMessage::assistant(assistant_content.to_string()));
+                    let assistant_message = ChatMessage::assistant(assistant_content.to_string());
+                    messages.push(assistant_message.clone());
+                    let _ = events_tx.as_ref().map(|tx| {
+                        tx.send(TurnEvent::TranscriptMessage {
+                            message: assistant_message,
+                        })
+                    });
 
                     // Execute tool calls — parallel when the model returns multiple
                     // calls in one response (it understands ordering dependencies),
                     // sequential otherwise or when opted out via config.
-                    let run_parallel = config.parallel_tools && response.tool_calls.len() > 1;
+                    let has_write_like_tool = response.tool_calls.iter().any(|tc| {
+                        tool_for_call(tools, tc)
+                            .map(|tool| tool.category() != ToolCategory::Read)
+                            .unwrap_or(true)
+                    });
+                    let run_parallel = config.parallel_tools
+                        && response.tool_calls.len() > 1
+                        && !has_write_like_tool;
+                    if response.tool_calls.len() > 1 && has_write_like_tool {
+                        debug!(
+                            agent = agent_name,
+                            model,
+                            tool_call_count = response.tool_calls.len(),
+                            "Serializing tool execution because the batch contains WRITE or READ/WRITE tools"
+                        );
+                    }
                     let tool_text_preview = response
                         .text
                         .as_deref()
@@ -290,13 +347,11 @@ pub async fn run(
 
                     total_tool_calls += tool_results.len() as u32;
 
-                    // Check if any executed tool is terminal (e.g. gate_verdict).
+                    // Check if any executed tool is terminal (e.g. pass_verdict).
                     // Terminal tools signal that the turn loop should stop immediately
                     // without feeding the tool result back to the LLM.
                     let has_terminal = tool_results.iter().any(|(tc, _)| {
-                        tools
-                            .iter()
-                            .find(|t| t.name() == tc.name)
+                        tool_for_call(tools, tc)
                             .is_some_and(|t| t.is_terminal())
                     });
 
@@ -347,7 +402,13 @@ pub async fn run(
                             "tool_call_id": tool_call.id,
                             "content": raw_content,
                         });
-                        messages.push(ChatMessage::tool(tool_content.to_string()));
+                        let tool_message = ChatMessage::tool(tool_content.to_string());
+                        messages.push(tool_message.clone());
+                        let _ = events_tx.as_ref().map(|tx| {
+                            tx.send(TurnEvent::TranscriptMessage {
+                                message: tool_message,
+                            })
+                        });
                     }
 
                     // Terminal tool: stop the loop. The verdict is already recorded
@@ -386,7 +447,14 @@ pub async fn run(
                     continue;
                 }
 
-                final_text = text;
+                final_text = text.clone();
+                let assistant_message = ChatMessage::assistant(text);
+                messages.push(assistant_message.clone());
+                let _ = events_tx.as_ref().map(|tx| {
+                    tx.send(TurnEvent::TranscriptMessage {
+                        message: assistant_message,
+                    })
+                });
                 break;
             }
 
@@ -438,12 +506,7 @@ async fn execute_tool(
 
     // Find the tool — also match against sanitized names since strict providers
     // (DeepSeek, OpenAI) replace dots/slashes (e.g. "app.nenjo.platform/x" → "app_nenjo_platform_x").
-    let tool = match tools.iter().find(|t| {
-        let name = t.name();
-        name == tool_call.name
-            || nenjo_models::sanitize_tool_name(name) == tool_call.name
-            || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
-    }) {
+    let tool = match tool_for_call(tools, tool_call) {
         Some(t) => t,
         None => {
             return nenjo_tools::ToolResult {

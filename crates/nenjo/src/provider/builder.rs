@@ -43,8 +43,6 @@ pub struct ProviderBuilder {
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
     lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    platform_resolver: Option<Arc<dyn crate::mcp::PlatformToolResolver>>,
-    template_source: Option<Arc<dyn crate::context::TemplateSource>>,
 }
 
 impl ProviderBuilder {
@@ -57,8 +55,6 @@ impl ProviderBuilder {
             memory: None,
             agent_config: AgentConfig::default(),
             lambda_runner: None,
-            platform_resolver: None,
-            template_source: None,
         }
     }
 
@@ -129,27 +125,6 @@ impl ProviderBuilder {
         self
     }
 
-    /// Set the platform tool resolver for resolving scope-gated MCP tools.
-    ///
-    /// When set, ability sub-executions can resolve additional platform tools
-    /// based on the ability's `platform_scopes`.
-    pub fn with_platform_resolver(
-        mut self,
-        resolver: Arc<dyn crate::mcp::PlatformToolResolver>,
-    ) -> Self {
-        self.platform_resolver = Some(resolver);
-        self
-    }
-
-    /// Set a lazy template source for context blocks.
-    ///
-    /// When set, the [`ContextRenderer`] loads templates on demand from this
-    /// source instead of holding all templates in memory.
-    pub fn with_template_source(mut self, source: Arc<dyn crate::context::TemplateSource>) -> Self {
-        self.template_source = Some(source);
-        self
-    }
-
     /// Build the Provider by loading and merging all manifest sources.
     ///
     /// Requires at least one of [`with_manifest`](Self::with_manifest) or
@@ -184,8 +159,6 @@ impl ProviderBuilder {
             memory: self.memory,
             agent_config: self.agent_config,
             lambda_runner: self.lambda_runner,
-            platform_resolver: self.platform_resolver,
-            template_source: self.template_source,
         })
     }
 }

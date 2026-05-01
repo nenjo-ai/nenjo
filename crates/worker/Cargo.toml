@@ -9,78 +9,80 @@ description = "Agent worker for the Nenjo platform"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.49", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 # Web framework
-axum = { version = "0.8.8", features = ["ws"] }
-tower = "0.5.3"
-tower-http = { version = "0.6", features = ["cors", "compression-full", "trace"] }
+axum = { workspace = true, features = ["ws"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "compression-full", "trace"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 
 # Workspace crates
 nenjo = { workspace = true }
+nenjo-crypto-auth = { workspace = true }
+nenjo-platform = { workspace = true }
 nenjo-xml = { workspace = true }
 nenjo-tools = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
+nenjo-secure-envelope = { workspace = true }
 nenjo-sessions = { workspace = true }
 
-# WebSocket client
-tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
-futures-util = "0.3"
-url = "2.5"
-
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
 
 # Configuration
-config = "0.15"
-dotenvy = "0.15"
+config = { workspace = true }
+dotenvy = { workspace = true }
 
 # Logging and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "2.0"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Utilities
-uuid = { version = "1.21", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-async-trait = "0.1"
-regex = "1.12"
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+async-trait = { workspace = true }
+regex = { workspace = true }
 
 # Config
-directories = "5.0"
-toml = "1.0"
-shellexpand = "3.1"
-tempfile = "3.25.0"
-parking_lot = "0.12.5"
-arc-swap = "1.9.0"
-dashmap = "6.1.0"
-base64 = "0.22.1"
-rusqlite = "0.38.0"
-sqlite-vec = "0.1"
-sha2 = "0.10.9"
-glob = "0.3"
-cron = "0.15"
-nanohtml2text = "0.1"
-urlencoding = "2.1"
-which = "7"
+directories = { workspace = true }
+toml = { workspace = true }
+shellexpand = { workspace = true }
+tempfile = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+dashmap = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+aes-gcm = { workspace = true, features = ["std"] }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
+rand_core = { workspace = true, features = ["getrandom"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+glob = { workspace = true }
+cron = { workspace = true }
+nanohtml2text = { workspace = true }
+urlencoding = { workspace = true }
+which = { workspace = true }
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true, features = ["derive", "env"] }
 
 # TLS
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { workspace = true, default-features = false, features = ["ring"] }
 
 # Testing
-tokio-test = "0.4"
-axum-test = "18.7"
+tokio-test = { workspace = true }
+axum-test = { workspace = true }

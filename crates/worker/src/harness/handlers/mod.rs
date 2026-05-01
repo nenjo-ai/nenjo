@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod cron;
+pub mod crypto;
 pub mod domain;
 pub mod event_bridge;
 pub mod heartbeat;
@@ -72,16 +73,12 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             routine_id,
             assigned_agent_id,
             execution_run_id,
-            title,
-            description,
-            slug,
-            acceptance_criteria,
-            tags,
-            status,
-            priority,
-            task_type,
-            complexity,
+            payload,
+            ..
         } => {
+            let payload = payload.ok_or_else(|| {
+                anyhow::anyhow!("task.execute missing payload after command decode")
+            })?;
             task::handle_task_execute(
                 &ctx,
                 task_id,
@@ -89,15 +86,15 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 routine_id,
                 assigned_agent_id,
                 execution_run_id,
-                &title,
-                description.as_deref().unwrap_or(""),
-                slug.as_deref(),
-                acceptance_criteria.as_deref(),
-                &tags,
-                status.as_deref(),
-                priority.as_deref(),
-                task_type.as_deref(),
-                complexity.as_deref(),
+                &payload.title,
+                payload.description.as_deref().unwrap_or(""),
+                payload.slug.as_deref(),
+                payload.acceptance_criteria.as_deref(),
+                &payload.tags,
+                payload.status.as_deref(),
+                payload.priority.as_deref(),
+                payload.task_type.as_deref(),
+                payload.complexity.as_deref(),
             )
             .await
         }
@@ -153,12 +150,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             Ok(())
         }
 
+        Command::WorkerAccountKeyUpdated { wrapped_ack } => {
+            crypto::handle_worker_account_key_updated(&ctx, wrapped_ack).await
+        }
+
         Command::ManifestChanged {
             resource_type,
             resource_id,
             action,
             project_id,
             payload,
+            encrypted_payload,
         } => {
             manifest::handle_manifest_changed(
                 &ctx,
@@ -167,6 +169,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 action,
                 project_id,
                 payload,
+                encrypted_payload,
             )
             .await
         }

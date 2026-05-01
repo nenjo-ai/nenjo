@@ -3,7 +3,17 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Capability;
+use crate::{Capability, EncryptedPayload, TaskExecuteContent};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedAccountContentKey {
+    pub key_version: u32,
+    pub algorithm: String,
+    pub ephemeral_public_key: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// A command dispatched to an agent harness.
 ///
@@ -22,6 +32,9 @@ pub enum Command {
         id: Option<String>,
         /// The user's message text.
         content: String,
+        /// Optional encrypted content body. When present, workers should prefer this over `content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<EncryptedPayload>,
         /// When true, persist for context/history but do not surface in normal chat views.
         #[serde(default)]
         hidden: bool,
@@ -89,23 +102,10 @@ pub enum Command {
         routine_id: Option<Uuid>,
         #[serde(default)]
         assigned_agent_id: Option<Uuid>,
-        title: String,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        slug: Option<String>,
-        #[serde(default)]
-        acceptance_criteria: Option<String>,
-        #[serde(default)]
-        tags: Vec<String>,
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        priority: Option<String>,
-        #[serde(default)]
-        task_type: Option<String>,
-        #[serde(default)]
-        complexity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<TaskExecuteContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 
     /// Cancel a running execution.
@@ -184,6 +184,13 @@ pub enum Command {
     #[serde(rename = "worker.ping")]
     WorkerPing,
 
+    /// Push a user-scoped wrapped account content key to a specific worker so
+    /// it can decrypt/encrypt that user's private chat traffic.
+    #[serde(rename = "worker.account_key_updated")]
+    WorkerAccountKeyUpdated {
+        wrapped_ack: WrappedAccountContentKey,
+    },
+
     // -----------------------------------------------------------------
     // Bootstrap
     // -----------------------------------------------------------------
@@ -202,6 +209,10 @@ pub enum Command {
         /// `None` means the harness should fetch from the detail endpoint (fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
+        /// Inline encrypted resource payload — preferred over plaintext `payload`
+        /// when the worker has an active ACK.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 }
 
@@ -220,10 +231,10 @@ impl std::fmt::Display for Command {
                 write!(f, "chat.session_delete(session={session_id})")
             }
             Self::TaskExecute {
-                execution_run_id,
-                title,
-                ..
-            } => write!(f, "task.execute(run={execution_run_id}, title={title})"),
+                execution_run_id, ..
+            } => {
+                write!(f, "task.execute(run={execution_run_id})")
+            }
             Self::ExecutionCancel { execution_run_id } => {
                 write!(f, "execution.cancel(run={execution_run_id})")
             }
@@ -252,6 +263,7 @@ impl std::fmt::Display for Command {
                 write!(f, "agent_heartbeat.trigger(agent={agent_id})")
             }
             Self::WorkerPing => write!(f, "worker.ping"),
+            Self::WorkerAccountKeyUpdated { .. } => write!(f, "worker.account_key_updated"),
             Self::ManifestChanged {
                 resource_type,
                 action,
@@ -287,6 +299,7 @@ impl Command {
             | Command::AgentHeartbeatTrigger { .. } => Capability::Cron,
 
             Command::WorkerPing => Capability::Ping,
+            Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
             Command::ManifestChanged { .. } => Capability::Manifest,
 
@@ -304,7 +317,6 @@ pub enum ResourceType {
     Routine,
     Project,
     Council,
-    Lambda,
     Ability,
     ContextBlock,
     McpServer,
@@ -320,7 +332,6 @@ impl std::fmt::Display for ResourceType {
             Self::Routine => write!(f, "routine"),
             Self::Project => write!(f, "project"),
             Self::Council => write!(f, "council"),
-            Self::Lambda => write!(f, "lambda"),
             Self::Ability => write!(f, "ability"),
             Self::ContextBlock => write!(f, "context_block"),
             Self::McpServer => write!(f, "mcp_server"),

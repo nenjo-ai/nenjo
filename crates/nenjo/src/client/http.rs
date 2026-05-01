@@ -59,43 +59,46 @@ impl NenjoClient {
     // Bootstrap
     // -----------------------------------------------------------------------
 
-    /// Fetch the full manifest (projects, routines, models, agents, etc.).
-    pub async fn fetch_manifest(&self) -> Result<Manifest> {
+    /// Fetch the raw manifest bootstrap payload.
+    pub async fn fetch_manifest_json(&self) -> Result<serde_json::Value> {
         let url = format!("{}/api/v1/manifest", self.base_url);
         let resp = self.get(&url).await?;
 
         match resp.status() {
-            StatusCode::OK => {
-                let text = resp.text().await.map_err(|e| {
-                    error!(error = %e, "Bootstrap: failed to read response body");
-                    ApiClientError::Http(e)
-                })?;
-
-                match serde_json::from_str::<Manifest>(&text) {
-                    Ok(data) => {
-                        debug!(
-                            projects = data.projects.len(),
-                            routines = data.routines.len(),
-                            models = data.models.len(),
-                            agents = data.agents.len(),
-                            "Bootstrap data fetched"
-                        );
-                        Ok(data)
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
-                            line = e.line(),
-                            column = e.column(),
-                            body_len = text.len(),
-                            body_preview = &text[..text.len().min(500)],
-                            "Bootstrap: failed to deserialize response"
-                        );
-                        Err(ApiClientError::Parse(e.to_string()))
-                    }
-                }
-            }
+            StatusCode::OK => resp.json().await.map_err(ApiClientError::Http),
             status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    /// Fetch the full manifest (projects, routines, models, agents, etc.).
+    pub async fn fetch_manifest(&self) -> Result<Manifest> {
+        let value = self.fetch_manifest_json().await?;
+        let text = serde_json::to_string(&value).map_err(|e| {
+            ApiClientError::Parse(format!("Failed to serialize manifest JSON: {e}"))
+        })?;
+
+        match serde_json::from_value::<Manifest>(value) {
+            Ok(data) => {
+                debug!(
+                    projects = data.projects.len(),
+                    routines = data.routines.len(),
+                    models = data.models.len(),
+                    agents = data.agents.len(),
+                    "Bootstrap data fetched"
+                );
+                Ok(data)
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    line = e.line(),
+                    column = e.column(),
+                    body_len = text.len(),
+                    body_preview = &text[..text.len().min(500)],
+                    "Bootstrap: failed to deserialize response"
+                );
+                Err(ApiClientError::Parse(e.to_string()))
+            }
         }
     }
 
@@ -112,7 +115,10 @@ impl NenjoClient {
     }
 
     pub async fn fetch_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
-        self.fetch_resource(&format!("/api/v1/routines/{id}")).await
+        let detail: Option<RoutineDetailResponse> = self
+            .fetch_resource(&format!("/api/v1/routines/{id}"))
+            .await?;
+        Ok(detail.map(Into::into))
     }
 
     pub async fn list_active_cron_routines(&self) -> Result<Vec<ActiveCronRoutineState>> {
@@ -135,12 +141,44 @@ impl NenjoClient {
         }
     }
 
-    pub async fn fetch_lambda(&self, id: Uuid) -> Result<Option<LambdaManifest>> {
-        self.fetch_resource(&format!("/api/v1/lambdas/{id}")).await
+    pub async fn register_worker_enrollment(
+        &self,
+        request: &WorkerEnrollmentRequest,
+    ) -> Result<WorkerEnrollmentStatusResponse> {
+        let url = format!("{}/api/v1/workers/enrollment", self.base_url);
+        let resp = self.post_json(&url, request).await?;
+
+        match resp.status() {
+            StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
+                resp.json().await.map_err(ApiClientError::Http)
+            }
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    pub async fn fetch_worker_enrollment_status(
+        &self,
+        api_key_id: Uuid,
+    ) -> Result<Option<WorkerEnrollmentStatusResponse>> {
+        self.fetch_resource(&format!("/api/v1/workers/enrollment/{api_key_id}"))
+            .await
     }
 
     pub async fn fetch_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
-        self.fetch_resource(&format!("/api/v1/domains/{id}")).await
+        let url = format!("{}/api/v1/domains/{id}/manifest", self.base_url);
+        let resp = self.get(&url).await?;
+        match resp.status() {
+            StatusCode::OK => {
+                let response: DomainManifestResponse = resp.json().await.map_err(|source| {
+                    ApiClientError::Parse(format!(
+                        "Failed to parse /api/v1/domains/{id}/manifest: {source}"
+                    ))
+                })?;
+                Ok(Some(response.into()))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(self.api_error(status, resp).await),
+        }
     }
 
     pub async fn fetch_mcp_server(&self, id: Uuid) -> Result<Option<McpServerManifest>> {
@@ -153,13 +191,44 @@ impl NenjoClient {
             .await
     }
 
-    pub async fn fetch_context_block(&self, id: Uuid) -> Result<Option<ContextBlockManifest>> {
+    pub async fn fetch_context_block_summary(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ContextBlockSummaryResponse>> {
         self.fetch_resource(&format!("/api/v1/context-blocks/{id}"))
             .await
     }
 
+    pub async fn fetch_context_block_content(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ContextBlockContentResponse>> {
+        self.fetch_resource(&format!("/api/v1/context-blocks/{id}/content"))
+            .await
+    }
+
     pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
-        self.fetch_resource(&format!("/api/v1/agents/{id}")).await
+        let detail: Option<AgentDetailResponse> =
+            self.fetch_resource(&format!("/api/v1/agents/{id}")).await?;
+        Ok(detail.map(Into::into))
+    }
+
+    pub async fn fetch_agent_prompt_config(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<AgentPromptConfigResponse>> {
+        let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, id);
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => resp
+                .json::<AgentPromptConfigResponse>()
+                .await
+                .map(Some)
+                .map_err(ApiClientError::Http),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(self.api_error(status, resp).await),
+        }
     }
 
     pub async fn fetch_council(&self, id: Uuid) -> Result<Option<CouncilManifest>> {
@@ -188,8 +257,12 @@ impl NenjoClient {
         }
     }
 
-    /// Get the text content of a single project document.
-    pub async fn get_document_content(&self, project_id: Uuid, doc_id: Uuid) -> Result<String> {
+    /// Get the content envelope of a single project document.
+    pub async fn get_document_content(
+        &self,
+        project_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<DocumentSyncContent> {
         let url = format!(
             "{}/api/v1/projects/{}/documents/{}/content",
             self.base_url, project_id, doc_id
@@ -198,9 +271,31 @@ impl NenjoClient {
 
         match resp.status() {
             StatusCode::OK => {
-                let content = resp.text().await.map_err(ApiClientError::Http)?;
+                let content = resp.json().await.map_err(ApiClientError::Http)?;
                 debug!(project_id = %project_id, doc_id = %doc_id, "Fetched document content");
                 Ok(content)
+            }
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    /// List all graph edges touching a single project document.
+    pub async fn list_project_document_edges(
+        &self,
+        project_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<Vec<DocumentSyncEdge>> {
+        let url = format!(
+            "{}/api/v1/projects/{}/documents/{}/edges",
+            self.base_url, project_id, doc_id
+        );
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => {
+                let edges: Vec<DocumentSyncEdge> = resp.json().await?;
+                debug!(project_id = %project_id, doc_id = %doc_id, count = edges.len(), "Listed project document edges");
+                Ok(edges)
             }
             status => Err(self.api_error(status, resp).await),
         }
@@ -242,6 +337,20 @@ impl NenjoClient {
         self.http
             .get(url)
             .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(ApiClientError::Http)
+    }
+
+    async fn post_json<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(url)
+            .headers(self.auth_headers())
+            .json(body)
             .send()
             .await
             .map_err(ApiClientError::Http)

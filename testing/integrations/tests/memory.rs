@@ -8,7 +8,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use nenjo::manifest::{
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+};
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo_models::ModelProvider;
@@ -43,7 +45,6 @@ fn make_model() -> ModelManifest {
         model: "anthropic/claude-3-haiku".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.0),
-        tags: vec![],
         base_url: None,
     }
 }
@@ -53,23 +54,23 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         id: Uuid::new_v4(),
         name: name.into(),
         description: Some(format!("Test agent: {name}")),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": system_prompt,
-            "templates": {
-                "chat_task": "{{ chat.message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: system_prompt.into(),
+            templates: PromptTemplates {
+                chat_task: "{{ chat.message }}".into(),
+                task_execution: String::new(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model_id),
-        model_name: Some("claude-haiku".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -79,7 +80,7 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
 // Tests
 // ===========================================================================
 
-/// Agent stores a fact via memory_store, verify it lands in the correct
+/// Agent stores a fact via save_memory, verify it lands in the correct
 /// file on disk under the project-scoped namespace.
 #[tokio::test]
 async fn memory_store_writes_to_correct_scope() {
@@ -101,14 +102,13 @@ async fn memory_store_writes_to_correct_scope() {
         name: "webapp".into(),
         slug: "webapp".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     };
     let agent = make_agent(
         "coder",
         model.id,
         "You are a helpful assistant.\n\
-         When the user tells you to remember something, use memory_store with scope 'project'.\n\
+         When the user tells you to remember something, use save_memory with scope 'project'.\n\
          Always respond concisely.",
     );
 
@@ -147,7 +147,7 @@ async fn memory_store_writes_to_correct_scope() {
 
     assert!(
         output.tool_calls >= 1,
-        "agent should have called memory_store, got: {}",
+        "agent should have called save_memory, got: {}",
         output.tool_calls
     );
 
@@ -169,10 +169,10 @@ async fn memory_store_writes_to_correct_scope() {
     );
 }
 
-/// Agent saves a resource via resource_save, verify the file and manifest
+/// Agent saves a resource via save_resource, verify the file and manifest
 /// land in the workspace dir.
 #[tokio::test]
-async fn resource_save_writes_to_workspace() {
+async fn save_resource_writes_to_workspace() {
     let api_key = match get_api_key() {
         Some(key) => key,
         None => {
@@ -191,14 +191,13 @@ async fn resource_save_writes_to_workspace() {
         name: "webapp".into(),
         slug: "webapp".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     };
     let agent = make_agent(
         "architect",
         model.id,
         "You are a helpful assistant.\n\
-         When the user asks you to create a document, use resource_save with scope 'project'.\n\
+         When the user asks you to create a document, use save_resource with scope 'project'.\n\
          Always respond concisely.",
     );
 
@@ -237,7 +236,7 @@ async fn resource_save_writes_to_workspace() {
 
     assert!(
         output.tool_calls >= 1,
-        "agent should have called resource_save, got: {}",
+        "agent should have called save_resource, got: {}",
         output.tool_calls
     );
 

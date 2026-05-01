@@ -10,9 +10,10 @@ use nenjo_models::ModelProvider;
 use nenjo_tools::security::SecurityPolicy;
 use nenjo_tools::{Tool, ToolSpec};
 
-use super::prompts::PromptConfig;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
+use crate::manifest::{AgentManifest, PromptConfig};
+use crate::provider::ToolFactory;
 use crate::types::{RenderContextExt, RenderContextVars, TaskType};
 
 /// The system and developer prompts ready for the turn loop.
@@ -53,6 +54,8 @@ pub struct AgentInstance {
     pub security: Arc<SecurityPolicy>,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
+    pub source_manifest: Option<AgentManifest>,
+    pub tool_factory: Option<Arc<dyn ToolFactory>>,
     pub memory_vars: HashMap<String, String>,
     pub resource_vars: HashMap<String, String>,
     pub documents_xml: String,
@@ -185,11 +188,11 @@ impl AgentInstance {
         vars.extend(rendered_blocks);
 
         // 5. Assemble developer prompt
-        // Domain system_addon is appended when a domain session is active.
+        // Domain developer prompt addon is appended when a domain session is active.
         let mut developer = self.prompt_config.developer_prompt.clone();
         if self.prompt_context.append_active_domain_addon
             && let Some(ref domain) = self.prompt_context.active_domain
-            && let Some(ref addon) = domain.manifest.prompt.system_addon
+            && let Some(ref addon) = domain.manifest.prompt_config.developer_prompt_addon
             && !addon.is_empty()
         {
             if !developer.is_empty() {
@@ -235,6 +238,14 @@ impl AgentInstance {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ManifestEntry {
     filename: String,
+    path: Option<String>,
+    title: Option<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    summary: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
     size_bytes: i64,
 }
 
@@ -269,7 +280,14 @@ pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &st
             .iter()
             .map(|doc| crate::context::DocumentContext {
                 name: doc.filename.clone(),
+                title: doc.title.clone(),
+                path: doc.path.clone(),
+                kind: doc.kind.clone(),
+                authority: doc.authority.clone(),
                 size: format_size(doc.size_bytes),
+                status: doc.status.clone(),
+                tags: doc.tags.clone(),
+                summary: doc.summary.clone(),
             })
             .collect(),
     };

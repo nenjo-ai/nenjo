@@ -1,0 +1,34 @@
+[package]
+name = "nenjo-crypto-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Worker crypto enrollment and content-key auth primitives"
+readme = "README.md"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+aes-gcm = { workspace = true, features = ["std"] }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+dashmap = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+hkdf = { workspace = true }
+nenjo = { workspace = true }
+nenjo-events = { workspace = true }
+nenjo-platform = { workspace = true }
+rand_core = { workspace = true, features = ["getrandom"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

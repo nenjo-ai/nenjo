@@ -19,11 +19,12 @@
 //! ```
 
 pub mod agents;
+#[path = "builtin/mod.rs"]
+pub mod builtin_knowledge;
 pub mod client;
 pub mod config;
 pub mod context;
 pub mod manifest;
-pub mod mcp;
 pub mod memory;
 pub mod provider;
 pub mod routines;
@@ -33,16 +34,17 @@ pub mod types;
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{ExecutionHandle, TurnEvent, TurnLoopConfig, TurnOutput};
 pub use config::AgentConfig;
-pub use manifest::{Manifest, ManifestLoader};
+pub use manifest::{
+    Manifest, ManifestLoader, ManifestResource, ManifestResourceKind,
+    local::LocalManifestStore,
+    store::{ManifestReader, ManifestWriter},
+};
 pub use provider::{
     ModelProviderFactory, Provider, ProviderBuilder, ProviderError, RoutineRunner, ToolFactory,
 };
 
 // Re-export the Tool trait for custom tool implementations.
 pub use nenjo_tools::{Tool, ToolCategory, ToolResult, ToolSpec};
-
-// Re-export MCP types.
-pub use mcp::{NoopPlatformResolver, PlatformMcpResolver, PlatformToolResolver};
 
 // Re-export Provider for convenience.
 pub use nenjo_models::ModelProvider;

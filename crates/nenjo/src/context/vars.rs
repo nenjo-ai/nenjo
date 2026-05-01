@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::builtin_knowledge::builtin_documents_summary;
 use crate::context::{MemoryProfileContext, TaskContext};
 
 use super::types::{
@@ -248,6 +249,7 @@ impl RenderContextVars {
         if !self.documents_xml.is_empty() {
             vars.insert("project.documents".to_string(), self.documents_xml.clone());
         }
+        vars.insert("builtin.documents".to_string(), builtin_documents_summary());
 
         // Merge context blocks
         vars.extend(self.context_blocks.clone());

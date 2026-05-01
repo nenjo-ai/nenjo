@@ -1,0 +1,22 @@
+[package]
+name = "nenjo-platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nenjo platform-backed manifest and REST API operations"
+
+[dependencies]
+nenjo = { workspace = true }
+nenjo-events = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["json", "multipart"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

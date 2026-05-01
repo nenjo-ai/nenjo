@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::manifest::DomainManifest;
+pub use crate::manifest::{
+    AbilityPromptConfig, DomainManifest as DomainSessionManifest, DomainPromptConfig,
+};
 use crate::routines::types::StepResult;
 use nenjo_models::ChatMessage;
 use serde::{Deserialize, Serialize};
@@ -190,56 +194,6 @@ pub enum TaskType {
     },
 }
 
-/// Prompt configuration parsed from AgentManifestRole.prompt_config JSONB.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PromptConfig {
-    #[serde(default)]
-    pub system_prompt: String,
-    #[serde(default)]
-    pub developer_prompt: String,
-    #[serde(default)]
-    pub templates: PromptTemplates,
-    #[serde(default)]
-    pub memory_profile: MemoryProfile,
-}
-
-/// Configures what a role wants its memory system to focus on.
-///
-/// Core focus = cross-project expertise that persists everywhere.
-/// Project focus = project-specific knowledge.
-/// Priority categories = categories this role cares about most (prioritized in retrieval).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MemoryProfile {
-    /// What this role wants remembered as core (cross-project) knowledge.
-    #[serde(default)]
-    pub core_focus: Vec<String>,
-    /// What this role wants remembered as project-specific knowledge.
-    #[serde(default)]
-    pub project_focus: Vec<String>,
-}
-
-impl MemoryProfile {
-    /// Returns true if the profile has any focus configured.
-    pub fn is_empty(&self) -> bool {
-        self.core_focus.is_empty() && self.project_focus.is_empty()
-    }
-}
-
-/// Task-specific prompt templates.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PromptTemplates {
-    #[serde(default)]
-    pub task_execution: String,
-    #[serde(default)]
-    pub chat_task: String,
-    #[serde(default)]
-    pub gate_eval: String,
-    #[serde(default)]
-    pub cron_task: String,
-    #[serde(default)]
-    pub heartbeat_task: String,
-}
-
 /// Tracks delegation depth and prevents cycles in agent-to-agent delegation.
 #[derive(Debug, Clone)]
 pub struct DelegationContext {
@@ -279,127 +233,13 @@ impl DelegationContext {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Domain types
-// ---------------------------------------------------------------------------
-
 /// Active domain state carried across turns within a domain session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveDomain {
     pub session_id: Uuid,
     pub domain_id: Uuid,
     pub domain_name: String,
-    pub manifest: DomainSessionManifest,
-    pub turn_number: u32,
-    pub artifact_draft: serde_json::Value,
-}
-
-/// Top-level domain manifest (deserialized from JSONB).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DomainSessionManifest {
-    #[serde(default)]
-    pub schema_version: u32,
-    #[serde(default)]
-    pub domain_type: String,
-    #[serde(default)]
-    pub prompt: DomainPromptConfig,
-    #[serde(default)]
-    pub tools: DomainToolConfig,
-    #[serde(default)]
-    pub artifact: Option<DomainArtifactConfig>,
-    #[serde(default)]
-    pub session: DomainSessionConfig,
-}
-
-/// Prompt overlay configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DomainPromptConfig {
-    #[serde(default)]
-    pub system_addon: Option<String>,
-    #[serde(default)]
-    pub guidelines: Vec<String>,
-    #[serde(default)]
-    pub entry_message: Option<String>,
-    #[serde(default)]
-    pub exit_message: Option<String>,
-}
-
-/// Tool allow/deny filter with optional injection for profile escalation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DomainToolConfig {
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub deny: Vec<String>,
-    #[serde(default)]
-    pub additional: Vec<String>,
-    /// Built-in tool names to inject (grants write tools that the understanding default excludes).
-    #[serde(default)]
-    pub inject_tools: Vec<String>,
-    /// Tool categories to inject. Values: "read", "write", "readwrite".
-    #[serde(default)]
-    pub inject_categories: Vec<String>,
-    /// Additional platform scopes to grant when this domain is active.
-    /// Escalates the role's base platform_scopes with extra MCP access.
-    /// Example: ["projects:write", "routines:write"]
-    #[serde(default)]
-    pub additional_scopes: Vec<String>,
-    /// Activate external MCP servers by name for this domain.
-    /// Example: ["github", "linear"]
-    #[serde(default)]
-    pub activate_mcp: Vec<String>,
-    /// Activate abilities by name for this domain session.
-    /// Example: ["code-review", "migration-writer"]
-    #[serde(default)]
-    pub activate_abilities: Vec<String>,
-}
-
-/// Artifact output configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainArtifactConfig {
-    #[serde(default)]
-    pub r#type: String,
-    #[serde(default)]
-    pub format: String,
-    #[serde(default)]
-    pub filename_template: Option<String>,
-    #[serde(default)]
-    pub schema: Option<serde_json::Value>,
-    #[serde(default)]
-    pub output_template: Option<String>,
-}
-
-/// Session behavior configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainSessionConfig {
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u32,
-    #[serde(default = "default_auto_save_interval")]
-    pub auto_save_interval: u32,
-    #[serde(default)]
-    pub exit_commands: Vec<String>,
-}
-
-impl Default for DomainSessionConfig {
-    fn default() -> Self {
-        Self {
-            max_turns: default_max_turns(),
-            auto_save_interval: default_auto_save_interval(),
-            exit_commands: vec![
-                "/exit".to_string(),
-                "/done".to_string(),
-                "/finish".to_string(),
-            ],
-        }
-    }
-}
-
-fn default_max_turns() -> u32 {
-    50
-}
-
-fn default_auto_save_interval() -> u32 {
-    5
+    pub manifest: DomainManifest,
 }
 
 /// Outcome of a single turn in the agent loop.
@@ -430,24 +270,6 @@ mod tests {
         let parsed: StepResult = serde_json::from_str(&json).unwrap();
         assert!(parsed.passed);
         assert_eq!(parsed.output, "done");
-    }
-
-    #[test]
-    fn prompt_config_default_is_empty() {
-        let config = PromptConfig::default();
-        assert!(config.system_prompt.is_empty());
-        assert!(config.templates.task_execution.is_empty());
-    }
-
-    #[test]
-    fn domain_tool_config_inject_fields() {
-        let json = serde_json::json!({
-            "inject_tools": ["file_write", "file_edit"],
-            "inject_categories": ["write"]
-        });
-        let config: DomainToolConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(config.inject_tools, vec!["file_write", "file_edit"]);
-        assert_eq!(config.inject_categories, vec!["write"]);
     }
 
     #[test]
@@ -485,25 +307,5 @@ mod tests {
         let child = ctx.child(id1).unwrap();
         assert!(child.would_cycle(id1));
         assert!(!child.would_cycle(Uuid::new_v4()));
-    }
-
-    #[test]
-    fn prompt_config_from_json() {
-        let json = serde_json::json!({
-            "system_prompt": "You are a helpful assistant.",
-            "templates": {
-                "task_execution": "Implement: {{ title }}",
-                "chat_task": "Respond to: {{ chat.message }}",
-                "gate_eval": "Evaluate: {{ criteria }}"
-            },
-            "output_templates": {
-                "agent_done": "Task complete.",
-                "gate_pass": "PASS",
-                "gate_fail": "FAIL"
-            }
-        });
-        let config: PromptConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(config.system_prompt, "You are a helpful assistant.");
-        assert_eq!(config.templates.task_execution, "Implement: {{ title }}");
     }
 }

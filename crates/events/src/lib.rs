@@ -30,12 +30,14 @@
 
 mod capability;
 mod command;
+mod content;
 mod envelope;
 mod response;
 mod subject;
 
 pub use capability::*;
 pub use command::*;
+pub use content::*;
 pub use envelope::*;
 pub use response::*;
 pub use subject::*;

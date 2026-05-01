@@ -115,17 +115,7 @@ fn resolve_cron_memory_namespace(
     let mut agent_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for step in &routine.steps {
-        let agent_id = step.agent_id.or_else(|| {
-            step.model_id.and_then(|model_id| {
-                manifest
-                    .agents
-                    .iter()
-                    .find(|agent| agent.model_id == Some(model_id))
-                    .map(|agent| agent.id)
-            })
-        });
-
-        if let Some(agent_id) = agent_id
+        if let Some(agent_id) = step.agent_id
             && let Some(agent) = manifest.agents.iter().find(|agent| agent.id == agent_id)
         {
             agent_names.insert(agent.name.clone());
@@ -145,7 +135,7 @@ fn resolve_cron_memory_namespace(
 }
 
 fn emit_cron_heartbeat(
-    response_tx: &tokio::sync::mpsc::UnboundedSender<Response>,
+    response_tx: &crate::harness::ResponseSender,
     routine_id: Uuid,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_fire_at: chrono::DateTime<chrono::Utc>,

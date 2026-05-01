@@ -129,7 +129,7 @@ impl OpenRouterProvider {
                 .map(|tool| NativeToolSpec {
                     kind: "function".to_string(),
                     function: NativeToolFunctionSpec {
-                        name: tool.name.clone(),
+                        name: crate::sanitize_tool_name(&tool.name),
                         description: tool.description.clone(),
                         parameters: tool.parameters.clone(),
                     },

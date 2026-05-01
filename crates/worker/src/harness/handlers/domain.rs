@@ -27,11 +27,7 @@ fn domain_memory_namespace(agent_name: &str, project_slug: &str) -> String {
     .project
 }
 
-/// Enter a domain session — creates a domain-expanded runner with escalated scopes.
-///
-/// The domain's `additional_scopes` are merged into the agent's `platform_scopes`
-/// before rebuilding through the Provider, so the `ToolFactory` sees the expanded
-/// scopes and includes the corresponding MCP tools.
+/// Enter a domain session — creates a domain-expanded runner with the domain prompt addon.
 pub async fn handle_domain_enter(
     ctx: &CommandContext,
     project_id: Uuid,
@@ -44,7 +40,7 @@ pub async fn handle_domain_enter(
     let aname = agent_name(manifest, agent_id);
     let pslug = super::event_bridge::project_slug(manifest, project_id);
 
-    // First do the domain expansion to get the session config + filtered tools.
+    // First do the domain expansion to get the session prompt/scoped activations.
     let base_runner = provider.agent_by_id(agent_id).await?.build().await?;
 
     match base_runner.domain_expansion(domain_command).await {
@@ -123,6 +119,8 @@ pub async fn handle_domain_enter(
                 session_id: None,
                 payload: StreamEvent::Error {
                     message: format!("Domain expansion failed: {e}"),
+                    payload: None,
+                    encrypted_payload: None,
                 },
             });
         }

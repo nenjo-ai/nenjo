@@ -8,7 +8,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use nenjo::manifest::{
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
@@ -42,7 +44,6 @@ fn make_model() -> ModelManifest {
         model: "anthropic/claude-3-haiku".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.0),
-        tags: vec![],
         base_url: None,
     }
 }
@@ -53,7 +54,6 @@ fn make_project() -> ProjectManifest {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     }
 }
@@ -63,23 +63,23 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
         id: Uuid::new_v4(),
         name: name.into(),
         description: Some(format!("Test agent: {name}")),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": system_prompt,
-            "templates": {
-                "chat_task": "{{ message }}",
-                "task_execution": "",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: system_prompt.into(),
+            templates: PromptTemplates {
+                chat_task: "{{ chat.message }}".into(),
+                task_execution: String::new(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model_id),
-        model_name: Some("claude-haiku".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     }

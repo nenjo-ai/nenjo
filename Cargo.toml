@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/crypto-auth",
     "crates/nenjo",
+    "crates/platform",
+    "crates/secure-envelope",
     "crates/worker",
     "crates/sessions",
     "crates/events",
@@ -22,10 +25,65 @@ repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
 nenjo = { path = "crates/nenjo", version = "0.10.0" }
+nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.10.0" }
+nenjo-platform = { path = "crates/platform", version = "0.10.0" }
 nenjo-xml = { path = "crates/xml", version = "0.10.0" }
 nenjo-models = { path = "crates/models", version = "0.10.0" }
 nenjo-tools = { path = "crates/tools", version = "0.10.0" }
 nenjo-events = { path = "crates/events", version = "0.10.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.10.0" }
+nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.10.0" }
 nenjo-sessions = { path = "crates/sessions", version = "0.10.0" }
 nenjo-worker = { path = "crates/worker" }
+
+aes-gcm = "0.10"
+anyhow = "1.0"
+arc-swap = "1.9.0"
+async-nats = "0.47"
+async-trait = "0.1.89"
+axum = "0.8.8"
+axum-test = "18.7"
+base64 = "0.22.1"
+bon = "3"
+bytes = "1"
+chrono = "0.4"
+clap = "4"
+config = "0.15"
+cron = "0.15"
+dashmap = "6.1.0"
+directories = "5.0"
+dotenvy = "0.15"
+ed25519-dalek = "2.2"
+futures-util = "0.3"
+glob = "0.3"
+hkdf = "0.12"
+minijinja = "2"
+nanohtml2text = "0.1"
+parking_lot = "0.12.5"
+quick-xml = "0.39.2"
+rand = "0.8.6"
+rand_core = "0.6"
+regex = "1.12"
+reqwest = "0.13"
+rustls = { version = "0.23", default-features = false }
+rustls-webpki = "0.103.13"
+serde = "1.0"
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10.9"
+shellexpand = "3.1"
+tempfile = "3.25.0"
+thiserror = "2.0"
+tokio = "1.49"
+tokio-test = "0.4"
+tokio-util = "0.7"
+toml = "1.0"
+tower = "0.5.3"
+tower-http = "0.6"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+urlencoding = "2.1"
+uuid = "1.21"
+which = "7"
+x25519-dalek = "2.0"
+zeroize = "1.8"

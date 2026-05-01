@@ -176,8 +176,6 @@ pub(crate) struct RoutineState {
     pub routine_id: Uuid,
     pub step_results: HashMap<Uuid, StepResult>,
     pub initial_input: String,
-    #[allow(dead_code)] // Stored for future retry logic
-    pub max_retries: i32,
     pub input: RoutineInput,
     pub routine_name: Option<String>,
     pub current_step_name: Option<String>,
@@ -189,13 +187,12 @@ pub(crate) struct RoutineState {
 }
 
 impl RoutineState {
-    pub fn new(routine_id: Uuid, input: RoutineInput, max_retries: i32) -> Self {
+    pub fn new(routine_id: Uuid, input: RoutineInput) -> Self {
         let initial_input = input.description.clone();
         Self {
             routine_id,
             step_results: HashMap::new(),
             initial_input,
-            max_retries,
             input,
             routine_name: None,
             current_step_name: None,
@@ -269,35 +266,7 @@ pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
 // EdgeCondition — conditional routing on DAG edges
 // ---------------------------------------------------------------------------
 
-/// Condition on a routine edge that determines whether to follow it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EdgeCondition {
-    Always,
-    OnPass,
-    OnFail,
-    OnReviewPass,
-    OnReviewFail,
-}
-
-impl EdgeCondition {
-    pub fn from_str_value(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "on_pass" => Self::OnPass,
-            "on_fail" => Self::OnFail,
-            "on_review_pass" => Self::OnReviewPass,
-            "on_review_fail" => Self::OnReviewFail,
-            _ => Self::Always,
-        }
-    }
-
-    pub fn is_satisfied(&self, passed: bool) -> bool {
-        match self {
-            Self::Always => true,
-            Self::OnPass | Self::OnReviewPass => passed,
-            Self::OnFail | Self::OnReviewFail => !passed,
-        }
-    }
-}
+pub use crate::manifest::RoutineEdgeCondition as EdgeCondition;
 
 // ---------------------------------------------------------------------------
 // StepType — the type of a routine step
@@ -589,14 +558,6 @@ mod tests {
         assert_eq!(
             EdgeCondition::from_str_value("on_fail"),
             EdgeCondition::OnFail
-        );
-        assert_eq!(
-            EdgeCondition::from_str_value("on_review_pass"),
-            EdgeCondition::OnReviewPass
-        );
-        assert_eq!(
-            EdgeCondition::from_str_value("on_review_fail"),
-            EdgeCondition::OnReviewFail
         );
         assert_eq!(
             EdgeCondition::from_str_value("always"),

@@ -2,22 +2,20 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::manifest::{RoutineManifest, RoutineStepManifest};
+use crate::manifest::{RoutineManifest, RoutineStepManifest, RoutineStepType};
 use crate::provider::Provider;
 use crate::routines::types::StepResult;
 use crate::routines::{apply_session_binding_memory_scope, gate};
 use crate::types::TaskType;
 
 use super::RoutineEvent;
-use super::types::{
-    CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineState, StepType,
-};
+use super::types::{CronMode, CronStepConfig, RoutineState};
 use crate::context::{RoutineContext, RoutineStepContext};
 
 /// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
@@ -72,16 +70,7 @@ pub(crate) async fn execute_routine_once(
     }
 
     // Find entry step
-    let entry_step_ids: Vec<Uuid> = routine
-        .metadata
-        .get("entry_step_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let entry_step_ids = &routine.metadata.entry_step_ids;
 
     let entry_step = if !entry_step_ids.is_empty() {
         steps
@@ -111,7 +100,7 @@ pub(crate) async fn execute_routine_once(
         );
 
         state.current_step_name = Some(current_step.name.clone());
-        state.current_step_type = Some(current_step.step_type.clone());
+        state.current_step_type = Some(current_step.step_type.to_string());
         state.current_agent_id = current_step.agent_id;
         // Parse step metadata — expect a JSON value. If the raw config value
         // is not valid JSON (e.g. a bare string without quotes), serialize it
@@ -133,7 +122,7 @@ pub(crate) async fn execute_routine_once(
         let _ = events_tx.send(RoutineEvent::StepStarted {
             step_id: current_step.id,
             step_name: current_step.name.clone(),
-            step_type: current_step.step_type.clone(),
+            step_type: current_step.step_type.to_string(),
             agent_id: current_step.agent_id,
         });
 
@@ -158,23 +147,22 @@ pub(crate) async fn execute_routine_once(
                 });
 
                 // Store gate feedback if this step failed (for on_fail edges).
-                // For gate steps, prefer the structured reasoning from the
-                // gate_verdict tool over the raw LLM output.
-                if !step_result.passed {
-                    let step_type = StepType::from_str_value(&current_step.step_type);
-                    if matches!(
-                        step_type,
-                        StepType::Gate | StepType::Cron | StepType::Lambda | StepType::Council
-                    ) {
-                        let feedback = step_result
-                            .data
-                            .get("reasoning")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| step_result.output.clone());
-                        state.gate_feedback = Some(feedback);
-                    }
+                // For structured-evaluation steps, prefer the structured reasoning from the
+                // pass_verdict tool over the raw LLM output.
+                if !step_result.passed
+                    && matches!(
+                        current_step.step_type,
+                        RoutineStepType::Gate | RoutineStepType::Cron | RoutineStepType::Council
+                    )
+                {
+                    let feedback = step_result
+                        .data
+                        .get("reasoning")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| step_result.output.clone());
+                    state.gate_feedback = Some(feedback);
                 }
 
                 state
@@ -206,8 +194,19 @@ pub(crate) async fn execute_routine_once(
         }
 
         // Check for terminal steps
-        let step_type = StepType::from_str_value(&current_step.step_type);
-        if matches!(step_type, StepType::Terminal | StepType::TerminalFail) {
+        if matches!(
+            current_step.step_type,
+            RoutineStepType::Terminal | RoutineStepType::TerminalFail
+        ) {
+            break;
+        }
+
+        // Agent-step fail verdicts are terminal for the routine.
+        if current_step.step_type == RoutineStepType::Agent && !last_result.passed {
+            debug!(
+                step = %current_step.name,
+                "Agent step returned fail verdict, terminating routine"
+            );
             break;
         }
 
@@ -217,10 +216,9 @@ pub(crate) async fn execute_routine_once(
             .filter(|e| e.source_step_id == current_step.id)
             .collect();
 
-        let next_edge = outgoing.iter().find(|e| {
-            let condition = EdgeCondition::from_str_value(&e.condition);
-            condition.is_satisfied(last_result.passed)
-        });
+        let next_edge = outgoing
+            .iter()
+            .find(|e| e.condition.is_satisfied(last_result.passed));
 
         match next_edge {
             Some(edge) => {
@@ -251,17 +249,14 @@ async fn execute_step(
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
-    let step_type = StepType::from_str_value(&step.step_type);
-
-    match step_type {
-        StepType::Agent => execute_agent_step(provider, step, state, events_tx).await,
-        StepType::Gate => execute_gate_step(provider, step, state, events_tx).await,
-        StepType::Lambda => execute_lambda_step(provider, step, state).await,
-        StepType::Council => {
+    match step.step_type {
+        RoutineStepType::Agent => execute_agent_step(provider, step, state, events_tx).await,
+        RoutineStepType::Gate => execute_gate_step(provider, step, state, events_tx).await,
+        RoutineStepType::Council => {
             super::council::execute_council(provider, step, state, events_tx).await
         }
-        StepType::Cron => execute_cron_step(provider, step, state, events_tx).await,
-        StepType::Terminal => {
+        RoutineStepType::Cron => execute_cron_step(provider, step, state, events_tx).await,
+        RoutineStepType::Terminal => {
             // Terminal step: return the most recent step result
             let last = state
                 .step_results
@@ -277,7 +272,7 @@ async fn execute_step(
                 ..Default::default()
             })
         }
-        StepType::TerminalFail => {
+        RoutineStepType::TerminalFail => {
             let reason = step
                 .config
                 .get("reason")
@@ -307,8 +302,7 @@ async fn execute_agent_step(
 ) -> Result<StepResult> {
     let agent_id = step
         .agent_id
-        .or_else(|| resolve_agent_from_model(provider, step.model_id))
-        .with_context(|| format!("No agent found for step '{}'", step.name))?;
+        .with_context(|| format!("Agent step '{}' is missing agent_id", step.name))?;
 
     let mut builder = apply_session_binding_memory_scope(
         provider.agent_by_id(agent_id).await?,
@@ -340,7 +334,10 @@ async fn execute_agent_step(
         builder = builder.with_work_dir(&git.work_dir);
     }
 
-    let runner = builder.build().await?;
+    let runner = builder
+        .with_tool(gate::PassVerdictTool::new())
+        .build()
+        .await?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -368,27 +365,26 @@ async fn execute_agent_step(
         build_task_type(step, state, task_description)
     };
 
-    let mut handle = runner.task_stream(task).await?;
+    let output =
+        gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step.id, events_tx)
+            .await?;
 
-    while let Some(event) = handle.recv().await {
-        let _ = events_tx.send(RoutineEvent::AgentEvent {
-            step_id: step.id,
-            event,
-        });
-    }
-
-    let output = handle.output().await?;
+    let verdict = gate::resolve_pass_verdict(&output.messages)?;
+    let data = serde_json::json!({
+        "verdict": if verdict.passed { "pass" } else { "fail" },
+        "reasoning": verdict.reasoning,
+    });
 
     Ok(StepResult {
-        passed: true,
+        passed: verdict.passed,
         output: output.text,
+        data,
         step_id: step.id,
         step_name: step.name.clone(),
         input_tokens: output.input_tokens,
         output_tokens: output.output_tokens,
         tool_calls: output.tool_calls,
         messages: output.messages,
-        ..Default::default()
     })
 }
 
@@ -404,14 +400,13 @@ async fn execute_gate_step(
 ) -> Result<StepResult> {
     let agent_id = step
         .agent_id
-        .or_else(|| resolve_agent_from_model(provider, step.model_id))
-        .with_context(|| format!("No agent found for gate step '{}'", step.name))?;
+        .with_context(|| format!("Gate step '{}' is missing agent_id", step.name))?;
 
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
     let runner = provider
         .agent_by_id(agent_id)
         .await?
-        .with_tool(gate::GateVerdictTool::new())
+        .with_tool(gate::PassVerdictTool::new())
         .with_routine_context(routine_ctx)
         .with_step_context(step_ctx)
         .build()
@@ -437,20 +432,11 @@ async fn execute_gate_step(
         task: Some(build_task(state, state.input.description.clone())),
     };
 
-    let mut handle = runner.task_stream(task).await?;
+    let output =
+        gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step.id, events_tx)
+            .await?;
 
-    while let Some(event) = handle.recv().await {
-        let _ = events_tx.send(RoutineEvent::AgentEvent {
-            step_id: step.id,
-            event,
-        });
-    }
-
-    let output = handle.output().await?;
-
-    // Extract verdict from the gate_verdict tool call, falling back to
-    // JSON parsing in the response text if the agent didn't call the tool.
-    let verdict = gate::resolve_gate_verdict(&output.messages, &output.text);
+    let verdict = gate::resolve_pass_verdict(&output.messages)?;
 
     // Store verdict + reasoning in `data` so the event bus and gate_feedback
     // can surface structured information instead of raw LLM text.
@@ -473,71 +459,6 @@ async fn execute_gate_step(
 }
 
 // ---------------------------------------------------------------------------
-// Lambda step
-// ---------------------------------------------------------------------------
-
-async fn execute_lambda_step(
-    provider: &Provider,
-    step: &RoutineStepManifest,
-    state: &RoutineState,
-) -> Result<StepResult> {
-    let lambda_runner = provider
-        .lambda_runner()
-        .context("Lambda step requires a LambdaRunner (configure with .with_lambda_runner())")?;
-
-    let config = LambdaStepConfig::from_config(&step.config, step.lambda_id)?;
-
-    let lambda = provider
-        .manifest()
-        .lambdas
-        .iter()
-        .find(|l| l.id == config.lambda_id)
-        .with_context(|| format!("Lambda {} not found in manifest", config.lambda_id))?;
-
-    let interpreter = config.interpreter.as_deref().unwrap_or(&lambda.interpreter);
-
-    // Build env vars with context
-    let mut env = std::collections::HashMap::new();
-    env.insert("ROUTINE_ID".to_string(), state.routine_id.to_string());
-    env.insert("STEP_ID".to_string(), step.id.to_string());
-    env.insert("STEP_NAME".to_string(), step.name.clone());
-    env.insert("PROJECT_ID".to_string(), state.input.project_id.to_string());
-    if let Some(ref run_id) = state.input.execution_run_id {
-        env.insert("EXECUTION_RUN_ID".to_string(), run_id.to_string());
-    }
-
-    // Add previous step output
-    if let Some(last) = state.step_results.values().last() {
-        env.insert("PREVIOUS_OUTPUT".to_string(), last.output.clone());
-        env.insert("PREVIOUS_PASSED".to_string(), last.passed.to_string());
-    }
-
-    let script_path = std::path::PathBuf::from(&lambda.path);
-
-    let result = lambda_runner
-        .run_script(&script_path, interpreter, env, config.timeout)
-        .await?;
-
-    let passed = result.exit_code == 0;
-    let output = if passed {
-        result.stdout
-    } else {
-        format!(
-            "Lambda exited with code {}.\nStdout: {}\nStderr: {}",
-            result.exit_code, result.stdout, result.stderr
-        )
-    };
-
-    Ok(StepResult {
-        passed,
-        output,
-        step_id: step.id,
-        step_name: step.name.clone(),
-        ..Default::default()
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Cron step
 // ---------------------------------------------------------------------------
 
@@ -547,122 +468,70 @@ async fn execute_cron_step(
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
-    let config = CronStepConfig::from_config(&step.config, step.agent_id, step.lambda_id)?;
+    let config = CronStepConfig::from_config(&step.config, step.agent_id, None)?;
 
-    let deadline = tokio::time::Instant::now() + config.timeout;
-    let mut cycle = 0u32;
-    let mut total_input_tokens = 0u64;
-    let mut total_output_tokens = 0u64;
+    debug!(cycle = 1u32, step = %step.name, "Cron cycle");
 
-    loop {
-        cycle += 1;
-        debug!(cycle, step = %step.name, "Cron cycle");
+    let cycle_result = match &config.mode {
+        CronMode::Agent(agent_id) => {
+            let (routine_ctx, step_ctx) = build_routine_ctx(state);
+            let runner = provider
+                .agent_by_id(*agent_id)
+                .await?
+                .with_tool(gate::PassVerdictTool::new())
+                .with_routine_context(routine_ctx)
+                .with_step_context(step_ctx)
+                .build()
+                .await?;
+            // Use TaskType::Cron so the agent's cron_task template is selected.
+            let inner_task = state
+                .input
+                .task_id
+                .map(|_| build_task(state, state.input.description.clone()));
+            let task = crate::types::TaskType::Cron {
+                task: inner_task,
+                project_id: state.input.project_id,
+                schedule: crate::routines::types::CronSchedule::Interval(config.interval),
+                start_at: None,
+                timeout: config.timeout,
+            };
 
-        let cycle_result = match &config.mode {
-            CronMode::Agent(agent_id) => {
-                let (routine_ctx, step_ctx) = build_routine_ctx(state);
-                let runner = provider
-                    .agent_by_id(*agent_id)
-                    .await?
-                    .with_tool(gate::GateVerdictTool::new())
-                    .with_routine_context(routine_ctx)
-                    .with_step_context(step_ctx)
-                    .build()
-                    .await?;
-                // Use TaskType::Cron so the agent's cron_task template is selected.
-                let inner_task = state
-                    .input
-                    .task_id
-                    .map(|_| build_task(state, state.input.description.clone()));
-                let task = crate::types::TaskType::Cron {
-                    task: inner_task,
-                    project_id: state.input.project_id,
-                    schedule: crate::routines::types::CronSchedule::Interval(config.interval),
-                    start_at: None,
-                    timeout: config.timeout,
-                };
-
-                let mut handle = runner.task_stream(task).await?;
-                while let Some(event) = handle.recv().await {
-                    let _ = events_tx.send(RoutineEvent::AgentEvent {
-                        step_id: step.id,
-                        event,
-                    });
-                }
-                handle.output().await?
-            }
-            CronMode::Lambda(lambda_id) => {
-                let lambda_runner = provider
-                    .lambda_runner()
-                    .context("Cron step in lambda mode requires a LambdaRunner")?;
-
-                let lambda = provider
-                    .manifest()
-                    .lambdas
-                    .iter()
-                    .find(|l| l.id == *lambda_id)
-                    .with_context(|| format!("Lambda {lambda_id} not found"))?;
-
-                let mut env = std::collections::HashMap::new();
-                env.insert("CYCLE".to_string(), cycle.to_string());
-                env.insert("STEP_NAME".to_string(), step.name.clone());
-
-                let script_path = std::path::PathBuf::from(&lambda.path);
-                let lambda_output = lambda_runner
-                    .run_script(&script_path, &lambda.interpreter, env, config.interval)
-                    .await?;
-
-                crate::agents::runner::types::TurnOutput {
-                    text: lambda_output.stdout,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    tool_calls: 0,
-                    messages: Vec::new(),
-                }
-            }
-        };
-
-        total_input_tokens += cycle_result.input_tokens;
-        total_output_tokens += cycle_result.output_tokens;
-
-        // Check for gate_verdict tool call — the deterministic completion
-        // signal. If the agent called gate_verdict, the cycle is done.
-        if let Some(passed) = gate::extract_gate_verdict(&cycle_result.messages) {
-            let reasoning = gate::extract_gate_reasoning(&cycle_result.messages);
-            let data = serde_json::json!({
-                "verdict": if passed { "pass" } else { "fail" },
-                "reasoning": reasoning,
-            });
-            return Ok(StepResult {
-                passed,
-                output: cycle_result.text,
-                data,
-                step_id: step.id,
-                step_name: step.name.clone(),
-                input_tokens: total_input_tokens,
-                output_tokens: total_output_tokens,
-                ..Default::default()
-            });
+            gate::execute_with_pass_verdict(
+                &runner,
+                task,
+                state.input.project_id,
+                step.id,
+                events_tx,
+            )
+            .await?
         }
-
-        // No verdict — agent wants another cycle.
-
-        // Check timeout
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(StepResult {
-                passed: false,
-                output: format!("Cron step '{}' timed out after {} cycles", step.name, cycle),
-                step_id: step.id,
-                step_name: step.name.clone(),
-                input_tokens: total_input_tokens,
-                output_tokens: total_output_tokens,
-                ..Default::default()
-            });
+        CronMode::Lambda(lambda_id) => {
+            anyhow::bail!("Cron lambda steps are no longer supported (lambda_id={lambda_id})")
         }
+    };
 
-        // Sleep for interval
-        tokio::time::sleep(config.interval).await;
+    if let Some(passed) = gate::extract_pass_verdict(&cycle_result.messages) {
+        let reasoning = gate::extract_pass_reasoning(&cycle_result.messages);
+        let data = serde_json::json!({
+            "verdict": if passed { "pass" } else { "fail" },
+            "reasoning": reasoning,
+        });
+        return Ok(StepResult {
+            passed,
+            output: cycle_result.text,
+            data,
+            step_id: step.id,
+            step_name: step.name.clone(),
+            input_tokens: cycle_result.input_tokens,
+            output_tokens: cycle_result.output_tokens,
+            ..Default::default()
+        });
     }
+
+    bail!(
+        "Cron step '{}' completed without required pass_verdict",
+        step.name
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -699,17 +568,6 @@ fn build_task_type(
     description: String,
 ) -> TaskType {
     TaskType::Task(build_task(state, description))
-}
-
-/// Resolve an agent ID from a model assignment.
-fn resolve_agent_from_model(provider: &Provider, model_id: Option<Uuid>) -> Option<Uuid> {
-    let model_id = model_id?;
-    provider
-        .manifest()
-        .agents
-        .iter()
-        .find(|a| a.model_id == Some(model_id))
-        .map(|a| a.id)
 }
 
 /// Build a task description from step config and routine state.

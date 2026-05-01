@@ -13,16 +13,78 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
+use crate::crypto::WorkerAuthProvider;
+use crate::crypto::decrypt_text_with_provider;
 use crate::harness::doc_sync;
+use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::NenjoClient;
-use nenjo::manifest::LambdaManifest;
-use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
+use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestAuth, ManifestLoader};
+use nenjo_events::EncryptedPayload;
+use nenjo_platform::ManifestKind;
+use serde::Deserialize;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 static TREE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Deserialize)]
+struct BootstrapManifestResponse {
+    user_id: Uuid,
+    org_id: Uuid,
+    #[serde(default)]
+    api_key_id: Option<Uuid>,
+    #[serde(default)]
+    routines: Vec<nenjo::manifest::RoutineManifest>,
+    #[serde(default)]
+    models: Vec<nenjo::manifest::ModelManifest>,
+    #[serde(default)]
+    agents: Vec<BootstrapAgentManifest>,
+    #[serde(default)]
+    councils: Vec<nenjo::manifest::CouncilManifest>,
+    #[serde(default)]
+    domains: Vec<nenjo::manifest::DomainManifest>,
+    #[serde(default)]
+    projects: Vec<nenjo::manifest::ProjectManifest>,
+    #[serde(default)]
+    mcp_servers: Vec<nenjo::manifest::McpServerManifest>,
+    #[serde(default)]
+    abilities: Vec<nenjo::manifest::AbilityManifest>,
+    #[serde(default)]
+    context_blocks: Vec<nenjo::manifest::ContextBlockManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapAuthResponse {
+    #[serde(default)]
+    user_id: Option<Uuid>,
+    #[serde(default)]
+    api_key_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapAgentManifest {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    color: Option<String>,
+    model_id: Option<Uuid>,
+    #[serde(default, alias = "domain_ids")]
+    domains: Vec<Uuid>,
+    #[serde(default)]
+    platform_scopes: Vec<String>,
+    #[serde(default)]
+    mcp_server_ids: Vec<Uuid>,
+    #[serde(default, alias = "ability_ids")]
+    abilities: Vec<Uuid>,
+    #[serde(default)]
+    prompt_locked: bool,
+    #[serde(default)]
+    heartbeat: Option<nenjo::manifest::AgentHeartbeatManifest>,
+    #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
+}
 
 /// Trait for manifest items that can be stored as tree files.
 pub trait TreeItem: serde::Serialize {
@@ -54,39 +116,6 @@ impl TreeItem for ContextBlockManifest {
     }
     fn name(&self) -> &str {
         &self.name
-    }
-}
-
-/// File-backed template source that reads context block templates from the
-/// tree structure on disk: `{base_dir}/{path}/{name}.json`.
-///
-/// Used by [`ContextRenderer`] for lazy template loading — templates are read
-/// from disk only when rendering is requested, rather than held in memory.
-pub struct FileTemplateSource {
-    base_dir: PathBuf,
-}
-
-impl FileTemplateSource {
-    /// Create a new file template source rooted at the given directory.
-    ///
-    /// `base_dir` is typically `{manifests_dir}/context_blocks/`.
-    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            base_dir: base_dir.into(),
-        }
-    }
-}
-
-impl nenjo::context::TemplateSource for FileTemplateSource {
-    fn load_template(&self, path: &str, name: &str) -> Option<String> {
-        let file_path = tree_item_path(&self.base_dir, path, name);
-        let content = std::fs::read_to_string(&file_path).ok()?;
-        // Parse the JSON and extract the "template" field.
-        let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-        value
-            .get("template")
-            .and_then(|v| v.as_str())
-            .map(String::from)
     }
 }
 
@@ -138,7 +167,6 @@ impl ManifestLoader for LocalManifestLoader {
                     display_name: None,
                     description: None,
                     template,
-                    is_system: false,
                 });
             }
         }
@@ -157,7 +185,12 @@ impl ManifestLoader for LocalManifestLoader {
 ///
 /// On network / API errors the function logs a warning and returns `Ok(())`
 /// so the worker can still start. Filesystem errors are propagated.
-pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path) -> Result<()> {
+pub async fn sync(
+    api: &NenjoClient,
+    manifests_dir: &Path,
+    workspace_dir: &Path,
+    state_dir: &Path,
+) -> Result<()> {
     // Ensure the data directory exists (filesystem error = hard fail)
     std::fs::create_dir_all(manifests_dir).with_context(|| {
         format!(
@@ -167,13 +200,20 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
     })?;
 
     // Fetch bootstrap data — soft-fail on network/API errors
-    let data = match api.fetch_manifest().await {
+    let bootstrap = match api.fetch_manifest_json().await {
         Ok(d) => d,
         Err(e) => {
             warn!(error = %e, "Bootstrap fetch failed — worker will continue without cached data");
             return Ok(());
         }
     };
+
+    let auth: BootstrapAuthResponse = serde_json::from_value(bootstrap.clone())
+        .context("Failed to deserialize bootstrap auth response")?;
+    ensure_worker_ack(api, state_dir, auth.user_id, auth.api_key_id)
+        .await
+        .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
+    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
 
     info!(
         projects = data.projects.len(),
@@ -182,19 +222,24 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
         agents = data.agents.len(),
         councils = data.councils.len(),
         domains = data.domains.len(),
-        lambdas = data.lambdas.len(),
         mcp_servers = data.mcp_servers.len(),
         "Manifest fetched successfully"
     );
 
+    let auth = data.auth.as_ref();
     // Write auth info (user_id + api_key_id) as a single file.
-    debug!(user_id = %data.user_id, api_key_id = ?data.api_key_id, "Writing auth.json");
+    debug!(
+        user_id = ?auth.map(|auth| auth.user_id),
+        api_key_id = ?auth.and_then(|auth| auth.api_key_id),
+        "Writing auth.json"
+    );
     atomic_write_json(
         manifests_dir,
         "auth.json",
         &serde_json::json!({
-            "user_id": data.user_id,
-            "api_key_id": data.api_key_id,
+            "user_id": auth.map(|auth| auth.user_id),
+            "org_id": auth.map(|auth| auth.org_id),
+            "api_key_id": auth.and_then(|auth| auth.api_key_id),
         }),
     )?;
     atomic_write_json(manifests_dir, "projects.json", &data.projects)?;
@@ -202,64 +247,189 @@ pub async fn sync(api: &NenjoClient, manifests_dir: &Path, workspace_dir: &Path)
     atomic_write_json(manifests_dir, "models.json", &data.models)?;
     atomic_write_json(manifests_dir, "agents.json", &data.agents)?;
     atomic_write_json(manifests_dir, "councils.json", &data.councils)?;
-    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
-    atomic_write_json(manifests_dir, "lambdas.json", &data.lambdas)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &data.mcp_servers)?;
+    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
     sync_tree(&manifests_dir.join("abilities"), &data.abilities)?;
     sync_tree(&manifests_dir.join("context_blocks"), &data.context_blocks)?;
 
-    // Sync lambda script files to workspace
-    sync_lambdas(workspace_dir, &data.lambdas)?;
-
     // Sync project documents to workspace
-    doc_sync::sync_all(api, workspace_dir, &data.projects).await?;
+    doc_sync::sync_all(api, workspace_dir, state_dir, &data.projects).await?;
 
     Ok(())
 }
 
-/// Write lambda script bodies to `{workspace_dir}/../lambdas/{path}` and set
-/// the executable bit so scripts with shebangs can be run directly.
-pub fn sync_lambdas(workspace_dir: &Path, lambdas: &[LambdaManifest]) -> Result<()> {
-    let parent = workspace_dir.parent().with_context(|| {
-        format!(
-            "Workspace directory `{}` has no parent; cannot determine sibling `lambdas` directory",
-            workspace_dir.display()
-        )
-    })?;
-    let lambdas_dir = parent.join("lambdas");
-    std::fs::create_dir_all(&lambdas_dir).with_context(|| {
-        format!(
-            "Failed to create lambdas directory: {}",
-            lambdas_dir.display()
-        )
-    })?;
-
-    for lambda in lambdas {
-        let script_path = lambdas_dir.join(&lambda.path);
-
-        // Ensure parent directories exist for nested paths
-        if let Some(parent) = script_path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create lambda parent dir: {}", parent.display())
-            })?;
+async fn hydrate_bootstrap_manifest(
+    api: &NenjoClient,
+    bootstrap: serde_json::Value,
+    state_dir: &Path,
+) -> Result<Manifest> {
+    let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
+        Ok(value) => value,
+        Err(err) => {
+            log_bootstrap_deserialize_failure(&bootstrap, &err);
+            return Err(err).context("Failed to deserialize bootstrap manifest response");
         }
+    };
 
-        std::fs::write(&script_path, &lambda.body)
-            .with_context(|| format!("Failed to write lambda script: {}", script_path.display()))?;
-
-        // Set executable bit (unix only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).with_context(|| {
-                format!("Failed to set executable bit: {}", script_path.display())
-            })?;
-        }
+    let mut agents = Vec::with_capacity(bootstrap.agents.len());
+    for agent in bootstrap.agents {
+        let prompt_config = resolve_bootstrap_prompt_config(api, &agent, state_dir).await?;
+        agents.push(nenjo::manifest::AgentManifest {
+            id: agent.id,
+            name: agent.name,
+            description: agent.description,
+            prompt_config,
+            color: agent.color,
+            model_id: agent.model_id,
+            domain_ids: agent.domains,
+            platform_scopes: agent.platform_scopes,
+            mcp_server_ids: agent.mcp_server_ids,
+            ability_ids: agent.abilities,
+            prompt_locked: agent.prompt_locked,
+            heartbeat: agent.heartbeat,
+        });
     }
 
-    debug!(count = lambdas.len(), dir = %lambdas_dir.display(), "Lambda scripts synced");
-    Ok(())
+    Ok(Manifest {
+        auth: Some(ManifestAuth {
+            user_id: bootstrap.user_id,
+            org_id: bootstrap.org_id,
+            api_key_id: bootstrap.api_key_id,
+        }),
+        routines: bootstrap.routines,
+        models: bootstrap.models,
+        agents,
+        councils: bootstrap.councils,
+        domains: bootstrap.domains,
+        projects: bootstrap.projects,
+        mcp_servers: bootstrap.mcp_servers,
+        abilities: bootstrap.abilities,
+        context_blocks: bootstrap.context_blocks,
+    })
+}
+
+fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_json::Error) {
+    let preview = serde_json::to_string(bootstrap)
+        .ok()
+        .map(|text| text.chars().take(1000).collect::<String>())
+        .unwrap_or_else(|| "<unavailable>".to_string());
+    error!(
+        error = %err,
+        line = err.line(),
+        column = err.column(),
+        body_preview = %preview,
+        "Failed to deserialize bootstrap manifest response"
+    );
+
+    let Some(object) = bootstrap.as_object() else {
+        error!("Bootstrap payload was not a JSON object");
+        return;
+    };
+
+    macro_rules! check_section {
+        ($field:literal, $ty:ty) => {
+            if let Some(value) = object.get($field) {
+                if let Err(section_err) = serde_json::from_value::<$ty>(value.clone()) {
+                    error!(
+                        section = $field,
+                        error = %section_err,
+                        line = section_err.line(),
+                        column = section_err.column(),
+                        "Bootstrap section failed to deserialize"
+                    );
+                }
+            }
+        };
+    }
+
+    check_section!("routines", Vec<nenjo::manifest::RoutineManifest>);
+    check_section!("models", Vec<nenjo::manifest::ModelManifest>);
+    check_section!("agents", Vec<BootstrapAgentManifest>);
+    check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
+    check_section!("domains", Vec<nenjo::manifest::DomainManifest>);
+    check_section!("projects", Vec<nenjo::manifest::ProjectManifest>);
+    check_section!("mcp_servers", Vec<nenjo::manifest::McpServerManifest>);
+    check_section!("abilities", Vec<nenjo::manifest::AbilityManifest>);
+    check_section!("context_blocks", Vec<nenjo::manifest::ContextBlockManifest>);
+}
+
+async fn ensure_worker_ack(
+    api: &NenjoClient,
+    state_dir: &Path,
+    user_id: Option<Uuid>,
+    api_key_id: Option<Uuid>,
+) -> Result<crate::crypto::ContentKey> {
+    let user_id =
+        user_id.context("Bootstrap response did not include auth.user_id for ACK routing")?;
+    let api_key_id =
+        api_key_id.context("Bootstrap response did not include auth.api_key_id for enrollment")?;
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap")?;
+    auth_provider
+        .sync_worker_enrollment(api, api_key_id, user_id, None)
+        .await
+        .context("Failed to sync worker enrollment before bootstrap")?;
+    auth_provider
+        .load_ack_for_user(user_id)
+        .await
+        .context("Failed to load ACK for bootstrap decrypt")?
+        .context("Worker has no enrolled ACK yet")
+}
+
+async fn resolve_bootstrap_prompt_config(
+    api: &NenjoClient,
+    agent: &BootstrapAgentManifest,
+    state_dir: &Path,
+) -> Result<PromptConfig> {
+    let Some(payload) = agent.encrypted_payload.as_ref() else {
+        let Some(response) = api.fetch_agent_prompt_config(agent.id).await? else {
+            return Ok(PromptConfig::default());
+        };
+
+        if let Some(payload) = response.encrypted_payload.as_ref() {
+            return decrypt_prompt_config_payload(payload, state_dir, agent.id).await;
+        }
+
+        return Ok(response.prompt_config.unwrap_or_default());
+    };
+
+    decrypt_prompt_config_payload(payload, state_dir, agent.id).await
+}
+
+async fn decrypt_prompt_config_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    agent_id: Uuid,
+) -> Result<PromptConfig> {
+    if payload.object_type
+        != ManifestKind::Agent
+            .encrypted_object_type()
+            .expect("agent prompt object type")
+    {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for agent {}",
+            payload.object_type,
+            agent_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap prompt decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap prompt payload for agent {}",
+                agent_id
+            )
+        })?;
+
+    serde_json::from_str::<PromptConfig>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap prompt config JSON for agent {}",
+            agent_id
+        )
+    })
 }
 
 /// Sync a list of tree items to a directory tree on disk.

@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use nenjo::manifest::{
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 
@@ -157,7 +159,6 @@ fn model(id: Uuid) -> ModelManifest {
         model: "mock-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
-        tags: vec![],
         base_url: None,
     }
 }
@@ -167,23 +168,23 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
         id,
         name: name.into(),
         description: Some(format!("{name} agent")),
-        is_system: false,
-        prompt_config: serde_json::json!({
-            "system_prompt": format!("You are the {name} agent."),
-            "templates": {
-                "task_execution": "Execute: {{ task.title }}",
-                "chat_task": "{{ chat.message }}",
-                "gate_eval": "",
-                "cron_task": ""
-            }
-        }),
+        prompt_config: PromptConfig {
+            system_prompt: format!("You are the {name} agent."),
+            templates: PromptTemplates {
+                task_execution: "Execute: {{ task.title }}".into(),
+                chat_task: "{{ chat.message }}".into(),
+                gate_eval: String::new(),
+                cron_task: String::new(),
+                heartbeat_task: String::new(),
+            },
+            ..Default::default()
+        },
         color: None,
         model_id: Some(model_id),
-        model_name: Some("test-model".into()),
-        domains: vec![],
+        domain_ids: vec![],
         platform_scopes: vec![],
         mcp_server_ids: vec![],
-        abilities: vec![],
+        ability_ids: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -195,7 +196,6 @@ fn project() -> ProjectManifest {
         name: "test-project".into(),
         slug: "test-project".into(),
         description: None,
-        is_system: false,
         settings: serde_json::Value::Null,
     }
 }
