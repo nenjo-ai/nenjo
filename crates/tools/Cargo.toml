@@ -11,40 +11,40 @@ keywords = ["ai-agents", "tools", "llm", "function-calling", "agentic"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-async-trait = "0.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
 
 # Async runtime (process, fs, time)
-tokio = { version = "1.49", features = ["process", "fs", "time", "sync", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["process", "fs", "time", "sync", "macros", "rt-multi-thread"] }
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "stream"] }
-futures-util = "0.3"
+reqwest = { workspace = true, features = ["json", "stream"] }
+futures-util = { workspace = true }
 
 # Search / pattern matching
-regex = "1.12"
-which = "7"
-glob = "0.3"
+regex = { workspace = true }
+which = { workspace = true }
+glob = { workspace = true }
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
 
 # Concurrency
-parking_lot = "0.12.5"
+parking_lot = { workspace = true }
 
 # Logging
-tracing = "0.1"
+tracing = { workspace = true }
 
 # HTML to text
-nanohtml2text = "0.1"
+nanohtml2text = { workspace = true }
 
 # URL encoding
-urlencoding = "2.1"
+urlencoding = { workspace = true }
 
 # Base64 encoding
-base64 = "0.22.1"
+base64 = { workspace = true }
 
 # Temp files (for tests)
-tempfile = "3.25.0"
+tempfile = { workspace = true }

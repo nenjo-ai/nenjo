@@ -24,9 +24,9 @@ path = "tests/routines.rs"
 nenjo = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-tools = { workspace = true }
-anyhow = "1.0"
-async-trait = "0.1"
-serde_json = "1.0"
-tempfile = "3"
-tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
-uuid = { version = "1.21", features = ["v4"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v4"] }

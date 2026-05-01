@@ -9,19 +9,19 @@ description = "Secure envelope wrapper over nenjo-eventbus"
 readme = "README.md"
 
 [dependencies]
-aes-gcm = { version = "0.10", features = ["std"] }
-anyhow = "1.0"
-async-trait = "0.1"
-base64 = "0.22.1"
+aes-gcm = { workspace = true, features = ["std"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
 nenjo-crypto-auth = { workspace = true }
 nenjo-eventbus = { workspace = true }
 nenjo-events = { workspace = true }
-rand_core = { version = "0.6", features = ["getrandom"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tracing = "0.1"
-uuid = { version = "1.21", features = ["v4", "serde"] }
+rand_core = { workspace = true, features = ["getrandom"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.49", features = ["sync", "macros", "rt"] }
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }

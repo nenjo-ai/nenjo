@@ -49,6 +49,22 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+  audit:
+    name: Audit Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+        env:
+          RUSTFLAGS: ""
+      - name: Audit
+        run: cargo audit
+
   test:
     name: Test
     needs: build

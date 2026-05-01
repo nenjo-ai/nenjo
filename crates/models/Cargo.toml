@@ -12,14 +12,14 @@ categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 nenjo-tools = { workspace = true }
-async-trait = "0.1"
-reqwest = { version = "0.13", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tracing = "0.1"
-anyhow = "1.0"
-directories = "5.0"
-base64 = "0.22.1"
-tokio = { version = "1.49", features = ["time"] }
-uuid = { version = "1.21", features = ["v4"] }
-chrono = "0.4"
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+directories = { workspace = true }
+base64 = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
