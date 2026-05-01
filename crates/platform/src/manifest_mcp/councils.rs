@@ -101,6 +101,7 @@ fn council_member_update_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for council resources.
 pub fn council_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

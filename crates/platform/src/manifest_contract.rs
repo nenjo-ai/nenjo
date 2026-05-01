@@ -33,15 +33,25 @@ impl ContentScope {
 /// Canonical manifest resource kinds used across the platform and worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestKind {
+    /// Agent manifest resource.
     Agent,
+    /// Ability manifest resource.
     Ability,
+    /// Domain manifest resource.
     Domain,
+    /// Context block manifest resource.
     ContextBlock,
+    /// Project document content resource.
     ProjectDocument,
+    /// Project task content resource.
     Task,
+    /// Project manifest resource.
     Project,
+    /// Routine manifest resource.
     Routine,
+    /// Model manifest resource.
     Model,
+    /// Council manifest resource.
     Council,
 }
 

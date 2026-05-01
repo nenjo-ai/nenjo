@@ -36,6 +36,7 @@ fn context_block_update_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for context block resources.
 pub fn context_block_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

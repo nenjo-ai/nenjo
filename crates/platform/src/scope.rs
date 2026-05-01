@@ -3,30 +3,44 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Operation component of a platform scope string.
 pub enum ScopeAction {
+    /// Read-only access.
     Read,
+    /// Write access, which also implies read access for the same resource.
     Write,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Resource family component of a platform scope string.
 pub enum ScopeResource {
+    /// Agent manifests.
     Agents,
+    /// Ability manifests.
     Abilities,
+    /// Domain manifests.
     Domains,
+    /// Project manifests and project-scoped data.
     Projects,
+    /// Routine manifests.
     Routines,
+    /// Model manifests.
     Models,
+    /// Council manifests.
     Councils,
+    /// Context block manifests.
     ContextBlocks,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 /// Parsed platform scope with explicit handling for unknown strings.
 pub enum PlatformScope {
+    /// Scope recognized by the platform parser.
     Known {
+        /// Resource family covered by the scope.
         resource: ScopeResource,
+        /// Operation allowed for the resource family.
         action: ScopeAction,
     },
+    /// Scope string preserved verbatim when this crate does not know its shape.
     Unknown(String),
 }
 

@@ -644,6 +644,7 @@ impl RoutineUpdateDocument {
 }
 
 impl RoutineDocument {
+    /// Convert the stored routine document into a graph write payload.
     pub fn graph_input(&self) -> RoutineGraphInput {
         RoutineGraphInput {
             entry_step_ids: self

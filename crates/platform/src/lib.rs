@@ -5,8 +5,8 @@
 //!
 //! - [`PlatformManifestClient`] to talk to platform HTTP endpoints.
 //! - [`PlatformManifestBackend`] to bridge a local manifest store with the platform API.
-//! - [`ManifestMcpContract`](crate::manifest_mcp::ManifestMcpContract) to expose the manifest
-//!   tool contract to an MCP server or test harness.
+//! - [`ManifestMcpContract`] to expose the manifest tool contract to an MCP server or test
+//!   harness.
 
 /// Platform-backed manifest backend implementations and payload encoding hooks.
 pub mod backend;

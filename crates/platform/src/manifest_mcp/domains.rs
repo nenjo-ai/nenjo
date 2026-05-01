@@ -85,6 +85,7 @@ fn domain_prompt_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for domain resources.
 pub fn domain_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

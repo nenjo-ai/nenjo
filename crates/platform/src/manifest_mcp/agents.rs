@@ -113,6 +113,7 @@ fn prompt_config_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for agent resources.
 pub fn agent_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

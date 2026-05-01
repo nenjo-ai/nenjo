@@ -50,6 +50,7 @@ fn model_update_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for model resources.
 pub fn model_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

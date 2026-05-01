@@ -112,6 +112,7 @@ fn project_update_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for project resources.
 pub fn project_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

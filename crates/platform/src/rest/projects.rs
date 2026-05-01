@@ -25,6 +25,7 @@ fn execution_run_id_schema() -> serde_json::Value {
     })
 }
 
+/// Return REST-backed project task and execution tool definitions.
 pub fn project_rest_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

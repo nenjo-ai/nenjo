@@ -86,6 +86,7 @@ fn ability_prompt_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for ability resources.
 pub fn ability_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {

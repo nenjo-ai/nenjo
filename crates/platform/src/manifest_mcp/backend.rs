@@ -31,6 +31,7 @@ use super::results::{
 };
 
 #[async_trait]
+/// Backend operations for agent manifest resources.
 pub trait AgentManifestBackend: Send + Sync {
     /// List visible agents.
     async fn list_agents(&self) -> Result<AgentsListResult>;
@@ -52,6 +53,7 @@ pub trait AgentManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for ability manifest resources.
 pub trait AbilityManifestBackend: Send + Sync {
     /// List visible abilities.
     async fn list_abilities(&self) -> Result<AbilitiesListResult>;
@@ -76,6 +78,7 @@ pub trait AbilityManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for domain manifest resources.
 pub trait DomainManifestBackend: Send + Sync {
     /// List visible domains.
     async fn list_domains(&self) -> Result<DomainsListResult>;
@@ -100,6 +103,7 @@ pub trait DomainManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for project manifest resources and project documents.
 pub trait ProjectManifestBackend: Send + Sync {
     /// List visible projects.
     async fn list_projects(&self) -> Result<ProjectsListResult>;
@@ -149,6 +153,7 @@ pub trait ProjectManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for routine manifest resources.
 pub trait RoutineManifestBackend: Send + Sync {
     /// List visible routines.
     async fn list_routines(&self) -> Result<RoutinesListResult>;
@@ -163,6 +168,7 @@ pub trait RoutineManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for model manifest resources.
 pub trait ModelManifestBackend: Send + Sync {
     /// List visible models.
     async fn list_models(&self) -> Result<ModelsListResult>;
@@ -177,6 +183,7 @@ pub trait ModelManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for council manifest resources.
 pub trait CouncilManifestBackend: Send + Sync {
     /// List visible councils.
     async fn list_councils(&self) -> Result<CouncilsListResult>;
@@ -206,6 +213,7 @@ pub trait CouncilManifestBackend: Send + Sync {
 }
 
 #[async_trait]
+/// Backend operations for context block manifest resources.
 pub trait ContextBlockManifestBackend: Send + Sync {
     /// List visible context blocks.
     async fn list_context_blocks(&self) -> Result<ContextBlocksListResult>;

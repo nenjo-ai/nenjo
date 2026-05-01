@@ -9,6 +9,7 @@ use super::models::model_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
 
+/// Return the complete manifest MCP tool registry.
 pub fn all_tools() -> Vec<ToolSpec> {
     let mut tools = Vec::new();
     tools.extend(agent_tools());

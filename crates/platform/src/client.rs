@@ -309,100 +309,154 @@ fn council_member_id_by_agent(detail: &CouncilResponseDetail, agent_id: Uuid) ->
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+/// Response body for a project document content read.
 pub struct ProjectDocumentContentResponse {
+    /// Plaintext document content when the platform can return it directly.
     #[serde(default)]
     pub content: Option<String>,
+    /// Stored document filename.
     pub filename: String,
+    /// MIME content type for the stored document.
     pub content_type: String,
+    /// Stored content size in bytes.
     pub size_bytes: i64,
+    /// Encrypted payload when content is protected outside the platform response body.
     #[serde(default)]
     pub encrypted_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Metadata for one project document stored by the platform.
 pub struct ProjectDocumentMetadata {
+    /// Document ID.
     pub id: Uuid,
+    /// Owning project ID.
     pub project_id: Uuid,
+    /// Stored document filename.
     pub filename: String,
+    /// Optional repository-relative or project-relative path.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional display title.
     #[serde(default)]
     pub title: Option<String>,
+    /// Optional document kind classifier.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Authority that owns or produced the document.
     pub authority: String,
+    /// Optional short summary.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Optional processing or publication status.
     #[serde(default)]
     pub status: Option<String>,
+    /// Tags associated with the document.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// MIME content type for the stored document.
     pub content_type: String,
+    /// Stored content size in bytes.
     pub size_bytes: i64,
+    /// Platform creation timestamp.
     pub created_at: String,
+    /// Platform update timestamp.
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Directed relationship between two project documents.
 pub struct ProjectDocumentEdge {
+    /// Edge ID.
     pub id: Uuid,
+    /// Owning project ID.
     pub project_id: Uuid,
+    /// Source document ID.
     pub source_document_id: Uuid,
+    /// Target document ID.
     pub target_document_id: Uuid,
+    /// Platform edge type classifier.
     pub edge_type: String,
+    /// Optional human-readable note for the relationship.
     #[serde(default)]
     pub note: Option<String>,
+    /// Platform creation timestamp.
     pub created_at: String,
+    /// Platform update timestamp.
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
+/// Query parameters for listing project tasks.
 pub struct ProjectTaskListQuery {
+    /// Project whose tasks should be listed.
     pub project_id: Uuid,
+    /// Optional task status filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional task priority filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// Optional task type filter.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
+    /// Optional comma-separated tag filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<String>,
+    /// Optional routine ID filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<Uuid>,
+    /// Optional user assignment filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<Uuid>,
+    /// Optional agent assignment filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_agent_id: Option<Uuid>,
+    /// Optional maximum number of tasks to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Optional result offset for pagination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
+/// Query parameters for listing project execution runs.
 pub struct ProjectExecutionListQuery {
+    /// Project whose execution runs should be listed.
     pub project_id: Uuid,
+    /// Optional agent ID filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<Uuid>,
+    /// Optional routine ID filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<Uuid>,
+    /// Optional execution status filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Optional maximum number of runs to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Optional result offset for pagination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+/// Request body for creating a project execution run.
 pub struct CreateExecutionRequest {
+    /// Project that should own the execution run.
     pub project_id: Uuid,
+    /// Execution-specific configuration payload.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Optional number of models to use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_count: Option<i32>,
+    /// Optional parallelism setting for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_count: Option<i32>,
+    /// Optional initial status to assign to the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_status: Option<String>,
 }
@@ -594,6 +648,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create an ability document, optionally sending encrypted prompt payload content.
     pub async fn create_ability_document(
         &self,
         ability: &AbilityCreateDocument,
@@ -622,6 +677,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch one ability document by ID.
     pub async fn fetch_ability_document(&self, id: Uuid) -> Result<Option<AbilityDocument>> {
         let response = self
             .http
@@ -642,6 +698,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial metadata update to an ability document.
     pub async fn update_ability_document(
         &self,
         id: Uuid,
@@ -667,6 +724,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update an ability prompt document and return the canonical prompt config when provided.
     pub async fn update_ability_prompt_document(
         &self,
         id: Uuid,
@@ -700,6 +758,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete an ability document by ID.
     pub async fn delete_ability_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -715,6 +774,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a domain document, optionally sending encrypted prompt payload content.
     pub async fn create_domain_document(
         &self,
         domain: &DomainCreateDocument,
@@ -743,6 +803,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial metadata update to a domain document.
     pub async fn update_domain_document(
         &self,
         id: Uuid,
@@ -767,6 +828,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch a domain manifest document including prompt configuration.
     pub async fn get_domain_manifest_document(&self, id: Uuid) -> Result<DomainPromptDocument> {
         let response = self
             .http
@@ -785,6 +847,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update a domain manifest prompt document.
     pub async fn update_domain_manifest_document(
         &self,
         id: Uuid,
@@ -820,6 +883,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a domain document by ID.
     pub async fn delete_domain_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -835,6 +899,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a project document.
     pub async fn create_project_document(
         &self,
         project: &ProjectCreateDocument,
@@ -859,6 +924,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial metadata update to a project document.
     pub async fn update_project_document(
         &self,
         id: Uuid,
@@ -896,6 +962,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a project document by ID.
     pub async fn delete_project_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -911,6 +978,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// List project document summaries for a project.
     pub async fn list_project_documents(
         &self,
         project_id: Uuid,
@@ -929,6 +997,7 @@ impl PlatformManifestClient {
             .collect())
     }
 
+    /// List project document metadata records for a project.
     pub async fn list_project_document_metadata(
         &self,
         project_id: Uuid,
@@ -953,6 +1022,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch one project document summary.
     pub async fn get_project_document(
         &self,
         project_id: Uuid,
@@ -971,6 +1041,7 @@ impl PlatformManifestClient {
         }))
     }
 
+    /// Fetch one project document metadata record.
     pub async fn get_project_document_metadata(
         &self,
         project_id: Uuid,
@@ -982,6 +1053,7 @@ impl PlatformManifestClient {
             .find(|document| document.id == document_id))
     }
 
+    /// Fetch raw project document content from the platform.
     pub async fn fetch_project_document_content(
         &self,
         project_id: Uuid,
@@ -1009,6 +1081,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch project document content in the manifest MCP document shape.
     pub async fn get_project_document_content(
         &self,
         project_id: Uuid,
@@ -1037,6 +1110,7 @@ impl PlatformManifestClient {
         })
     }
 
+    /// List graph edges connected to a project document.
     pub async fn list_project_document_edges(
         &self,
         project_id: Uuid,
@@ -1062,6 +1136,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a project file document, optionally sending encrypted content payload.
     pub async fn create_project_file_document(
         &self,
         document: &ProjectDocumentCreateDocument,
@@ -1110,6 +1185,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update the content for an existing project document.
     pub async fn update_project_document_content(
         &self,
         project_id: Uuid,
@@ -1145,6 +1221,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a project file document by project and document ID.
     pub async fn delete_project_file_document(
         &self,
         project_id: Uuid,
@@ -1167,6 +1244,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// List project tasks using the platform task API.
     pub async fn list_project_tasks(
         &self,
         query: &ProjectTaskListQuery,
@@ -1221,6 +1299,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch the current organization ID associated with the API key.
     pub async fn current_org_id(&self) -> Result<Uuid> {
         let response = self
             .http
@@ -1246,6 +1325,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch one project task by ID.
     pub async fn get_project_task(&self, task_id: Uuid) -> Result<serde_json::Value> {
         let response = self
             .http
@@ -1261,6 +1341,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a project task using a raw platform task payload.
     pub async fn create_project_task(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
         let response = self
             .http
@@ -1280,6 +1361,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create multiple project tasks using a raw platform bulk payload.
     pub async fn bulk_create_project_tasks(
         &self,
         body: &serde_json::Value,
@@ -1302,6 +1384,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update a project task using a raw platform task payload.
     pub async fn update_project_task(
         &self,
         task_id: Uuid,
@@ -1325,6 +1408,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a project task by ID.
     pub async fn delete_project_task(&self, task_id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -1340,6 +1424,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// List project execution runs using the platform execution API.
     pub async fn list_project_execution_runs(
         &self,
         query: &ProjectExecutionListQuery,
@@ -1387,6 +1472,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch one project execution run by ID.
     pub async fn get_project_execution_run(
         &self,
         execution_run_id: Uuid,
@@ -1411,6 +1497,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a project execution run.
     pub async fn create_execution_run(
         &self,
         request: &CreateExecutionRequest,
@@ -1433,6 +1520,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Send a command to an existing project execution run.
     pub async fn command_project_execution_run(
         &self,
         execution_run_id: Uuid,
@@ -1461,6 +1549,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a routine document and optional routine graph.
     pub async fn create_routine_document(
         &self,
         routine: &RoutineCreateDocument,
@@ -1507,6 +1596,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update routine metadata and optional routine graph.
     pub async fn update_routine_document(
         &self,
         id: Uuid,
@@ -1580,6 +1670,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a routine document by ID.
     pub async fn delete_routine_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -1595,6 +1686,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a model document.
     pub async fn create_model_document(
         &self,
         model: &ModelCreateDocument,
@@ -1625,6 +1717,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial update to a model document.
     pub async fn update_model_document(
         &self,
         id: Uuid,
@@ -1649,6 +1742,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a model document by ID.
     pub async fn delete_model_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -1688,6 +1782,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a council document.
     pub async fn create_council_document(
         &self,
         council: &CouncilCreateDocument,
@@ -1715,6 +1810,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial update to a council document.
     pub async fn update_council_document(
         &self,
         id: Uuid,
@@ -1737,6 +1833,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a council document by ID.
     pub async fn delete_council_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -1752,6 +1849,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Add an agent member to a council.
     pub async fn add_council_member_document(
         &self,
         council_id: Uuid,
@@ -1783,6 +1881,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update a council member by council and agent ID.
     pub async fn update_council_member_document(
         &self,
         council_id: Uuid,
@@ -1819,6 +1918,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Remove an agent member from a council.
     pub async fn remove_council_member_document(
         &self,
         council_id: Uuid,
@@ -1845,6 +1945,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a context block document.
     pub async fn create_context_block_document(
         &self,
         context_block: &ContextBlockCreateDocument,
@@ -1873,6 +1974,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Apply a partial metadata update to a context block document.
     pub async fn update_context_block_document(
         &self,
         id: Uuid,
@@ -1898,6 +2000,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Update a context block template document.
     pub async fn update_context_block_content_document(
         &self,
         id: Uuid,
@@ -1934,6 +2037,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Delete a context block document by ID.
     pub async fn delete_context_block_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -1949,6 +2053,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Fetch one generic manifest resource by platform resource type and ID.
     pub async fn fetch_resource(
         &self,
         path: &str,
@@ -1980,6 +2085,7 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Upsert one generic manifest resource through the platform write API.
     pub async fn upsert_resource(
         &self,
         request: &PlatformManifestWriteRequest,
@@ -1991,10 +2097,12 @@ impl PlatformManifestClient {
         )
     }
 
+    /// Delete one generic manifest resource through the platform write API.
     pub async fn delete_resource(&self, _resource_type: &str, _resource_id: Uuid) -> Result<()> {
         bail!("platform manifest deletes are not implemented yet")
     }
 
+    /// Build the API-key authorization header value used by REST-backed tools.
     pub fn auth_header(&self) -> Result<header::HeaderValue> {
         header::HeaderValue::from_str(&self.api_key).context("invalid api key header")
     }

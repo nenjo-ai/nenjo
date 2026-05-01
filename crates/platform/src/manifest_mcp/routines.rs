@@ -162,6 +162,7 @@ fn routine_update_schema() -> serde_json::Value {
     })
 }
 
+/// Return manifest MCP tool definitions for routine resources.
 pub fn routine_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
