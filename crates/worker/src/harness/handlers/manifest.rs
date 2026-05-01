@@ -4,7 +4,8 @@ use anyhow::Result;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo_platform::{
     AbilityDocument, AbilityPromptDocument, AgentDocument, ContextBlockContentDocument,
-    ContextBlockDocument, CouncilDocument, DomainDocument, DomainPromptDocument, ProjectDocument,
+    ContextBlockDocument, CouncilDocument, DomainDocument, DomainPromptDocument, ManifestKind,
+    ProjectDocument,
 };
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -251,15 +252,41 @@ async fn apply_inline_encrypted_upsert(
     encrypted_payload: &EncryptedPayload,
 ) -> bool {
     let object_type = encrypted_payload.object_type.as_str();
-    if !matches!(
-        (rt, object_type),
-        (ResourceType::Agent, "manifest.agent")
-            | (ResourceType::Agent, "manifest.agent.prompt")
-            | (ResourceType::Ability, "manifest.ability.prompt")
-            | (ResourceType::Domain, "manifest.domain.prompt")
-            | (ResourceType::ContextBlock, "manifest.context_block.content")
-            | (ResourceType::Document, "manifest.document.content")
-    ) {
+    let handled_inline = match rt {
+        ResourceType::Agent => {
+            object_type == "manifest.agent"
+                || object_type
+                    == ManifestKind::Agent
+                        .encrypted_object_type()
+                        .expect("agent prompt object type")
+        }
+        ResourceType::Ability => {
+            object_type
+                == ManifestKind::Ability
+                    .encrypted_object_type()
+                    .expect("ability prompt object type")
+        }
+        ResourceType::Domain => {
+            object_type
+                == ManifestKind::Domain
+                    .encrypted_object_type()
+                    .expect("domain prompt object type")
+        }
+        ResourceType::ContextBlock => {
+            object_type
+                == ManifestKind::ContextBlock
+                    .encrypted_object_type()
+                    .expect("context block content object type")
+        }
+        ResourceType::Document => {
+            object_type
+                == ManifestKind::ProjectDocument
+                    .encrypted_object_type()
+                    .expect("document content object type")
+        }
+        _ => false,
+    };
+    if !handled_inline {
         debug!(%rt, %id, object_type, "Encrypted manifest payload not handled inline");
         return false;
     }
@@ -294,7 +321,12 @@ async fn apply_inline_encrypted_upsert(
 
             apply_inline_upsert(ctx, rt, id, &value)
         }
-        "manifest.agent.prompt" => {
+        object_type
+            if object_type
+                == ManifestKind::Agent
+                    .encrypted_object_type()
+                    .expect("agent prompt object type") =>
+        {
             let prompt_config = match serde_json::from_str::<PromptConfig>(&plaintext) {
                 Ok(value) => value,
                 Err(error) => {
@@ -344,7 +376,12 @@ async fn apply_inline_encrypted_upsert(
             ctx.swap_provider(ctx.provider().with_manifest(manifest));
             true
         }
-        "manifest.ability.prompt" => {
+        object_type
+            if object_type
+                == ManifestKind::Ability
+                    .encrypted_object_type()
+                    .expect("ability prompt object type") =>
+        {
             let prompt_config = match serde_json::from_str::<nenjo::types::AbilityPromptConfig>(
                 &plaintext,
             ) {
@@ -392,7 +429,12 @@ async fn apply_inline_encrypted_upsert(
             ctx.swap_provider(ctx.provider().with_manifest(manifest));
             true
         }
-        "manifest.domain.prompt" => {
+        object_type
+            if object_type
+                == ManifestKind::Domain
+                    .encrypted_object_type()
+                    .expect("domain prompt object type") =>
+        {
             let prompt_config = match serde_json::from_str::<nenjo::types::DomainPromptConfig>(
                 &plaintext,
             ) {
@@ -457,7 +499,12 @@ async fn apply_inline_encrypted_upsert(
             ctx.swap_provider(ctx.provider().with_manifest(manifest));
             true
         }
-        "manifest.context_block.content" => {
+        object_type
+            if object_type
+                == ManifestKind::ContextBlock
+                    .encrypted_object_type()
+                    .expect("context block content object type") =>
+        {
             let template = match serde_json::from_str::<String>(&plaintext) {
                 Ok(value) => value,
                 Err(error) => {
@@ -506,7 +553,12 @@ async fn apply_inline_encrypted_upsert(
             ctx.swap_provider(ctx.provider().with_manifest(manifest));
             true
         }
-        "manifest.document.content" => {
+        object_type
+            if object_type
+                == ManifestKind::ProjectDocument
+                    .encrypted_object_type()
+                    .expect("document content object type") =>
+        {
             let metadata = match inline_payload
                 .cloned()
                 .map(serde_json::from_value::<InlineDocumentMeta>)
@@ -568,8 +620,15 @@ async fn decrypt_prompt_payload(
     ctx: &CommandContext,
     encrypted_payload: &EncryptedPayload,
 ) -> Option<PromptConfig> {
-    let plaintext =
-        decrypt_string_payload(ctx, encrypted_payload, "manifest.agent.prompt", "prompt").await?;
+    let plaintext = decrypt_string_payload(
+        ctx,
+        encrypted_payload,
+        ManifestKind::Agent
+            .encrypted_object_type()
+            .expect("agent prompt object type"),
+        "prompt",
+    )
+    .await?;
 
     match serde_json::from_str::<PromptConfig>(&plaintext) {
         Ok(prompt_config) => Some(prompt_config),
@@ -1059,7 +1118,9 @@ async fn apply_upsert(ctx: &CommandContext, rt: ResourceType, id: Uuid) -> Resul
                             decrypt_string_payload(
                                 ctx,
                                 encrypted_payload,
-                                "manifest.context_block.content",
+                                ManifestKind::ContextBlock
+                                    .encrypted_object_type()
+                                    .expect("context block content object type"),
                                 "context block content",
                             )
                             .await

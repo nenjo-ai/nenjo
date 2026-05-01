@@ -57,7 +57,7 @@ pub struct DecodingError {
 #[derive(Debug, Clone)]
 pub enum DecodeCommandResult {
     /// Successfully decoded command ready for harness routing.
-    Command(Command),
+    Command(Box<Command>),
     /// Envelope should be acknowledged and silently discarded.
     Drop,
     /// Envelope failed in a user-visible way and should become a terminal client error.
@@ -194,11 +194,11 @@ impl<T: Transport> SecureEnvelopeBus<T> {
                 .map_err(|error| EventBusError::Codec(error.to_string()))?
             {
                 DecodeCommandResult::Command(command) => {
-                    return Ok(Some(ReceivedInput::Command(ReceivedCommand {
-                        command,
+                    return Ok(Some(ReceivedInput::Command(Box::new(ReceivedCommand {
+                        command: *command,
                         envelope,
                         received,
-                    })));
+                    }))));
                 }
                 DecodeCommandResult::Drop => {
                     trace!(actor_user_id = %envelope.user_id, "received command dropped by secure envelope codec");
@@ -206,11 +206,13 @@ impl<T: Transport> SecureEnvelopeBus<T> {
                     continue;
                 }
                 DecodeCommandResult::ClientError(failure) => {
-                    return Ok(Some(ReceivedInput::DecodeFailure(ReceivedDecodeFailure {
-                        failure,
-                        envelope,
-                        received,
-                    })));
+                    return Ok(Some(ReceivedInput::DecodeFailure(Box::new(
+                        ReceivedDecodeFailure {
+                            failure,
+                            envelope,
+                            received,
+                        },
+                    ))));
                 }
             }
         }
@@ -244,8 +246,8 @@ impl ReceivedCommand {
 
 /// Inbound secure-envelope item delivered to the harness.
 pub enum ReceivedInput {
-    Command(ReceivedCommand),
-    DecodeFailure(ReceivedDecodeFailure),
+    Command(Box<ReceivedCommand>),
+    DecodeFailure(Box<ReceivedDecodeFailure>),
 }
 
 /// User-safe decode failure plus its original envelope/ack handle.

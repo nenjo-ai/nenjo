@@ -12,6 +12,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nenjo_sessions::{ScheduleState, SessionKind, SessionRecord, SessionStatus};
 use serde_json::json;
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -62,18 +63,22 @@ pub struct ResponseSender {
     user_id: Uuid,
 }
 
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("response channel closed")]
+pub struct ResponseSenderError;
+
 impl ResponseSender {
     fn new(tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>, user_id: Uuid) -> Self {
         Self { tx, user_id }
     }
 
-    pub fn send(&self, response: Response) -> Result<(), ()> {
+    pub fn send(&self, response: Response) -> Result<(), ResponseSenderError> {
         self.tx
             .send(RoutedResponse {
                 user_id: self.user_id,
                 response,
             })
-            .map_err(|_| ())
+            .map_err(|_| ResponseSenderError)
     }
 }
 

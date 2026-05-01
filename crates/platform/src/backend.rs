@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::PlatformManifestClient;
+use crate::manifest_contract::ManifestKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 
@@ -187,13 +188,13 @@ where
             .unwrap_or(true)
     }
 
-    async fn local_manifest_user_id(&self) -> Result<Uuid> {
+    async fn local_manifest_org_id(&self) -> Result<Uuid> {
         self.local_store
             .load_manifest()
             .await?
             .auth
-            .map(|auth| auth.user_id)
-            .ok_or_else(|| anyhow!("local manifest is missing auth.user_id"))
+            .map(|auth| auth.org_id)
+            .ok_or_else(|| anyhow!("local manifest is missing auth.org_id"))
     }
 
     async fn cached_or_remote_ability(&self, id: Uuid) -> Result<AbilityManifest> {
@@ -941,9 +942,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 params.id,
-                "manifest.agent.prompt",
+                ManifestKind::Agent
+                    .encrypted_object_type()
+                    .expect("agent prompt object type"),
                 &prompt_payload,
             )
             .await?;
@@ -1040,9 +1043,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                "manifest.ability.prompt",
+                ManifestKind::Ability
+                    .encrypted_object_type()
+                    .expect("ability prompt object type"),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
@@ -1160,9 +1165,11 @@ where
                 &prompt_config,
                 self.sensitive_payload_encoder
                     .encode_payload(
-                        self.local_manifest_user_id().await?,
+                        self.local_manifest_org_id().await?,
                         params.id,
-                        "manifest.ability.prompt",
+                        ManifestKind::Ability
+                            .encrypted_object_type()
+                            .expect("ability prompt object type"),
                         &serde_json::json!(prompt_config.clone()),
                     )
                     .await?,
@@ -1262,9 +1269,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                "manifest.domain.prompt",
+                ManifestKind::Domain
+                    .encrypted_object_type()
+                    .expect("domain prompt object type"),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
@@ -1388,9 +1397,11 @@ where
                 params.prompt_config.clone(),
                 self.sensitive_payload_encoder
                     .encode_payload(
-                        self.local_manifest_user_id().await?,
+                        self.local_manifest_org_id().await?,
                         params.id,
-                        "manifest.domain.prompt",
+                        ManifestKind::Domain
+                            .encrypted_object_type()
+                            .expect("domain prompt object type"),
                         &serde_json::json!(params.prompt_config.clone()),
                     )
                     .await?,
@@ -1644,9 +1655,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                "manifest.document.content",
+                ManifestKind::ProjectDocument
+                    .encrypted_object_type()
+                    .expect("document content object type"),
                 &serde_json::Value::String(params.data.description.clone()),
             )
             .await?;
@@ -1664,9 +1677,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 params.document_id,
-                "manifest.document.content",
+                ManifestKind::ProjectDocument
+                    .encrypted_object_type()
+                    .expect("document content object type"),
                 &serde_json::Value::String(params.description.clone()),
             )
             .await?;
@@ -2089,9 +2104,11 @@ where
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
-                self.local_manifest_user_id().await?,
+                self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                "manifest.context_block.content",
+                ManifestKind::ContextBlock
+                    .encrypted_object_type()
+                    .expect("context block content object type"),
                 &serde_json::json!(params.data.template.clone()),
             )
             .await?;
@@ -2177,9 +2194,11 @@ where
                 &template,
                 self.sensitive_payload_encoder
                     .encode_payload(
-                        self.local_manifest_user_id().await?,
+                        self.local_manifest_org_id().await?,
                         params.id,
-                        "manifest.context_block.content",
+                        ManifestKind::ContextBlock
+                            .encrypted_object_type()
+                            .expect("context block content object type"),
                         &serde_json::json!(template.clone()),
                     )
                     .await?,

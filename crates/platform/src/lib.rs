@@ -14,6 +14,8 @@ pub mod backend;
 pub mod client;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
+/// Shared manifest resource and encrypted-content classification.
+pub mod manifest_contract;
 /// Manifest MCP contract types, params, results, and dispatch helpers.
 pub mod manifest_mcp;
 /// Access-policy helpers for filtering manifest resources by platform scopes.
@@ -28,6 +30,7 @@ pub mod types;
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
 pub use local::LocalManifestMcpBackend;
+pub use manifest_contract::{ContentScope, ManifestKind};
 pub use manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityCreateDocument, AbilityCreateParams,
     AbilityDeleteParams, AbilityDocument, AbilityGetResult, AbilityManifestBackend,

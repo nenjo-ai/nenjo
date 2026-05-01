@@ -19,6 +19,7 @@ ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 hkdf = "0.12"
 nenjo = { workspace = true }
 nenjo-events = { workspace = true }
+nenjo-platform = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

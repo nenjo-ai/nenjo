@@ -69,25 +69,29 @@ fn payload_aad(account_id: Uuid, object_id: Uuid, object_type: &str) -> Vec<u8> 
     format!("{account_id}:{object_id}:{object_type}").into_bytes()
 }
 
-fn build_encrypted_payload(
+struct EncryptedPayloadParts {
     account_id: Uuid,
-    encryption_scope: Option<&str>,
+    encryption_scope: Option<String>,
     object_id: Uuid,
     object_type: String,
-    algorithm: &str,
+    algorithm: String,
     key_version: u32,
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> EncryptedPayload {
-    EncryptedPayload {
-        account_id,
-        encryption_scope: encryption_scope.map(str::to_string),
-        object_id,
-        object_type,
-        algorithm: algorithm.to_string(),
-        key_version,
-        nonce: BASE64.encode(nonce),
-        ciphertext: BASE64.encode(ciphertext),
+    nonce: String,
+    ciphertext: String,
+}
+
+impl From<EncryptedPayloadParts> for EncryptedPayload {
+    fn from(parts: EncryptedPayloadParts) -> Self {
+        Self {
+            account_id: parts.account_id,
+            encryption_scope: parts.encryption_scope,
+            object_id: parts.object_id,
+            object_type: parts.object_type,
+            algorithm: parts.algorithm,
+            key_version: parts.key_version,
+            nonce: parts.nonce,
+            ciphertext: parts.ciphertext,
+        }
     }
 }
 
@@ -115,16 +119,17 @@ fn encrypt_with_aes_256_gcm(
         )
         .context("Failed to encrypt AES-GCM content payload")?;
 
-    Ok(build_encrypted_payload(
+    Ok(EncryptedPayloadParts {
         account_id,
-        scope.encryption_scope_value(),
+        encryption_scope: scope.encryption_scope_value().map(str::to_string),
         object_id,
         object_type,
-        CONTENT_ALGORITHM_AES_256_GCM,
+        algorithm: CONTENT_ALGORITHM_AES_256_GCM.to_string(),
         key_version,
-        &nonce_bytes,
-        &ciphertext,
-    ))
+        nonce: BASE64.encode(nonce_bytes),
+        ciphertext: BASE64.encode(ciphertext),
+    }
+    .into())
 }
 
 fn decode_fixed<const N: usize>(raw: &str, field: &str) -> Result<[u8; N]> {

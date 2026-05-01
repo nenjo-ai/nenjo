@@ -148,10 +148,15 @@ impl WorkerAuthProvider {
             .map(|wrapped| wrapped.key_version)
     }
 
-    /// Return whether the worker currently has any active user-routed ACK enrollment.
+    /// Return whether the worker currently has a complete active enrollment snapshot.
+    ///
+    /// Active requires both a backend-signed certificate and at least one
+    /// user-routed wrapped ACK. Fixtures that seed wrapped keys without the
+    /// certificate should remain pending so the worker refreshes from the backend
+    /// instead of treating the local snapshot as complete.
     pub async fn enrollment_status(&self) -> EnrollmentStatus {
         let enrollment = self.enrollment.read().await;
-        if !enrollment.user_wrapped_acks.is_empty() {
+        if enrollment.certificate.is_some() && !enrollment.user_wrapped_acks.is_empty() {
             EnrollmentStatus::Active
         } else {
             EnrollmentStatus::Pending
@@ -410,8 +415,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EnrollmentStatus, WorkerAuthProvider, WrappedAccountContentKey, WrappedOrgContentKey,
-        wrap_ack_for_recipient,
+        EnrollmentStatus, WorkerAuthProvider, WorkerCertificate, WrappedAccountContentKey,
+        WrappedOrgContentKey, wrap_ack_for_recipient,
     };
     use chrono::Utc;
     use nenjo::client::{
@@ -468,6 +473,30 @@ mod tests {
             .unwrap()
             .expect("ack should load");
         assert_eq!(loaded.as_bytes(), &ack);
+        assert_eq!(state.enrollment_status().await, EnrollmentStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn active_enrollment_requires_certificate_and_wrapped_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = WorkerAuthProvider::load_or_create(dir.path()).unwrap();
+        let ack = [7_u8; 32];
+        let wrapped = wrap_ack_for_recipient(&state.identity().enc_public_key, &ack, 1).unwrap();
+        let user_id = Uuid::new_v4();
+        let certificate = WorkerCertificate {
+            account_id: Uuid::new_v4(),
+            api_key_id: Uuid::new_v4(),
+            issued_at: Utc::now(),
+            enc_public_key: state.identity().enc_public_key,
+            sign_public_key: state.identity().sign_public_key,
+            signature: "test-signature".into(),
+        };
+
+        state
+            .store_enrollment(Some(certificate), Some(user_id), Some(wrapped), None)
+            .await
+            .unwrap();
+
         assert_eq!(state.enrollment_status().await, EnrollmentStatus::Active);
     }
 

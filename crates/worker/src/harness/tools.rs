@@ -17,8 +17,8 @@ use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::store::ManifestReader;
 use nenjo_platform::{
-    ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract, PlatformManifestBackend,
-    PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
+    ContentScope, ManifestAccessPolicy, ManifestKind, ManifestMcpBackend, ManifestMcpContract,
+    PlatformManifestBackend, PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
     client::{CreateExecutionRequest, ProjectExecutionListQuery, ProjectTaskListQuery},
     rest::projects::project_rest_tools,
 };
@@ -29,7 +29,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::crypto::WorkerAuthProvider;
-use crate::crypto::{ContentScope, decrypt_text_with_provider, encrypt_text_with_provider};
+use crate::crypto::{decrypt_text_with_provider, encrypt_text_with_provider};
 
 // Re-export core tool types.
 pub use nenjo_tools::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
@@ -65,6 +65,12 @@ struct WorkerAgentPromptPayloadEncoder {
     state_dir: std::path::PathBuf,
 }
 
+fn payload_scope_for_object_type(object_type: &str) -> ContentScope {
+    ManifestKind::from_encrypted_object_type(object_type)
+        .and_then(ManifestKind::encrypted_scope)
+        .unwrap_or(ContentScope::User)
+}
+
 #[async_trait]
 impl SensitivePayloadEncoder for WorkerAgentPromptPayloadEncoder {
     async fn encode_payload(
@@ -76,9 +82,10 @@ impl SensitivePayloadEncoder for WorkerAgentPromptPayloadEncoder {
     ) -> Result<Option<serde_json::Value>> {
         let auth_provider = WorkerAuthProvider::load_or_create(self.state_dir.join("crypto"))
             .context("failed to load worker auth provider")?;
+        let scope = payload_scope_for_object_type(object_type);
         let encrypted_payload = encrypt_text_with_provider(
             &auth_provider,
-            ContentScope::User,
+            scope,
             account_id,
             object_id,
             object_type,
@@ -823,7 +830,9 @@ impl PlatformProjectToolsBackend {
             .encode_org_payload(
                 org_id,
                 task_id,
-                "task_content",
+                ManifestKind::Task
+                    .encrypted_object_type()
+                    .expect("task content object type"),
                 &serde_json::to_value(payload).context("failed to encode task content payload")?,
             )
             .await
@@ -1390,6 +1399,58 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn payload_scope_uses_org_for_org_owned_manifest_resources() {
+        assert_eq!(
+            payload_scope_for_object_type(
+                ManifestKind::Agent
+                    .encrypted_object_type()
+                    .expect("agent prompt object type"),
+            ),
+            ContentScope::Org
+        );
+        assert_eq!(
+            payload_scope_for_object_type(
+                ManifestKind::Ability
+                    .encrypted_object_type()
+                    .expect("ability prompt object type"),
+            ),
+            ContentScope::Org
+        );
+        assert_eq!(
+            payload_scope_for_object_type(
+                ManifestKind::Domain
+                    .encrypted_object_type()
+                    .expect("domain prompt object type"),
+            ),
+            ContentScope::Org
+        );
+        assert_eq!(
+            payload_scope_for_object_type(
+                ManifestKind::ContextBlock
+                    .encrypted_object_type()
+                    .expect("context block content object type"),
+            ),
+            ContentScope::Org
+        );
+        assert_eq!(
+            payload_scope_for_object_type(
+                ManifestKind::ProjectDocument
+                    .encrypted_object_type()
+                    .expect("document content object type"),
+            ),
+            ContentScope::Org
+        );
+    }
+
+    #[test]
+    fn payload_scope_falls_back_to_user_for_other_payloads() {
+        assert_eq!(
+            payload_scope_for_object_type("chat.message"),
+            ContentScope::User
+        );
+    }
 
     async fn scoped_backend(
         caller_scopes: Vec<String>,

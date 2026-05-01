@@ -2,41 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use nenjo_events::EncryptedPayload;
+pub use nenjo_platform::ContentScope;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub(crate) const CURRENT_CRYPTO_VERSION: u32 = 1;
 pub(crate) const ACK_LEN: usize = 32;
-
-/// Scope used when selecting between user-private and org-shared content keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentScope {
-    /// User-private account content encrypted with an ACK.
-    User,
-    /// Org-shared content encrypted with an OCK.
-    Org,
-}
-
-impl ContentScope {
-    /// Infer the content scope from an encrypted payload's declared scope marker.
-    pub fn from_payload(payload: &EncryptedPayload) -> Self {
-        if payload.encryption_scope.as_deref() == Some("org") {
-            Self::Org
-        } else {
-            Self::User
-        }
-    }
-
-    /// Return the serialized `encryption_scope` value used on payloads.
-    pub fn encryption_scope_value(self) -> Option<&'static str> {
-        match self {
-            Self::User => None,
-            Self::Org => Some("org"),
-        }
-    }
-}
 
 /// In-memory 32-byte content key used for envelope and payload crypto operations.
 #[derive(Clone)]

@@ -314,17 +314,19 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 session_id,
                 domain_session_id,
             } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
-                Ok(content) => Ok(DecodeCommandResult::Command(Command::ChatMessage {
-                    id,
-                    content,
-                    encrypted_content: None,
-                    hidden,
-                    project_id,
-                    routine_id,
-                    agent_id,
-                    session_id,
-                    domain_session_id,
-                })),
+                Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
+                    Command::ChatMessage {
+                        id,
+                        content,
+                        encrypted_content: None,
+                        hidden,
+                        project_id,
+                        routine_id,
+                        agent_id,
+                        session_id,
+                        domain_session_id,
+                    },
+                ))),
                 Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
                     code: "encrypted_chat_decode_failed",
                     message: error.to_string(),
@@ -341,38 +343,40 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 assigned_agent_id,
                 payload,
                 encrypted_payload: Some(encrypted_payload),
-            } => Ok(DecodeCommandResult::Command(Command::TaskExecute {
-                task_id,
-                project_id,
-                execution_run_id,
-                routine_id,
-                assigned_agent_id,
-                payload: match payload {
-                    Some(mut payload) => {
-                        let encrypted = self
-                            .decode_json_payload::<TaskEncryptedContent>(
+            } => Ok(DecodeCommandResult::Command(Box::new(
+                Command::TaskExecute {
+                    task_id,
+                    project_id,
+                    execution_run_id,
+                    routine_id,
+                    assigned_agent_id,
+                    payload: match payload {
+                        Some(mut payload) => {
+                            let encrypted = self
+                                .decode_json_payload::<TaskEncryptedContent>(
+                                    actor_user_id,
+                                    &encrypted_payload,
+                                )
+                                .await?;
+                            payload.description = encrypted.description;
+                            payload.acceptance_criteria = encrypted.acceptance_criteria;
+                            Some(payload)
+                        }
+                        None => Some(
+                            self.decode_json_payload::<TaskExecuteContent>(
                                 actor_user_id,
                                 &encrypted_payload,
                             )
-                            .await?;
-                        payload.description = encrypted.description;
-                        payload.acceptance_criteria = encrypted.acceptance_criteria;
-                        Some(payload)
-                    }
-                    None => Some(
-                        self.decode_json_payload::<TaskExecuteContent>(
-                            actor_user_id,
-                            &encrypted_payload,
-                        )
-                        .await?,
-                    ),
+                            .await?,
+                        ),
+                    },
+                    encrypted_payload: None,
                 },
-                encrypted_payload: None,
-            })),
+            ))),
             Command::WorkerAccountKeyUpdated { wrapped_ack } => Ok(DecodeCommandResult::Command(
-                Command::WorkerAccountKeyUpdated { wrapped_ack },
+                Box::new(Command::WorkerAccountKeyUpdated { wrapped_ack }),
             )),
-            other => Ok(DecodeCommandResult::Command(other)),
+            other => Ok(DecodeCommandResult::Command(Box::new(other))),
         }
     }
 
@@ -633,14 +637,17 @@ mod tests {
             .expect("actor-specific decrypt should succeed after ACK sync");
 
         match after_sync {
-            DecodeCommandResult::Command(Command::ChatMessage {
-                content,
-                encrypted_content,
-                ..
-            }) => {
-                assert_eq!(content, "secondary actor secret");
-                assert!(encrypted_content.is_none());
-            }
+            DecodeCommandResult::Command(command) => match *command {
+                Command::ChatMessage {
+                    content,
+                    encrypted_content,
+                    ..
+                } => {
+                    assert_eq!(content, "secondary actor secret");
+                    assert!(encrypted_content.is_none());
+                }
+                other => panic!("unexpected decoded command payload: {other:?}"),
+            },
             other => panic!("unexpected decoded command result: {other:?}"),
         }
     }
