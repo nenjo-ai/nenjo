@@ -275,6 +275,28 @@ impl NenjoClient {
         }
     }
 
+    /// List all graph edges touching a single project document.
+    pub async fn list_project_document_edges(
+        &self,
+        project_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<Vec<DocumentSyncEdge>> {
+        let url = format!(
+            "{}/api/v1/projects/{}/documents/{}/edges",
+            self.base_url, project_id, doc_id
+        );
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => {
+                let edges: Vec<DocumentSyncEdge> = resp.json().await?;
+                debug!(project_id = %project_id, doc_id = %doc_id, count = edges.len(), "Listed project document edges");
+                Ok(edges)
+            }
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------

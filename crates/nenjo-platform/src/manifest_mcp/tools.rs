@@ -6,7 +6,6 @@ use super::context_blocks::context_block_tools;
 use super::councils::council_tools;
 use super::domains::domain_tools;
 use super::models::model_tools;
-use super::project_documents::project_document_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
 
@@ -15,8 +14,26 @@ pub fn all_tools() -> Vec<ToolSpec> {
     tools.extend(agent_tools());
     tools.extend(ability_tools());
     tools.extend(domain_tools());
-    tools.extend(project_tools());
-    tools.extend(project_document_tools());
+    tools.extend(project_tools().into_iter().filter(|tool| {
+        matches!(
+            tool.name.as_str(),
+            "list_projects"
+                | "get_project"
+                | "list_project_documents"
+                | "read_project_document_manifest"
+                | "read_project_document"
+                | "search_project_documents"
+                | "search_project_document_paths"
+                | "list_project_document_tree"
+                | "list_project_document_neighbors"
+                | "create_project"
+                | "update_project"
+                | "delete_project"
+                | "create_project_document"
+                | "update_project_document_content"
+                | "delete_project_document"
+        )
+    }));
     tools.extend(routine_tools());
     tools.extend(model_tools());
     tools.extend(council_tools());
@@ -123,14 +140,18 @@ mod tests {
                 ("delete_domain".into(), ToolCategory::Write),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
+                ("list_project_documents".into(), ToolCategory::Read),
+                ("read_project_document_manifest".into(), ToolCategory::Read),
+                ("read_project_document".into(), ToolCategory::Read),
+                ("search_project_documents".into(), ToolCategory::Read),
+                ("search_project_document_paths".into(), ToolCategory::Read),
+                ("list_project_document_tree".into(), ToolCategory::Read),
+                ("list_project_document_neighbors".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),
-                ("list_project_documents".into(), ToolCategory::Read),
                 ("create_project_document".into(), ToolCategory::Write),
-                ("get_project_document".into(), ToolCategory::Read),
                 ("delete_project_document".into(), ToolCategory::Write),
-                ("get_project_document_content".into(), ToolCategory::Read),
                 (
                     "update_project_document_content".into(),
                     ToolCategory::Write

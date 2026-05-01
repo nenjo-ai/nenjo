@@ -304,14 +304,14 @@ fn council_member_id_by_agent(detail: &CouncilResponseDetail, agent_id: Uuid) ->
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct ProjectDocumentContentResponse {
+pub struct ProjectDocumentContentResponse {
     #[serde(default)]
-    pub(crate) content: Option<String>,
-    pub(crate) filename: String,
-    pub(crate) content_type: String,
-    pub(crate) size_bytes: i64,
+    pub content: Option<String>,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
     #[serde(default)]
-    pub(crate) encrypted_payload: Option<serde_json::Value>,
+    pub encrypted_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -977,7 +977,7 @@ impl PlatformManifestClient {
             .find(|document| document.id == document_id))
     }
 
-    pub(crate) async fn fetch_project_document_content(
+    pub async fn fetch_project_document_content(
         &self,
         project_id: Uuid,
         document_id: Uuid,

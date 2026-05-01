@@ -22,8 +22,6 @@ pub mod domains;
 pub mod models;
 /// Request parameter types for manifest MCP tools.
 pub mod params;
-/// Tool specs for project document operations.
-pub mod project_documents;
 /// Tool specs for project operations.
 pub mod projects;
 /// Result payload types for manifest MCP tools.
@@ -34,7 +32,11 @@ pub mod routines;
 pub mod tools;
 mod types;
 
-pub use backend::ManifestMcpBackend;
+pub use backend::{
+    AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, ManifestMcpBackend, ModelManifestBackend,
+    ProjectManifestBackend, RoutineManifestBackend,
+};
 pub use contract::ManifestMcpContract;
 pub use params::{
     AbilitiesGetParams, AbilityCreateParams, AbilityDeleteParams, AbilityPromptGetParams,
@@ -47,10 +49,10 @@ pub use params::{
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainPromptGetParams,
     DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, ModelCreateParams,
     ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
-    ProjectDeleteParams, ProjectDocumentContentGetParams, ProjectDocumentContentUpdateParams,
-    ProjectDocumentCreateParams, ProjectDocumentDeleteParams, ProjectDocumentGetParams,
-    ProjectDocumentsListParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
-    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
+    ProjectDeleteParams, ProjectDocumentContentUpdateParams, ProjectDocumentCreateParams,
+    ProjectDocumentDeleteParams, ProjectDocumentsListParams, ProjectUpdateParams,
+    ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
+    RoutinesGetParams,
 };
 pub use results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -60,10 +62,10 @@ pub use results::{
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
     DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
-    ModelGetResult, ModelMutationResult, ModelsListResult, ProjectDocumentContentGetResult,
-    ProjectDocumentContentMutationResult, ProjectDocumentGetResult, ProjectDocumentMutationResult,
-    ProjectDocumentsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
-    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
+    ModelGetResult, ModelMutationResult, ModelsListResult, ProjectDocumentContentMutationResult,
+    ProjectDocumentMutationResult, ProjectDocumentsListResult, ProjectGetResult,
+    ProjectMutationResult, ProjectsListResult, RoutineGetResult, RoutineMutationResult,
+    RoutinesListResult,
 };
 pub use types::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,

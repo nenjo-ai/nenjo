@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Nenjo platform-backed manifest operations"
+description = "Nenjo platform-backed manifest and REST API operations"
 
 [dependencies]
 nenjo = { workspace = true }

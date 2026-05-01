@@ -10,8 +10,8 @@ use super::types::{
     AbilityDocument, AbilityPromptDocument, AbilitySummary, AgentDocument, AgentPromptDocument,
     AgentSummary, ContextBlockContentDocument, ContextBlockDocument, ContextBlockSummary,
     CouncilDocument, CouncilSummary, DomainDocument, DomainPromptDocument, DomainSummary,
-    ModelDocument, ModelSummary, ProjectDocument, ProjectDocumentContentDocument,
-    ProjectDocumentSummary, ProjectSummary, RoutineDocument, RoutineSummary,
+    ModelDocument, ModelSummary, ProjectDocument, ProjectDocumentSummary, ProjectSummary,
+    RoutineDocument, RoutineSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,21 +143,9 @@ pub struct ProjectDocumentsListResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_project_document`.
-pub struct ProjectDocumentGetResult {
-    pub project_document: ProjectDocumentSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Result for `create_project_document`.
 pub struct ProjectDocumentMutationResult {
     pub project_document: ProjectDocumentSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_project_document_content`.
-pub struct ProjectDocumentContentGetResult {
-    pub project_document: ProjectDocumentContentDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

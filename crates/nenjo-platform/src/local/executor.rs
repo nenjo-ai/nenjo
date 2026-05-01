@@ -16,30 +16,30 @@ use nenjo::{
 
 use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
-    AbilityGetResult, AbilityMutationResult, AbilityPromptDocument, AbilityPromptGetParams,
-    AbilityPromptGetResult, AbilityPromptMutationResult, AbilityPromptUpdateParams, AbilitySummary,
-    AbilityUpdateParams, AgentCreateParams, AgentDeleteParams, AgentDocument, AgentGetResult,
-    AgentMutationResult, AgentPromptGetParams, AgentPromptGetResult, AgentPromptMutationResult,
-    AgentPromptUpdateParams, AgentSummary, AgentsGetParams, AgentsListResult,
-    ContextBlockContentDocument, ContextBlockContentGetParams, ContextBlockContentGetResult,
-    ContextBlockContentMutationResult, ContextBlockContentUpdateParams, ContextBlockDeleteParams,
-    ContextBlockDocument, ContextBlockGetResult, ContextBlockMutationResult,
+    AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
+    AbilityPromptGetParams, AbilityPromptGetResult, AbilityPromptMutationResult,
+    AbilityPromptUpdateParams, AbilitySummary, AbilityUpdateParams, AgentCreateParams,
+    AgentDeleteParams, AgentDocument, AgentGetResult, AgentManifestBackend, AgentMutationResult,
+    AgentPromptGetParams, AgentPromptGetResult, AgentPromptMutationResult, AgentPromptUpdateParams,
+    AgentSummary, AgentsGetParams, AgentsListResult, ContextBlockContentDocument,
+    ContextBlockContentGetParams, ContextBlockContentGetResult, ContextBlockContentMutationResult,
+    ContextBlockContentUpdateParams, ContextBlockDeleteParams, ContextBlockDocument,
+    ContextBlockGetResult, ContextBlockManifestBackend, ContextBlockMutationResult,
     ContextBlockUpdateParams, ContextBlocksGetParams, ContextBlocksListResult,
     CouncilAddMemberParams, CouncilDeleteParams, CouncilDocument, CouncilGetResult,
-    CouncilMutationResult, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
-    CouncilUpdateParams, CouncilsGetParams, CouncilsListResult, DeleteResult, DomainDeleteParams,
-    DomainDocument, DomainGetResult, DomainManifestDocument, DomainManifestGetParams,
-    DomainManifestGetResult, DomainManifestMutationResult, DomainManifestUpdateParams,
-    DomainMutationResult, DomainSummary, DomainUpdateParams, DomainsGetParams, DomainsListResult,
-    ManifestMcpBackend, ModelDeleteParams, ModelDocument, ModelGetResult, ModelMutationResult,
-    ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectDeleteParams, ProjectDocument,
-    ProjectDocumentContentGetParams, ProjectDocumentContentGetResult,
-    ProjectDocumentContentMutationResult, ProjectDocumentContentUpdateParams,
-    ProjectDocumentGetParams, ProjectDocumentGetResult, ProjectDocumentMutationResult,
-    ProjectDocumentsListParams, ProjectDocumentsListResult, ProjectGetResult,
-    ProjectMutationResult, ProjectSummary, ProjectUpdateParams, ProjectsGetParams,
-    ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
-    RoutineMutationResult, RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
+    CouncilManifestBackend, CouncilMutationResult, CouncilRemoveMemberParams,
+    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, CouncilsListResult,
+    DeleteResult, DomainDeleteParams, DomainDocument, DomainGetResult, DomainManifestBackend,
+    DomainManifestDocument, DomainManifestGetParams, DomainManifestGetResult,
+    DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, ModelDeleteParams, ModelDocument,
+    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
+    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectDocumentContentMutationResult,
+    ProjectDocumentContentUpdateParams, ProjectDocumentMutationResult, ProjectGetResult,
+    ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
+    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
+    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
+    RoutinesGetParams, RoutinesListResult,
 };
 use crate::{
     AbilityCreateParams, AgentUpdateParams, ContextBlockCreateParams, CouncilCreateParams,
@@ -149,12 +149,12 @@ impl<R, W> LocalManifestMcpBackend<R, W> {
 }
 
 #[async_trait]
-impl<R, W> ManifestMcpBackend for LocalManifestMcpBackend<R, W>
+impl<R, W> AgentManifestBackend for LocalManifestMcpBackend<R, W>
 where
     R: ManifestReader + Send + Sync,
     W: ManifestWriter + Send + Sync,
 {
-    async fn agents_list(&self) -> Result<AgentsListResult> {
+    async fn list_agents(&self) -> Result<AgentsListResult> {
         let agents: Vec<AgentSummary> = self
             .reader
             .list_agents()
@@ -165,7 +165,7 @@ where
         Ok(AgentsListResult { agents })
     }
 
-    async fn agents_get(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
+    async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
         let agent = self
             .reader
             .get_agent(params.id)
@@ -176,10 +176,7 @@ where
         })
     }
 
-    async fn agents_get_prompt(
-        &self,
-        params: AgentPromptGetParams,
-    ) -> Result<AgentPromptGetResult> {
+    async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult> {
         let agent = self
             .reader
             .get_agent(params.id)
@@ -190,7 +187,7 @@ where
         })
     }
 
-    async fn agents_create(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
+    async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
         let agent = AgentManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
@@ -213,7 +210,7 @@ where
         })
     }
 
-    async fn agents_update(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
+    async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
         let existing = self
             .reader
             .get_agent(params.id)
@@ -242,7 +239,7 @@ where
         })
     }
 
-    async fn agents_update_prompt(
+    async fn update_agent_prompt(
         &self,
         params: AgentPromptUpdateParams,
     ) -> Result<AgentPromptMutationResult> {
@@ -264,7 +261,7 @@ where
         Ok(AgentPromptMutationResult { prompt_config })
     }
 
-    async fn agents_delete(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
+    async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Agent, params.id)
             .await?;
@@ -273,8 +270,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn abilities_list(&self) -> Result<AbilitiesListResult> {
+#[async_trait]
+impl<R, W> AbilityManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_abilities(&self) -> Result<AbilitiesListResult> {
         let abilities: Vec<AbilitySummary> = self
             .reader
             .list_abilities()
@@ -285,7 +289,7 @@ where
         Ok(AbilitiesListResult { abilities })
     }
 
-    async fn abilities_get(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
+    async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
         let ability = self
             .reader
             .get_ability(params.id)
@@ -296,7 +300,7 @@ where
         })
     }
 
-    async fn abilities_get_prompt(
+    async fn get_ability_prompt(
         &self,
         params: AbilityPromptGetParams,
     ) -> Result<AbilityPromptGetResult> {
@@ -310,7 +314,7 @@ where
         })
     }
 
-    async fn abilities_create(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
+    async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
@@ -331,7 +335,7 @@ where
         })
     }
 
-    async fn abilities_update(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult> {
+    async fn update_ability(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult> {
         if params.data.is_empty() {
             return Err(anyhow!(
                 "ability update requires at least one field in data"
@@ -369,7 +373,7 @@ where
         })
     }
 
-    async fn abilities_update_prompt(
+    async fn update_ability_prompt(
         &self,
         params: AbilityPromptUpdateParams,
     ) -> Result<AbilityPromptMutationResult> {
@@ -386,7 +390,7 @@ where
         Ok(AbilityPromptMutationResult { prompt_config })
     }
 
-    async fn abilities_delete(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
+    async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Ability, params.id)
             .await?;
@@ -395,8 +399,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn domains_list(&self) -> Result<DomainsListResult> {
+#[async_trait]
+impl<R, W> DomainManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_domains(&self) -> Result<DomainsListResult> {
         let domains: Vec<DomainSummary> = self
             .reader
             .list_domains()
@@ -407,7 +418,7 @@ where
         Ok(DomainsListResult { domains })
     }
 
-    async fn domains_get(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
+    async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
         let domain = self
             .reader
             .get_domain(params.id)
@@ -418,7 +429,7 @@ where
         })
     }
 
-    async fn domains_get_manifest(
+    async fn get_domain_prompt(
         &self,
         params: DomainManifestGetParams,
     ) -> Result<DomainManifestGetResult> {
@@ -432,7 +443,7 @@ where
         })
     }
 
-    async fn domains_create(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
+    async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
         let domain = DomainManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
@@ -453,7 +464,7 @@ where
         })
     }
 
-    async fn domains_update(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
+    async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
         let existing = self
             .reader
             .get_domain(params.id)
@@ -492,7 +503,7 @@ where
         })
     }
 
-    async fn domains_update_manifest(
+    async fn update_domain_prompt(
         &self,
         params: DomainManifestUpdateParams,
     ) -> Result<DomainManifestMutationResult> {
@@ -509,7 +520,7 @@ where
         Ok(DomainManifestMutationResult { prompt_config })
     }
 
-    async fn domains_delete(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
+    async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Domain, params.id)
             .await?;
@@ -518,8 +529,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn projects_list(&self) -> Result<ProjectsListResult> {
+#[async_trait]
+impl<R, W> ProjectManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_projects(&self) -> Result<ProjectsListResult> {
         let projects: Vec<ProjectSummary> = self
             .reader
             .list_projects()
@@ -530,7 +548,7 @@ where
         Ok(ProjectsListResult { projects })
     }
 
-    async fn projects_get(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
+    async fn get_project(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
         let project = self
             .reader
             .get_project(params.id)
@@ -541,7 +559,7 @@ where
         })
     }
 
-    async fn projects_create(&self, params: ProjectCreateParams) -> Result<ProjectMutationResult> {
+    async fn create_project(&self, params: ProjectCreateParams) -> Result<ProjectMutationResult> {
         let mut settings = serde_json::json!({});
         if let Some(repo_url) = params.data.repo_url
             && let Some(obj) = settings.as_object_mut()
@@ -563,7 +581,7 @@ where
         })
     }
 
-    async fn projects_update(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
+    async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
         let existing = self
             .reader
             .get_project(params.id)
@@ -600,7 +618,7 @@ where
         })
     }
 
-    async fn projects_delete(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
+    async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Project, params.id)
             .await?;
@@ -610,50 +628,81 @@ where
         })
     }
 
-    async fn project_documents_list(
+    async fn list_project_documents(
         &self,
-        _params: ProjectDocumentsListParams,
-    ) -> Result<ProjectDocumentsListResult> {
-        Ok(ProjectDocumentsListResult {
-            project_documents: Vec::new(),
-        })
-    }
-
-    async fn project_documents_get(
-        &self,
-        params: ProjectDocumentGetParams,
-    ) -> Result<ProjectDocumentGetResult> {
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         Err(anyhow!(
-            "project document metadata is not available in the local manifest: {}",
-            params.document_id
+            "project documents are not available in the local manifest backend"
         ))
     }
 
-    async fn project_documents_get_content(
+    async fn read_project_document_manifest(
         &self,
-        params: ProjectDocumentContentGetParams,
-    ) -> Result<ProjectDocumentContentGetResult> {
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         Err(anyhow!(
-            "project document content is not available in the local manifest: {}",
-            params.document_id
+            "project document manifests are not available in the local manifest backend"
         ))
     }
 
-    async fn project_documents_create(
+    async fn read_project_document(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+        Err(anyhow!(
+            "project document content is not available in the local manifest backend"
+        ))
+    }
+
+    async fn search_project_documents(
+        &self,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow!(
+            "project document search is not available in the local manifest backend"
+        ))
+    }
+
+    async fn search_project_document_paths(
+        &self,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow!(
+            "project document path search is not available in the local manifest backend"
+        ))
+    }
+
+    async fn list_project_document_tree(
+        &self,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow!(
+            "project document tree is not available in the local manifest backend"
+        ))
+    }
+
+    async fn list_project_document_neighbors(
+        &self,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow!(
+            "project document neighbors are not available in the local manifest backend"
+        ))
+    }
+
+    async fn create_project_document(
         &self,
         _params: ProjectDocumentCreateParams,
     ) -> Result<ProjectDocumentMutationResult> {
         bail!("project document tools require the platform backend")
     }
 
-    async fn project_documents_update_content(
+    async fn update_project_document_content(
         &self,
         _params: ProjectDocumentContentUpdateParams,
     ) -> Result<ProjectDocumentContentMutationResult> {
         bail!("project document tools require the platform backend")
     }
 
-    async fn project_documents_delete(
+    async fn delete_project_document(
         &self,
         params: ProjectDocumentDeleteParams,
     ) -> Result<DeleteResult> {
@@ -662,8 +711,15 @@ where
             id: params.document_id,
         })
     }
+}
 
-    async fn routines_list(&self) -> Result<RoutinesListResult> {
+#[async_trait]
+impl<R, W> RoutineManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_routines(&self) -> Result<RoutinesListResult> {
         Ok(RoutinesListResult {
             routines: self
                 .reader
@@ -675,7 +731,7 @@ where
         })
     }
 
-    async fn routines_get(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
+    async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
         let routine = self
             .reader
             .get_routine(params.id)
@@ -686,7 +742,7 @@ where
         })
     }
 
-    async fn routines_create(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
+    async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
         let routine_id = uuid::Uuid::new_v4();
         let (steps, edges, metadata) = graph_input_to_manifest_parts(
             routine_id,
@@ -710,7 +766,7 @@ where
         })
     }
 
-    async fn routines_update(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult> {
+    async fn update_routine(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult> {
         if params.data.is_empty() {
             return Err(anyhow!(
                 "routine update requires at least one field in data"
@@ -749,7 +805,7 @@ where
         })
     }
 
-    async fn routines_delete(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
+    async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Routine, params.id)
             .await?;
@@ -758,8 +814,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn models_list(&self) -> Result<ModelsListResult> {
+#[async_trait]
+impl<R, W> ModelManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_models(&self) -> Result<ModelsListResult> {
         Ok(ModelsListResult {
             models: self
                 .reader
@@ -771,7 +834,7 @@ where
         })
     }
 
-    async fn models_get(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
+    async fn get_model(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
         let model = self
             .reader
             .get_model(params.id)
@@ -782,7 +845,7 @@ where
         })
     }
 
-    async fn models_create(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
+    async fn create_model(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
         let model = ModelManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
@@ -803,7 +866,7 @@ where
         })
     }
 
-    async fn models_update(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
+    async fn update_model(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
         let existing = self
             .reader
             .get_model(params.id)
@@ -836,7 +899,7 @@ where
         })
     }
 
-    async fn models_delete(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
+    async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Model, params.id)
             .await?;
@@ -845,8 +908,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn councils_list(&self) -> Result<CouncilsListResult> {
+#[async_trait]
+impl<R, W> CouncilManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_councils(&self) -> Result<CouncilsListResult> {
         Ok(CouncilsListResult {
             councils: self
                 .reader
@@ -858,7 +928,7 @@ where
         })
     }
 
-    async fn councils_get(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
+    async fn get_council(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
         let council = self
             .reader
             .get_council(params.id)
@@ -869,7 +939,7 @@ where
         })
     }
 
-    async fn councils_create(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
+    async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
         let council = CouncilManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
@@ -897,7 +967,7 @@ where
         })
     }
 
-    async fn councils_update(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
+    async fn update_council(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
         let existing = self
             .reader
             .get_council(params.id)
@@ -918,7 +988,7 @@ where
         })
     }
 
-    async fn councils_add_member(
+    async fn add_council_member(
         &self,
         params: CouncilAddMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -947,7 +1017,7 @@ where
         })
     }
 
-    async fn councils_update_member(
+    async fn update_council_member(
         &self,
         params: CouncilUpdateMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -975,7 +1045,7 @@ where
         })
     }
 
-    async fn councils_remove_member(
+    async fn remove_council_member(
         &self,
         params: CouncilRemoveMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -999,7 +1069,7 @@ where
         })
     }
 
-    async fn councils_delete(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
+    async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::Council, params.id)
             .await?;
@@ -1008,8 +1078,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn context_blocks_list(&self) -> Result<ContextBlocksListResult> {
+#[async_trait]
+impl<R, W> ContextBlockManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_context_blocks(&self) -> Result<ContextBlocksListResult> {
         Ok(ContextBlocksListResult {
             context_blocks: self
                 .reader
@@ -1021,7 +1098,7 @@ where
         })
     }
 
-    async fn context_blocks_get(
+    async fn get_context_block(
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult> {
@@ -1035,7 +1112,7 @@ where
         })
     }
 
-    async fn context_blocks_get_content(
+    async fn get_context_block_content(
         &self,
         params: ContextBlockContentGetParams,
     ) -> Result<ContextBlockContentGetResult> {
@@ -1049,7 +1126,7 @@ where
         })
     }
 
-    async fn context_blocks_create(
+    async fn create_context_block(
         &self,
         params: ContextBlockCreateParams,
     ) -> Result<ContextBlockMutationResult> {
@@ -1069,7 +1146,7 @@ where
         })
     }
 
-    async fn context_blocks_update(
+    async fn update_context_block(
         &self,
         params: ContextBlockUpdateParams,
     ) -> Result<ContextBlockMutationResult> {
@@ -1096,7 +1173,7 @@ where
         })
     }
 
-    async fn context_blocks_update_content(
+    async fn update_context_block_content(
         &self,
         params: ContextBlockContentUpdateParams,
     ) -> Result<ContextBlockContentMutationResult> {
@@ -1115,10 +1192,7 @@ where
         Ok(ContextBlockContentMutationResult { template })
     }
 
-    async fn context_blocks_delete(
-        &self,
-        params: ContextBlockDeleteParams,
-    ) -> Result<DeleteResult> {
+    async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult> {
         self.writer
             .delete_resource(ManifestResourceKind::ContextBlock, params.id)
             .await?;
@@ -1370,10 +1444,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_get_is_prompt_free() {
+    async fn get_agent_is_prompt_free() {
         let TestContext { backend, agent, .. } = backend().await;
 
-        let list = backend.agents_list().await.unwrap();
+        let list = backend.list_agents().await.unwrap();
         assert_eq!(list.agents.len(), 1);
         assert_eq!(list.agents[0].id, agent.id);
         let list_value = serde_json::to_value(&list).unwrap();
@@ -1383,7 +1457,7 @@ mod tests {
         assert!(list_value["agents"][0].get("prompt_config").is_none());
 
         let result = backend
-            .agents_get(AgentsGetParams { id: agent.id })
+            .get_agent(AgentsGetParams { id: agent.id })
             .await
             .unwrap();
         let value = serde_json::to_value(result).unwrap();
@@ -1393,7 +1467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_get_includes_heartbeat_state() {
+    async fn get_agent_includes_heartbeat_state() {
         let dir = tempdir().unwrap();
         let root = dir.keep();
         let store = Arc::new(LocalManifestStore::new(root));
@@ -1415,7 +1489,7 @@ mod tests {
         let backend = LocalManifestMcpBackend::new(store.clone(), store);
 
         let result = backend
-            .agents_get(AgentsGetParams { id: agent.id })
+            .get_agent(AgentsGetParams { id: agent.id })
             .await
             .unwrap();
 
@@ -1430,11 +1504,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_get_prompt_returns_prompt_config() {
+    async fn get_agent_prompt_returns_prompt_config() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .agents_get_prompt(AgentPromptGetParams { id: agent.id })
+            .get_agent_prompt(AgentPromptGetParams { id: agent.id })
             .await
             .unwrap();
 
@@ -1446,11 +1520,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_update_merges_partial_patch() {
+    async fn update_agent_merges_partial_patch() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .agents_update(AgentUpdateParams {
+            .update_agent(AgentUpdateParams {
                 id: agent.id,
                 data: crate::AgentUpdateDocument {
                     name: Some("reviewer".into()),
@@ -1470,11 +1544,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_update_can_clear_nullable_fields() {
+    async fn update_agent_can_clear_nullable_fields() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .agents_update(AgentUpdateParams {
+            .update_agent(AgentUpdateParams {
                 id: agent.id,
                 data: crate::AgentUpdateDocument {
                     name: None,
@@ -1494,11 +1568,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_update_prompt_merges_nested_patch() {
+    async fn update_agent_prompt_merges_nested_patch() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .agents_update_prompt(AgentPromptUpdateParams {
+            .update_agent_prompt(AgentPromptUpdateParams {
                 id: agent.id,
                 prompt_config: Some(serde_json::json!({
                     "developer_prompt": "Prefer minimal diffs.",
@@ -1529,7 +1603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_update_prompt_rejects_locked_agent() {
+    async fn update_agent_prompt_rejects_locked_agent() {
         let dir = tempdir().unwrap();
         let root = dir.keep();
         let store = Arc::new(LocalManifestStore::new(root));
@@ -1543,7 +1617,7 @@ mod tests {
         let backend = LocalManifestMcpBackend::new(store.clone(), store);
 
         let error = backend
-            .agents_update_prompt(AgentPromptUpdateParams {
+            .update_agent_prompt(AgentPromptUpdateParams {
                 id: agent.id,
                 prompt_config: Some(serde_json::json!({
                     "developer_prompt": "This should fail."
@@ -1621,17 +1695,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abilities_list_and_get_use_local_manifest() {
+    async fn list_abilities_and_get_use_local_manifest() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
-        let list = backend.abilities_list().await.unwrap();
+        let list = backend.list_abilities().await.unwrap();
         assert_eq!(list.abilities.len(), 1);
         assert_eq!(list.abilities[0].id, ability.id);
 
         let get = backend
-            .abilities_get(AbilitiesGetParams { id: ability.id })
+            .get_ability(AbilitiesGetParams { id: ability.id })
             .await
             .unwrap();
         assert_eq!(get.ability.summary.name, "review_helper");
@@ -1639,13 +1713,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abilities_get_prompt_returns_prompt_content() {
+    async fn get_ability_prompt_returns_prompt_content() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let get = backend
-            .abilities_get_prompt(AbilityPromptGetParams { id: ability.id })
+            .get_ability_prompt(AbilityPromptGetParams { id: ability.id })
             .await
             .unwrap();
         assert_eq!(get.ability.ability.summary.name, "review_helper");
@@ -1656,13 +1730,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abilities_update_merges_partial_patch() {
+    async fn update_ability_merges_partial_patch() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let result = backend
-            .abilities_update(AbilityUpdateParams {
+            .update_ability(AbilityUpdateParams {
                 id: ability.id,
                 data: crate::AbilityUpdateDocument {
                     tool_name: None,
@@ -1685,13 +1759,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abilities_update_prompt_replaces_prompt() {
+    async fn update_ability_prompt_replaces_prompt() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let result = backend
-            .abilities_update_prompt(AbilityPromptUpdateParams {
+            .update_ability_prompt(AbilityPromptUpdateParams {
                 id: ability.id,
                 prompt_config: AbilityPromptConfig {
                     developer_prompt: "New review prompt".into(),
@@ -1704,17 +1778,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domains_list_and_get_use_local_manifest() {
+    async fn list_domains_and_get_use_local_manifest() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
-        let list = backend.domains_list().await.unwrap();
+        let list = backend.list_domains().await.unwrap();
         assert_eq!(list.domains.len(), 1);
         assert_eq!(list.domains[0].id, domain.id);
 
         let get = backend
-            .domains_get(DomainsGetParams { id: domain.id })
+            .get_domain(DomainsGetParams { id: domain.id })
             .await
             .unwrap();
         assert_eq!(get.domain.summary.name, "creator");
@@ -1722,13 +1796,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domains_get_manifest_returns_manifest_content() {
+    async fn get_domain_manifest_returns_manifest_content() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let get = backend
-            .domains_get_manifest(DomainManifestGetParams { id: domain.id })
+            .get_domain_prompt(DomainManifestGetParams { id: domain.id })
             .await
             .unwrap();
         assert_eq!(get.domain.domain.summary.name, "creator");
@@ -1739,13 +1813,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domains_update_merges_partial_patch() {
+    async fn update_domain_merges_partial_patch() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let result = backend
-            .domains_update(DomainUpdateParams {
+            .update_domain(DomainUpdateParams {
                 id: domain.id,
                 data: crate::DomainUpdateDocument {
                     name: None,
@@ -1766,13 +1840,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn domains_update_manifest_replaces_manifest() {
+    async fn update_domain_manifest_replaces_manifest() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let result = backend
-            .domains_update_manifest(DomainManifestUpdateParams {
+            .update_domain_prompt(DomainManifestUpdateParams {
                 id: domain.id,
                 prompt_config: DomainPromptConfig {
                     developer_prompt_addon: Some("Builder mode".into()),
@@ -1862,19 +1936,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projects_list_and_get_use_local_manifest() {
+    async fn list_projects_and_get_use_local_manifest() {
         let TestContext {
             backend, project, ..
         } = backend().await;
 
-        let list = backend.projects_list().await.unwrap();
+        let list = backend.list_projects().await.unwrap();
         assert_eq!(list.projects.len(), 1);
         assert_eq!(list.projects[0].id, project.id);
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["projects"][0].get("settings").is_none());
 
         let get = backend
-            .projects_get(ProjectsGetParams { id: project.id })
+            .get_project(ProjectsGetParams { id: project.id })
             .await
             .unwrap();
         assert_eq!(get.project.summary.name, "workspace");
@@ -1882,13 +1956,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projects_update_merges_partial_patch() {
+    async fn update_project_merges_partial_patch() {
         let TestContext {
             backend, project, ..
         } = backend().await;
 
         let result = backend
-            .projects_update(ProjectUpdateParams {
+            .update_project(ProjectUpdateParams {
                 id: project.id,
                 data: crate::ProjectUpdateDocument {
                     name: Some("workspace-v2".into()),
@@ -1911,13 +1985,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projects_update_can_clear_description() {
+    async fn update_project_can_clear_description() {
         let TestContext {
             backend, project, ..
         } = backend().await;
 
         let result = backend
-            .projects_update(ProjectUpdateParams {
+            .update_project(ProjectUpdateParams {
                 id: project.id,
                 data: crate::ProjectUpdateDocument {
                     name: None,
@@ -1956,12 +2030,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_list_and_get_use_local_manifest() {
+    async fn list_routines_and_get_use_local_manifest() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
-        let list = backend.routines_list().await.unwrap();
+        let list = backend.list_routines().await.unwrap();
         assert_eq!(list.routines.len(), 1);
         assert_eq!(list.routines[0].id, routine.id);
         let list_value = serde_json::to_value(&list).unwrap();
@@ -1970,7 +2044,7 @@ mod tests {
         assert!(list_value["routines"][0].get("edges").is_none());
 
         let get = backend
-            .routines_get(RoutinesGetParams { id: routine.id })
+            .get_routine(RoutinesGetParams { id: routine.id })
             .await
             .unwrap();
         assert_eq!(get.routine.summary.name, "nightly-build");
@@ -1979,13 +2053,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_update_merges_partial_patch() {
+    async fn update_routine_merges_partial_patch() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
         let result = backend
-            .routines_update(RoutineUpdateParams {
+            .update_routine(RoutineUpdateParams {
                 id: routine.id,
                 data: crate::RoutineUpdateDocument {
                     name: Some("nightly-release".into()),
@@ -2015,13 +2089,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_update_can_clear_description() {
+    async fn update_routine_can_clear_description() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
         let result = backend
-            .routines_update(RoutineUpdateParams {
+            .update_routine(RoutineUpdateParams {
                 id: routine.id,
                 data: crate::RoutineUpdateDocument {
                     name: None,
@@ -2068,13 +2142,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_create_and_update_accept_graph_payloads() {
+    async fn create_routine_and_update_accept_graph_payloads() {
         let TestContext { backend, .. } = backend().await;
         let step_id = Uuid::new_v4();
         let terminal_id = Uuid::new_v4();
 
         let created = backend
-            .routines_create(RoutineCreateParams {
+            .create_routine(RoutineCreateParams {
                 data: crate::RoutineCreateDocument {
                     name: "pipeline".into(),
                     description: Some("Build workflow".into()),
@@ -2120,7 +2194,7 @@ mod tests {
         assert_eq!(created.routine.edges.len(), 1);
 
         let updated = backend
-            .routines_update(RoutineUpdateParams {
+            .update_routine(RoutineUpdateParams {
                 id: created.routine.summary.id,
                 data: crate::RoutineUpdateDocument {
                     name: None,
@@ -2151,10 +2225,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_list_and_get_use_local_manifest() {
+    async fn list_models_and_get_use_local_manifest() {
         let TestContext { backend, model, .. } = backend().await;
 
-        let list = backend.models_list().await.unwrap();
+        let list = backend.list_models().await.unwrap();
         assert_eq!(list.models.len(), 2);
         assert!(list.models.iter().any(|m| m.id == model.id));
         let reasoner = serde_json::to_value(&list).unwrap()["models"]
@@ -2169,7 +2243,7 @@ mod tests {
         assert!(reasoner.get("base_url").is_none());
 
         let get = backend
-            .models_get(ModelsGetParams { id: model.id })
+            .get_model(ModelsGetParams { id: model.id })
             .await
             .unwrap();
         assert_eq!(get.model.summary.name, "reasoner");
@@ -2177,11 +2251,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_update_merges_partial_patch() {
+    async fn update_model_merges_partial_patch() {
         let TestContext { backend, model, .. } = backend().await;
 
         let result = backend
-            .models_update(ModelUpdateParams {
+            .update_model(ModelUpdateParams {
                 id: model.id,
                 data: crate::ModelUpdateDocument {
                     name: Some("reasoner-v2".into()),
@@ -2208,11 +2282,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_update_can_clear_nullable_fields() {
+    async fn update_model_can_clear_nullable_fields() {
         let TestContext { backend, model, .. } = backend().await;
 
         let result = backend
-            .models_update(ModelUpdateParams {
+            .update_model(ModelUpdateParams {
                 id: model.id,
                 data: crate::ModelUpdateDocument {
                     name: None,
@@ -2250,19 +2324,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn councils_list_and_get_use_local_manifest() {
+    async fn list_councils_and_get_use_local_manifest() {
         let TestContext {
             backend, council, ..
         } = backend().await;
 
-        let list = backend.councils_list().await.unwrap();
+        let list = backend.list_councils().await.unwrap();
         assert_eq!(list.councils.len(), 1);
         assert_eq!(list.councils[0].id, council.id);
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["councils"][0].get("members").is_none());
 
         let get = backend
-            .councils_get(CouncilsGetParams { id: council.id })
+            .get_council(CouncilsGetParams { id: council.id })
             .await
             .unwrap();
         assert_eq!(get.council.summary.name, "triage");
@@ -2270,13 +2344,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn councils_update_merges_partial_patch() {
+    async fn update_council_merges_partial_patch() {
         let TestContext {
             backend, council, ..
         } = backend().await;
 
         let result = backend
-            .councils_update(CouncilUpdateParams {
+            .update_council(CouncilUpdateParams {
                 id: council.id,
                 data: crate::CouncilUpdateDocument {
                     name: Some("dispatch".into()),
@@ -2377,14 +2451,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_blocks_list_and_get_are_content_free() {
+    async fn list_context_blocks_and_get_are_content_free() {
         let TestContext {
             backend,
             context_block,
             ..
         } = backend().await;
 
-        let list = backend.context_blocks_list().await.unwrap();
+        let list = backend.list_context_blocks().await.unwrap();
         assert_eq!(list.context_blocks.len(), 1);
         assert_eq!(list.context_blocks[0].id, context_block.id);
         assert!(
@@ -2394,7 +2468,7 @@ mod tests {
         );
 
         let get = backend
-            .context_blocks_get(ContextBlocksGetParams {
+            .get_context_block(ContextBlocksGetParams {
                 id: context_block.id,
             })
             .await
@@ -2408,7 +2482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_blocks_get_content_returns_template() {
+    async fn get_context_block_content_returns_template() {
         let TestContext {
             backend,
             context_block,
@@ -2416,7 +2490,7 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .context_blocks_get_content(ContextBlockContentGetParams {
+            .get_context_block_content(ContextBlockContentGetParams {
                 id: context_block.id,
             })
             .await
@@ -2426,7 +2500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_blocks_update_merges_partial_patch() {
+    async fn update_context_block_merges_partial_patch() {
         let TestContext {
             backend,
             context_block,
@@ -2434,7 +2508,7 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .context_blocks_update(ContextBlockUpdateParams {
+            .update_context_block(ContextBlockUpdateParams {
                 id: context_block.id,
                 data: crate::ContextBlockUpdateDocument {
                     name: None,
@@ -2457,7 +2531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_blocks_update_content_updates_template_only() {
+    async fn update_context_block_content_updates_template_only() {
         let TestContext {
             backend,
             context_block,
@@ -2465,7 +2539,7 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .context_blocks_update_content(ContextBlockContentUpdateParams {
+            .update_context_block_content(ContextBlockContentUpdateParams {
                 id: context_block.id,
                 template: Some("Repository: {{ repo_slug }}".into()),
             })
@@ -2475,7 +2549,7 @@ mod tests {
         assert_eq!(result.template, "Repository: {{ repo_slug }}");
 
         let fetched = backend
-            .context_blocks_get_content(ContextBlockContentGetParams {
+            .get_context_block_content(ContextBlockContentGetParams {
                 id: context_block.id,
             })
             .await

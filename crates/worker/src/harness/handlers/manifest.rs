@@ -25,6 +25,7 @@ struct InlineDocumentMeta {
     id: Uuid,
     project_id: Uuid,
     filename: String,
+    path: Option<String>,
     size_bytes: i64,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -51,13 +52,12 @@ pub async fn handle_manifest_changed(
         "Manifest resource changed"
     );
 
-    let mut applied_inline = false;
-
-    if action == ResourceAction::Deleted {
+    let applied_inline = if action == ResourceAction::Deleted {
         apply_delete(ctx, resource_type, resource_id);
+        false
     } else {
         // Try encrypted inline payload first, then plaintext, then API fetch.
-        applied_inline = if let Some(ref data) = encrypted_payload {
+        let applied_inline = if let Some(ref data) = encrypted_payload {
             apply_inline_encrypted_upsert(ctx, resource_type, resource_id, payload.as_ref(), data)
                 .await
         } else if let Some(ref data) = payload {
@@ -76,7 +76,8 @@ pub async fn handle_manifest_changed(
             full_refresh(ctx).await?;
             return Ok(());
         }
-    }
+        applied_inline
+    };
 
     // Side-effects for specific resource types
     match resource_type {
@@ -86,9 +87,6 @@ pub async fn handle_manifest_changed(
         }
         ResourceType::Lambda => {}
         ResourceType::Document => {
-            if applied_inline {
-                return Ok(());
-            }
             if let Some(pid) = project_id {
                 let manifest = ctx.provider().manifest().clone();
                 let slug = manifest
@@ -102,6 +100,14 @@ pub async fn handle_manifest_changed(
                     match crate::harness::doc_sync::remove_manifest_entry(&project_dir, resource_id)
                     {
                         Ok(Some(filename)) => {
+                            if let Err(error) =
+                                crate::harness::doc_sync::remove_project_knowledge_entry(
+                                    &project_dir,
+                                    resource_id,
+                                )
+                            {
+                                warn!(%pid, %resource_id, error = %error, "Failed to update local project knowledge manifest");
+                            }
                             if let Err(error) = crate::harness::doc_sync::delete_document_file(
                                 &project_dir,
                                 &filename,
@@ -132,7 +138,7 @@ pub async fn handle_manifest_changed(
                         metadata.map(|meta| crate::harness::api_client::DocumentSyncMeta {
                             id: meta.id,
                             filename: meta.filename,
-                            path: None,
+                            path: meta.path,
                             title: None,
                             kind: None,
                             authority: None,
@@ -143,17 +149,28 @@ pub async fn handle_manifest_changed(
                             size_bytes: meta.size_bytes,
                             updated_at: meta.updated_at.to_rfc3339(),
                         });
-                    if let Err(e) = crate::harness::doc_sync::sync_document(
-                        &ctx.api,
-                        &project_dir,
-                        pid,
-                        resource_id,
-                        &ctx.config.state_dir,
-                        metadata.as_ref(),
-                    )
-                    .await
-                    {
-                        warn!(%pid, %resource_id, error = %e, "Document fetch failed");
+                    let result = if applied_inline {
+                        crate::harness::doc_sync::sync_document_metadata(
+                            &ctx.api,
+                            &project_dir,
+                            pid,
+                            resource_id,
+                            metadata.as_ref(),
+                        )
+                        .await
+                    } else {
+                        crate::harness::doc_sync::sync_document(
+                            &ctx.api,
+                            &project_dir,
+                            pid,
+                            resource_id,
+                            &ctx.config.state_dir,
+                            metadata.as_ref(),
+                        )
+                        .await
+                    };
+                    if let Err(e) = result {
+                        warn!(%pid, %resource_id, error = %e, "Document sync failed");
                     }
                 }
             } else {
@@ -544,7 +561,10 @@ async fn apply_inline_encrypted_upsert(
 
             if let Err(error) = crate::harness::doc_sync::write_document_content(
                 &project_dir,
-                &metadata.filename,
+                &match metadata.path.as_deref().map(|path| path.trim_matches('/')) {
+                    Some(path) if !path.is_empty() => format!("{path}/{}", metadata.filename),
+                    _ => metadata.filename.clone(),
+                },
                 content,
             ) {
                 warn!(%rt, %id, error = %error, "Failed to write inline decrypted document");

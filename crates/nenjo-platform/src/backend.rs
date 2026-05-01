@@ -1,8 +1,9 @@
 //! Platform-backed manifest backend implementations.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
@@ -10,6 +11,7 @@ use nenjo::manifest::{
     RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::PlatformManifestClient;
@@ -54,32 +56,6 @@ fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
             .collect(),
         delegation_strategy: council.summary.delegation_strategy,
     }
-}
-
-async fn decode_document_transport_content<E: SensitivePayloadEncoder>(
-    codec: &E,
-    content: Option<String>,
-    encrypted_payload: Option<serde_json::Value>,
-) -> Result<String> {
-    if let Some(content) = content {
-        return Ok(content);
-    }
-
-    let payload = encrypted_payload
-        .ok_or_else(|| anyhow!("project document content response did not include content"))?;
-    let looks_encrypted = payload.get("ciphertext").is_some()
-        && payload.get("nonce").is_some()
-        && payload.get("object_type").is_some();
-    if !looks_encrypted {
-        bail!("project document encrypted payload was not in the expected format");
-    }
-    let Some(decoded) = codec.decode_payload(&payload).await? else {
-        bail!("project document content is encrypted and could not be decoded");
-    };
-    decoded
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("decoded project document content was not a string"))
 }
 
 #[async_trait]
@@ -129,6 +105,7 @@ pub struct PlatformManifestBackend<L, E> {
     platform_client: PlatformManifestClient,
     sensitive_payload_encoder: E,
     access_policy: Option<ManifestAccessPolicy>,
+    workspace_dir: Option<PathBuf>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -143,12 +120,19 @@ impl<L, E> PlatformManifestBackend<L, E> {
             platform_client,
             sensitive_payload_encoder,
             access_policy: None,
+            workspace_dir: None,
         }
     }
 
     /// Attach a scope-based access policy used to filter reads and validate writes.
     pub fn with_access_policy(mut self, access_policy: ManifestAccessPolicy) -> Self {
         self.access_policy = Some(access_policy);
+        self
+    }
+
+    /// Attach the worker workspace root used for local-first project document reads.
+    pub fn with_workspace_dir(mut self, workspace_dir: PathBuf) -> Self {
+        self.workspace_dir = Some(workspace_dir);
         self
     }
 
@@ -238,15 +222,590 @@ where
             .await?;
         Ok(hydrated)
     }
+
+    fn workspace_dir(&self) -> Result<&Path> {
+        self.workspace_dir
+            .as_deref()
+            .ok_or_else(|| anyhow!("project document tools require a configured workspace_dir"))
+    }
+
+    async fn project_workspace_dir(&self, project_id: Uuid) -> Result<PathBuf> {
+        let project = self
+            .local_store
+            .get_project(project_id)
+            .await?
+            .ok_or_else(|| anyhow!("project {project_id} is not cached locally"))?;
+        Ok(self.workspace_dir()?.join(project.slug))
+    }
+
+    async fn list_local_project_documents(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<ProjectKnowledgeDocManifest>> {
+        let project_dir = self.project_workspace_dir(project_id).await?;
+        // Project document tools read from the worker's local knowledge cache rather than
+        // hydrating documents directly from the platform on demand.
+        let manifest = load_project_knowledge_manifest(&project_dir).ok_or_else(|| {
+            anyhow!("project documents are not cached locally for project {project_id}")
+        })?;
+        Ok(manifest.docs)
+    }
+
+    async fn read_local_project_document(
+        &self,
+        project_id: Uuid,
+        source_path: &str,
+        fallback_filename: Option<&str>,
+    ) -> Result<String> {
+        let project_dir = self.project_workspace_dir(project_id).await?;
+        let path = project_dir.join(source_path);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(content),
+            Err(primary_error) => {
+                if let Some(filename) = fallback_filename {
+                    let fallback_path = project_dir.join("docs").join(filename);
+                    if fallback_path != path {
+                        return Ok(
+                            std::fs::read_to_string(&fallback_path).map_err(|_| primary_error)?
+                        );
+                    }
+                }
+                Err(anyhow::Error::from(primary_error)).with_context(|| {
+                    format!("failed to read local project document {}", path.display())
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectKnowledgeManifest {
+    docs: Vec<ProjectKnowledgeDocManifest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectKnowledgeDocManifest {
+    id: String,
+    virtual_path: String,
+    source_path: String,
+    title: String,
+    summary: String,
+    description: Option<String>,
+    kind: String,
+    authority: String,
+    status: String,
+    tags: Vec<String>,
+    aliases: Vec<String>,
+    keywords: Vec<String>,
+    related: Vec<ProjectKnowledgeDocEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectKnowledgeDocEdge {
+    #[serde(rename = "type", alias = "edge_type")]
+    edge_type: String,
+    target: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProjectDocFilterArgs {
+    #[serde(default)]
+    tags: Vec<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    status: Option<String>,
+    path_prefix: Option<String>,
+    related_to: Option<String>,
+    edge_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocListArgs {
+    project_id: Uuid,
+    #[serde(flatten)]
+    filter: ProjectDocFilterArgs,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocLookupArgs {
+    project_id: Uuid,
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocSearchArgs {
+    project_id: Uuid,
+    query: String,
+    #[serde(flatten)]
+    filter: ProjectDocFilterArgs,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocTreeArgs {
+    project_id: Uuid,
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocNeighborArgs {
+    project_id: Uuid,
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+    edge_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocManifest {
+    id: String,
+    project_id: String,
+    virtual_path: String,
+    filename: String,
+    path: Option<String>,
+    title: String,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    kind: String,
+    authority: String,
+    status: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocRead {
+    manifest: ProjectDocManifest,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocSearchHit {
+    id: String,
+    virtual_path: String,
+    title: String,
+    summary: String,
+    kind: String,
+    authority: String,
+    tags: Vec<String>,
+    score: usize,
+    matched: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocTree {
+    root_uri: String,
+    entries: Vec<ProjectDocTreeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocTreeEntry {
+    path: String,
+    title: String,
+    kind: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocNeighbor {
+    edge_type: String,
+    direction: String,
+    target: String,
+    note: Option<String>,
+}
+
+fn load_project_knowledge_manifest(project_dir: &Path) -> Option<ProjectKnowledgeManifest> {
+    let path = project_dir.join("knowledge_manifest.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn project_doc_relative_path(doc: &ProjectKnowledgeDocManifest) -> String {
+    doc.virtual_path
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(_, path)| path.to_string())
+        .unwrap_or_else(|| doc.virtual_path.clone())
+}
+
+fn project_doc_filename(doc: &ProjectKnowledgeDocManifest) -> String {
+    let relative = project_doc_relative_path(doc);
+    relative
+        .rsplit('/')
+        .next()
+        .map(ToString::to_string)
+        .unwrap_or(relative)
+}
+
+fn project_doc_path(doc: &ProjectKnowledgeDocManifest) -> Option<String> {
+    project_doc_relative_path(doc)
+        .rsplit_once('/')
+        .map(|(path, _)| path.to_string())
+}
+
+fn normalize_project_lookup(project_id: Uuid, value: &str) -> String {
+    let trimmed = value.trim().trim_matches('/').to_string();
+    if let Some(stripped) = trimmed.strip_prefix(&format!("project://{project_id}/")) {
+        stripped.trim_matches('/').to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn project_doc_manifest(doc: &ProjectKnowledgeDocManifest) -> ProjectDocManifest {
+    ProjectDocManifest {
+        id: doc.id.clone(),
+        project_id: doc
+            .virtual_path
+            .split_once("project://")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map(|(project_id, _)| project_id.to_string())
+            .unwrap_or_default(),
+        virtual_path: doc.virtual_path.clone(),
+        filename: project_doc_filename(doc),
+        path: project_doc_path(doc),
+        title: doc.title.clone(),
+        summary: doc.summary.clone(),
+        description: doc.description.clone(),
+        kind: doc.kind.clone(),
+        authority: doc.authority.clone(),
+        status: doc.status.clone(),
+        tags: doc.tags.clone(),
+    }
+}
+
+fn filter_project_docs(
+    docs: Vec<ProjectKnowledgeDocManifest>,
+    filter: &ProjectDocFilterArgs,
+) -> Vec<ProjectKnowledgeDocManifest> {
+    docs.into_iter()
+        .filter(|doc| {
+            if !filter.tags.is_empty()
+                && !filter.tags.iter().all(|tag| {
+                    doc.tags
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(tag))
+                })
+            {
+                return false;
+            }
+            if let Some(kind) = filter.kind.as_ref()
+                && !doc.kind.eq_ignore_ascii_case(kind)
+            {
+                return false;
+            }
+            if let Some(authority) = filter.authority.as_ref()
+                && !doc.authority.eq_ignore_ascii_case(authority)
+            {
+                return false;
+            }
+            if let Some(status) = filter.status.as_ref()
+                && !doc.status.eq_ignore_ascii_case(status)
+            {
+                return false;
+            }
+            if let Some(path_prefix) = filter.path_prefix.as_ref() {
+                let prefix = path_prefix.trim_matches('/');
+                let relative = project_doc_relative_path(doc);
+                if !relative.starts_with(prefix) && !doc.virtual_path.starts_with(path_prefix) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+async fn lookup_project_doc<L, E>(
+    backend: &PlatformManifestBackend<L, E>,
+    project_id: Uuid,
+    id_or_path: &str,
+) -> Result<ProjectKnowledgeDocManifest>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder,
+{
+    let docs = backend.list_local_project_documents(project_id).await?;
+    let normalized = normalize_project_lookup(project_id, id_or_path);
+    docs.into_iter()
+        .find(|doc| {
+            doc.id == id_or_path
+                || doc.virtual_path == id_or_path
+                || project_doc_relative_path(doc) == normalized
+                || project_doc_filename(doc) == normalized
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "unknown project doc '{}'; use a document id, relative path, filename, or project://{project_id}/ path",
+                id_or_path
+            )
+        })
+}
+
+fn project_doc_score(
+    doc: &ProjectKnowledgeDocManifest,
+    query: &str,
+    content: Option<&str>,
+) -> Option<(usize, Vec<String>)> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut score = 0;
+    let mut matched = Vec::new();
+    let relative_path = project_doc_relative_path(doc).to_lowercase();
+    let virtual_path = doc.virtual_path.to_lowercase();
+    let title = doc.title.to_lowercase();
+    let summary = doc.summary.to_lowercase();
+    let kind = doc.kind.to_lowercase();
+    let authority = doc.authority.to_lowercase();
+    let status = doc.status.to_lowercase();
+    let tags = doc
+        .tags
+        .iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
+    let aliases = doc
+        .aliases
+        .iter()
+        .map(|alias| alias.to_lowercase())
+        .collect::<Vec<_>>();
+    let keywords = doc
+        .keywords
+        .iter()
+        .map(|keyword| keyword.to_lowercase())
+        .collect::<Vec<_>>();
+
+    if relative_path.contains(&query) || virtual_path.contains(&query) {
+        score += 6;
+        matched.push("path".to_string());
+    }
+    if title.contains(&query) {
+        score += 5;
+        matched.push("title".to_string());
+    }
+    if summary.contains(&query) {
+        score += 4;
+        matched.push("summary".to_string());
+    }
+    if kind.contains(&query) {
+        score += 3;
+        matched.push("kind".to_string());
+    }
+    if authority.contains(&query) {
+        score += 2;
+        matched.push("authority".to_string());
+    }
+    if status.contains(&query) {
+        score += 2;
+        matched.push("status".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains(&query)) {
+        score += 4;
+        matched.push("tags".to_string());
+    }
+    if aliases.iter().any(|alias| alias.contains(&query)) {
+        score += 4;
+        matched.push("aliases".to_string());
+    }
+    if keywords.iter().any(|keyword| keyword.contains(&query)) {
+        score += 3;
+        matched.push("keywords".to_string());
+    }
+    if let Some(content) = content
+        && content.to_lowercase().contains(&query)
+    {
+        score += 3;
+        matched.push("content".to_string());
+    }
+
+    if score == 0 {
+        None
+    } else {
+        matched.sort();
+        matched.dedup();
+        Some((score, matched))
+    }
+}
+
+async fn project_doc_neighbors<L, E>(
+    backend: &PlatformManifestBackend<L, E>,
+    project_id: Uuid,
+    doc: &ProjectKnowledgeDocManifest,
+    edge_type: Option<&str>,
+) -> Result<Vec<ProjectDocNeighbor>>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder,
+{
+    let docs = backend.list_local_project_documents(project_id).await?;
+    let docs_by_virtual_path = docs
+        .iter()
+        .map(|candidate| (candidate.virtual_path.clone(), candidate))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut neighbors = Vec::new();
+
+    for edge in &doc.related {
+        if let Some(filter) = edge_type
+            && !edge.edge_type.eq_ignore_ascii_case(filter)
+        {
+            continue;
+        }
+        if let Some(target) = docs_by_virtual_path.get(&edge.target) {
+            neighbors.push(ProjectDocNeighbor {
+                edge_type: edge.edge_type.clone(),
+                direction: "outgoing".to_string(),
+                target: target.virtual_path.clone(),
+                note: edge.description.clone(),
+            });
+        }
+    }
+
+    for candidate in &docs {
+        for edge in &candidate.related {
+            if edge.target != doc.virtual_path {
+                continue;
+            }
+            if let Some(filter) = edge_type
+                && !edge.edge_type.eq_ignore_ascii_case(filter)
+            {
+                continue;
+            }
+            neighbors.push(ProjectDocNeighbor {
+                edge_type: edge.edge_type.clone(),
+                direction: "incoming".to_string(),
+                target: candidate.virtual_path.clone(),
+                note: edge.description.clone(),
+            });
+        }
+    }
+
+    neighbors.sort_by(|left, right| {
+        left.target
+            .cmp(&right.target)
+            .then_with(|| left.direction.cmp(&right.direction))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+    });
+    neighbors.dedup_by(|left, right| {
+        left.target == right.target
+            && left.direction == right.direction
+            && left.edge_type == right.edge_type
+            && left.note == right.note
+    });
+
+    Ok(neighbors)
+}
+
+async fn search_project_docs<L, E>(
+    backend: &PlatformManifestBackend<L, E>,
+    project_id: Uuid,
+    docs: Vec<ProjectKnowledgeDocManifest>,
+    query: &str,
+    filter: &ProjectDocFilterArgs,
+    include_content: bool,
+) -> Result<Vec<ProjectDocSearchHit>>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder,
+{
+    let docs = filter_project_docs(docs, filter);
+    let related_doc = if let Some(related_to) = filter.related_to.as_ref() {
+        Some(lookup_project_doc(backend, project_id, related_to).await?)
+    } else {
+        None
+    };
+    let mut hits = Vec::new();
+
+    for doc in docs {
+        if let Some(related) = related_doc.as_ref() {
+            let neighbors =
+                project_doc_neighbors(backend, project_id, related, filter.edge_type.as_deref())
+                    .await?;
+            if !neighbors
+                .iter()
+                .any(|neighbor| neighbor.target == doc.virtual_path)
+            {
+                continue;
+            }
+        }
+
+        let content = backend
+            .read_local_project_document(
+                project_id,
+                &doc.source_path,
+                Some(&project_doc_filename(&doc)),
+            )
+            .await
+            .ok();
+
+        let Some((score, matched)) = project_doc_score(&doc, query, content.as_deref()) else {
+            continue;
+        };
+
+        hits.push(ProjectDocSearchHit {
+            id: doc.id.clone(),
+            virtual_path: doc.virtual_path.clone(),
+            title: doc.title.clone(),
+            summary: doc.summary.clone(),
+            kind: doc.kind.clone(),
+            authority: doc.authority.clone(),
+            tags: doc.tags.clone(),
+            score,
+            matched,
+            content: if include_content { content } else { None },
+        });
+    }
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.virtual_path.cmp(&right.virtual_path))
+    });
+
+    Ok(hits)
+}
+
+fn project_doc_tree(
+    project_id: Uuid,
+    docs: &[ProjectKnowledgeDocManifest],
+    prefix: Option<&str>,
+) -> ProjectDocTree {
+    let normalized_prefix = prefix.map(|value| normalize_project_lookup(project_id, value));
+    let mut entries = docs
+        .iter()
+        .filter_map(|doc| {
+            let relative = project_doc_relative_path(doc);
+            if let Some(prefix) = normalized_prefix.as_ref()
+                && !relative.starts_with(prefix)
+            {
+                return None;
+            }
+            Some(ProjectDocTreeEntry {
+                path: doc.virtual_path.clone(),
+                title: doc.title.clone(),
+                kind: doc.kind.clone(),
+                tags: doc.tags.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    ProjectDocTree {
+        root_uri: format!("project://{project_id}/"),
+        entries,
+    }
 }
 
 #[async_trait]
-impl<L, E> ManifestMcpBackend for PlatformManifestBackend<L, E>
+impl<L, E> AgentManifestBackend for PlatformManifestBackend<L, E>
 where
     L: ManifestReader + ManifestWriter + Send + Sync,
     E: SensitivePayloadEncoder + Send + Sync,
 {
-    async fn agents_list(&self) -> Result<AgentsListResult> {
+    async fn list_agents(&self) -> Result<AgentsListResult> {
         let agents: Vec<AgentSummary> = self
             .local_store
             .list_agents()
@@ -258,7 +817,7 @@ where
         Ok(AgentsListResult { agents })
     }
 
-    async fn agents_get(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
+    async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
         let agent = self
             .local_store
             .get_agent(params.id)
@@ -272,10 +831,7 @@ where
         })
     }
 
-    async fn agents_get_prompt(
-        &self,
-        params: AgentPromptGetParams,
-    ) -> Result<AgentPromptGetResult> {
+    async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult> {
         let agent = self
             .local_store
             .get_agent(params.id)
@@ -289,7 +845,7 @@ where
         })
     }
 
-    async fn agents_create(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
+    async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
         let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
         if !self.validate_agent_scopes(&requested_scopes) {
             return Err(anyhow!("requested agent scopes exceed caller scopes"));
@@ -313,7 +869,7 @@ where
         Ok(AgentMutationResult { agent: created })
     }
 
-    async fn agents_update(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
+    async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
         let existing = self
             .local_store
             .get_agent(params.id)
@@ -362,7 +918,7 @@ where
         Ok(AgentMutationResult { agent: updated })
     }
 
-    async fn agents_update_prompt(
+    async fn update_agent_prompt(
         &self,
         params: AgentPromptUpdateParams,
     ) -> Result<AgentPromptMutationResult> {
@@ -407,7 +963,7 @@ where
         Ok(AgentPromptMutationResult { prompt_config })
     }
 
-    async fn agents_delete(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
+    async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
         let existing = self
             .local_store
             .get_agent(params.id)
@@ -427,8 +983,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn abilities_list(&self) -> Result<AbilitiesListResult> {
+#[async_trait]
+impl<L, E> AbilityManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_abilities(&self) -> Result<AbilitiesListResult> {
         let abilities: Vec<AbilitySummary> = self
             .local_store
             .list_abilities()
@@ -440,7 +1003,7 @@ where
         Ok(AbilitiesListResult { abilities })
     }
 
-    async fn abilities_get(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
+    async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
         let ability = self.cached_or_remote_ability(params.id).await?;
         if !self.allow_ability(&ability) {
             return Err(anyhow!(
@@ -453,7 +1016,7 @@ where
         })
     }
 
-    async fn abilities_get_prompt(
+    async fn get_ability_prompt(
         &self,
         params: AbilityPromptGetParams,
     ) -> Result<AbilityPromptGetResult> {
@@ -469,7 +1032,7 @@ where
         })
     }
 
-    async fn abilities_create(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
+    async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
         let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
         if !self.validate_ability_scopes(&requested_scopes) {
             return Err(anyhow!("requested ability scopes exceed caller scopes"));
@@ -505,7 +1068,7 @@ where
         Ok(AbilityMutationResult { ability: created })
     }
 
-    async fn abilities_update(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult> {
+    async fn update_ability(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult> {
         if params.data.is_empty() {
             return Err(anyhow!(
                 "ability update requires at least one field in data"
@@ -578,7 +1141,7 @@ where
         Ok(AbilityMutationResult { ability: updated })
     }
 
-    async fn abilities_update_prompt(
+    async fn update_ability_prompt(
         &self,
         params: AbilityPromptUpdateParams,
     ) -> Result<AbilityPromptMutationResult> {
@@ -625,7 +1188,7 @@ where
         })
     }
 
-    async fn abilities_delete(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
+    async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
         let existing = self.cached_or_remote_ability(params.id).await?;
         if !self.allow_ability(&existing) {
             return Err(anyhow!(
@@ -644,8 +1207,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn domains_list(&self) -> Result<DomainsListResult> {
+#[async_trait]
+impl<L, E> DomainManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_domains(&self) -> Result<DomainsListResult> {
         let domains: Vec<DomainSummary> = self
             .local_store
             .list_domains()
@@ -657,7 +1227,7 @@ where
         Ok(DomainsListResult { domains })
     }
 
-    async fn domains_get(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
+    async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
         let domain = self
             .local_store
             .get_domain(params.id)
@@ -671,7 +1241,7 @@ where
         })
     }
 
-    async fn domains_get_manifest(
+    async fn get_domain_prompt(
         &self,
         params: DomainManifestGetParams,
     ) -> Result<DomainManifestGetResult> {
@@ -688,7 +1258,7 @@ where
         })
     }
 
-    async fn domains_create(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
+    async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
@@ -720,7 +1290,7 @@ where
         Ok(DomainMutationResult { domain: created })
     }
 
-    async fn domains_update(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
+    async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
         let existing = self
             .local_store
             .get_domain(params.id)
@@ -794,7 +1364,7 @@ where
         Ok(DomainMutationResult { domain: updated })
     }
 
-    async fn domains_update_manifest(
+    async fn update_domain_prompt(
         &self,
         params: DomainManifestUpdateParams,
     ) -> Result<DomainManifestMutationResult> {
@@ -846,7 +1416,7 @@ where
         })
     }
 
-    async fn domains_delete(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
+    async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
         let existing = self
             .local_store
             .get_domain(params.id)
@@ -866,8 +1436,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn projects_list(&self) -> Result<ProjectsListResult> {
+#[async_trait]
+impl<L, E> ProjectManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_projects(&self) -> Result<ProjectsListResult> {
         let projects: Vec<ProjectSummary> = self
             .local_store
             .list_projects()
@@ -878,7 +1455,7 @@ where
         Ok(ProjectsListResult { projects })
     }
 
-    async fn projects_get(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
+    async fn get_project(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
         let project = self
             .local_store
             .get_project(params.id)
@@ -889,7 +1466,7 @@ where
         })
     }
 
-    async fn projects_create(&self, params: ProjectCreateParams) -> Result<ProjectMutationResult> {
+    async fn create_project(&self, params: ProjectCreateParams) -> Result<ProjectMutationResult> {
         let created = self
             .platform_client
             .create_project_document(&params.data)
@@ -907,7 +1484,7 @@ where
         Ok(ProjectMutationResult { project: created })
     }
 
-    async fn projects_update(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
+    async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
         let existing = self
             .local_store
             .get_project(params.id)
@@ -946,7 +1523,7 @@ where
         Ok(ProjectMutationResult { project: updated })
     }
 
-    async fn projects_delete(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
+    async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_project_document(params.id)
             .await?;
@@ -959,64 +1536,108 @@ where
         })
     }
 
-    async fn project_documents_list(
-        &self,
-        params: ProjectDocumentsListParams,
-    ) -> Result<ProjectDocumentsListResult> {
-        let project_documents = self
-            .platform_client
-            .list_project_documents(params.project_id)
-            .await?;
-        Ok(ProjectDocumentsListResult { project_documents })
+    async fn list_project_documents(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: ProjectDocListArgs =
+            serde_json::from_value(params).context("invalid list_project_documents args")?;
+        let docs = self.list_local_project_documents(args.project_id).await?;
+        let docs = filter_project_docs(docs, &args.filter);
+        serde_json::to_value(
+            docs.iter()
+                .map(project_doc_manifest)
+                .collect::<Vec<ProjectDocManifest>>(),
+        )
+        .map_err(Into::into)
     }
 
-    async fn project_documents_get(
+    async fn read_project_document_manifest(
         &self,
-        params: ProjectDocumentGetParams,
-    ) -> Result<ProjectDocumentGetResult> {
-        let project_document = self
-            .platform_client
-            .get_project_document(params.project_id, params.document_id)
-            .await?
-            .ok_or_else(|| anyhow!("project document not found: {}", params.document_id))?;
-        Ok(ProjectDocumentGetResult { project_document })
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: ProjectDocLookupArgs = serde_json::from_value(params)
+            .context("invalid read_project_document_manifest args")?;
+        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
+        serde_json::to_value(project_doc_manifest(&manifest)).map_err(Into::into)
     }
 
-    async fn project_documents_get_content(
+    async fn read_project_document(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: ProjectDocLookupArgs =
+            serde_json::from_value(params).context("invalid read_project_document args")?;
+        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
+        let content = self
+            .read_local_project_document(
+                args.project_id,
+                &manifest.source_path,
+                Some(&project_doc_filename(&manifest)),
+            )
+            .await?;
+        serde_json::to_value(ProjectDocRead {
+            manifest: project_doc_manifest(&manifest),
+            content,
+        })
+        .map_err(Into::into)
+    }
+
+    async fn search_project_documents(
         &self,
-        params: ProjectDocumentContentGetParams,
-    ) -> Result<ProjectDocumentContentGetResult> {
-        let metadata = self
-            .platform_client
-            .get_project_document(params.project_id, params.document_id)
-            .await?;
-        let metadata = metadata
-            .ok_or_else(|| anyhow!("project document not found: {}", params.document_id))?;
-        let transport = self
-            .platform_client
-            .fetch_project_document_content(params.project_id, params.document_id)
-            .await?;
-        let description = decode_document_transport_content(
-            &self.sensitive_payload_encoder,
-            transport.content,
-            transport.encrypted_payload,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: ProjectDocSearchArgs =
+            serde_json::from_value(params).context("invalid search_project_documents args")?;
+        let docs = self.list_local_project_documents(args.project_id).await?;
+        let hits =
+            search_project_docs(self, args.project_id, docs, &args.query, &args.filter, true)
+                .await?;
+        serde_json::to_value(hits).map_err(Into::into)
+    }
+
+    async fn search_project_document_paths(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: ProjectDocSearchArgs =
+            serde_json::from_value(params).context("invalid search_project_document_paths args")?;
+        let docs = self.list_local_project_documents(args.project_id).await?;
+        let hits = search_project_docs(
+            self,
+            args.project_id,
+            docs,
+            &args.query,
+            &args.filter,
+            false,
         )
         .await?;
-        let project_document = ProjectDocumentContentDocument {
-            document: ProjectDocumentSummary {
-                id: metadata.id,
-                project_id: metadata.project_id,
-                filename: transport.filename,
-                content_type: transport.content_type,
-                size_bytes: transport.size_bytes,
-                updated_at: metadata.updated_at,
-            },
-            description,
-        };
-        Ok(ProjectDocumentContentGetResult { project_document })
+        serde_json::to_value(hits).map_err(Into::into)
     }
 
-    async fn project_documents_create(
+    async fn list_project_document_tree(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: ProjectDocTreeArgs =
+            serde_json::from_value(params).context("invalid list_project_document_tree args")?;
+        let docs = self.list_local_project_documents(args.project_id).await?;
+        serde_json::to_value(project_doc_tree(
+            args.project_id,
+            &docs,
+            args.prefix.as_deref(),
+        ))
+        .map_err(Into::into)
+    }
+
+    async fn list_project_document_neighbors(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: ProjectDocNeighborArgs = serde_json::from_value(params)
+            .context("invalid list_project_document_neighbors args")?;
+        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
+        let neighbors =
+            project_doc_neighbors(self, args.project_id, &manifest, args.edge_type.as_deref())
+                .await?;
+        serde_json::to_value(neighbors).map_err(Into::into)
+    }
+
+    async fn create_project_document(
         &self,
         params: ProjectDocumentCreateParams,
     ) -> Result<ProjectDocumentMutationResult> {
@@ -1036,7 +1657,7 @@ where
         Ok(ProjectDocumentMutationResult { project_document })
     }
 
-    async fn project_documents_update_content(
+    async fn update_project_document_content(
         &self,
         params: ProjectDocumentContentUpdateParams,
     ) -> Result<ProjectDocumentContentMutationResult> {
@@ -1061,7 +1682,7 @@ where
         Ok(ProjectDocumentContentMutationResult { project_document })
     }
 
-    async fn project_documents_delete(
+    async fn delete_project_document(
         &self,
         params: ProjectDocumentDeleteParams,
     ) -> Result<DeleteResult> {
@@ -1073,8 +1694,15 @@ where
             id: params.document_id,
         })
     }
+}
 
-    async fn routines_list(&self) -> Result<RoutinesListResult> {
+#[async_trait]
+impl<L, E> RoutineManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_routines(&self) -> Result<RoutinesListResult> {
         let routines = self
             .local_store
             .list_routines()
@@ -1085,7 +1713,7 @@ where
         Ok(RoutinesListResult { routines })
     }
 
-    async fn routines_get(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
+    async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
         let routine = self
             .local_store
             .get_routine(params.id)
@@ -1096,7 +1724,7 @@ where
         })
     }
 
-    async fn routines_create(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
+    async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
         let created = self
             .platform_client
             .create_routine_document(&params.data)
@@ -1116,7 +1744,7 @@ where
         Ok(RoutineMutationResult { routine: created })
     }
 
-    async fn routines_update(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult> {
+    async fn update_routine(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult> {
         if params.data.is_empty() {
             return Err(anyhow!(
                 "routine update requires at least one field in data"
@@ -1164,7 +1792,7 @@ where
         Ok(RoutineMutationResult { routine: updated })
     }
 
-    async fn routines_delete(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
+    async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_routine_document(params.id)
             .await?;
@@ -1176,8 +1804,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn models_list(&self) -> Result<ModelsListResult> {
+#[async_trait]
+impl<L, E> ModelManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_models(&self) -> Result<ModelsListResult> {
         let models = self
             .local_store
             .list_models()
@@ -1188,7 +1823,7 @@ where
         Ok(ModelsListResult { models })
     }
 
-    async fn models_get(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
+    async fn get_model(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
         let model = self
             .local_store
             .get_model(params.id)
@@ -1199,7 +1834,7 @@ where
         })
     }
 
-    async fn models_create(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
+    async fn create_model(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
         let created = self
             .platform_client
             .create_model_document(&params.data)
@@ -1219,7 +1854,7 @@ where
         Ok(ModelMutationResult { model: created })
     }
 
-    async fn models_update(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
+    async fn update_model(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
         let existing = self
             .local_store
             .get_model(params.id)
@@ -1260,7 +1895,7 @@ where
         Ok(ModelMutationResult { model: updated })
     }
 
-    async fn models_delete(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
+    async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_model_document(params.id)
             .await?;
@@ -1272,8 +1907,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn councils_list(&self) -> Result<CouncilsListResult> {
+#[async_trait]
+impl<L, E> CouncilManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_councils(&self) -> Result<CouncilsListResult> {
         let councils = self
             .local_store
             .list_councils()
@@ -1284,7 +1926,7 @@ where
         Ok(CouncilsListResult { councils })
     }
 
-    async fn councils_get(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
+    async fn get_council(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
         let council = self
             .local_store
             .get_council(params.id)
@@ -1295,7 +1937,7 @@ where
         })
     }
 
-    async fn councils_create(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
+    async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
         let created = self
             .platform_client
             .create_council_document(&params.data)
@@ -1307,7 +1949,7 @@ where
         Ok(CouncilMutationResult { council: created })
     }
 
-    async fn councils_update(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
+    async fn update_council(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
         let existing = self
             .local_store
             .get_council(params.id)
@@ -1333,7 +1975,7 @@ where
         Ok(CouncilMutationResult { council: updated })
     }
 
-    async fn councils_add_member(
+    async fn add_council_member(
         &self,
         params: CouncilAddMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -1348,7 +1990,7 @@ where
         Ok(CouncilMutationResult { council: updated })
     }
 
-    async fn councils_update_member(
+    async fn update_council_member(
         &self,
         params: CouncilUpdateMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -1366,7 +2008,7 @@ where
         Ok(CouncilMutationResult { council: updated })
     }
 
-    async fn councils_remove_member(
+    async fn remove_council_member(
         &self,
         params: CouncilRemoveMemberParams,
     ) -> Result<CouncilMutationResult> {
@@ -1381,7 +2023,7 @@ where
         Ok(CouncilMutationResult { council: updated })
     }
 
-    async fn councils_delete(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
+    async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_council_document(params.id)
             .await?;
@@ -1393,8 +2035,15 @@ where
             id: params.id,
         })
     }
+}
 
-    async fn context_blocks_list(&self) -> Result<ContextBlocksListResult> {
+#[async_trait]
+impl<L, E> ContextBlockManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_context_blocks(&self) -> Result<ContextBlocksListResult> {
         let context_blocks: Vec<ContextBlockSummary> = self
             .local_store
             .list_context_blocks()
@@ -1405,7 +2054,7 @@ where
         Ok(ContextBlocksListResult { context_blocks })
     }
 
-    async fn context_blocks_get(
+    async fn get_context_block(
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult> {
@@ -1419,7 +2068,7 @@ where
         })
     }
 
-    async fn context_blocks_get_content(
+    async fn get_context_block_content(
         &self,
         params: ContextBlockContentGetParams,
     ) -> Result<ContextBlockContentGetResult> {
@@ -1433,7 +2082,7 @@ where
         })
     }
 
-    async fn context_blocks_create(
+    async fn create_context_block(
         &self,
         params: ContextBlockCreateParams,
     ) -> Result<ContextBlockMutationResult> {
@@ -1466,7 +2115,7 @@ where
         })
     }
 
-    async fn context_blocks_update(
+    async fn update_context_block(
         &self,
         params: ContextBlockUpdateParams,
     ) -> Result<ContextBlockMutationResult> {
@@ -1511,7 +2160,7 @@ where
         })
     }
 
-    async fn context_blocks_update_content(
+    async fn update_context_block_content(
         &self,
         params: ContextBlockContentUpdateParams,
     ) -> Result<ContextBlockContentMutationResult> {
@@ -1552,10 +2201,7 @@ where
         })
     }
 
-    async fn context_blocks_delete(
-        &self,
-        params: ContextBlockDeleteParams,
-    ) -> Result<DeleteResult> {
+    async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_context_block_document(params.id)
             .await?;

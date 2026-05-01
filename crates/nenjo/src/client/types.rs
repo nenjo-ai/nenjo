@@ -47,6 +47,19 @@ pub struct DocumentSyncContent {
     pub encrypted_payload: Option<EncryptedPayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSyncEdge {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub source_document_id: Uuid,
+    pub target_document_id: Uuid,
+    pub edge_type: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // Agent detail response (from GET /agents/{id}) → conversion to Manifest
 // ---------------------------------------------------------------------------

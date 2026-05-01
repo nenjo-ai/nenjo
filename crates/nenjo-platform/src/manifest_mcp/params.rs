@@ -179,20 +179,6 @@ pub struct ProjectDocumentsListParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_project_document`.
-pub struct ProjectDocumentGetParams {
-    pub project_id: Uuid,
-    pub document_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_project_document_content`.
-pub struct ProjectDocumentContentGetParams {
-    pub project_id: Uuid,
-    pub document_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `create_project_document`.
 pub struct ProjectDocumentCreateParams {
     #[serde(flatten)]

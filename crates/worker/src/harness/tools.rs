@@ -19,10 +19,8 @@ use nenjo::manifest::store::ManifestReader;
 use nenjo_platform::{
     ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract, PlatformManifestBackend,
     PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
-    client::{
-        CreateExecutionRequest, ProjectDocumentEdge, ProjectDocumentMetadata,
-        ProjectExecutionListQuery, ProjectTaskListQuery,
-    },
+    client::{CreateExecutionRequest, ProjectExecutionListQuery, ProjectTaskListQuery},
+    rest::projects::project_rest_tools,
 };
 use nenjo_tools::security::SecurityPolicy;
 use serde::{Deserialize, Serialize};
@@ -132,11 +130,14 @@ impl HarnessToolFactory {
                 .ok();
         Self {
             manifest_backend: platform_client.as_ref().map(|client| {
-                Arc::new(PlatformManifestBackend::new(
-                    local_store.clone(),
-                    client.as_ref().clone(),
-                    payload_encoder.clone(),
-                ))
+                Arc::new(
+                    PlatformManifestBackend::new(
+                        local_store.clone(),
+                        client.as_ref().clone(),
+                        payload_encoder.clone(),
+                    )
+                    .with_workspace_dir(config.workspace_dir.clone()),
+                )
             }),
             security,
             runtime,
@@ -214,21 +215,24 @@ impl HarnessToolFactory {
 
         let policy = ManifestAccessPolicy::new(agent.platform_scopes.clone());
 
-        if let Some(backend) = self.manifest_backend.as_ref() {
-            let backend: Arc<dyn ManifestMcpBackend> =
-                Arc::new(backend.as_ref().clone().with_access_policy(policy.clone()));
-            add_manifest_tools(&mut tools, backend, &policy);
+        let manifest_backend = self.manifest_backend.as_ref().map(|backend| {
+            Arc::new(backend.as_ref().clone().with_access_policy(policy.clone()))
+                as Arc<dyn ManifestMcpBackend>
+        });
+
+        if let Some(backend) = manifest_backend.as_ref() {
+            add_manifest_tools(&mut tools, backend.clone(), &policy);
         }
 
-        if let Some(client) = self.platform_client.as_ref() {
-            let project_backend = PlatformProjectToolsBackend {
-                client: client.clone(),
-                manifest_store: self.manifest_store.clone(),
-                payload_encoder: self.payload_encoder.clone(),
-            };
-            add_project_knowledge_tools(&mut tools, project_backend.clone(), &policy);
-            add_project_rest_tools(&mut tools, project_backend, &policy);
-        }
+        let project_backend =
+            self.platform_client
+                .as_ref()
+                .map(|client| PlatformProjectToolsBackend {
+                    client: client.clone(),
+                    manifest_store: self.manifest_store.clone(),
+                    payload_encoder: self.payload_encoder.clone(),
+                });
+        add_project_tools(&mut tools, manifest_backend, project_backend, &policy);
 
         // Web fetch (always included with config, deny-by-default via allowed_domains)
         if self.config.web_fetch.enabled {
@@ -349,25 +353,25 @@ impl Tool for BuiltinKnowledgeTool {
     fn description(&self) -> &str {
         match self.kind {
             BuiltinKnowledgeToolKind::ListDocs => {
-                "List compact metadata for embedded Nenjo builtin docs under builtin://nenjo/."
+                "List builtin docs as compact metadata only. Use this to browse or filter the builtin knowledge set without loading full document content."
             }
             BuiltinKnowledgeToolKind::ReadDoc => {
-                "Read a full embedded Nenjo builtin doc by id or builtin://nenjo/ path."
+                "Read one full builtin doc, including its body content, by id or builtin://nenjo/ path. Use this when you want the actual document text, not just metadata."
             }
             BuiltinKnowledgeToolKind::SearchDocs => {
-                "Search embedded Nenjo builtin docs and return matching metadata plus full markdown content."
+                "Search builtin docs and return matches with body content. Use this when you want to inspect or quote the matching text, not just identify candidate docs."
             }
             BuiltinKnowledgeToolKind::SearchDocPaths => {
-                "Search embedded Nenjo builtin docs and return compact path metadata without full bodies."
+                "Search builtin docs and return compact metadata without body content. Use this for fast discovery or navigation when you only need to know which docs match."
             }
             BuiltinKnowledgeToolKind::ListTree => {
-                "List the embedded Nenjo builtin virtual filesystem tree under builtin://nenjo/."
+                "List the builtin doc tree under builtin://nenjo/. Use this when you want a filesystem-style view of the builtin knowledge namespace instead of a search result."
             }
             BuiltinKnowledgeToolKind::ReadManifest => {
-                "Read compact manifest metadata for one embedded Nenjo builtin doc by id or path."
+                "Read one builtin doc's metadata only by id or path. Use this when you need title, tags, path, or other manifest fields but do not need the document body."
             }
             BuiltinKnowledgeToolKind::Neighbors => {
-                "List graph neighbors for one embedded Nenjo builtin doc by id or path."
+                "List graph neighbors for one builtin doc by id or path. Use this when you want related builtin docs connected by knowledge edges."
             }
         }
     }
@@ -573,14 +577,24 @@ const DOMAIN_WRITE_TOOLS: &[&str] = &[
     "update_domain_prompt",
     "delete_domain",
 ];
-const PROJECT_READ_TOOLS: &[&str] = &[
+const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &[
     "list_projects",
     "get_project",
     "list_project_documents",
-    "get_project_document",
-    "get_project_document_content",
+    "read_project_document_manifest",
+    "read_project_document",
+    "search_project_documents",
+    "search_project_document_paths",
+    "list_project_document_tree",
+    "list_project_document_neighbors",
 ];
-const PROJECT_WRITE_TOOLS: &[&str] = &[
+const PROJECT_REST_READ_TOOLS: &[&str] = &[
+    "list_project_tasks",
+    "get_project_task",
+    "list_project_execution_runs",
+    "get_project_execution_run",
+];
+const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_project",
     "update_project",
     "delete_project",
@@ -588,24 +602,8 @@ const PROJECT_WRITE_TOOLS: &[&str] = &[
     "update_project_document_content",
     "delete_project_document",
 ];
-const PROJECT_KNOWLEDGE_READ_TOOLS: &[&str] = &[
-    "list_project_docs",
-    "read_project_doc",
-    "search_project_docs",
-    "search_project_doc_paths",
-    "list_project_doc_tree",
-    "read_project_doc_manifest",
-    "list_project_doc_neighbors",
-];
-const PROJECT_NATIVE_READ_TOOLS: &[&str] = &[
-    "list_project_tasks",
-    "get_project_task",
-    "list_project_execution_runs",
-    "get_project_execution_run",
-];
-const PROJECT_NATIVE_WRITE_TOOLS: &[&str] = &[
-    "create_project_task",
-    "bulk_create_project_tasks",
+const PROJECT_REST_WRITE_TOOLS: &[&str] = &[
+    "create_project_tasks",
     "update_project_task",
     "delete_project_task",
     "start_project_execution",
@@ -649,11 +647,6 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         DOMAIN_WRITE_TOOLS,
     ),
     (
-        ScopeResource::Projects,
-        PROJECT_READ_TOOLS,
-        PROJECT_WRITE_TOOLS,
-    ),
-    (
         ScopeResource::Routines,
         ROUTINE_READ_TOOLS,
         ROUTINE_WRITE_TOOLS,
@@ -687,47 +680,27 @@ fn add_manifest_tools(
     }
 }
 
-fn add_project_rest_tools(
+fn add_project_tools(
     tools: &mut Vec<Arc<dyn Tool>>,
-    backend: PlatformProjectToolsBackend,
+    manifest_backend: Option<Arc<dyn ManifestMcpBackend>>,
+    project_backend: Option<PlatformProjectToolsBackend>,
     policy: &ManifestAccessPolicy,
 ) {
+    let specs = manifest_tool_specs();
     if policy.can_read_resource(ScopeResource::Projects) {
-        add_named_project_rest_tools(tools, backend.clone(), PROJECT_NATIVE_READ_TOOLS);
+        if let Some(backend) = manifest_backend.as_ref() {
+            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_READ_TOOLS);
+        }
+        if let Some(backend) = project_backend.as_ref() {
+            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
+        }
     }
     if policy.can_write_resource(ScopeResource::Projects) {
-        add_named_project_rest_tools(tools, backend, PROJECT_NATIVE_WRITE_TOOLS);
-    }
-}
-
-fn add_project_knowledge_tools(
-    tools: &mut Vec<Arc<dyn Tool>>,
-    backend: PlatformProjectToolsBackend,
-    policy: &ManifestAccessPolicy,
-) {
-    if policy.can_read_resource(ScopeResource::Projects) {
-        for tool_name in PROJECT_KNOWLEDGE_READ_TOOLS {
-            if tools.iter().any(|existing| existing.name() == *tool_name) {
-                continue;
-            }
-            if let Some(tool) = ProjectKnowledgeTool::from_name(tool_name, backend.clone()) {
-                tools.push(Arc::new(tool));
-            }
+        if let Some(backend) = manifest_backend.as_ref() {
+            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_WRITE_TOOLS);
         }
-    }
-}
-
-fn add_named_project_rest_tools(
-    tools: &mut Vec<Arc<dyn Tool>>,
-    backend: PlatformProjectToolsBackend,
-    tool_names: &[&str],
-) {
-    for tool_name in tool_names {
-        if tools.iter().any(|existing| existing.name() == *tool_name) {
-            continue;
-        }
-        if let Some(tool) = ProjectRestTool::from_name(tool_name, backend.clone()) {
-            tools.push(Arc::new(tool));
+        if let Some(backend) = project_backend.as_ref() {
+            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
         }
     }
 }
@@ -752,6 +725,21 @@ fn add_named_manifest_tools(
     }
 }
 
+fn add_named_project_rest_tools(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    backend: PlatformProjectToolsBackend,
+    tool_names: &[&str],
+) {
+    for tool_name in tool_names {
+        if tools.iter().any(|existing| existing.name() == *tool_name) {
+            continue;
+        }
+        if let Some(tool) = ProjectRestTool::from_name(tool_name, backend.clone()) {
+            tools.push(Arc::new(tool));
+        }
+    }
+}
+
 fn manifest_tool_specs() -> HashMap<String, nenjo::ToolSpec> {
     ManifestMcpContract::tools()
         .into_iter()
@@ -769,130 +757,6 @@ struct PlatformProjectToolsBackend {
     client: Arc<PlatformManifestClient>,
     manifest_store: Arc<LocalManifestStore>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ProjectKnowledgeToolKind {
-    ListDocs,
-    ReadDoc,
-    SearchDocs,
-    SearchDocPaths,
-    ListTree,
-    ReadManifest,
-    Neighbors,
-}
-
-struct ProjectKnowledgeTool {
-    kind: ProjectKnowledgeToolKind,
-    backend: PlatformProjectToolsBackend,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ProjectDocFilterArgs {
-    #[serde(default)]
-    tags: Vec<String>,
-    kind: Option<String>,
-    authority: Option<String>,
-    status: Option<String>,
-    path_prefix: Option<String>,
-    related_to: Option<String>,
-    edge_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocListArgs {
-    project_id: Uuid,
-    #[serde(flatten)]
-    filter: ProjectDocFilterArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocLookupArgs {
-    project_id: Uuid,
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocSearchArgs {
-    project_id: Uuid,
-    query: String,
-    #[serde(flatten)]
-    filter: ProjectDocFilterArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocTreeArgs {
-    project_id: Uuid,
-    prefix: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocNeighborArgs {
-    project_id: Uuid,
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-    edge_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocManifest {
-    id: String,
-    project_id: String,
-    virtual_path: String,
-    filename: String,
-    path: Option<String>,
-    title: String,
-    summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    kind: String,
-    authority: String,
-    status: String,
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocRead {
-    manifest: ProjectDocManifest,
-    content: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocSearchHit {
-    id: String,
-    virtual_path: String,
-    title: String,
-    summary: String,
-    kind: String,
-    authority: String,
-    tags: Vec<String>,
-    score: usize,
-    matched: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocTree {
-    root_uri: String,
-    entries: Vec<ProjectDocTreeEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocTreeEntry {
-    path: String,
-    title: String,
-    kind: String,
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocNeighbor {
-    edge_type: String,
-    direction: String,
-    target: String,
-    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -945,7 +809,11 @@ impl PlatformProjectToolsBackend {
         self.encode_task_payload(task_id, payload).await.map(Some)
     }
 
-    async fn create_task_body(&self, args: &CreateProjectTaskArgs) -> Result<serde_json::Value> {
+    async fn create_task_body(
+        &self,
+        project_id: Uuid,
+        args: &CreateProjectTaskItemArgs,
+    ) -> Result<serde_json::Value> {
         let task_id = Uuid::new_v4();
         let payload = TaskContentPayload {
             description: args.description.clone(),
@@ -955,7 +823,7 @@ impl PlatformProjectToolsBackend {
 
         Ok(json!({
             "id": task_id,
-            "project_id": args.project_id,
+            "project_id": project_id,
             "title": args.title,
             "status": args.status,
             "priority": args.priority,
@@ -973,32 +841,10 @@ impl PlatformProjectToolsBackend {
         }))
     }
 
-    async fn bulk_create_task_body(
-        &self,
-        args: &BulkCreateProjectTasksArgs,
-    ) -> Result<serde_json::Value> {
+    async fn create_tasks_body(&self, args: &CreateProjectTasksArgs) -> Result<serde_json::Value> {
         let mut tasks = Vec::with_capacity(args.tasks.len());
         for task in &args.tasks {
-            let body = self
-                .create_task_body(&CreateProjectTaskArgs {
-                    project_id: args.project_id,
-                    title: task.title.clone(),
-                    description: task.description.clone(),
-                    acceptance_criteria: task.acceptance_criteria.clone(),
-                    status: task.status.clone(),
-                    priority: task.priority.clone(),
-                    task_type: task.task_type.clone(),
-                    complexity: task.complexity,
-                    tags: task.tags.clone(),
-                    required_tags: task.required_tags.clone(),
-                    slug: task.slug.clone(),
-                    order_index: task.order_index,
-                    assigned_to: task.assigned_to,
-                    assigned_agent_id: task.assigned_agent_id,
-                    routine_id: task.routine_id,
-                    metadata: task.metadata.clone(),
-                })
-                .await?;
+            let body = self.create_task_body(args.project_id, task).await?;
             tasks.push(body);
         }
         Ok(json!({ "tasks": tasks }))
@@ -1072,662 +918,11 @@ impl PlatformProjectToolsBackend {
     }
 }
 
-impl ProjectKnowledgeTool {
-    fn from_name(name: &str, backend: PlatformProjectToolsBackend) -> Option<Self> {
-        let kind = match name {
-            "list_project_docs" => ProjectKnowledgeToolKind::ListDocs,
-            "read_project_doc" => ProjectKnowledgeToolKind::ReadDoc,
-            "search_project_docs" => ProjectKnowledgeToolKind::SearchDocs,
-            "search_project_doc_paths" => ProjectKnowledgeToolKind::SearchDocPaths,
-            "list_project_doc_tree" => ProjectKnowledgeToolKind::ListTree,
-            "read_project_doc_manifest" => ProjectKnowledgeToolKind::ReadManifest,
-            "list_project_doc_neighbors" => ProjectKnowledgeToolKind::Neighbors,
-            _ => return None,
-        };
-        Some(Self { kind, backend })
-    }
-}
-
-#[async_trait]
-impl Tool for ProjectKnowledgeTool {
-    fn name(&self) -> &str {
-        match self.kind {
-            ProjectKnowledgeToolKind::ListDocs => "list_project_docs",
-            ProjectKnowledgeToolKind::ReadDoc => "read_project_doc",
-            ProjectKnowledgeToolKind::SearchDocs => "search_project_docs",
-            ProjectKnowledgeToolKind::SearchDocPaths => "search_project_doc_paths",
-            ProjectKnowledgeToolKind::ListTree => "list_project_doc_tree",
-            ProjectKnowledgeToolKind::ReadManifest => "read_project_doc_manifest",
-            ProjectKnowledgeToolKind::Neighbors => "list_project_doc_neighbors",
-        }
-    }
-
-    fn description(&self) -> &str {
-        match self.kind {
-            ProjectKnowledgeToolKind::ListDocs => {
-                "List compact metadata for one project's documents using builtin-style filters."
-            }
-            ProjectKnowledgeToolKind::ReadDoc => {
-                "Read a full project document by id, relative path, or project://<project_id>/ path."
-            }
-            ProjectKnowledgeToolKind::SearchDocs => {
-                "Search one project's documents and return matching metadata plus full text content."
-            }
-            ProjectKnowledgeToolKind::SearchDocPaths => {
-                "Search one project's documents and return compact path metadata without full bodies."
-            }
-            ProjectKnowledgeToolKind::ListTree => {
-                "List the virtual filesystem tree for one project's documents."
-            }
-            ProjectKnowledgeToolKind::ReadManifest => {
-                "Read compact manifest metadata for one project document by id or path."
-            }
-            ProjectKnowledgeToolKind::Neighbors => {
-                "List graph neighbors for one project document by id or path."
-            }
-        }
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        match self.kind {
-            ProjectKnowledgeToolKind::ListDocs => project_doc_filter_schema(None, &["project_id"]),
-            ProjectKnowledgeToolKind::ReadDoc | ProjectKnowledgeToolKind::ReadManifest => json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "Target project id"
-                    },
-                    "id_or_path": {
-                        "type": "string",
-                        "description": "Project doc id, relative path, filename, or project://<project_id>/... path"
-                    }
-                },
-                "required": ["project_id", "id_or_path"],
-                "additionalProperties": false
-            }),
-            ProjectKnowledgeToolKind::SearchDocs | ProjectKnowledgeToolKind::SearchDocPaths => {
-                project_doc_filter_schema(
-                    Some(json!({
-                        "query": {
-                            "type": "string",
-                            "description": "Search query, path, title, tag, summary, or body text"
-                        }
-                    })),
-                    &["project_id", "query"],
-                )
-            }
-            ProjectKnowledgeToolKind::ListTree => json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "Target project id"
-                    },
-                    "prefix": {
-                        "type": "string",
-                        "description": "Optional relative path or project://<project_id>/ prefix"
-                    }
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-            ProjectKnowledgeToolKind::Neighbors => json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "Target project id"
-                    },
-                    "id_or_path": {
-                        "type": "string",
-                        "description": "Project doc id, relative path, filename, or project://<project_id>/... path"
-                    },
-                    "edge_type": {
-                        "type": "string",
-                        "description": "Optional relationship type filter such as references or depends_on"
-                    }
-                },
-                "required": ["project_id", "id_or_path"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let output = match self.kind {
-            ProjectKnowledgeToolKind::ListDocs => {
-                let args: ProjectDocListArgs =
-                    serde_json::from_value(args).context("invalid list_project_docs args")?;
-                let docs = self
-                    .backend
-                    .client
-                    .list_project_document_metadata(args.project_id)
-                    .await?;
-                let docs = filter_project_docs(docs, &args.filter);
-                serde_json::to_value(
-                    docs.iter()
-                        .map(project_doc_manifest)
-                        .collect::<Vec<ProjectDocManifest>>(),
-                )?
-            }
-            ProjectKnowledgeToolKind::ReadDoc => {
-                let args: ProjectDocLookupArgs =
-                    serde_json::from_value(args).context("invalid read_project_doc args")?;
-                let manifest =
-                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
-                let content = self
-                    .backend
-                    .client
-                    .get_project_document_content(args.project_id, manifest.id)
-                    .await?
-                    .description;
-                serde_json::to_value(ProjectDocRead {
-                    manifest: project_doc_manifest(&manifest),
-                    content,
-                })?
-            }
-            ProjectKnowledgeToolKind::SearchDocs => {
-                let args: ProjectDocSearchArgs =
-                    serde_json::from_value(args).context("invalid search_project_docs args")?;
-                let docs = self
-                    .backend
-                    .client
-                    .list_project_document_metadata(args.project_id)
-                    .await?;
-                let hits = search_project_docs(
-                    &self.backend,
-                    args.project_id,
-                    docs,
-                    &args.query,
-                    &args.filter,
-                    true,
-                )
-                .await?;
-                serde_json::to_value(hits)?
-            }
-            ProjectKnowledgeToolKind::SearchDocPaths => {
-                let args: ProjectDocSearchArgs = serde_json::from_value(args)
-                    .context("invalid search_project_doc_paths args")?;
-                let docs = self
-                    .backend
-                    .client
-                    .list_project_document_metadata(args.project_id)
-                    .await?;
-                let hits = search_project_docs(
-                    &self.backend,
-                    args.project_id,
-                    docs,
-                    &args.query,
-                    &args.filter,
-                    false,
-                )
-                .await?;
-                serde_json::to_value(hits)?
-            }
-            ProjectKnowledgeToolKind::ListTree => {
-                let args: ProjectDocTreeArgs =
-                    serde_json::from_value(args).context("invalid list_project_doc_tree args")?;
-                let docs = self
-                    .backend
-                    .client
-                    .list_project_document_metadata(args.project_id)
-                    .await?;
-                serde_json::to_value(project_doc_tree(
-                    args.project_id,
-                    &docs,
-                    args.prefix.as_deref(),
-                ))?
-            }
-            ProjectKnowledgeToolKind::ReadManifest => {
-                let args: ProjectDocLookupArgs = serde_json::from_value(args)
-                    .context("invalid read_project_doc_manifest args")?;
-                let manifest =
-                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
-                serde_json::to_value(project_doc_manifest(&manifest))?
-            }
-            ProjectKnowledgeToolKind::Neighbors => {
-                let args: ProjectDocNeighborArgs = serde_json::from_value(args)
-                    .context("invalid list_project_doc_neighbors args")?;
-                let manifest =
-                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
-                let neighbors = project_doc_neighbors(
-                    &self.backend,
-                    args.project_id,
-                    &manifest,
-                    args.edge_type.as_deref(),
-                )
-                .await?;
-                serde_json::to_value(neighbors)?
-            }
-        };
-
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string_pretty(&output)?,
-            error: None,
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-}
-
-fn project_doc_filter_schema(
-    extra_properties: Option<serde_json::Value>,
-    required: &[&str],
-) -> serde_json::Value {
-    let mut properties = json!({
-        "project_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Target project id"
-        },
-        "tags": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Optional tags that all returned docs must have"
-        },
-        "kind": {
-            "type": "string",
-            "description": "Optional kind filter"
-        },
-        "authority": {
-            "type": "string",
-            "description": "Optional authority filter"
-        },
-        "status": {
-            "type": "string",
-            "description": "Optional status filter"
-        },
-        "path_prefix": {
-            "type": "string",
-            "description": "Optional relative path or project://<project_id>/ prefix"
-        },
-        "related_to": {
-            "type": "string",
-            "description": "Optional related doc id or path that returned docs must connect to"
-        },
-        "edge_type": {
-            "type": "string",
-            "description": "Optional relationship type used with related_to"
-        }
-    });
-
-    if let Some(extra) = extra_properties
-        && let Some(map) = properties.as_object_mut()
-        && let Some(extra_map) = extra.as_object()
-    {
-        for (key, value) in extra_map {
-            map.insert(key.clone(), value.clone());
-        }
-    }
-
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false
-    })
-}
-
-fn project_doc_virtual_path(project_id: Uuid, doc: &ProjectDocumentMetadata) -> String {
-    let mut path = doc.path.clone().unwrap_or_default();
-    path = path.trim_matches('/').to_string();
-    if path.is_empty() {
-        format!("project://{project_id}/{}", doc.filename)
-    } else {
-        format!("project://{project_id}/{path}/{}", doc.filename)
-    }
-}
-
-fn project_doc_relative_path(doc: &ProjectDocumentMetadata) -> String {
-    let mut path = doc.path.clone().unwrap_or_default();
-    path = path.trim_matches('/').to_string();
-    if path.is_empty() {
-        doc.filename.clone()
-    } else {
-        format!("{path}/{}", doc.filename)
-    }
-}
-
-fn normalize_project_lookup(project_id: Uuid, value: &str) -> String {
-    let trimmed = value.trim().trim_matches('/').to_string();
-    if let Some(stripped) = trimmed.strip_prefix(&format!("project://{project_id}/")) {
-        stripped.trim_matches('/').to_string()
-    } else {
-        trimmed
-    }
-}
-
-fn project_doc_manifest(doc: &ProjectDocumentMetadata) -> ProjectDocManifest {
-    ProjectDocManifest {
-        id: doc.id.to_string(),
-        project_id: doc.project_id.to_string(),
-        virtual_path: project_doc_virtual_path(doc.project_id, doc),
-        filename: doc.filename.clone(),
-        path: doc.path.clone(),
-        title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
-        summary: doc
-            .summary
-            .clone()
-            .unwrap_or_else(|| format!("Project document {}", project_doc_relative_path(doc))),
-        description: None,
-        kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
-        authority: doc.authority.clone(),
-        status: doc.status.clone().unwrap_or_else(|| "stable".to_string()),
-        tags: doc.tags.clone(),
-    }
-}
-
-fn filter_project_docs(
-    docs: Vec<ProjectDocumentMetadata>,
-    filter: &ProjectDocFilterArgs,
-) -> Vec<ProjectDocumentMetadata> {
-    docs.into_iter()
-        .filter(|doc| {
-            if !filter.tags.is_empty()
-                && !filter.tags.iter().all(|tag| {
-                    doc.tags
-                        .iter()
-                        .any(|candidate| candidate.eq_ignore_ascii_case(tag))
-                })
-            {
-                return false;
-            }
-            if let Some(kind) = filter.kind.as_ref()
-                && doc
-                    .kind
-                    .as_deref()
-                    .map(|value| !value.eq_ignore_ascii_case(kind))
-                    .unwrap_or(true)
-            {
-                return false;
-            }
-            if let Some(authority) = filter.authority.as_ref()
-                && !doc.authority.eq_ignore_ascii_case(authority)
-            {
-                return false;
-            }
-            if let Some(status) = filter.status.as_ref()
-                && doc
-                    .status
-                    .as_deref()
-                    .map(|value| !value.eq_ignore_ascii_case(status))
-                    .unwrap_or(true)
-            {
-                return false;
-            }
-            if let Some(path_prefix) = filter.path_prefix.as_ref() {
-                let prefix = path_prefix.trim_matches('/');
-                let relative = project_doc_relative_path(doc);
-                let virtual_path = project_doc_virtual_path(doc.project_id, doc);
-                if !relative.starts_with(prefix) && !virtual_path.starts_with(path_prefix) {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect()
-}
-
-async fn lookup_project_doc(
-    backend: &PlatformProjectToolsBackend,
-    project_id: Uuid,
-    id_or_path: &str,
-) -> Result<ProjectDocumentMetadata> {
-    let docs = backend
-        .client
-        .list_project_document_metadata(project_id)
-        .await?;
-    let normalized = normalize_project_lookup(project_id, id_or_path);
-    docs.into_iter()
-        .find(|doc| {
-            doc.id.to_string() == id_or_path
-                || project_doc_virtual_path(project_id, doc) == id_or_path
-                || project_doc_relative_path(doc) == normalized
-                || doc.filename == normalized
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "unknown project doc '{}'; use a document id, relative path, filename, or project://{project_id}/ path",
-                id_or_path
-            )
-        })
-}
-
-fn project_doc_score(
-    doc: &ProjectDocumentMetadata,
-    query: &str,
-    content: Option<&str>,
-) -> Option<(usize, Vec<String>)> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return None;
-    }
-
-    let mut score = 0;
-    let mut matched = Vec::new();
-    let relative_path = project_doc_relative_path(doc).to_lowercase();
-    let virtual_path = project_doc_virtual_path(doc.project_id, doc).to_lowercase();
-    let title = doc
-        .title
-        .clone()
-        .unwrap_or_else(|| doc.filename.clone())
-        .to_lowercase();
-    let summary = doc.summary.clone().unwrap_or_default().to_lowercase();
-    let kind = doc.kind.clone().unwrap_or_default().to_lowercase();
-    let authority = doc.authority.to_lowercase();
-    let status = doc.status.clone().unwrap_or_default().to_lowercase();
-    let tags = doc
-        .tags
-        .iter()
-        .map(|tag| tag.to_lowercase())
-        .collect::<Vec<_>>();
-
-    if relative_path.contains(&query) || virtual_path.contains(&query) {
-        score += 6;
-        matched.push("path".to_string());
-    }
-    if title.contains(&query) {
-        score += 5;
-        matched.push("title".to_string());
-    }
-    if summary.contains(&query) {
-        score += 4;
-        matched.push("summary".to_string());
-    }
-    if kind.contains(&query) {
-        score += 3;
-        matched.push("kind".to_string());
-    }
-    if authority.contains(&query) {
-        score += 2;
-        matched.push("authority".to_string());
-    }
-    if status.contains(&query) {
-        score += 2;
-        matched.push("status".to_string());
-    }
-    if tags.iter().any(|tag| tag.contains(&query)) {
-        score += 4;
-        matched.push("tags".to_string());
-    }
-    if let Some(content) = content
-        && content.to_lowercase().contains(&query)
-    {
-        score += 3;
-        matched.push("content".to_string());
-    }
-
-    if score == 0 {
-        None
-    } else {
-        matched.sort();
-        matched.dedup();
-        Some((score, matched))
-    }
-}
-
-async fn search_project_docs(
-    backend: &PlatformProjectToolsBackend,
-    project_id: Uuid,
-    docs: Vec<ProjectDocumentMetadata>,
-    query: &str,
-    filter: &ProjectDocFilterArgs,
-    include_content: bool,
-) -> Result<Vec<ProjectDocSearchHit>> {
-    let docs = filter_project_docs(docs, filter);
-    let related_doc = if let Some(related_to) = filter.related_to.as_ref() {
-        Some(lookup_project_doc(backend, project_id, related_to).await?)
-    } else {
-        None
-    };
-    let mut hits = Vec::new();
-
-    for doc in docs {
-        if let Some(related) = related_doc.as_ref() {
-            let neighbors =
-                project_doc_neighbors(backend, project_id, related, filter.edge_type.as_deref())
-                    .await?;
-            let target = project_doc_virtual_path(doc.project_id, &doc);
-            if !neighbors.iter().any(|neighbor| neighbor.target == target) {
-                continue;
-            }
-        }
-
-        let content = backend
-            .client
-            .get_project_document_content(project_id, doc.id)
-            .await
-            .ok()
-            .map(|document| document.description);
-
-        let Some((score, matched)) = project_doc_score(&doc, query, content.as_deref()) else {
-            continue;
-        };
-
-        hits.push(ProjectDocSearchHit {
-            id: doc.id.to_string(),
-            virtual_path: project_doc_virtual_path(doc.project_id, &doc),
-            title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
-            summary: doc
-                .summary
-                .clone()
-                .unwrap_or_else(|| format!("Project document {}", project_doc_relative_path(&doc))),
-            kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
-            authority: doc.authority.clone(),
-            tags: doc.tags.clone(),
-            score,
-            matched,
-            content: if include_content { content } else { None },
-        });
-    }
-
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.virtual_path.cmp(&right.virtual_path))
-    });
-
-    Ok(hits)
-}
-
-fn project_doc_tree(
-    project_id: Uuid,
-    docs: &[ProjectDocumentMetadata],
-    prefix: Option<&str>,
-) -> ProjectDocTree {
-    let normalized_prefix = prefix.map(|value| normalize_project_lookup(project_id, value));
-    let mut entries = docs
-        .iter()
-        .filter_map(|doc| {
-            let relative = project_doc_relative_path(doc);
-            if let Some(prefix) = normalized_prefix.as_ref()
-                && !relative.starts_with(prefix)
-            {
-                return None;
-            }
-            Some(ProjectDocTreeEntry {
-                path: project_doc_virtual_path(project_id, doc),
-                title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
-                kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
-                tags: doc.tags.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    ProjectDocTree {
-        root_uri: format!("project://{project_id}/"),
-        entries,
-    }
-}
-
-async fn project_doc_neighbors(
-    backend: &PlatformProjectToolsBackend,
-    project_id: Uuid,
-    doc: &ProjectDocumentMetadata,
-    edge_type: Option<&str>,
-) -> Result<Vec<ProjectDocNeighbor>> {
-    let edges = backend
-        .client
-        .list_project_document_edges(project_id, doc.id)
-        .await?;
-    let docs = backend
-        .client
-        .list_project_document_metadata(project_id)
-        .await?;
-    let mut docs_by_id = HashMap::new();
-    for entry in docs {
-        docs_by_id.insert(entry.id, entry);
-    }
-
-    let mut neighbors = Vec::new();
-    for edge in edges {
-        if let Some(filter_edge_type) = edge_type
-            && !edge.edge_type.eq_ignore_ascii_case(filter_edge_type)
-        {
-            continue;
-        }
-        if edge.source_document_id == doc.id {
-            if let Some(target) = docs_by_id.get(&edge.target_document_id) {
-                neighbors.push(project_doc_neighbor_from_edge(&edge, "outgoing", target));
-            }
-        } else if edge.target_document_id == doc.id
-            && let Some(source) = docs_by_id.get(&edge.source_document_id)
-        {
-            neighbors.push(project_doc_neighbor_from_edge(&edge, "incoming", source));
-        }
-    }
-
-    neighbors.sort_by(|left, right| left.target.cmp(&right.target));
-    Ok(neighbors)
-}
-
-fn project_doc_neighbor_from_edge(
-    edge: &ProjectDocumentEdge,
-    direction: &str,
-    target: &ProjectDocumentMetadata,
-) -> ProjectDocNeighbor {
-    ProjectDocNeighbor {
-        edge_type: edge.edge_type.clone(),
-        direction: direction.to_string(),
-        target: project_doc_virtual_path(target.project_id, target),
-        note: edge.note.clone(),
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum ProjectRestToolKind {
     ListProjectTasks,
     GetProjectTask,
-    CreateProjectTask,
-    BulkCreateProjectTasks,
+    CreateProjectTasks,
     UpdateProjectTask,
     DeleteProjectTask,
     ListProjectExecutionRuns,
@@ -1742,8 +937,7 @@ impl ProjectRestToolKind {
         match name {
             "list_project_tasks" => Some(Self::ListProjectTasks),
             "get_project_task" => Some(Self::GetProjectTask),
-            "create_project_task" => Some(Self::CreateProjectTask),
-            "bulk_create_project_tasks" => Some(Self::BulkCreateProjectTasks),
+            "create_project_tasks" => Some(Self::CreateProjectTasks),
             "update_project_task" => Some(Self::UpdateProjectTask),
             "delete_project_task" => Some(Self::DeleteProjectTask),
             "list_project_execution_runs" => Some(Self::ListProjectExecutionRuns),
@@ -1752,6 +946,21 @@ impl ProjectRestToolKind {
             "pause_project_execution" => Some(Self::PauseProjectExecution),
             "resume_project_execution" => Some(Self::ResumeProjectExecution),
             _ => None,
+        }
+    }
+
+    fn tool_name(&self) -> &'static str {
+        match self {
+            Self::ListProjectTasks => "list_project_tasks",
+            Self::GetProjectTask => "get_project_task",
+            Self::CreateProjectTasks => "create_project_tasks",
+            Self::UpdateProjectTask => "update_project_task",
+            Self::DeleteProjectTask => "delete_project_task",
+            Self::ListProjectExecutionRuns => "list_project_execution_runs",
+            Self::GetProjectExecutionRun => "get_project_execution_run",
+            Self::StartProjectExecution => "start_project_execution",
+            Self::PauseProjectExecution => "pause_project_execution",
+            Self::ResumeProjectExecution => "resume_project_execution",
         }
     }
 }
@@ -1768,7 +977,7 @@ impl ProjectRestTool {
         Some(Self {
             kind,
             backend,
-            spec: project_rest_tool_spec(kind),
+            spec: project_rest_tool_spec(kind)?,
         })
     }
 }
@@ -1813,16 +1022,10 @@ impl Tool for ProjectRestTool {
                     serde_json::from_value(args).context("invalid get_project_task args")?;
                 self.backend.client.get_project_task(args.task_id).await?
             }
-            ProjectRestToolKind::CreateProjectTask => {
-                let args: CreateProjectTaskArgs =
-                    serde_json::from_value(args).context("invalid create_project_task args")?;
-                let body = self.backend.create_task_body(&args).await?;
-                self.backend.client.create_project_task(&body).await?
-            }
-            ProjectRestToolKind::BulkCreateProjectTasks => {
-                let args: BulkCreateProjectTasksArgs = serde_json::from_value(args)
-                    .context("invalid bulk_create_project_tasks args")?;
-                let body = self.backend.bulk_create_task_body(&args).await?;
+            ProjectRestToolKind::CreateProjectTasks => {
+                let args: CreateProjectTasksArgs =
+                    serde_json::from_value(args).context("invalid create_project_tasks args")?;
+                let body = self.backend.create_tasks_body(&args).await?;
                 self.backend.client.bulk_create_project_tasks(&body).await?
             }
             ProjectRestToolKind::UpdateProjectTask => {
@@ -1931,34 +1134,13 @@ struct GetProjectTaskArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateProjectTaskArgs {
+struct CreateProjectTasksArgs {
     project_id: Uuid,
-    title: String,
-    description: Option<String>,
-    acceptance_criteria: Option<String>,
-    status: Option<String>,
-    priority: Option<String>,
-    #[serde(rename = "type")]
-    task_type: Option<String>,
-    complexity: Option<i16>,
-    tags: Option<Vec<String>>,
-    required_tags: Option<Vec<String>>,
-    slug: Option<String>,
-    order_index: Option<i32>,
-    assigned_to: Option<Uuid>,
-    assigned_agent_id: Option<Uuid>,
-    routine_id: Option<Uuid>,
-    metadata: Option<serde_json::Value>,
+    tasks: Vec<CreateProjectTaskItemArgs>,
 }
 
 #[derive(Debug, Deserialize)]
-struct BulkCreateProjectTasksArgs {
-    project_id: Uuid,
-    tasks: Vec<BulkCreateProjectTaskItemArgs>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BulkCreateProjectTaskItemArgs {
+struct CreateProjectTaskItemArgs {
     title: String,
     description: Option<String>,
     acceptance_criteria: Option<String>,
@@ -2031,224 +1213,10 @@ struct CommandProjectExecutionArgs {
     execution_run_id: Uuid,
 }
 
-fn project_rest_tool_spec(kind: ProjectRestToolKind) -> nenjo::ToolSpec {
-    match kind {
-        ProjectRestToolKind::ListProjectTasks => nenjo::ToolSpec {
-            name: "list_project_tasks".into(),
-            description: "List tasks for a project, with optional task-state filters.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "format": "uuid"},
-                    "status": {"type": "string"},
-                    "priority": {"type": "string"},
-                    "type": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "routine_id": {"type": "string", "format": "uuid"},
-                    "assigned_to": {"type": "string", "format": "uuid"},
-                    "assigned_agent_id": {"type": "string", "format": "uuid"},
-                    "limit": {"type": "integer"},
-                    "offset": {"type": "integer"}
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ProjectRestToolKind::GetProjectTask => nenjo::ToolSpec {
-            name: "get_project_task".into(),
-            description: "Fetch one task by ID.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string", "format": "uuid"}
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ProjectRestToolKind::CreateProjectTask => nenjo::ToolSpec {
-            name: "create_project_task".into(),
-            description: "Create a new task for a project. Task content is encrypted before it is sent to the platform.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "format": "uuid"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "acceptance_criteria": {"type": "string"},
-                    "status": {"type": "string"},
-                    "priority": {"type": "string"},
-                    "type": {"type": "string"},
-                    "complexity": {"type": "integer"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "required_tags": {"type": "array", "items": {"type": "string"}},
-                    "slug": {"type": "string"},
-                    "order_index": {"type": "integer"},
-                    "assigned_to": {"type": "string", "format": "uuid"},
-                    "assigned_agent_id": {"type": "string", "format": "uuid"},
-                    "routine_id": {"type": "string", "format": "uuid"},
-                    "metadata": {"type": "object"}
-                },
-                "required": ["project_id", "title"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::BulkCreateProjectTasks => nenjo::ToolSpec {
-            name: "bulk_create_project_tasks".into(),
-            description: "Create multiple tasks for one project in a single request. Each task's content is encrypted before it is sent to the platform.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "format": "uuid"},
-                    "tasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"},
-                                "description": {"type": "string"},
-                                "acceptance_criteria": {"type": "string"},
-                                "status": {"type": "string"},
-                                "priority": {"type": "string"},
-                                "type": {"type": "string"},
-                                "complexity": {"type": "integer"},
-                                "tags": {"type": "array", "items": {"type": "string"}},
-                                "required_tags": {"type": "array", "items": {"type": "string"}},
-                                "slug": {"type": "string"},
-                                "order_index": {"type": "integer"},
-                                "assigned_to": {"type": "string", "format": "uuid"},
-                                "assigned_agent_id": {"type": "string", "format": "uuid"},
-                                "routine_id": {"type": "string", "format": "uuid"},
-                                "metadata": {"type": "object"}
-                            },
-                            "required": ["title"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["project_id", "tasks"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::UpdateProjectTask => nenjo::ToolSpec {
-            name: "update_project_task".into(),
-            description: "Update a task. If you change title, description, acceptance criteria, tags, status, priority, type, complexity, or slug, the harness re-encrypts the task content automatically.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string", "format": "uuid"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "acceptance_criteria": {"type": "string"},
-                    "status": {"type": "string"},
-                    "priority": {"type": "string"},
-                    "type": {"type": "string"},
-                    "complexity": {"type": "integer"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "required_tags": {"type": "array", "items": {"type": "string"}},
-                    "slug": {"type": "string"},
-                    "order_index": {"type": "integer"},
-                    "assigned_to": {"type": "string", "format": "uuid"},
-                    "assigned_agent_id": {"type": "string", "format": "uuid"},
-                    "routine_id": {"type": "string", "format": "uuid"},
-                    "metadata": {"type": "object"}
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::DeleteProjectTask => nenjo::ToolSpec {
-            name: "delete_project_task".into(),
-            description: "Delete a task by ID.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string", "format": "uuid"}
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::ListProjectExecutionRuns => nenjo::ToolSpec {
-            name: "list_project_execution_runs".into(),
-            description: "List execution runs for a project.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "format": "uuid"},
-                    "agent_id": {"type": "string", "format": "uuid"},
-                    "routine_id": {"type": "string", "format": "uuid"},
-                    "status": {"type": "string"},
-                    "limit": {"type": "integer"},
-                    "offset": {"type": "integer"}
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ProjectRestToolKind::GetProjectExecutionRun => nenjo::ToolSpec {
-            name: "get_project_execution_run".into(),
-            description: "Fetch one execution run by ID.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "execution_run_id": {"type": "string", "format": "uuid"}
-                },
-                "required": ["execution_run_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ProjectRestToolKind::StartProjectExecution => nenjo::ToolSpec {
-            name: "start_project_execution".into(),
-            description: "Start a new execution run for a project immediately.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "format": "uuid"},
-                    "config": {"type": "object"},
-                    "model_count": {"type": "integer"},
-                    "parallel_count": {"type": "integer"}
-                },
-                "required": ["project_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::PauseProjectExecution => nenjo::ToolSpec {
-            name: "pause_project_execution".into(),
-            description: "Pause a running execution run.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "execution_run_id": {"type": "string", "format": "uuid"}
-                },
-                "required": ["execution_run_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ProjectRestToolKind::ResumeProjectExecution => nenjo::ToolSpec {
-            name: "resume_project_execution".into(),
-            description: "Resume a paused execution run.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "execution_run_id": {"type": "string", "format": "uuid"}
-                },
-                "required": ["execution_run_id"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-    }
+fn project_rest_tool_spec(kind: ProjectRestToolKind) -> Option<nenjo::ToolSpec> {
+    project_rest_tools()
+        .into_iter()
+        .find(|tool| tool.name == kind.tool_name())
 }
 
 impl ManifestContractTool {
@@ -2362,7 +1330,10 @@ mod tests {
     use nenjo::agents::prompts::PromptConfig;
     use nenjo::manifest::local::LocalManifestStore;
     use nenjo::manifest::{AbilityManifest, DomainManifest, Manifest};
-    use nenjo_platform::{AbilitiesGetParams, AgentsGetParams, DomainsGetParams};
+    use nenjo_platform::{
+        AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
+        DomainManifestBackend, DomainsGetParams,
+    };
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -2552,10 +1523,14 @@ mod tests {
         assert!(names.iter().any(|name| name == "update_agent"));
         assert!(names.iter().any(|name| name == "list_projects"));
         assert!(names.iter().any(|name| name == "get_project"));
-        assert!(names.iter().any(|name| name == "list_project_docs"));
-        assert!(names.iter().any(|name| name == "read_project_doc"));
-        assert!(names.iter().any(|name| name == "search_project_docs"));
-        assert!(names.iter().any(|name| name == "search_project_doc_paths"));
+        assert!(names.iter().any(|name| name == "list_project_documents"));
+        assert!(names.iter().any(|name| name == "read_project_document"));
+        assert!(names.iter().any(|name| name == "search_project_documents"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "search_project_document_paths")
+        );
         assert!(names.iter().any(|name| name == "list_project_tasks"));
         assert!(names.iter().any(|name| name == "get_project_task"));
         assert!(
@@ -2643,8 +1618,7 @@ mod tests {
         let tools = factory.create_tools(&agent).await;
         let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-        assert!(names.iter().any(|name| name == "create_project_task"));
-        assert!(names.iter().any(|name| name == "bulk_create_project_tasks"));
+        assert!(names.iter().any(|name| name == "create_project_tasks"));
         assert!(names.iter().any(|name| name == "update_project_task"));
         assert!(names.iter().any(|name| name == "delete_project_task"));
         assert!(names.iter().any(|name| name == "start_project_execution"));
@@ -2664,31 +1638,31 @@ mod tests {
             hidden_domain,
         ) = scoped_backend(vec!["projects:read".into()]).await;
 
-        let agents = backend.agents_list().await.unwrap();
+        let agents = backend.list_agents().await.unwrap();
         assert_eq!(agents.agents.len(), 1);
         assert_eq!(agents.agents[0].id, visible_agent.id);
         assert!(
             backend
-                .agents_get(AgentsGetParams {
+                .get_agent(AgentsGetParams {
                     id: hidden_agent.id
                 })
                 .await
                 .is_err()
         );
 
-        let abilities = backend.abilities_list().await.unwrap();
+        let abilities = backend.list_abilities().await.unwrap();
         assert_eq!(abilities.abilities.len(), 1);
         assert_eq!(abilities.abilities[0].id, visible_ability.id);
         assert!(
             backend
-                .abilities_get(AbilitiesGetParams {
+                .get_ability(AbilitiesGetParams {
                     id: hidden_ability.id
                 })
                 .await
                 .is_err()
         );
 
-        let domains = backend.domains_list().await.unwrap();
+        let domains = backend.list_domains().await.unwrap();
         assert_eq!(domains.domains.len(), 1);
         assert!(
             domains
@@ -2698,7 +1672,7 @@ mod tests {
         );
         assert!(
             backend
-                .domains_get(DomainsGetParams {
+                .get_domain(DomainsGetParams {
                     id: hidden_domain.id
                 })
                 .await
