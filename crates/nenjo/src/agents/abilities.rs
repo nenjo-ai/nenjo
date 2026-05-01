@@ -215,6 +215,7 @@ impl Tool for AssignedAbilityTool {
                         TurnEvent::MessageCompacted { .. } => {
                             let _ = parent_tx.send(event);
                         }
+                        TurnEvent::TranscriptMessage { .. } => {}
                         _ => {}
                     }
                 }

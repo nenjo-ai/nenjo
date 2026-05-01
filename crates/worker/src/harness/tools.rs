@@ -9,13 +9,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use nenjo::ToolFactory;
+use nenjo::builtin_knowledge::{
+    BuiltinDocAuthority, BuiltinDocEdgeType, BuiltinDocFilter, BuiltinDocKind, BuiltinDocStatus,
+    builtin_knowledge_pack,
+};
 use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::store::ManifestReader;
 use nenjo_platform::{
     ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract, PlatformManifestBackend,
     PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
-    client::{CreateExecutionRequest, ProjectExecutionListQuery, ProjectTaskListQuery},
+    client::{
+        CreateExecutionRequest, ProjectDocumentEdge, ProjectDocumentMetadata,
+        ProjectExecutionListQuery, ProjectTaskListQuery,
+    },
 };
 use nenjo_tools::security::SecurityPolicy;
 use serde::{Deserialize, Serialize};
@@ -156,6 +163,25 @@ impl HarnessToolFactory {
             Arc::new(GitOperationsTool::new(security.clone())),
             Arc::new(ContentSearchTool::new(security.clone())),
             Arc::new(GlobSearchTool::new(security.clone())),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::ListDocs,
+            )),
+            Arc::new(BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::ReadDoc)),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::SearchDocs,
+            )),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::SearchDocPaths,
+            )),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::ListTree,
+            )),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::ReadManifest,
+            )),
+            Arc::new(BuiltinKnowledgeTool::new(
+                BuiltinKnowledgeToolKind::Neighbors,
+            )),
         ]
     }
 
@@ -195,15 +221,13 @@ impl HarnessToolFactory {
         }
 
         if let Some(client) = self.platform_client.as_ref() {
-            add_project_rest_tools(
-                &mut tools,
-                PlatformProjectToolsBackend {
-                    client: client.clone(),
-                    manifest_store: self.manifest_store.clone(),
-                    payload_encoder: self.payload_encoder.clone(),
-                },
-                &policy,
-            );
+            let project_backend = PlatformProjectToolsBackend {
+                client: client.clone(),
+                manifest_store: self.manifest_store.clone(),
+                payload_encoder: self.payload_encoder.clone(),
+            };
+            add_project_knowledge_tools(&mut tools, project_backend.clone(), &policy);
+            add_project_rest_tools(&mut tools, project_backend, &policy);
         }
 
         // Web fetch (always included with config, deny-by-default via allowed_domains)
@@ -250,7 +274,285 @@ impl HarnessToolFactory {
     }
 }
 
-const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent"];
+#[derive(Debug, Clone, Copy)]
+enum BuiltinKnowledgeToolKind {
+    ListDocs,
+    ReadDoc,
+    SearchDocs,
+    SearchDocPaths,
+    ListTree,
+    ReadManifest,
+    Neighbors,
+}
+
+struct BuiltinKnowledgeTool {
+    kind: BuiltinKnowledgeToolKind,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BuiltinFilterArgs {
+    #[serde(default)]
+    tags: Vec<String>,
+    kind: Option<BuiltinDocKind>,
+    authority: Option<BuiltinDocAuthority>,
+    status: Option<BuiltinDocStatus>,
+    path_prefix: Option<String>,
+    related_to: Option<String>,
+    edge_type: Option<BuiltinDocEdgeType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuiltinLookupArgs {
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuiltinSearchArgs {
+    query: String,
+    #[serde(flatten)]
+    filter: BuiltinFilterArgs,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuiltinTreeArgs {
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuiltinNeighborArgs {
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+    edge_type: Option<BuiltinDocEdgeType>,
+}
+
+impl BuiltinKnowledgeTool {
+    fn new(kind: BuiltinKnowledgeToolKind) -> Self {
+        Self { kind }
+    }
+}
+
+#[async_trait]
+impl Tool for BuiltinKnowledgeTool {
+    fn name(&self) -> &str {
+        match self.kind {
+            BuiltinKnowledgeToolKind::ListDocs => "list_builtin_docs",
+            BuiltinKnowledgeToolKind::ReadDoc => "read_builtin_doc",
+            BuiltinKnowledgeToolKind::SearchDocs => "search_builtin_docs",
+            BuiltinKnowledgeToolKind::SearchDocPaths => "search_builtin_doc_paths",
+            BuiltinKnowledgeToolKind::ListTree => "list_builtin_doc_tree",
+            BuiltinKnowledgeToolKind::ReadManifest => "read_builtin_doc_manifest",
+            BuiltinKnowledgeToolKind::Neighbors => "list_builtin_doc_neighbors",
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self.kind {
+            BuiltinKnowledgeToolKind::ListDocs => {
+                "List compact metadata for embedded Nenjo builtin docs under builtin://nenjo/."
+            }
+            BuiltinKnowledgeToolKind::ReadDoc => {
+                "Read a full embedded Nenjo builtin doc by id or builtin://nenjo/ path."
+            }
+            BuiltinKnowledgeToolKind::SearchDocs => {
+                "Search embedded Nenjo builtin docs and return matching metadata plus full markdown content."
+            }
+            BuiltinKnowledgeToolKind::SearchDocPaths => {
+                "Search embedded Nenjo builtin docs and return compact path metadata without full bodies."
+            }
+            BuiltinKnowledgeToolKind::ListTree => {
+                "List the embedded Nenjo builtin virtual filesystem tree under builtin://nenjo/."
+            }
+            BuiltinKnowledgeToolKind::ReadManifest => {
+                "Read compact manifest metadata for one embedded Nenjo builtin doc by id or path."
+            }
+            BuiltinKnowledgeToolKind::Neighbors => {
+                "List graph neighbors for one embedded Nenjo builtin doc by id or path."
+            }
+        }
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        match self.kind {
+            BuiltinKnowledgeToolKind::ReadDoc | BuiltinKnowledgeToolKind::ReadManifest => json!({
+                "type": "object",
+                "properties": {
+                    "id_or_path": {
+                        "type": "string",
+                        "description": "Builtin doc id such as nenjo.guide.routines or path such as builtin://nenjo/guide/routines.md"
+                    }
+                },
+                "required": ["id_or_path"]
+            }),
+            BuiltinKnowledgeToolKind::SearchDocs | BuiltinKnowledgeToolKind::SearchDocPaths => {
+                filter_schema(
+                    Some(json!({
+                        "query": {
+                            "type": "string",
+                            "description": "Search query, alias, keyword, tag, title, or body text"
+                        }
+                    })),
+                    &["query"],
+                )
+            }
+            BuiltinKnowledgeToolKind::ListTree => json!({
+                "type": "object",
+                "properties": {
+                    "prefix": {
+                        "type": "string",
+                        "description": "Optional builtin://nenjo/ path prefix"
+                    }
+                }
+            }),
+            BuiltinKnowledgeToolKind::ListDocs => filter_schema(None, &[]),
+            BuiltinKnowledgeToolKind::Neighbors => json!({
+                "type": "object",
+                "properties": {
+                    "id_or_path": {
+                        "type": "string",
+                        "description": "Builtin doc id or builtin://nenjo/ path"
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"],
+                        "description": "Optional canonical relationship type"
+                    }
+                },
+                "required": ["id_or_path"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let pack = builtin_knowledge_pack();
+        let output = match self.kind {
+            BuiltinKnowledgeToolKind::ListDocs => {
+                let args: BuiltinFilterArgs =
+                    serde_json::from_value(args).context("invalid list_builtin_docs args")?;
+                serde_json::to_value(pack.list_docs(args.into_filter()))?
+            }
+            BuiltinKnowledgeToolKind::ReadDoc => {
+                let args: BuiltinLookupArgs =
+                    serde_json::from_value(args).context("invalid read_builtin_doc args")?;
+                serde_json::to_value(pack.read_doc(&args.id_or_path).ok_or_else(|| {
+                    anyhow!(
+                        "unknown builtin doc '{}'; use an id or builtin://nenjo/ path",
+                        args.id_or_path
+                    )
+                })?)?
+            }
+            BuiltinKnowledgeToolKind::SearchDocs => {
+                let args: BuiltinSearchArgs =
+                    serde_json::from_value(args).context("invalid search_builtin_docs args")?;
+                serde_json::to_value(pack.search_docs(&args.query, args.filter.into_filter()))?
+            }
+            BuiltinKnowledgeToolKind::SearchDocPaths => {
+                let args: BuiltinSearchArgs = serde_json::from_value(args)
+                    .context("invalid search_builtin_doc_paths args")?;
+                serde_json::to_value(pack.search_paths(&args.query, args.filter.into_filter()))?
+            }
+            BuiltinKnowledgeToolKind::ListTree => {
+                let args: BuiltinTreeArgs =
+                    serde_json::from_value(args).context("invalid list_builtin_doc_tree args")?;
+                serde_json::to_value(pack.list_tree(args.prefix.as_deref()))?
+            }
+            BuiltinKnowledgeToolKind::ReadManifest => {
+                let args: BuiltinLookupArgs = serde_json::from_value(args)
+                    .context("invalid read_builtin_doc_manifest args")?;
+                serde_json::to_value(pack.read_manifest(&args.id_or_path).ok_or_else(|| {
+                    anyhow!(
+                        "unknown builtin doc '{}'; use an id or builtin://nenjo/ path",
+                        args.id_or_path
+                    )
+                })?)?
+            }
+            BuiltinKnowledgeToolKind::Neighbors => {
+                let args: BuiltinNeighborArgs = serde_json::from_value(args)
+                    .context("invalid list_builtin_doc_neighbors args")?;
+                serde_json::to_value(pack.neighbors(&args.id_or_path, args.edge_type))?
+            }
+        };
+
+        Ok(ToolResult {
+            success: true,
+            output: serde_json::to_string_pretty(&output)?,
+            error: None,
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+}
+
+impl BuiltinFilterArgs {
+    fn into_filter(self) -> BuiltinDocFilter {
+        BuiltinDocFilter {
+            tags: self.tags,
+            kind: self.kind,
+            authority: self.authority,
+            status: self.status,
+            path_prefix: self.path_prefix,
+            related_to: self.related_to,
+            edge_type: self.edge_type,
+        }
+    }
+}
+
+fn filter_schema(
+    extra_properties: Option<serde_json::Value>,
+    required: &[&str],
+) -> serde_json::Value {
+    let mut properties = json!({
+        "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional tags that all returned docs must have"
+        },
+        "kind": {
+            "type": "string",
+            "enum": ["guide", "reference", "taxonomy", "domain", "entity", "policy"]
+        },
+        "authority": {
+            "type": "string",
+            "enum": ["canonical", "pattern", "reference", "advisory", "example"]
+        },
+        "status": {
+            "type": "string",
+            "enum": ["stable", "draft", "deprecated"]
+        },
+        "path_prefix": {
+            "type": "string",
+            "description": "Optional builtin://nenjo/ path prefix"
+        },
+        "related_to": {
+            "type": "string",
+            "description": "Optional target doc id that returned docs must relate to"
+        },
+        "edge_type": {
+            "type": "string",
+            "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"],
+            "description": "Optional canonical relationship type used with related_to"
+        }
+    });
+
+    if let Some(extra) = extra_properties
+        && let Some(map) = properties.as_object_mut()
+        && let Some(extra_map) = extra.as_object()
+    {
+        for (key, value) in extra_map {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required
+    })
+}
+
+const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent", "get_agent_prompt"];
 const AGENT_WRITE_TOOLS: &[&str] = &[
     "create_agent",
     "update_agent",
@@ -285,6 +587,15 @@ const PROJECT_WRITE_TOOLS: &[&str] = &[
     "create_project_document",
     "update_project_document_content",
     "delete_project_document",
+];
+const PROJECT_KNOWLEDGE_READ_TOOLS: &[&str] = &[
+    "list_project_docs",
+    "read_project_doc",
+    "search_project_docs",
+    "search_project_doc_paths",
+    "list_project_doc_tree",
+    "read_project_doc_manifest",
+    "list_project_doc_neighbors",
 ];
 const PROJECT_NATIVE_READ_TOOLS: &[&str] = &[
     "list_project_tasks",
@@ -389,6 +700,23 @@ fn add_project_rest_tools(
     }
 }
 
+fn add_project_knowledge_tools(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    backend: PlatformProjectToolsBackend,
+    policy: &ManifestAccessPolicy,
+) {
+    if policy.can_read_resource(ScopeResource::Projects) {
+        for tool_name in PROJECT_KNOWLEDGE_READ_TOOLS {
+            if tools.iter().any(|existing| existing.name() == *tool_name) {
+                continue;
+            }
+            if let Some(tool) = ProjectKnowledgeTool::from_name(tool_name, backend.clone()) {
+                tools.push(Arc::new(tool));
+            }
+        }
+    }
+}
+
 fn add_named_project_rest_tools(
     tools: &mut Vec<Arc<dyn Tool>>,
     backend: PlatformProjectToolsBackend,
@@ -441,6 +769,130 @@ struct PlatformProjectToolsBackend {
     client: Arc<PlatformManifestClient>,
     manifest_store: Arc<LocalManifestStore>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProjectKnowledgeToolKind {
+    ListDocs,
+    ReadDoc,
+    SearchDocs,
+    SearchDocPaths,
+    ListTree,
+    ReadManifest,
+    Neighbors,
+}
+
+struct ProjectKnowledgeTool {
+    kind: ProjectKnowledgeToolKind,
+    backend: PlatformProjectToolsBackend,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProjectDocFilterArgs {
+    #[serde(default)]
+    tags: Vec<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    status: Option<String>,
+    path_prefix: Option<String>,
+    related_to: Option<String>,
+    edge_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocListArgs {
+    project_id: Uuid,
+    #[serde(flatten)]
+    filter: ProjectDocFilterArgs,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocLookupArgs {
+    project_id: Uuid,
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocSearchArgs {
+    project_id: Uuid,
+    query: String,
+    #[serde(flatten)]
+    filter: ProjectDocFilterArgs,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocTreeArgs {
+    project_id: Uuid,
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDocNeighborArgs {
+    project_id: Uuid,
+    #[serde(alias = "id", alias = "path")]
+    id_or_path: String,
+    edge_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocManifest {
+    id: String,
+    project_id: String,
+    virtual_path: String,
+    filename: String,
+    path: Option<String>,
+    title: String,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    kind: String,
+    authority: String,
+    status: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocRead {
+    manifest: ProjectDocManifest,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocSearchHit {
+    id: String,
+    virtual_path: String,
+    title: String,
+    summary: String,
+    kind: String,
+    authority: String,
+    tags: Vec<String>,
+    score: usize,
+    matched: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocTree {
+    root_uri: String,
+    entries: Vec<ProjectDocTreeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocTreeEntry {
+    path: String,
+    title: String,
+    kind: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocNeighbor {
+    edge_type: String,
+    direction: String,
+    target: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -617,6 +1069,656 @@ impl PlatformProjectToolsBackend {
         }
 
         Ok(serde_json::Value::Object(body))
+    }
+}
+
+impl ProjectKnowledgeTool {
+    fn from_name(name: &str, backend: PlatformProjectToolsBackend) -> Option<Self> {
+        let kind = match name {
+            "list_project_docs" => ProjectKnowledgeToolKind::ListDocs,
+            "read_project_doc" => ProjectKnowledgeToolKind::ReadDoc,
+            "search_project_docs" => ProjectKnowledgeToolKind::SearchDocs,
+            "search_project_doc_paths" => ProjectKnowledgeToolKind::SearchDocPaths,
+            "list_project_doc_tree" => ProjectKnowledgeToolKind::ListTree,
+            "read_project_doc_manifest" => ProjectKnowledgeToolKind::ReadManifest,
+            "list_project_doc_neighbors" => ProjectKnowledgeToolKind::Neighbors,
+            _ => return None,
+        };
+        Some(Self { kind, backend })
+    }
+}
+
+#[async_trait]
+impl Tool for ProjectKnowledgeTool {
+    fn name(&self) -> &str {
+        match self.kind {
+            ProjectKnowledgeToolKind::ListDocs => "list_project_docs",
+            ProjectKnowledgeToolKind::ReadDoc => "read_project_doc",
+            ProjectKnowledgeToolKind::SearchDocs => "search_project_docs",
+            ProjectKnowledgeToolKind::SearchDocPaths => "search_project_doc_paths",
+            ProjectKnowledgeToolKind::ListTree => "list_project_doc_tree",
+            ProjectKnowledgeToolKind::ReadManifest => "read_project_doc_manifest",
+            ProjectKnowledgeToolKind::Neighbors => "list_project_doc_neighbors",
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self.kind {
+            ProjectKnowledgeToolKind::ListDocs => {
+                "List compact metadata for one project's documents using builtin-style filters."
+            }
+            ProjectKnowledgeToolKind::ReadDoc => {
+                "Read a full project document by id, relative path, or project://<project_id>/ path."
+            }
+            ProjectKnowledgeToolKind::SearchDocs => {
+                "Search one project's documents and return matching metadata plus full text content."
+            }
+            ProjectKnowledgeToolKind::SearchDocPaths => {
+                "Search one project's documents and return compact path metadata without full bodies."
+            }
+            ProjectKnowledgeToolKind::ListTree => {
+                "List the virtual filesystem tree for one project's documents."
+            }
+            ProjectKnowledgeToolKind::ReadManifest => {
+                "Read compact manifest metadata for one project document by id or path."
+            }
+            ProjectKnowledgeToolKind::Neighbors => {
+                "List graph neighbors for one project document by id or path."
+            }
+        }
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        match self.kind {
+            ProjectKnowledgeToolKind::ListDocs => project_doc_filter_schema(None, &["project_id"]),
+            ProjectKnowledgeToolKind::ReadDoc | ProjectKnowledgeToolKind::ReadManifest => json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target project id"
+                    },
+                    "id_or_path": {
+                        "type": "string",
+                        "description": "Project doc id, relative path, filename, or project://<project_id>/... path"
+                    }
+                },
+                "required": ["project_id", "id_or_path"],
+                "additionalProperties": false
+            }),
+            ProjectKnowledgeToolKind::SearchDocs | ProjectKnowledgeToolKind::SearchDocPaths => {
+                project_doc_filter_schema(
+                    Some(json!({
+                        "query": {
+                            "type": "string",
+                            "description": "Search query, path, title, tag, summary, or body text"
+                        }
+                    })),
+                    &["project_id", "query"],
+                )
+            }
+            ProjectKnowledgeToolKind::ListTree => json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target project id"
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": "Optional relative path or project://<project_id>/ prefix"
+                    }
+                },
+                "required": ["project_id"],
+                "additionalProperties": false
+            }),
+            ProjectKnowledgeToolKind::Neighbors => json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target project id"
+                    },
+                    "id_or_path": {
+                        "type": "string",
+                        "description": "Project doc id, relative path, filename, or project://<project_id>/... path"
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "description": "Optional relationship type filter such as references or depends_on"
+                    }
+                },
+                "required": ["project_id", "id_or_path"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let output = match self.kind {
+            ProjectKnowledgeToolKind::ListDocs => {
+                let args: ProjectDocListArgs =
+                    serde_json::from_value(args).context("invalid list_project_docs args")?;
+                let docs = self
+                    .backend
+                    .client
+                    .list_project_document_metadata(args.project_id)
+                    .await?;
+                let docs = filter_project_docs(docs, &args.filter);
+                serde_json::to_value(
+                    docs.iter()
+                        .map(project_doc_manifest)
+                        .collect::<Vec<ProjectDocManifest>>(),
+                )?
+            }
+            ProjectKnowledgeToolKind::ReadDoc => {
+                let args: ProjectDocLookupArgs =
+                    serde_json::from_value(args).context("invalid read_project_doc args")?;
+                let manifest =
+                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
+                let content = self
+                    .backend
+                    .client
+                    .get_project_document_content(args.project_id, manifest.id)
+                    .await?
+                    .description;
+                serde_json::to_value(ProjectDocRead {
+                    manifest: project_doc_manifest(&manifest),
+                    content,
+                })?
+            }
+            ProjectKnowledgeToolKind::SearchDocs => {
+                let args: ProjectDocSearchArgs =
+                    serde_json::from_value(args).context("invalid search_project_docs args")?;
+                let docs = self
+                    .backend
+                    .client
+                    .list_project_document_metadata(args.project_id)
+                    .await?;
+                let hits = search_project_docs(
+                    &self.backend,
+                    args.project_id,
+                    docs,
+                    &args.query,
+                    &args.filter,
+                    true,
+                )
+                .await?;
+                serde_json::to_value(hits)?
+            }
+            ProjectKnowledgeToolKind::SearchDocPaths => {
+                let args: ProjectDocSearchArgs = serde_json::from_value(args)
+                    .context("invalid search_project_doc_paths args")?;
+                let docs = self
+                    .backend
+                    .client
+                    .list_project_document_metadata(args.project_id)
+                    .await?;
+                let hits = search_project_docs(
+                    &self.backend,
+                    args.project_id,
+                    docs,
+                    &args.query,
+                    &args.filter,
+                    false,
+                )
+                .await?;
+                serde_json::to_value(hits)?
+            }
+            ProjectKnowledgeToolKind::ListTree => {
+                let args: ProjectDocTreeArgs =
+                    serde_json::from_value(args).context("invalid list_project_doc_tree args")?;
+                let docs = self
+                    .backend
+                    .client
+                    .list_project_document_metadata(args.project_id)
+                    .await?;
+                serde_json::to_value(project_doc_tree(
+                    args.project_id,
+                    &docs,
+                    args.prefix.as_deref(),
+                ))?
+            }
+            ProjectKnowledgeToolKind::ReadManifest => {
+                let args: ProjectDocLookupArgs = serde_json::from_value(args)
+                    .context("invalid read_project_doc_manifest args")?;
+                let manifest =
+                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
+                serde_json::to_value(project_doc_manifest(&manifest))?
+            }
+            ProjectKnowledgeToolKind::Neighbors => {
+                let args: ProjectDocNeighborArgs = serde_json::from_value(args)
+                    .context("invalid list_project_doc_neighbors args")?;
+                let manifest =
+                    lookup_project_doc(&self.backend, args.project_id, &args.id_or_path).await?;
+                let neighbors = project_doc_neighbors(
+                    &self.backend,
+                    args.project_id,
+                    &manifest,
+                    args.edge_type.as_deref(),
+                )
+                .await?;
+                serde_json::to_value(neighbors)?
+            }
+        };
+
+        Ok(ToolResult {
+            success: true,
+            output: serde_json::to_string_pretty(&output)?,
+            error: None,
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+}
+
+fn project_doc_filter_schema(
+    extra_properties: Option<serde_json::Value>,
+    required: &[&str],
+) -> serde_json::Value {
+    let mut properties = json!({
+        "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Target project id"
+        },
+        "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional tags that all returned docs must have"
+        },
+        "kind": {
+            "type": "string",
+            "description": "Optional kind filter"
+        },
+        "authority": {
+            "type": "string",
+            "description": "Optional authority filter"
+        },
+        "status": {
+            "type": "string",
+            "description": "Optional status filter"
+        },
+        "path_prefix": {
+            "type": "string",
+            "description": "Optional relative path or project://<project_id>/ prefix"
+        },
+        "related_to": {
+            "type": "string",
+            "description": "Optional related doc id or path that returned docs must connect to"
+        },
+        "edge_type": {
+            "type": "string",
+            "description": "Optional relationship type used with related_to"
+        }
+    });
+
+    if let Some(extra) = extra_properties
+        && let Some(map) = properties.as_object_mut()
+        && let Some(extra_map) = extra.as_object()
+    {
+        for (key, value) in extra_map {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+fn project_doc_virtual_path(project_id: Uuid, doc: &ProjectDocumentMetadata) -> String {
+    let mut path = doc.path.clone().unwrap_or_default();
+    path = path.trim_matches('/').to_string();
+    if path.is_empty() {
+        format!("project://{project_id}/{}", doc.filename)
+    } else {
+        format!("project://{project_id}/{path}/{}", doc.filename)
+    }
+}
+
+fn project_doc_relative_path(doc: &ProjectDocumentMetadata) -> String {
+    let mut path = doc.path.clone().unwrap_or_default();
+    path = path.trim_matches('/').to_string();
+    if path.is_empty() {
+        doc.filename.clone()
+    } else {
+        format!("{path}/{}", doc.filename)
+    }
+}
+
+fn normalize_project_lookup(project_id: Uuid, value: &str) -> String {
+    let trimmed = value.trim().trim_matches('/').to_string();
+    if let Some(stripped) = trimmed.strip_prefix(&format!("project://{project_id}/")) {
+        stripped.trim_matches('/').to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn project_doc_manifest(doc: &ProjectDocumentMetadata) -> ProjectDocManifest {
+    ProjectDocManifest {
+        id: doc.id.to_string(),
+        project_id: doc.project_id.to_string(),
+        virtual_path: project_doc_virtual_path(doc.project_id, doc),
+        filename: doc.filename.clone(),
+        path: doc.path.clone(),
+        title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
+        summary: doc
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("Project document {}", project_doc_relative_path(doc))),
+        description: None,
+        kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
+        authority: doc.authority.clone(),
+        status: doc.status.clone().unwrap_or_else(|| "stable".to_string()),
+        tags: doc.tags.clone(),
+    }
+}
+
+fn filter_project_docs(
+    docs: Vec<ProjectDocumentMetadata>,
+    filter: &ProjectDocFilterArgs,
+) -> Vec<ProjectDocumentMetadata> {
+    docs.into_iter()
+        .filter(|doc| {
+            if !filter.tags.is_empty()
+                && !filter.tags.iter().all(|tag| {
+                    doc.tags
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(tag))
+                })
+            {
+                return false;
+            }
+            if let Some(kind) = filter.kind.as_ref()
+                && doc
+                    .kind
+                    .as_deref()
+                    .map(|value| !value.eq_ignore_ascii_case(kind))
+                    .unwrap_or(true)
+            {
+                return false;
+            }
+            if let Some(authority) = filter.authority.as_ref()
+                && !doc.authority.eq_ignore_ascii_case(authority)
+            {
+                return false;
+            }
+            if let Some(status) = filter.status.as_ref()
+                && doc
+                    .status
+                    .as_deref()
+                    .map(|value| !value.eq_ignore_ascii_case(status))
+                    .unwrap_or(true)
+            {
+                return false;
+            }
+            if let Some(path_prefix) = filter.path_prefix.as_ref() {
+                let prefix = path_prefix.trim_matches('/');
+                let relative = project_doc_relative_path(doc);
+                let virtual_path = project_doc_virtual_path(doc.project_id, doc);
+                if !relative.starts_with(prefix) && !virtual_path.starts_with(path_prefix) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+async fn lookup_project_doc(
+    backend: &PlatformProjectToolsBackend,
+    project_id: Uuid,
+    id_or_path: &str,
+) -> Result<ProjectDocumentMetadata> {
+    let docs = backend
+        .client
+        .list_project_document_metadata(project_id)
+        .await?;
+    let normalized = normalize_project_lookup(project_id, id_or_path);
+    docs.into_iter()
+        .find(|doc| {
+            doc.id.to_string() == id_or_path
+                || project_doc_virtual_path(project_id, doc) == id_or_path
+                || project_doc_relative_path(doc) == normalized
+                || doc.filename == normalized
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "unknown project doc '{}'; use a document id, relative path, filename, or project://{project_id}/ path",
+                id_or_path
+            )
+        })
+}
+
+fn project_doc_score(
+    doc: &ProjectDocumentMetadata,
+    query: &str,
+    content: Option<&str>,
+) -> Option<(usize, Vec<String>)> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut score = 0;
+    let mut matched = Vec::new();
+    let relative_path = project_doc_relative_path(doc).to_lowercase();
+    let virtual_path = project_doc_virtual_path(doc.project_id, doc).to_lowercase();
+    let title = doc
+        .title
+        .clone()
+        .unwrap_or_else(|| doc.filename.clone())
+        .to_lowercase();
+    let summary = doc.summary.clone().unwrap_or_default().to_lowercase();
+    let kind = doc.kind.clone().unwrap_or_default().to_lowercase();
+    let authority = doc.authority.to_lowercase();
+    let status = doc.status.clone().unwrap_or_default().to_lowercase();
+    let tags = doc
+        .tags
+        .iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
+
+    if relative_path.contains(&query) || virtual_path.contains(&query) {
+        score += 6;
+        matched.push("path".to_string());
+    }
+    if title.contains(&query) {
+        score += 5;
+        matched.push("title".to_string());
+    }
+    if summary.contains(&query) {
+        score += 4;
+        matched.push("summary".to_string());
+    }
+    if kind.contains(&query) {
+        score += 3;
+        matched.push("kind".to_string());
+    }
+    if authority.contains(&query) {
+        score += 2;
+        matched.push("authority".to_string());
+    }
+    if status.contains(&query) {
+        score += 2;
+        matched.push("status".to_string());
+    }
+    if tags.iter().any(|tag| tag.contains(&query)) {
+        score += 4;
+        matched.push("tags".to_string());
+    }
+    if let Some(content) = content
+        && content.to_lowercase().contains(&query)
+    {
+        score += 3;
+        matched.push("content".to_string());
+    }
+
+    if score == 0 {
+        None
+    } else {
+        matched.sort();
+        matched.dedup();
+        Some((score, matched))
+    }
+}
+
+async fn search_project_docs(
+    backend: &PlatformProjectToolsBackend,
+    project_id: Uuid,
+    docs: Vec<ProjectDocumentMetadata>,
+    query: &str,
+    filter: &ProjectDocFilterArgs,
+    include_content: bool,
+) -> Result<Vec<ProjectDocSearchHit>> {
+    let docs = filter_project_docs(docs, filter);
+    let related_doc = if let Some(related_to) = filter.related_to.as_ref() {
+        Some(lookup_project_doc(backend, project_id, related_to).await?)
+    } else {
+        None
+    };
+    let mut hits = Vec::new();
+
+    for doc in docs {
+        if let Some(related) = related_doc.as_ref() {
+            let neighbors =
+                project_doc_neighbors(backend, project_id, related, filter.edge_type.as_deref())
+                    .await?;
+            let target = project_doc_virtual_path(doc.project_id, &doc);
+            if !neighbors.iter().any(|neighbor| neighbor.target == target) {
+                continue;
+            }
+        }
+
+        let content = backend
+            .client
+            .get_project_document_content(project_id, doc.id)
+            .await
+            .ok()
+            .map(|document| document.description);
+
+        let Some((score, matched)) = project_doc_score(&doc, query, content.as_deref()) else {
+            continue;
+        };
+
+        hits.push(ProjectDocSearchHit {
+            id: doc.id.to_string(),
+            virtual_path: project_doc_virtual_path(doc.project_id, &doc),
+            title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
+            summary: doc
+                .summary
+                .clone()
+                .unwrap_or_else(|| format!("Project document {}", project_doc_relative_path(&doc))),
+            kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
+            authority: doc.authority.clone(),
+            tags: doc.tags.clone(),
+            score,
+            matched,
+            content: if include_content { content } else { None },
+        });
+    }
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.virtual_path.cmp(&right.virtual_path))
+    });
+
+    Ok(hits)
+}
+
+fn project_doc_tree(
+    project_id: Uuid,
+    docs: &[ProjectDocumentMetadata],
+    prefix: Option<&str>,
+) -> ProjectDocTree {
+    let normalized_prefix = prefix.map(|value| normalize_project_lookup(project_id, value));
+    let mut entries = docs
+        .iter()
+        .filter_map(|doc| {
+            let relative = project_doc_relative_path(doc);
+            if let Some(prefix) = normalized_prefix.as_ref()
+                && !relative.starts_with(prefix)
+            {
+                return None;
+            }
+            Some(ProjectDocTreeEntry {
+                path: project_doc_virtual_path(project_id, doc),
+                title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
+                kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
+                tags: doc.tags.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    ProjectDocTree {
+        root_uri: format!("project://{project_id}/"),
+        entries,
+    }
+}
+
+async fn project_doc_neighbors(
+    backend: &PlatformProjectToolsBackend,
+    project_id: Uuid,
+    doc: &ProjectDocumentMetadata,
+    edge_type: Option<&str>,
+) -> Result<Vec<ProjectDocNeighbor>> {
+    let edges = backend
+        .client
+        .list_project_document_edges(project_id, doc.id)
+        .await?;
+    let docs = backend
+        .client
+        .list_project_document_metadata(project_id)
+        .await?;
+    let mut docs_by_id = HashMap::new();
+    for entry in docs {
+        docs_by_id.insert(entry.id, entry);
+    }
+
+    let mut neighbors = Vec::new();
+    for edge in edges {
+        if let Some(filter_edge_type) = edge_type
+            && !edge.edge_type.eq_ignore_ascii_case(filter_edge_type)
+        {
+            continue;
+        }
+        if edge.source_document_id == doc.id {
+            if let Some(target) = docs_by_id.get(&edge.target_document_id) {
+                neighbors.push(project_doc_neighbor_from_edge(&edge, "outgoing", target));
+            }
+        } else if edge.target_document_id == doc.id
+            && let Some(source) = docs_by_id.get(&edge.source_document_id)
+        {
+            neighbors.push(project_doc_neighbor_from_edge(&edge, "incoming", source));
+        }
+    }
+
+    neighbors.sort_by(|left, right| left.target.cmp(&right.target));
+    Ok(neighbors)
+}
+
+fn project_doc_neighbor_from_edge(
+    edge: &ProjectDocumentEdge,
+    direction: &str,
+    target: &ProjectDocumentMetadata,
+) -> ProjectDocNeighbor {
+    ProjectDocNeighbor {
+        edge_type: edge.edge_type.clone(),
+        direction: direction.to_string(),
+        target: project_doc_virtual_path(target.project_id, target),
+        note: edge.note.clone(),
     }
 }
 
@@ -1450,6 +2552,10 @@ mod tests {
         assert!(names.iter().any(|name| name == "update_agent"));
         assert!(names.iter().any(|name| name == "list_projects"));
         assert!(names.iter().any(|name| name == "get_project"));
+        assert!(names.iter().any(|name| name == "list_project_docs"));
+        assert!(names.iter().any(|name| name == "read_project_doc"));
+        assert!(names.iter().any(|name| name == "search_project_docs"));
+        assert!(names.iter().any(|name| name == "search_project_doc_paths"));
         assert!(names.iter().any(|name| name == "list_project_tasks"));
         assert!(names.iter().any(|name| name == "get_project_task"));
         assert!(
@@ -1458,12 +2564,44 @@ mod tests {
                 .any(|name| name == "list_project_execution_runs")
         );
         assert!(names.iter().any(|name| name == "get_project_execution_run"));
+        assert!(names.iter().any(|name| name == "list_builtin_docs"));
+        assert!(names.iter().any(|name| name == "read_builtin_doc"));
+        assert!(names.iter().any(|name| name == "search_builtin_docs"));
+        assert!(names.iter().any(|name| name == "search_builtin_doc_paths"));
+        assert!(names.iter().any(|name| name == "list_builtin_doc_tree"));
+        assert!(names.iter().any(|name| name == "read_builtin_doc_manifest"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "list_builtin_doc_neighbors")
+        );
         assert!(!names.iter().any(|name| name == "create_project_task"));
         assert!(!names.iter().any(|name| name == "start_project_execution"));
 
         assert!(!names.iter().any(|name| name == "platform_read"));
         assert!(!names.iter().any(|name| name == "platform_write"));
         assert!(!names.iter().any(|name| name == "platform_graph"));
+    }
+
+    #[tokio::test]
+    async fn builtin_knowledge_tools_read_embedded_docs() {
+        let read_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::ReadDoc);
+        let result = read_tool
+            .execute(json!({"id_or_path": "nenjo.guide.routines"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("builtin://nenjo/guide/routines.md"));
+        assert!(result.output.contains("# Routines"));
+
+        let search_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::SearchDocPaths);
+        let result = search_tool
+            .execute(json!({"query": "permission"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("nenjo.guide.scopes"));
+        assert!(!result.output.contains("# Platform Scopes"));
     }
 
     #[tokio::test]

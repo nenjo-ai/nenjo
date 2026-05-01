@@ -1025,6 +1025,7 @@ fn direct_task_turn_event_to_response(
             encrypted_payload: None,
             agent,
         }),
+        nenjo::TurnEvent::TranscriptMessage { .. } => None,
         nenjo::TurnEvent::MessageCompacted { .. } => None,
         nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
     }

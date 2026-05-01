@@ -19,6 +19,8 @@
 //! ```
 
 pub mod agents;
+#[path = "builtin/mod.rs"]
+pub mod builtin_knowledge;
 pub mod client;
 pub mod config;
 pub mod context;

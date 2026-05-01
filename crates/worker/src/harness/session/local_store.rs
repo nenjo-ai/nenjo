@@ -114,7 +114,7 @@ mod tests {
             parent_session_id: None,
             version,
             refs: SessionRefs {
-                history_ref: Some("history/test.json".to_string()),
+                transcript_ref: Some("transcripts/test.jsonl".to_string()),
                 trace_ref: None,
                 checkpoint_ref: None,
                 memory_namespace: Some("agent_test_core".to_string()),
@@ -142,8 +142,8 @@ mod tests {
         assert_eq!(loaded.session_id, session_id);
         assert_eq!(loaded.version, 1);
         assert_eq!(
-            loaded.refs.history_ref.as_deref(),
-            Some("history/test.json")
+            loaded.refs.transcript_ref.as_deref(),
+            Some("transcripts/test.jsonl")
         );
 
         let listed = store.list().unwrap();

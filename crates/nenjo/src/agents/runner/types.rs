@@ -48,6 +48,8 @@ pub enum TurnEvent {
         messages_before: usize,
         messages_after: usize,
     },
+    /// A transcript message was durably relevant to future turns.
+    TranscriptMessage { message: ChatMessage },
     /// Execution was paused by the caller.
     Paused,
     /// Execution was resumed after a pause.

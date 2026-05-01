@@ -5,6 +5,7 @@ use chrono::Utc;
 use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
     ExecutionPhase, SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionSummary,
+    SessionTranscriptEventPayload, TranscriptState,
 };
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
@@ -17,22 +18,12 @@ use super::event_bridge::{
     turn_event_to_stream_event,
 };
 use crate::harness::execution_trace::ExecutionTraceRecorder;
+use crate::harness::preview::summarize_preview;
 use crate::harness::session::{
-    apply_session_memory_scope, lease_for_status, read_json_blob, transition_session_state,
-    update_session_status,
+    append_transcript_event, apply_session_memory_scope, chat_message_to_transcript,
+    lease_for_status, load_chat_history, transition_session_state, update_session_status,
 };
 use crate::harness::{ActiveExecution, CommandContext, ExecutionKind};
-
-fn chat_history_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
-    if project_slug.is_empty() {
-        format!("chat_history/{}_{}.json", agent_name, session_id)
-    } else {
-        format!(
-            "{project_slug}/chat_history/{}_{}.json",
-            agent_name, session_id
-        )
-    }
-}
 
 fn chat_trace_ref(project_slug: &str, agent_name: &str, session_id: Uuid) -> String {
     if project_slug.is_empty() {
@@ -80,7 +71,6 @@ struct ChatSessionUpsert {
     agent_id: Uuid,
     project_slug: String,
     agent_name: String,
-    history_ref: String,
     trace_ref: String,
     checkpoint_ref: String,
     status: SessionStatus,
@@ -93,7 +83,6 @@ fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
         agent_id,
         project_slug,
         agent_name,
-        history_ref,
         trace_ref,
         checkpoint_ref,
         status,
@@ -131,7 +120,6 @@ fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
     record.agent_id = Some(agent_id);
     record.version += 1;
     record.updated_at = now;
-    record.refs.history_ref = Some(history_ref);
     record.refs.trace_ref = Some(trace_ref);
     record.refs.checkpoint_ref = Some(checkpoint_ref);
     record.refs.memory_namespace = Some(chat_memory_namespace(&agent_name, &project_slug));
@@ -206,11 +194,11 @@ pub async fn handle_chat(
     let manifest = provider.manifest();
     let effective_project_id = project_id.unwrap_or(Uuid::nil());
     let effective_content = content.to_string();
+    let turn_id = Uuid::new_v4();
 
     let agent_id = agent_id.context("No agent_id provided for chat")?;
     let slug = project_slug(manifest, effective_project_id);
     let aname = agent_name(manifest, agent_id);
-    let history_ref = chat_history_ref(&slug, &aname, session_id);
     let trace_ref = chat_trace_ref(&slug, &aname, session_id);
     let checkpoint_ref = chat_checkpoint_ref(&slug, &aname, session_id);
     upsert_chat_session(
@@ -221,7 +209,6 @@ pub async fn handle_chat(
             agent_id,
             project_slug: slug.clone(),
             agent_name: aname.clone(),
-            history_ref: history_ref.clone(),
             trace_ref,
             checkpoint_ref: checkpoint_ref.clone(),
             status: SessionStatus::Active,
@@ -236,9 +223,18 @@ pub async fn handle_chat(
         Some(ExecutionPhase::CallingModel),
         SessionStatus::Active,
     );
-
     let history: Vec<ChatMessage> =
-        read_json_blob(&*ctx.session_content, &history_ref)?.unwrap_or_default();
+        load_chat_history(&*ctx.session_store, &*ctx.session_content, session_id)?;
+    let _ = append_transcript_event(
+        &*ctx.session_store,
+        &*ctx.session_content,
+        session_id,
+        Some(turn_id),
+        SessionTranscriptEventPayload::ChatMessage {
+            message: chat_message_to_transcript(&ChatMessage::user(effective_content.clone())),
+        },
+        TranscriptState::MidTurn,
+    )?;
     let mut trace_recorder = ExecutionTraceRecorder::for_chat_with_store(
         &ctx.config.workspace_dir,
         &slug,
@@ -388,6 +384,117 @@ pub async fn handle_chat(
                             "Chat handler received turn event"
                         );
                         let _ = trace_recorder.record(&ev);
+                        match &ev {
+                            nenjo::TurnEvent::TranscriptMessage { message } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::ChatMessage {
+                                        message: chat_message_to_transcript(message),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::ToolCallStart {
+                                parent_tool_name,
+                                calls,
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::ToolCalls {
+                                        parent_tool_name: parent_tool_name.clone(),
+                                        tool_names: calls
+                                            .iter()
+                                            .map(|call| call.tool_name.clone())
+                                            .collect(),
+                                        text_preview: calls.first().and_then(|call| {
+                                            call.text_preview.as_ref().map(ToOwned::to_owned)
+                                        }),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::ToolCallEnd {
+                                parent_tool_name,
+                                tool_name,
+                                result,
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::ToolResult {
+                                        parent_tool_name: parent_tool_name.clone(),
+                                        tool_name: tool_name.clone(),
+                                        success: result.success,
+                                        output_preview: summarize_preview(&result.output),
+                                        error_preview: result
+                                            .error
+                                            .as_deref()
+                                            .and_then(summarize_preview),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::AbilityStarted {
+                                ability_tool_name,
+                                ability_name,
+                                task_input,
+                                ..
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::AbilityStarted {
+                                        ability_tool_name: ability_tool_name.clone(),
+                                        ability_name: ability_name.clone(),
+                                        task_input: task_input.clone(),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::AbilityCompleted {
+                                ability_tool_name,
+                                ability_name,
+                                success,
+                                final_output,
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::AbilityCompleted {
+                                        ability_tool_name: ability_tool_name.clone(),
+                                        ability_name: ability_name.clone(),
+                                        success: *success,
+                                        final_output: final_output.clone(),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::Done { output } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::TurnCompleted {
+                                        final_output: output.text.clone(),
+                                    },
+                                    TranscriptState::Clean,
+                                )?;
+                            }
+                            _ => {}
+                        }
                         if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
                             trace!(
                                 stream_event = %summarize_stream_event(&se),
@@ -432,29 +539,8 @@ pub async fn handle_chat(
     // Unregister
     ctx.executions.remove(&session_id);
 
-    // Persist history if not cancelled.
-    // Note: we don't send Done here — the turn loop already emits
-    // TurnEvent::Done which gets forwarded to the frontend via the
-    // event bridge in the streaming loop above.
     if !cancel.is_cancelled() {
-        let output = handle.output().await?;
-        if !output.messages.is_empty() {
-            // Strip system/developer messages — they are rebuilt each turn from
-            // the agent's prompt config. Only persist the conversation turns.
-            let conversation: Vec<_> = output
-                .messages
-                .iter()
-                .filter(|m| m.role != "system" && m.role != "developer")
-                .cloned()
-                .collect();
-            if !conversation.is_empty() {
-                let _ = crate::harness::session::write_json_blob(
-                    &*ctx.session_content,
-                    &history_ref,
-                    &conversation,
-                );
-            }
-        }
+        let _ = handle.output().await?;
         let _ = transition_session_state(
             &*ctx.session_store,
             &*ctx.session_content,
@@ -510,14 +596,13 @@ pub async fn handle_chat_cancel(
 /// Delete a chat session's local history.
 pub async fn handle_session_delete(
     ctx: &CommandContext,
-    project_id: Uuid,
-    agent_id: Uuid,
+    _project_id: Uuid,
+    _agent_id: Uuid,
     session_id: Uuid,
 ) -> Result<()> {
-    let provider = ctx.provider();
     if let Ok(Some(record)) = ctx.session_store.get(session_id) {
-        if let Some(history_ref) = record.refs.history_ref.as_deref() {
-            let _ = ctx.session_content.delete_blob(history_ref);
+        if let Some(transcript_ref) = record.refs.transcript_ref.as_deref() {
+            let _ = ctx.session_content.delete_blob(transcript_ref);
         }
         if let Some(trace_ref) = record.refs.trace_ref.as_deref() {
             let _ = ctx.session_content.delete_blob(trace_ref);
@@ -525,12 +610,6 @@ pub async fn handle_session_delete(
         if let Some(checkpoint_ref) = record.refs.checkpoint_ref.as_deref() {
             let _ = ctx.session_content.delete_blob(checkpoint_ref);
         }
-    } else {
-        let manifest = provider.manifest();
-        let slug = project_slug(manifest, project_id);
-        let name = agent_name(manifest, agent_id);
-        let history_ref = chat_history_ref(&slug, &name, session_id);
-        let _ = ctx.session_content.delete_blob(&history_ref);
     }
     let _ = ctx.session_store.delete(session_id);
     Ok(())

@@ -267,8 +267,22 @@ pub struct ResourcesContext {
 pub struct DocumentContext {
     #[serde(rename = "@name")]
     pub name: String,
+    #[serde(rename = "@title", skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(rename = "@path", skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(rename = "@kind", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(rename = "@authority", skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
     #[serde(rename = "@size")]
     pub size: String,
+    #[serde(rename = "@status", skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Project documents listing.

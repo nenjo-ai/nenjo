@@ -314,6 +314,43 @@ pub(crate) struct ProjectDocumentContentResponse {
     pub(crate) encrypted_payload: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectDocumentMetadata {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub filename: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub authority: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProjectDocumentEdge {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub source_document_id: Uuid,
+    pub target_document_id: Uuid,
+    pub edge_type: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ProjectTaskListQuery {
     pub project_id: Uuid,
@@ -873,6 +910,24 @@ impl PlatformManifestClient {
         &self,
         project_id: Uuid,
     ) -> Result<Vec<ProjectDocumentSummary>> {
+        let documents = self.list_project_document_metadata(project_id).await?;
+        Ok(documents
+            .into_iter()
+            .map(|document| ProjectDocumentSummary {
+                id: document.id,
+                project_id: document.project_id,
+                filename: document.filename,
+                content_type: document.content_type,
+                size_bytes: document.size_bytes,
+                updated_at: document.updated_at,
+            })
+            .collect())
+    }
+
+    pub async fn list_project_document_metadata(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<ProjectDocumentMetadata>> {
         let response = self
             .http
             .get(format!(
@@ -888,7 +943,7 @@ impl PlatformManifestClient {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode project documents"),
+                .context("failed to decode project document metadata"),
             status => bail!("project document list failed with status {status}"),
         }
     }
@@ -898,7 +953,25 @@ impl PlatformManifestClient {
         project_id: Uuid,
         document_id: Uuid,
     ) -> Result<Option<ProjectDocumentSummary>> {
-        let documents = self.list_project_documents(project_id).await?;
+        let document = self
+            .get_project_document_metadata(project_id, document_id)
+            .await?;
+        Ok(document.map(|document| ProjectDocumentSummary {
+            id: document.id,
+            project_id: document.project_id,
+            filename: document.filename,
+            content_type: document.content_type,
+            size_bytes: document.size_bytes,
+            updated_at: document.updated_at,
+        }))
+    }
+
+    pub async fn get_project_document_metadata(
+        &self,
+        project_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<Option<ProjectDocumentMetadata>> {
+        let documents = self.list_project_document_metadata(project_id).await?;
         Ok(documents
             .into_iter()
             .find(|document| document.id == document_id))
@@ -937,7 +1010,7 @@ impl PlatformManifestClient {
         document_id: Uuid,
     ) -> Result<ProjectDocumentContentDocument> {
         let metadata = self
-            .get_project_document(project_id, document_id)
+            .get_project_document_metadata(project_id, document_id)
             .await?
             .ok_or_else(|| anyhow!("project document not found: {document_id}"))?;
         let payload = self
@@ -957,6 +1030,31 @@ impl PlatformManifestClient {
             },
             description: content,
         })
+    }
+
+    pub async fn list_project_document_edges(
+        &self,
+        project_id: Uuid,
+        document_id: Uuid,
+    ) -> Result<Vec<ProjectDocumentEdge>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/api/v1/projects/{project_id}/documents/{document_id}/edges",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to list edges for project document {document_id}"))?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode project document edges"),
+            status => bail!("project document edge list failed with status {status}"),
+        }
     }
 
     pub async fn create_project_file_document(

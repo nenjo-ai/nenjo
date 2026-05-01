@@ -238,6 +238,14 @@ impl AgentInstance {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ManifestEntry {
     filename: String,
+    path: Option<String>,
+    title: Option<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    summary: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
     size_bytes: i64,
 }
 
@@ -272,7 +280,14 @@ pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &st
             .iter()
             .map(|doc| crate::context::DocumentContext {
                 name: doc.filename.clone(),
+                title: doc.title.clone(),
+                path: doc.path.clone(),
+                kind: doc.kind.clone(),
+                authority: doc.authority.clone(),
                 size: format_size(doc.size_bytes),
+                status: doc.status.clone(),
+                tags: doc.tags.clone(),
+                summary: doc.summary.clone(),
             })
             .collect(),
     };

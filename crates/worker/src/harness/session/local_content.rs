@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::{fs::OpenOptions, io::Write};
 
 use anyhow::{Result, bail};
 use nenjo_sessions::SessionContentStore;
@@ -57,6 +58,17 @@ impl SessionContentStore for FileSessionContentStore {
         Ok(())
     }
 
+    fn append_blob(&self, key: &str, body: &[u8]) -> Result<()> {
+        let path = self.path_for_key(key)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(body)?;
+        file.flush()?;
+        Ok(())
+    }
+
     fn delete_blob(&self, key: &str) -> Result<()> {
         let path = self.path_for_key(key)?;
         match std::fs::remove_file(path) {
@@ -82,6 +94,10 @@ mod tests {
         store.write_blob(key, b"{\"ok\":true}").unwrap();
         let bytes = store.read_blob(key).unwrap().expect("blob should exist");
         assert_eq!(bytes, b"{\"ok\":true}");
+
+        store.append_blob(key, b"\n{\"appended\":true}").unwrap();
+        let bytes = store.read_blob(key).unwrap().expect("blob should exist");
+        assert_eq!(bytes, b"{\"ok\":true}\n{\"appended\":true}");
 
         store.delete_blob(key).unwrap();
         assert!(store.read_blob(key).unwrap().is_none());

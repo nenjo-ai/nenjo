@@ -17,6 +17,20 @@ use crate::manifest::{
 pub struct DocumentSyncMeta {
     pub id: Uuid,
     pub filename: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub authority: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub content_type: String,
     pub size_bytes: i64,
     pub updated_at: String,

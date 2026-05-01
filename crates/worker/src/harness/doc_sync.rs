@@ -34,6 +34,13 @@ pub struct DocumentManifest {
 pub struct ManifestEntry {
     pub id: Uuid,
     pub filename: String,
+    pub path: Option<String>,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    pub authority: Option<String>,
+    pub summary: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
     pub size_bytes: i64,
     pub updated_at: String,
 }
@@ -286,6 +293,13 @@ pub async fn sync_project(
             .map(|d| ManifestEntry {
                 id: d.id,
                 filename: d.filename.clone(),
+                path: d.path.clone(),
+                title: d.title.clone(),
+                kind: d.kind.clone(),
+                authority: d.authority.clone(),
+                summary: d.summary.clone(),
+                status: d.status.clone(),
+                tags: d.tags.clone(),
                 size_bytes: d.size_bytes,
                 updated_at: d.updated_at.clone(),
             })
@@ -396,6 +410,13 @@ pub async fn sync_document(
     let entry = ManifestEntry {
         id: document_id,
         filename: response.filename,
+        path: metadata.and_then(|doc| doc.path.clone()),
+        title: metadata.and_then(|doc| doc.title.clone()),
+        kind: metadata.and_then(|doc| doc.kind.clone()),
+        authority: metadata.and_then(|doc| doc.authority.clone()),
+        summary: metadata.and_then(|doc| doc.summary.clone()),
+        status: metadata.and_then(|doc| doc.status.clone()),
+        tags: metadata.map(|doc| doc.tags.clone()).unwrap_or_default(),
         size_bytes: metadata
             .map(|doc| doc.size_bytes)
             .unwrap_or(response.size_bytes),
@@ -447,6 +468,13 @@ mod tests {
         DocumentSyncMeta {
             id: Uuid::from_u128(id),
             filename: filename.into(),
+            path: None,
+            title: None,
+            kind: None,
+            authority: None,
+            summary: None,
+            status: None,
+            tags: Vec::new(),
             content_type: "text/markdown".into(),
             size_bytes: size,
             updated_at: updated.into(),
@@ -457,6 +485,13 @@ mod tests {
         ManifestEntry {
             id: Uuid::from_u128(id),
             filename: filename.into(),
+            path: None,
+            title: None,
+            kind: None,
+            authority: None,
+            summary: None,
+            status: None,
+            tags: Vec::new(),
             size_bytes: size,
             updated_at: updated.into(),
         }

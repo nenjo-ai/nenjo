@@ -15,6 +15,7 @@ pub use store::SessionStore;
 pub use types::{
     CronScheduleState, DomainState, ExecutionPhase, HeartbeatScheduleState, RunCompletion,
     ScheduleState, SessionCheckpoint, SessionKind, SessionLease, SessionRecord, SessionRefs,
-    SessionStatus, SessionSummary, WorktreeSnapshot,
+    SessionStatus, SessionSummary, SessionTranscriptChatMessage, SessionTranscriptEvent,
+    SessionTranscriptEventPayload, TranscriptState, WorktreeSnapshot,
 };
 pub use updates::SessionUpdate;

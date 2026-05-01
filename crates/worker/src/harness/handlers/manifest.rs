@@ -132,6 +132,13 @@ pub async fn handle_manifest_changed(
                         metadata.map(|meta| crate::harness::api_client::DocumentSyncMeta {
                             id: meta.id,
                             filename: meta.filename,
+                            path: None,
+                            title: None,
+                            kind: None,
+                            authority: None,
+                            summary: None,
+                            status: None,
+                            tags: Vec::new(),
                             content_type: "application/octet-stream".to_string(),
                             size_bytes: meta.size_bytes,
                             updated_at: meta.updated_at.to_rfc3339(),

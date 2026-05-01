@@ -239,7 +239,13 @@ pub async fn run(
                         agent = agent_name,
                         model, "Tool call response: {assistant_content}"
                     );
-                    messages.push(ChatMessage::assistant(assistant_content.to_string()));
+                    let assistant_message = ChatMessage::assistant(assistant_content.to_string());
+                    messages.push(assistant_message.clone());
+                    let _ = events_tx.as_ref().map(|tx| {
+                        tx.send(TurnEvent::TranscriptMessage {
+                            message: assistant_message,
+                        })
+                    });
 
                     // Execute tool calls — parallel when the model returns multiple
                     // calls in one response (it understands ordering dependencies),
@@ -347,7 +353,13 @@ pub async fn run(
                             "tool_call_id": tool_call.id,
                             "content": raw_content,
                         });
-                        messages.push(ChatMessage::tool(tool_content.to_string()));
+                        let tool_message = ChatMessage::tool(tool_content.to_string());
+                        messages.push(tool_message.clone());
+                        let _ = events_tx.as_ref().map(|tx| {
+                            tx.send(TurnEvent::TranscriptMessage {
+                                message: tool_message,
+                            })
+                        });
                     }
 
                     // Terminal tool: stop the loop. The verdict is already recorded
@@ -386,7 +398,14 @@ pub async fn run(
                     continue;
                 }
 
-                final_text = text;
+                final_text = text.clone();
+                let assistant_message = ChatMessage::assistant(text);
+                messages.push(assistant_message.clone());
+                let _ = events_tx.as_ref().map(|tx| {
+                    tx.send(TurnEvent::TranscriptMessage {
+                        message: assistant_message,
+                    })
+                });
                 break;
             }
 

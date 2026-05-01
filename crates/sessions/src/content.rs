@@ -7,5 +7,7 @@ pub trait SessionContentStore: Send + Sync {
 
     fn write_blob(&self, key: &str, body: &[u8]) -> Result<()>;
 
+    fn append_blob(&self, key: &str, body: &[u8]) -> Result<()>;
+
     fn delete_blob(&self, key: &str) -> Result<()>;
 }

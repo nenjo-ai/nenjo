@@ -163,7 +163,12 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                 },
                 TemplateVarDef {
                     name: "project.documents",
-                    description: "XML listing of project documents available for retrieval",
+                    description: "Compact XML index of project knowledge documents with metadata and summaries",
+                    group: "Project",
+                },
+                TemplateVarDef {
+                    name: "builtin.documents",
+                    description: "Compact XML listing of embedded Nenjo builtin docs available at builtin://nenjo/",
                     group: "Project",
                 },
             ],
