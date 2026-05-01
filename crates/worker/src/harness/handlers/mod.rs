@@ -72,16 +72,12 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             routine_id,
             assigned_agent_id,
             execution_run_id,
-            title,
-            description,
-            slug,
-            acceptance_criteria,
-            tags,
-            status,
-            priority,
-            task_type,
-            complexity,
+            payload,
+            ..
         } => {
+            let payload = payload.ok_or_else(|| {
+                anyhow::anyhow!("task.execute missing payload after command decode")
+            })?;
             task::handle_task_execute(
                 &ctx,
                 task_id,
@@ -89,15 +85,15 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 routine_id,
                 assigned_agent_id,
                 execution_run_id,
-                &title,
-                description.as_deref().unwrap_or(""),
-                slug.as_deref(),
-                acceptance_criteria.as_deref(),
-                &tags,
-                status.as_deref(),
-                priority.as_deref(),
-                task_type.as_deref(),
-                complexity.as_deref(),
+                &payload.title,
+                payload.description.as_deref().unwrap_or(""),
+                payload.slug.as_deref(),
+                payload.acceptance_criteria.as_deref(),
+                &payload.tags,
+                payload.status.as_deref(),
+                payload.priority.as_deref(),
+                payload.task_type.as_deref(),
+                payload.complexity.as_deref(),
             )
             .await
         }

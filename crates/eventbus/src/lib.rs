@@ -35,10 +35,12 @@
 //! ```
 
 mod bus;
+mod codec;
 mod error;
 mod transport;
 
 pub use bus::{EventBus, EventBusBuilder, ReceivedCommand, ReceivedResponse};
+pub use codec::{CodecError, CodecResult, EventCodec, NoopEventCodec};
 pub use error::EventBusError;
 pub use transport::{AckHandle, Message, NoOpAck, Transport};
 

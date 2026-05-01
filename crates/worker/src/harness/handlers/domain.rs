@@ -123,6 +123,8 @@ pub async fn handle_domain_enter(
                 session_id: None,
                 payload: StreamEvent::Error {
                     message: format!("Domain expansion failed: {e}"),
+                    payload: None,
+                    encrypted_payload: None,
                 },
             });
         }

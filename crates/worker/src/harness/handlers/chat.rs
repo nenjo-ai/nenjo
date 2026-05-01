@@ -6,7 +6,7 @@ use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
     ExecutionPhase, SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionSummary,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use nenjo_events::{Response, StreamEvent};
@@ -220,6 +220,7 @@ pub async fn handle_chat(
     let provider = ctx.provider();
     let manifest = provider.manifest();
     let effective_project_id = project_id.unwrap_or(Uuid::nil());
+    let effective_content = content.to_string();
 
     let resolved_agent_id =
         agent_id.or_else(|| manifest.agents.iter().find(|a| a.is_system).map(|a| a.id));
@@ -333,6 +334,8 @@ pub async fn handle_chat(
                     session_id: Some(session_id),
                     payload: StreamEvent::Error {
                         message: "Domain session expired. Please re-enter the domain.".into(),
+                        payload: None,
+                        encrypted_payload: None,
                     },
                 });
                 return Ok(());
@@ -349,7 +352,9 @@ pub async fn handle_chat(
     };
 
     // Start streaming execution
-    let mut handle = runner.chat_with_history_stream(content, history).await?;
+    let mut handle = runner
+        .chat_with_history_stream(&effective_content, history)
+        .await?;
 
     // Register the execution handle for cancellation (keyed by session_id).
     // We need to move the handle into the registry but also keep streaming from it.
@@ -386,19 +391,10 @@ pub async fn handle_chat(
                         );
                         let _ = trace_recorder.record(&ev);
                         if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
-                            let se = match se {
-                                StreamEvent::Done { final_output, .. } => StreamEvent::Done {
-                                    final_output,
-                                    project_id,
-                                    agent_id: Some(agent_id),
-                                    session_id: Some(session_id),
-                                },
-                                other => other,
-                            };
-                            debug!(
+                            trace!(
                                 stream_event = %summarize_stream_event(&se),
                                 agent = %aname,
-                                "Chat handler sending stream event"
+                                "Chat handler produced stream event"
                             );
                             let _ = ctx.response_tx.send(Response::AgentResponse {
                                 session_id: Some(session_id),
@@ -424,7 +420,11 @@ pub async fn handle_chat(
                 );
                 let _ = ctx.response_tx.send(Response::AgentResponse {
                     session_id: Some(session_id),
-                    payload: StreamEvent::Error { message: "Cancelled".to_string() },
+                    payload: StreamEvent::Error {
+                        message: "Cancelled".to_string(),
+                        payload: None,
+                        encrypted_payload: None,
+                    },
                 });
                 break;
             }

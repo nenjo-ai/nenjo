@@ -139,6 +139,29 @@ impl NenjoClient {
         self.fetch_resource(&format!("/api/v1/lambdas/{id}")).await
     }
 
+    pub async fn register_worker_enrollment(
+        &self,
+        request: &WorkerEnrollmentRequest,
+    ) -> Result<WorkerEnrollmentStatusResponse> {
+        let url = format!("{}/api/v1/workers/enrollment", self.base_url);
+        let resp = self.post_json(&url, request).await?;
+
+        match resp.status() {
+            StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
+                resp.json().await.map_err(ApiClientError::Http)
+            }
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    pub async fn fetch_worker_enrollment_status(
+        &self,
+        api_key_id: Uuid,
+    ) -> Result<Option<WorkerEnrollmentStatusResponse>> {
+        self.fetch_resource(&format!("/api/v1/workers/enrollment/{api_key_id}"))
+            .await
+    }
+
     pub async fn fetch_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
         self.fetch_resource(&format!("/api/v1/domains/{id}")).await
     }
@@ -242,6 +265,20 @@ impl NenjoClient {
         self.http
             .get(url)
             .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(ApiClientError::Http)
+    }
+
+    async fn post_json<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(url)
+            .headers(self.auth_headers())
+            .json(body)
             .send()
             .await
             .map_err(ApiClientError::Http)

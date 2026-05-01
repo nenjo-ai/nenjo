@@ -3,7 +3,7 @@
 use nenjo::manifest::Manifest;
 use nenjo_events::{Response, StepAgent, StreamEvent, ToolCall};
 use serde::Serialize;
-use tracing::debug;
+use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::harness::preview::{summarize_preview, truncate_preview};
@@ -15,18 +15,13 @@ use crate::harness::preview::{summarize_preview, truncate_preview};
 #[derive(Serialize)]
 pub struct StepCompletedData {
     pub passed: bool,
-    pub output_preview: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct StepFailedData {
-    pub error: String,
+    pub error: &'static str,
 }
 
 #[derive(Serialize)]
@@ -55,7 +50,10 @@ pub fn turn_event_to_stream_event(
             agent: agent_name.to_string(),
             ability: ability_name.clone(),
             ability_tool_name: ability_tool_name.clone(),
-            task_preview: task_input.clone(),
+            payload: Some(serde_json::json!({
+                "task_preview": task_input,
+            })),
+            encrypted_payload: None,
         }),
         nenjo::TurnEvent::ToolCallStart {
             parent_tool_name,
@@ -69,8 +67,11 @@ pub fn turn_event_to_stream_event(
                 })
                 .collect(),
             agent_name: agent_name.to_string(),
-            text_preview: calls.first().and_then(|c| c.text_preview.clone()),
             parent_tool_name: parent_tool_name.clone(),
+            payload: Some(serde_json::json!({
+                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
+            })),
+            encrypted_payload: None,
         }),
         nenjo::TurnEvent::ToolCallEnd {
             parent_tool_name,
@@ -79,9 +80,12 @@ pub fn turn_event_to_stream_event(
         } => Some(StreamEvent::ToolCompleted {
             tool_name: tool_name.clone(),
             success: result.success,
-            output_preview: summarize_preview(&result.output),
-            error_preview: result.error.as_deref().and_then(summarize_preview),
             parent_tool_name: parent_tool_name.clone(),
+            payload: Some(serde_json::json!({
+                "output_preview": summarize_preview(&result.output),
+                "error_preview": result.error.as_deref().and_then(summarize_preview),
+            })),
+            encrypted_payload: None,
         }),
         nenjo::TurnEvent::AbilityCompleted {
             ability_tool_name,
@@ -93,7 +97,10 @@ pub fn turn_event_to_stream_event(
             ability: ability_name.clone(),
             ability_tool_name: ability_tool_name.clone(),
             success: *success,
-            result_preview: final_output.clone(),
+            payload: Some(serde_json::json!({
+                "result_preview": final_output,
+            })),
+            encrypted_payload: None,
         }),
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
@@ -105,7 +112,8 @@ pub fn turn_event_to_stream_event(
         nenjo::TurnEvent::Paused => Some(StreamEvent::Paused),
         nenjo::TurnEvent::Resumed => Some(StreamEvent::Resumed),
         nenjo::TurnEvent::Done { output } => Some(StreamEvent::Done {
-            final_output: output.text.clone(),
+            payload: Some(serde_json::Value::String(output.text.clone())),
+            encrypted_payload: None,
             project_id: None,
             agent_id: None,
             session_id: None,
@@ -113,11 +121,11 @@ pub fn turn_event_to_stream_event(
     };
 
     if let Some(ref stream_event) = stream_event {
-        debug!(
+        trace!(
             turn_event = %summarize_turn_event(event),
             stream_event = %summarize_stream_event(stream_event),
             agent = agent_name,
-            "Bridged turn event to stream event"
+            "Bridged turn event to pre-codec stream event"
         );
     } else {
         debug!(
@@ -199,7 +207,6 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
 
 pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
     match event {
-        StreamEvent::Token { text } => format!("token(len={})", text.len()),
         StreamEvent::ToolCalls {
             tool_calls,
             agent_name,
@@ -222,22 +229,20 @@ pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
             agent,
             ability,
             ability_tool_name,
-            task_preview,
-        } => format!(
-            "ability_activated(agent={agent}, ability={ability}, tool={ability_tool_name}, task_len={})",
-            task_preview.len()
-        ),
+            ..
+        } => {
+            format!("ability_activated(agent={agent}, ability={ability}, tool={ability_tool_name})")
+        }
         StreamEvent::AbilityCompleted {
             agent,
             ability,
             ability_tool_name,
             success,
-            result_preview,
+            ..
         } => format!(
-            "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success}, result_len={})",
-            result_preview.len()
+            "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success})"
         ),
-        StreamEvent::Error { message } => {
+        StreamEvent::Error { message, .. } => {
             format!(
                 "error(message={:?}, len={})",
                 truncate_preview(message, 80),
@@ -245,13 +250,15 @@ pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
             )
         }
         StreamEvent::Done {
-            final_output,
+            payload,
+            encrypted_payload,
             project_id,
             agent_id,
             session_id,
         } => format!(
-            "done(output_len={}, project_id={}, agent_id={}, session_id={})",
-            final_output.len(),
+            "done(payload={}, encrypted={}, project_id={}, agent_id={}, session_id={})",
+            if payload.is_some() { "yes" } else { "no" },
+            encrypted_payload.is_some(),
             project_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_string()),
@@ -328,6 +335,8 @@ pub fn routine_event_to_response(
                 step_type: step_type.clone(),
                 duration_ms: None,
                 data: serde_json::Value::Null,
+                payload: None,
+                encrypted_payload: None,
                 agent,
             })
         }
@@ -343,19 +352,8 @@ pub fn routine_event_to_response(
 
             let data = StepCompletedData {
                 passed: result.passed,
-                output_preview,
                 input_tokens: result.input_tokens,
                 output_tokens: result.output_tokens,
-                verdict: result
-                    .data
-                    .get("verdict")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                reasoning: result
-                    .data
-                    .get("reasoning")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
             };
 
             Some(Response::TaskStepEvent {
@@ -366,6 +364,20 @@ pub fn routine_event_to_response(
                 step_type: String::new(),
                 duration_ms: Some(*duration_ms),
                 data: serde_json::to_value(data).unwrap_or_default(),
+                payload: Some(serde_json::json!({
+                    "output_preview": output_preview,
+                    "verdict": result
+                        .data
+                        .get("verdict")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    "reasoning": result
+                        .data
+                        .get("reasoning")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                })),
+                encrypted_payload: None,
                 agent: resolve_agent(manifest, current_agent_id),
             })
         }
@@ -379,9 +391,11 @@ pub fn routine_event_to_response(
             step_type: String::new(),
             duration_ms: Some(*duration_ms),
             data: serde_json::to_value(StepFailedData {
-                error: error.clone(),
+                error: "Step failed",
             })
             .unwrap_or_default(),
+            payload: Some(serde_json::json!({ "error": error })),
+            encrypted_payload: None,
             agent: None,
         }),
         nenjo::RoutineEvent::AgentEvent { event, .. } => routine_agent_event_to_response(
@@ -400,6 +414,8 @@ pub fn routine_event_to_response(
             step_type: "cron".to_string(),
             duration_ms: None,
             data: serde_json::to_value(CronCycleStartedData { cycle: *cycle }).unwrap_or_default(),
+            payload: None,
+            encrypted_payload: None,
             agent: None,
         }),
         nenjo::RoutineEvent::CronCycleCompleted { cycle, result, .. } => {
@@ -415,6 +431,8 @@ pub fn routine_event_to_response(
                     passed: result.passed,
                 })
                 .unwrap_or_default(),
+                payload: None,
+                encrypted_payload: None,
                 agent: None,
             })
         }
@@ -447,8 +465,13 @@ fn routine_agent_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
-                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
             }),
+            payload: calls.first().and_then(|c| {
+                c.text_preview
+                    .as_ref()
+                    .map(|preview| serde_json::json!({ "text_preview": preview }))
+            }),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::ToolCallEnd {
@@ -470,9 +493,17 @@ fn routine_agent_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "success": result.success,
+                "error": if result.error.is_some() {
+                    serde_json::Value::String("Tool execution failed".to_string())
+                } else {
+                    serde_json::Value::Null
+                },
+            }),
+            payload: Some(serde_json::json!({
                 "output_preview": summarize_preview(&result.output),
                 "error": result.error,
-            }),
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::AbilityStarted {
@@ -486,9 +517,11 @@ fn routine_agent_event_to_response(
             step_name: ability_name.clone(),
             step_type: "ability".to_string(),
             duration_ms: None,
-            data: serde_json::json!({
+            data: serde_json::Value::Null,
+            payload: Some(serde_json::json!({
                 "task_preview": task_input,
-            }),
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::AbilityCompleted {
@@ -509,8 +542,11 @@ fn routine_agent_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "success": success,
-                "output_preview": summarize_preview(final_output),
             }),
+            payload: Some(serde_json::json!({
+                "output_preview": final_output,
+            })),
+            encrypted_payload: None,
             agent,
         }),
         // The enclosing routine step already emits StepCompleted/StepFailed.

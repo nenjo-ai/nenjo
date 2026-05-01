@@ -18,7 +18,6 @@ use nenjo_events::{Response, StepAgent};
 
 use super::event_bridge::{agent_name, project_slug, routine_event_to_response};
 use crate::harness::execution_trace::{ExecutionTraceRecorder, TaskTraceLocation};
-use crate::harness::preview::summarize_preview;
 use crate::harness::session::{
     apply_session_memory_scope, lease_for_status, read_json_blob, session_memory_namespace,
     transition_session_state, update_checkpoint_with_worktree,
@@ -270,8 +269,11 @@ pub async fn handle_task_execute(
             data: serde_json::json!({
                 "branch": wt.branch,
                 "target_branch": wt.target_branch,
-                "work_dir": wt.work_dir,
             }),
+            payload: Some(serde_json::json!({
+                "work_dir": wt.work_dir,
+            })),
+            encrypted_payload: None,
             agent: None,
         });
         Some(wt)
@@ -284,6 +286,8 @@ pub async fn handle_task_execute(
             step_type: "worktree".to_string(),
             duration_ms: None,
             data: serde_json::Value::Null,
+            payload: None,
+            encrypted_payload: None,
             agent: None,
         });
 
@@ -307,8 +311,11 @@ pub async fn handle_task_execute(
                     data: serde_json::json!({
                         "branch": wt.branch,
                         "target_branch": wt.target_branch,
-                        "work_dir": wt.work_dir,
                     }),
+                    payload: Some(serde_json::json!({
+                        "work_dir": wt.work_dir,
+                    })),
+                    encrypted_payload: None,
                     agent: None,
                 });
 
@@ -326,7 +333,9 @@ pub async fn handle_task_execute(
                     step_name: "worktree_setup".to_string(),
                     step_type: "worktree".to_string(),
                     duration_ms: Some(duration_ms),
-                    data: serde_json::json!({ "error": &error_msg }),
+                    data: serde_json::json!({ "error": "Worktree setup failed" }),
+                    payload: Some(serde_json::json!({ "error": &error_msg })),
+                    encrypted_payload: None,
                     agent: None,
                 });
 
@@ -483,6 +492,8 @@ pub async fn handle_task_execute(
             step_type: "worktree".to_string(),
             duration_ms: None,
             data: serde_json::Value::Null,
+            payload: None,
+            encrypted_payload: None,
             agent: None,
         });
 
@@ -504,6 +515,8 @@ pub async fn handle_task_execute(
                     step_type: "worktree".to_string(),
                     duration_ms: Some(duration_ms),
                     data: serde_json::json!({ "branch": wt.branch }),
+                    payload: None,
+                    encrypted_payload: None,
                     agent: None,
                 });
             }
@@ -516,7 +529,9 @@ pub async fn handle_task_execute(
                     step_name: "worktree_cleanup".to_string(),
                     step_type: "worktree".to_string(),
                     duration_ms: Some(duration_ms),
-                    data: serde_json::json!({ "error": e.to_string() }),
+                    data: serde_json::json!({ "error": "Worktree cleanup failed" }),
+                    payload: Some(serde_json::json!({ "error": e.to_string() })),
+                    encrypted_payload: None,
                     agent: None,
                 });
             }
@@ -909,8 +924,13 @@ fn direct_task_turn_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
-                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
             }),
+            payload: calls.first().and_then(|c| {
+                c.text_preview
+                    .as_ref()
+                    .map(|preview| serde_json::json!({ "text_preview": preview }))
+            }),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::ToolCallEnd {
@@ -932,9 +952,17 @@ fn direct_task_turn_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "success": result.success,
-                "output_preview": summarize_preview(&result.output),
-                "error": result.error,
+                "error": if result.error.is_some() {
+                    serde_json::Value::String("Tool execution failed".to_string())
+                } else {
+                    serde_json::Value::Null
+                },
             }),
+            payload: Some(serde_json::json!({
+                "output_preview": result.output,
+                "error": result.error,
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::AbilityStarted {
@@ -948,9 +976,11 @@ fn direct_task_turn_event_to_response(
             step_name: ability_name.clone(),
             step_type: "ability".to_string(),
             duration_ms: None,
-            data: serde_json::json!({
+            data: serde_json::Value::Null,
+            payload: Some(serde_json::json!({
                 "task_preview": task_input,
-            }),
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::AbilityCompleted {
@@ -971,8 +1001,11 @@ fn direct_task_turn_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "success": success,
-                "output_preview": summarize_preview(final_output),
             }),
+            payload: Some(serde_json::json!({
+                "output_preview": final_output,
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::Done { output } => Some(Response::TaskStepEvent {
@@ -983,10 +1016,13 @@ fn direct_task_turn_event_to_response(
             step_type: "agent".to_string(),
             duration_ms: None,
             data: serde_json::json!({
-                "output_preview": summarize_preview(&output.text),
                 "input_tokens": output.input_tokens,
                 "output_tokens": output.output_tokens,
             }),
+            payload: Some(serde_json::json!({
+                "output_preview": output.text,
+            })),
+            encrypted_payload: None,
             agent,
         }),
         nenjo::TurnEvent::MessageCompacted { .. } => None,

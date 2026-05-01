@@ -9,18 +9,22 @@
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
+pub mod codec;
+pub mod crypto;
 pub mod harness;
 
 use std::time::Duration;
 
+use crate::codec::{EnrollmentBackedKeyProvider, SecureEnvelopeCodec};
+use crate::crypto::{EnrollmentStatus, WorkerAuthProvider};
 use crate::harness::Harness;
 use crate::harness::config::Config;
 use anyhow::Result;
 use clap::Args;
+use nenjo_eventbus::EventBus;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
 /// Maximum backoff between connection attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -177,7 +181,6 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     // Create harness — runs bootstrap, builds Provider, connects MCP servers
     let harness = Harness::new(config.clone()).await?;
 
-    // Build the NATS transport.
     // The api_key_id is the stable worker identifier used for presence tracking.
     let api_key_id = harness.provider().manifest().api_key_id.ok_or_else(|| {
         anyhow::anyhow!(
@@ -187,6 +190,30 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     })?;
     debug!(%api_key_id, "Using API key ID as stable worker identifier");
 
+    let auth_provider = WorkerAuthProvider::load_or_create(config.state_dir.join("crypto"))?;
+
+    auth_provider
+        .sync_worker_enrollment(harness.api().as_ref(), api_key_id)
+        .await?;
+
+    let identity = auth_provider.identity();
+    match auth_provider.enrollment_status().await {
+        EnrollmentStatus::Pending => {
+            info!(
+                worker_crypto_id = %identity.worker_id,
+                "Worker crypto identity loaded; enrollment pending"
+            );
+        }
+        EnrollmentStatus::Active => {
+            info!(
+                worker_crypto_id = %identity.worker_id,
+                "Worker crypto identity loaded; wrapped ACK available"
+            );
+        }
+    }
+
+    let user_id = harness.provider().manifest().user_id;
+
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
         .url(config.nats_url())
         .token(&config.api_key)
@@ -195,7 +222,20 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))?;
 
-    info!(nats_url = %config.nats_url(), "NATS transport connected");
+    let codec = SecureEnvelopeCodec::new(
+        EnrollmentBackedKeyProvider::new(auth_provider, harness.api(), api_key_id),
+        user_id,
+    );
+
+    let bus = EventBus::builder()
+        .transport(transport)
+        .user_id(user_id)
+        .with_codec(codec)
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
+
+    info!(nats_url = %config.nats_url(), "Eventbus transport connected");
 
     // Wire up the harness's own shutdown to the global one.
     let harness_shutdown = harness.shutdown_token();
@@ -206,7 +246,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     });
 
     // Run the event loop — blocks until the bus stream ends or shutdown.
-    let result = harness.run(transport).await;
+    let result = harness.run(bus).await;
 
     link.abort();
 

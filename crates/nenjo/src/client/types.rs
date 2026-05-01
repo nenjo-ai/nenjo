@@ -1,5 +1,6 @@
 //! Request and response types for the Nenjo backend API.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -90,4 +91,52 @@ pub struct ActiveAgentHeartbeatState {
     pub interval: String,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerEnrollmentRequest {
+    pub api_key_id: Uuid,
+    pub requested_at: DateTime<Utc>,
+    pub crypto_version: u32,
+    pub enc_public_key: String,
+    pub sign_public_key: String,
+    pub verification_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerCertificate {
+    pub account_id: Uuid,
+    pub api_key_id: Uuid,
+    pub issued_at: DateTime<Utc>,
+    pub enc_public_key: String,
+    pub sign_public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedAccountContentKey {
+    pub key_version: u32,
+    pub algorithm: String,
+    pub ephemeral_public_key: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerEnrollmentState {
+    Pending,
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerEnrollmentStatusResponse {
+    pub api_key_id: Uuid,
+    pub state: WorkerEnrollmentState,
+    #[serde(default)]
+    pub certificate: Option<WorkerCertificate>,
+    #[serde(default)]
+    pub wrapped_ack: Option<WrappedAccountContentKey>,
 }

@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use nenjo::Provider;
-use nenjo_eventbus::{EventBus, Transport};
+use nenjo_eventbus::ReceivedCommand;
 use nenjo_events::Response;
 
 pub mod agent;
@@ -465,6 +465,10 @@ impl Harness {
         self.provider.load_full()
     }
 
+    pub fn api(&self) -> Arc<NenjoClient> {
+        self.api.clone()
+    }
+
     /// Get a handle that can trigger shutdown from another task.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
@@ -487,9 +491,12 @@ impl Harness {
     }
 
     /// Run the event loop until shutdown.
-    pub async fn run<T: Transport + 'static>(&self, transport: T) -> Result<()> {
-        let user_id = self.provider.load().manifest().user_id;
-        let worker_id = transport.worker_id();
+    pub async fn run<T>(&self, mut bus: nenjo_eventbus::EventBus<T>) -> Result<()>
+    where
+        T: nenjo_eventbus::Transport + 'static,
+    {
+        let user_id = bus.user_id();
+        let worker_id = bus.transport().worker_id();
         let capabilities = self.resolved_capabilities();
 
         info!(
@@ -499,16 +506,9 @@ impl Harness {
             "Subscribing to eventbus"
         );
 
-        let mut bus = EventBus::builder()
-            .transport(transport)
-            .user_id(user_id)
-            .build()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
-
         let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<Response>();
         let (command_tx, mut command_rx) =
-            tokio::sync::mpsc::unbounded_channel::<nenjo_eventbus::ReceivedCommand>();
+            tokio::sync::mpsc::unbounded_channel::<ReceivedCommand>();
 
         // Send initial worker registration + heartbeat.
         let app_version = Some(env!("CARGO_PKG_VERSION").to_string());

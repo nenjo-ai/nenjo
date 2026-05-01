@@ -69,6 +69,12 @@ base64 = "0.22.1"
 rusqlite = "0.38.0"
 sqlite-vec = "0.1"
 sha2 = "0.10.9"
+hkdf = "0.12"
+aes-gcm = { version = "0.10", features = ["std"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 glob = "0.3"
 cron = "0.15"
 nanohtml2text = "0.1"

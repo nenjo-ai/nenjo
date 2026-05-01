@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Capability;
+use crate::{Capability, EncryptedPayload};
 
 // ---------------------------------------------------------------------------
 // Execution type
@@ -59,6 +59,10 @@ pub enum Response {
         duration_ms: Option<u64>,
         #[serde(default)]
         data: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
         /// Agent executing this step (if it's an agent step).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<StepAgent>,
@@ -314,17 +318,16 @@ impl std::fmt::Display for Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum StreamEvent {
-    /// An incremental LLM output token.
-    Token { text: String },
-
     /// One or more tool invocations.
     ToolCalls {
         tool_calls: Vec<ToolCall>,
         agent_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        text_preview: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 
     /// A single tool invocation completed.
@@ -332,11 +335,11 @@ pub enum StreamEvent {
         tool_name: String,
         success: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_preview: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error_preview: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 
     /// An ability was activated for an agent.
@@ -344,7 +347,10 @@ pub enum StreamEvent {
         agent: String,
         ability: String,
         ability_tool_name: String,
-        task_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 
     /// An ability finished executing.
@@ -353,15 +359,27 @@ pub enum StreamEvent {
         ability: String,
         ability_tool_name: String,
         success: bool,
-        result_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
     },
 
     /// An error occurred during execution.
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
 
     /// Execution completed successfully.
     Done {
-        final_output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,7 +419,6 @@ pub enum StreamEvent {
 impl std::fmt::Display for StreamEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Token { text } => write!(f, "token({}B)", text.len()),
             Self::ToolCalls {
                 tool_calls,
                 agent_name,
@@ -430,8 +447,21 @@ impl std::fmt::Display for StreamEvent {
                 f,
                 "ability_completed({ability}, agent={agent}, success={success})"
             ),
-            Self::Error { message } => write!(f, "error({message})"),
-            Self::Done { .. } => write!(f, "done"),
+            Self::Error { message, .. } => write!(f, "error({message})"),
+            Self::Done {
+                payload,
+                encrypted_payload,
+                ..
+            } => write!(
+                f,
+                "done(payload={}, encrypted={})",
+                if payload.is_some() { "yes" } else { "no" },
+                if encrypted_payload.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ),
             Self::DomainEntered {
                 session_id,
                 domain_name,
@@ -495,6 +525,8 @@ impl Response {
             step_type: step_type.into(),
             duration_ms,
             data,
+            payload: None,
+            encrypted_payload: None,
             agent: None,
         }
     }
@@ -528,21 +560,7 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Command, Envelope};
-
-    #[test]
-    fn stream_event_token_roundtrip() {
-        let event = StreamEvent::Token {
-            text: "hello".into(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains(r#""event_type":"Token""#));
-        let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            StreamEvent::Token { text } => assert_eq!(text, "hello"),
-            _ => panic!("wrong variant"),
-        }
-    }
+    use crate::{Command, EncryptedPayload, Envelope};
 
     #[test]
     fn stream_event_tool_calls_roundtrip() {
@@ -552,8 +570,17 @@ mod tests {
                 tool_args: r#"{"cmd":"ls"}"#.into(),
             }],
             agent_name: "coder".into(),
-            text_preview: Some("Running a quick command".into()),
             parent_tool_name: Some("ability/test.builder".into()),
+            payload: None,
+            encrypted_payload: Some(EncryptedPayload {
+                account_id: Uuid::nil(),
+                object_id: Uuid::new_v4(),
+                object_type: "tool_call_preview".into(),
+                algorithm: "aes-256-gcm".into(),
+                key_version: 1,
+                nonce: "bm9uY2U=".into(),
+                ciphertext: "Y2lwaGVydGV4dA==".into(),
+            }),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
@@ -561,15 +588,15 @@ mod tests {
             StreamEvent::ToolCalls {
                 tool_calls,
                 agent_name,
-                text_preview,
                 parent_tool_name,
+                encrypted_payload,
                 ..
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].tool_name, "shell");
                 assert_eq!(agent_name, "coder");
-                assert_eq!(text_preview.as_deref(), Some("Running a quick command"));
                 assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
+                assert!(encrypted_payload.is_some());
             }
             _ => panic!("wrong variant"),
         }
@@ -580,9 +607,17 @@ mod tests {
         let event = StreamEvent::ToolCompleted {
             tool_name: "shell".into(),
             success: false,
-            output_preview: None,
-            error_preview: Some("permission denied".into()),
             parent_tool_name: Some("ability/test.builder".into()),
+            payload: None,
+            encrypted_payload: Some(EncryptedPayload {
+                account_id: Uuid::nil(),
+                object_id: Uuid::new_v4(),
+                object_type: "tool_error_preview".into(),
+                algorithm: "aes-256-gcm".into(),
+                key_version: 1,
+                nonce: "bm9uY2U=".into(),
+                ciphertext: "Y2lwaGVydGV4dA==".into(),
+            }),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
@@ -590,14 +625,14 @@ mod tests {
             StreamEvent::ToolCompleted {
                 tool_name,
                 success,
-                error_preview,
                 parent_tool_name,
+                encrypted_payload,
                 ..
             } => {
                 assert_eq!(tool_name, "shell");
                 assert!(!success);
-                assert_eq!(error_preview.as_deref(), Some("permission denied"));
                 assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
+                assert!(encrypted_payload.is_some());
             }
             _ => panic!("wrong variant"),
         }
@@ -608,6 +643,7 @@ mod tests {
         let cmd = Command::ChatMessage {
             id: Some("msg-123".into()),
             content: "hello".into(),
+            encrypted_content: None,
             hidden: true,
             project_id: None,
             routine_id: None,
@@ -625,6 +661,45 @@ mod tests {
             } => {
                 assert_eq!(content, "hello");
                 assert!(hidden);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn command_chat_message_with_encrypted_content_roundtrip() {
+        let payload = EncryptedPayload {
+            account_id: Uuid::nil(),
+            object_id: Uuid::new_v4(),
+            object_type: "agent_prompt".into(),
+            algorithm: "aes-256-gcm".into(),
+            key_version: 1,
+            nonce: "bm9uY2U=".into(),
+            ciphertext: "Y2lwaGVydGV4dA==".into(),
+        };
+        let cmd = Command::ChatMessage {
+            id: None,
+            content: String::new(),
+            encrypted_content: Some(payload.clone()),
+            hidden: false,
+            project_id: None,
+            routine_id: None,
+            agent_id: None,
+            domain_session_id: None,
+            session_id: Uuid::nil(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""encrypted_content""#));
+
+        let parsed: Command = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Command::ChatMessage {
+                encrypted_content, ..
+            } => {
+                let parsed_payload = encrypted_content.expect("encrypted content should exist");
+                assert_eq!(parsed_payload.account_id, payload.account_id);
+                assert_eq!(parsed_payload.object_id, payload.object_id);
+                assert_eq!(parsed_payload.object_type, payload.object_type);
             }
             _ => panic!("wrong variant"),
         }
@@ -659,7 +734,8 @@ mod tests {
         let resp = Response::AgentResponse {
             session_id: Some(Uuid::nil()),
             payload: StreamEvent::Done {
-                final_output: "result".into(),
+                payload: Some(serde_json::Value::String("result".into())),
+                encrypted_payload: None,
                 project_id: None,
                 agent_id: None,
                 session_id: None,
@@ -673,9 +749,54 @@ mod tests {
                 session_id,
                 payload,
             } => match payload {
-                StreamEvent::Done { final_output, .. } => {
+                StreamEvent::Done {
+                    payload,
+                    encrypted_payload,
+                    ..
+                } => {
                     assert_eq!(session_id, Some(Uuid::nil()));
-                    assert_eq!(final_output, "result")
+                    assert_eq!(
+                        payload.as_ref().and_then(|value| value.as_str()),
+                        Some("result")
+                    );
+                    assert!(encrypted_payload.is_none());
+                }
+                _ => panic!("wrong stream event"),
+            },
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn response_agent_response_with_encrypted_done_roundtrip() {
+        let resp = Response::AgentResponse {
+            session_id: Some(Uuid::nil()),
+            payload: StreamEvent::Done {
+                payload: Some(serde_json::Value::String("compat".into())),
+                encrypted_payload: Some(EncryptedPayload {
+                    account_id: Uuid::nil(),
+                    object_id: Uuid::new_v4(),
+                    object_type: "agent_response".into(),
+                    algorithm: "aes-256-gcm".into(),
+                    key_version: 1,
+                    nonce: "bm9uY2U=".into(),
+                    ciphertext: "Y2lwaGVydGV4dA==".into(),
+                }),
+                project_id: None,
+                agent_id: None,
+                session_id: None,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""encrypted_payload""#));
+
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Response::AgentResponse { payload, .. } => match payload {
+                StreamEvent::Done {
+                    encrypted_payload, ..
+                } => {
+                    assert!(encrypted_payload.is_some());
                 }
                 _ => panic!("wrong stream event"),
             },
@@ -865,23 +986,29 @@ mod tests {
             execution_run_id: Uuid::nil(),
             routine_id: None,
             assigned_agent_id: None,
-            title: "Fix bug".into(),
-            description: Some("In auth module".into()),
-            slug: None,
-            acceptance_criteria: None,
-            tags: vec!["urgent".into()],
-            status: None,
-            priority: None,
-            task_type: None,
-            complexity: None,
+            payload: Some(crate::TaskExecuteContent {
+                title: "Fix bug".into(),
+                description: Some("In auth module".into()),
+                slug: None,
+                acceptance_criteria: None,
+                tags: vec!["urgent".into()],
+                status: None,
+                priority: None,
+                task_type: None,
+                complexity: None,
+            }),
+            encrypted_payload: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"task.execute""#));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::TaskExecute { title, tags, .. } => {
-                assert_eq!(title, "Fix bug");
-                assert_eq!(tags, vec!["urgent"]);
+            Command::TaskExecute {
+                payload: Some(payload),
+                ..
+            } => {
+                assert_eq!(payload.title, "Fix bug");
+                assert_eq!(payload.tags, vec!["urgent"]);
             }
             _ => panic!("wrong variant"),
         }

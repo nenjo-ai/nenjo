@@ -15,6 +15,10 @@ pub enum EventBusError {
     #[error("deserialization failed: {message}")]
     Deserialize { message: String, raw: String },
 
+    /// Failed to encode or decode an event through the configured codec.
+    #[error("codec error: {0}")]
+    Codec(String),
+
     /// The event bus has not been fully configured.
     #[error("builder error: {0}")]
     Builder(String),

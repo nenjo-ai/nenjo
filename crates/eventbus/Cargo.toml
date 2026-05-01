@@ -17,6 +17,7 @@ uuid = { version = "1.21", features = ["v4", "serde"] }
 tracing = "0.1"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["sync"] }
+async-trait = "0.1.89"
 
 # NATS transport (optional)
 async-nats = { version = "0.47", optional = true }
