@@ -19,18 +19,6 @@ fn uuid_list_schema(description: &str) -> serde_json::Value {
     })
 }
 
-fn platform_scope_list_schema(description: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "array",
-        "description": description,
-        "items": {
-            "type": "string",
-            "pattern": "^[a-z_]+:(read|write)$",
-            "description": "A full platform scope string such as `projects:read` or `agents:write`."
-        }
-    })
-}
-
 fn ability_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -50,7 +38,6 @@ fn ability_create_schema() -> serde_json::Value {
                 },
                 "additionalProperties": false
             },
-            "platform_scopes": platform_scope_list_schema("Platform scopes granted while this ability runs."),
             "mcp_server_ids": uuid_list_schema("MCP server ids available while this ability runs."),
         },
         "additionalProperties": false
@@ -62,10 +49,9 @@ fn ability_update_schema() -> serde_json::Value {
         "type": "object",
         "description": "Partial patch for an existing ability. Omit fields you do not want to change.",
         "properties": {
-            "display_name": { "type": ["string", "null"], "description": "Update or clear the display name. For normal metadata edits, send this field and omit platform_scopes and mcp_server_ids unless the user explicitly asked to change them." },
-            "description": { "type": ["string", "null"], "description": "Update or clear the description. For normal metadata edits, send this field and omit platform_scopes and mcp_server_ids unless the user explicitly asked to change them." },
-            "activation_condition": { "type": "string", "description": "Replace the activation condition text. Omit platform_scopes and mcp_server_ids unless the user explicitly asked to change them too." },
-            "platform_scopes": platform_scope_list_schema("Full replacement platform scope list for this ability. Use this field only when the user explicitly asks to change scopes. Never send this field for display_name, description, activation_condition, or prompt-only edits."),
+            "display_name": { "type": ["string", "null"], "description": "Update or clear the display name." },
+            "description": { "type": ["string", "null"], "description": "Update or clear the description." },
+            "activation_condition": { "type": "string", "description": "Replace the activation condition text." },
             "mcp_server_ids": uuid_list_schema("Full replacement MCP server assignment list for this ability. Use this field only when the user explicitly asks to change MCP assignments."),
         },
         "additionalProperties": false
@@ -121,7 +107,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_ability".to_string(),
-            description: "Create one ability using the provided top-level fields, including the required tool_name and prompt_config.developer_prompt that will run when the ability is invoked."
+            description: "Create one ability using the provided top-level fields, including the required tool_name and prompt_config.developer_prompt that will run when the ability is invoked. Ability platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -133,7 +119,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_ability".to_string(),
-            description: "Update one ability by id. For normal metadata edits, send only the requested metadata fields such as display_name or description. Use update_ability_prompt for prompt_config changes. Use platform_scopes only when the user explicitly asks to replace scopes, and use mcp_server_ids only when the user explicitly asks to replace MCP assignments. Valid platform scope strings are agents:read, agents:write, abilities:read, abilities:write, domains:read, domains:write, projects:read, projects:write, routines:read, routines:write, models:read, models:write, councils:read, councils:write, context_blocks:read, context_blocks:write, mcp_servers:read, mcp_servers:write, chat:read, and chat:write."
+            description: "Update one ability by id. For normal metadata edits, send only the requested metadata fields such as display_name or description. Use update_ability_prompt for prompt_config changes. Ability platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -143,7 +129,6 @@ pub fn ability_tools() -> Vec<ToolSpec> {
                     "display_name": ability_update_schema()["properties"]["display_name"].clone(),
                     "description": ability_update_schema()["properties"]["description"].clone(),
                     "activation_condition": ability_update_schema()["properties"]["activation_condition"].clone(),
-                    "platform_scopes": ability_update_schema()["properties"]["platform_scopes"].clone(),
                     "mcp_server_ids": ability_update_schema()["properties"]["mcp_server_ids"].clone()
                 },
                 "additionalProperties": false

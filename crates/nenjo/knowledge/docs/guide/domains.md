@@ -38,7 +38,7 @@ Do **not** use a Domain when:
 - `display_name` — Human-readable name shown to users
 - `description` — Explains what the domain does and when to use it
 - `command` — The user command that activates the domain (e.g., `/compliance-mode`)
-- `platform_scopes` — Additional or expanded permissions granted while active
+- `platform_scopes` — Additional or expanded permissions granted while active, assigned through an admin/platform-controlled path
 - `ability_ids` — Specialist abilities made available in this mode
 - `mcp_server_ids` — External tools available in this mode
 - `prompt_config.developer_prompt_addon` — Additional guidance appended to the agent’s developer prompt while the domain is active
@@ -79,7 +79,7 @@ When a user activates a domain:
 ## Pitfalls to Avoid
 
 - Using Domains for narrow capabilities that an agent could safely invoke itself
-- Granting overly broad scopes in a domain (still follow least privilege)
+- Treating domain scope assignment as an agent-side write; agents may recommend required scopes, but a user/admin must assign them
 - Forgetting to track domain sessions for audit purposes
 - Creating too many overlapping domains instead of composing them cleanly
 - Making domain activation too easy for high-risk operations
@@ -88,6 +88,7 @@ When a user activates a domain:
 
 - Use clear, memorable `command` names (e.g., `/compliance`, `/exec-mode`)
 - Document exactly what changes when the domain is activated
+- Tell the user/admin which platform scopes must be assigned through the controlled scope-management path
 - Keep domain sessions visible in the UI and logs
 - Prefer composition (multiple focused domains) over monolithic mega-domains
 - Always include a way for users to explicitly deactivate a domain

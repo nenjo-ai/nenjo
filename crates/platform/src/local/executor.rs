@@ -196,7 +196,7 @@ where
             color: params.data.color,
             model_id: params.data.model_id,
             domain_ids: Vec::new(),
-            platform_scopes: params.data.platform_scopes.unwrap_or_default(),
+            platform_scopes: Vec::new(),
             mcp_server_ids: Vec::new(),
             ability_ids: Vec::new(),
             prompt_locked: false,
@@ -228,9 +228,6 @@ where
         }
         if let Some(model_id) = params.data.model_id {
             agent.model_id = model_id;
-        }
-        if let Some(platform_scopes) = params.data.platform_scopes {
-            agent.platform_scopes = platform_scopes;
         }
         let resource = ManifestResource::Agent(agent.clone());
         self.writer.upsert_resource(&resource).await?;
@@ -324,7 +321,7 @@ where
             description: params.data.description,
             activation_condition: params.data.activation_condition,
             prompt_config: params.data.prompt_config,
-            platform_scopes: params.data.platform_scopes.unwrap_or_default(),
+            platform_scopes: Vec::new(),
             mcp_server_ids: params.data.mcp_server_ids.unwrap_or_default(),
         };
         self.writer
@@ -358,9 +355,6 @@ where
         }
         if let Some(activation_condition) = params.data.activation_condition {
             ability.activation_condition = activation_condition;
-        }
-        if let Some(platform_scopes) = params.data.platform_scopes {
-            ability.platform_scopes = platform_scopes;
         }
         if let Some(mcp_server_ids) = params.data.mcp_server_ids {
             ability.mcp_server_ids = mcp_server_ids;
@@ -451,7 +445,7 @@ where
             display_name: params.data.display_name,
             description: params.data.description,
             command: params.data.command,
-            platform_scopes: params.data.platform_scopes.unwrap_or_default(),
+            platform_scopes: Vec::new(),
             ability_ids: params.data.ability_ids.unwrap_or_default(),
             mcp_server_ids: params.data.mcp_server_ids.unwrap_or_default(),
             prompt_config: params.data.prompt_config.unwrap_or_default(),
@@ -485,9 +479,6 @@ where
         }
         if let Some(command) = params.data.command {
             domain.command = command;
-        }
-        if let Some(platform_scopes) = params.data.platform_scopes {
-            domain.platform_scopes = platform_scopes;
         }
         if let Some(ability_ids) = params.data.ability_ids {
             domain.ability_ids = ability_ids;
@@ -1532,7 +1523,6 @@ mod tests {
                     description: None,
                     color: None,
                     model_id: None,
-                    platform_scopes: None,
                 },
             })
             .await
@@ -1556,7 +1546,6 @@ mod tests {
                     description: Some(None),
                     color: Some(None),
                     model_id: Some(None),
-                    platform_scopes: None,
                 },
             })
             .await
@@ -1681,7 +1670,26 @@ mod tests {
             "create_agent",
             serde_json::json!({
                 "name": "writer",
-                "description": "Writes manifests.",
+                "description": "Writes manifests."
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["agent"]["name"], serde_json::json!("writer"));
+        assert_eq!(result["agent"]["platform_scopes"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn contract_dispatch_does_not_update_agent_platform_scopes() {
+        let TestContext { backend, agent, .. } = backend().await;
+
+        let result = ManifestMcpContract::dispatch(
+            &backend,
+            "update_agent",
+            serde_json::json!({
+                "id": agent.id,
+                "name": "writer",
                 "platform_scopes": ["agents:write"]
             }),
         )
@@ -1691,7 +1699,7 @@ mod tests {
         assert_eq!(result["agent"]["name"], serde_json::json!("writer"));
         assert_eq!(
             result["agent"]["platform_scopes"],
-            serde_json::json!(["agents:write"])
+            serde_json::json!(["agents:read"])
         );
     }
 
@@ -1744,7 +1752,6 @@ mod tests {
                     display_name: Some(Some("Reviewer".into())),
                     description: None,
                     activation_condition: None,
-                    platform_scopes: None,
                     mcp_server_ids: None,
                 },
             })
@@ -1757,6 +1764,34 @@ mod tests {
             Some("Helps review code".into())
         );
         assert_eq!(result.ability.platform_scopes, vec!["projects:read"]);
+    }
+
+    #[tokio::test]
+    async fn contract_dispatch_does_not_update_ability_platform_scopes() {
+        let TestContext {
+            backend, ability, ..
+        } = backend().await;
+
+        let result = ManifestMcpContract::dispatch(
+            &backend,
+            "update_ability",
+            serde_json::json!({
+                "id": ability.id,
+                "description": "Updated",
+                "platform_scopes": ["projects:write"]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["ability"]["description"],
+            serde_json::json!("Updated")
+        );
+        assert_eq!(
+            result["ability"]["platform_scopes"],
+            serde_json::json!(["projects:read"])
+        );
     }
 
     #[tokio::test]
@@ -1827,7 +1862,6 @@ mod tests {
                     display_name: Some("Builder".into()),
                     description: Some(None),
                     command: None,
-                    platform_scopes: None,
                     ability_ids: None,
                     mcp_server_ids: None,
                 },
@@ -1838,6 +1872,32 @@ mod tests {
         assert_eq!(result.domain.summary.name, "creator");
         assert_eq!(result.domain.summary.display_name, "Builder");
         assert_eq!(result.domain.summary.description, None);
+        assert_eq!(result.domain.platform_scopes, domain.platform_scopes);
+    }
+
+    #[tokio::test]
+    async fn contract_dispatch_does_not_update_domain_platform_scopes() {
+        let TestContext {
+            backend, domain, ..
+        } = backend().await;
+
+        let result = ManifestMcpContract::dispatch(
+            &backend,
+            "update_domain",
+            serde_json::json!({
+                "id": domain.id,
+                "display_name": "Builder",
+                "platform_scopes": ["agents:write"]
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["domain"]["display_name"],
+            serde_json::json!("Builder")
+        );
+        assert_eq!(result["domain"]["platform_scopes"], serde_json::json!([]));
     }
 
     #[tokio::test]

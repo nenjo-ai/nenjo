@@ -6,6 +6,11 @@ Platform scopes are exact permission strings. They control which platform
 resource families an agent, ability, domain, API key, or organization member
 may read or mutate.
 
+Agent-facing creation and metadata-update tools do not assign platform scopes
+to agents, abilities, or domains. Scopes may be read for troubleshooting, but
+changing them is an admin or platform-controlled operation outside the normal
+agent MCP surface.
+
 Do not invent scope names. Use only the canonical scope strings in this
 document unless live platform state or source code proves a newer scope exists.
 If a requested permission is not listed here, say that no canonical platform
@@ -19,8 +24,9 @@ Scopes use `resource:action`.
 - `:write` allows create/update/delete/mutation style access and implies
   `:read` for the same resource family.
 - Empty API-key scopes mean full API-key access.
-- Agent, ability, and domain `platform_scopes` should be explicit; do not rely
-  on empty scope lists as a design pattern.
+- Runtime resource `platform_scopes` should be explicit, but agent-facing MCP
+  creation and metadata-update tools do not accept `platform_scopes` for
+  agents, abilities, or domains.
 - There are no documented wildcard scopes.
 - There is no separate documented `:execute` action. Execution-like operations
   are currently authorized through the relevant resource family's read/write
@@ -91,24 +97,32 @@ specific platform tool explicitly supports that administrative surface.
 
 ## Agent Guidance
 
-Before recommending, creating, or updating `platform_scopes`:
+Before recommending platform scopes for an agent, ability, or domain:
 
 1. Read this document.
 2. Select the minimum exact scopes required.
-3. Prefer read-only scopes unless the agent, ability, or domain must mutate
-   that resource family.
+3. Prefer read-only scopes unless the resource must mutate that resource
+   family.
 4. Use domains for temporary elevation instead of permanently broadening an
-   agent.
+   agent through admin-managed scope changes.
 5. If a permission does not map cleanly to one of the canonical scopes above,
    call out the uncertainty instead of inventing a new scope.
+
+Do not include `platform_scopes` when creating or updating agents, abilities,
+or domains through MCP tools. If a user asks to change platform permissions,
+explain that this requires the user or an admin to assign scopes through the
+platform scope-management path. Agents assigning scopes to themselves or to
+other executable resources is a security boundary violation.
 
 ## Common Patterns
 
 - Read-only platform guide: `agents:read`, `projects:read`, `routines:read`,
   `domains:read`, `abilities:read`, `models:read`,
   `mcp_servers:read`.
-- Agent builder: `agents:write`, `models:read`, `abilities:read`,
-  `domains:read`, `context_blocks:read`, `mcp_servers:read`.
+- Agent builder runtime access: `agents:write`, `models:read`,
+  `abilities:read`, `domains:read`, `context_blocks:read`,
+  `mcp_servers:read`. This allows metadata/prompt work, not assigning platform
+  scopes to executable resources.
 - Workflow builder: `routines:write`, `projects:read`, `agents:read`,
   `domains:read`
 - Project work manager: `projects:write`, `routines:read`, `agents:read`,

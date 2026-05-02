@@ -174,20 +174,6 @@ where
             .unwrap_or(true)
     }
 
-    fn validate_agent_scopes(&self, scopes: &[String]) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.validate_agent_scopes(scopes))
-            .unwrap_or(true)
-    }
-
-    fn validate_ability_scopes(&self, scopes: &[String]) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.validate_ability_scopes(scopes))
-            .unwrap_or(true)
-    }
-
     async fn local_manifest_org_id(&self) -> Result<Uuid> {
         self.local_store
             .load_manifest()
@@ -876,17 +862,11 @@ where
     }
 
     async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
-        let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
-        if !self.validate_agent_scopes(&requested_scopes) {
-            return Err(anyhow!("requested agent scopes exceed caller scopes"));
-        }
-
         let create = AgentCreateDocument {
             name: params.data.name,
             description: params.data.description,
             color: params.data.color,
             model_id: params.data.model_id,
-            platform_scopes: Some(requested_scopes),
         };
 
         let created = self.platform_client.create_agent_document(&create).await?;
@@ -908,14 +888,6 @@ where
         if !self.allow_agent(&existing) {
             return Err(anyhow!("agent not found in local manifest: {}", params.id));
         }
-        let requested_scopes = params
-            .data
-            .platform_scopes
-            .clone()
-            .unwrap_or_else(|| existing.platform_scopes.clone());
-        if !self.validate_agent_scopes(&requested_scopes) {
-            return Err(anyhow!("requested agent scopes exceed caller scopes"));
-        }
         let merged = AgentUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: Some(
@@ -926,12 +898,6 @@ where
             ),
             color: Some(params.data.color.unwrap_or_else(|| existing.color.clone())),
             model_id: Some(params.data.model_id.unwrap_or(existing.model_id)),
-            platform_scopes: Some(
-                params
-                    .data
-                    .platform_scopes
-                    .unwrap_or_else(|| existing.platform_scopes.clone()),
-            ),
         };
         let updated = self
             .platform_client
@@ -1065,10 +1031,6 @@ where
     }
 
     async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
-        let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
-        if !self.validate_ability_scopes(&requested_scopes) {
-            return Err(anyhow!("requested ability scopes exceed caller scopes"));
-        }
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
@@ -1115,14 +1077,6 @@ where
                 params.id
             ));
         }
-        let requested_scopes = params
-            .data
-            .platform_scopes
-            .clone()
-            .unwrap_or_else(|| existing.platform_scopes.clone());
-        if !self.validate_ability_scopes(&requested_scopes) {
-            return Err(anyhow!("requested ability scopes exceed caller scopes"));
-        }
         let merged = AbilityUpdateDocument {
             tool_name: params
                 .data
@@ -1144,10 +1098,6 @@ where
                 .data
                 .activation_condition
                 .or_else(|| Some(existing.activation_condition.clone())),
-            platform_scopes: params
-                .data
-                .platform_scopes
-                .or_else(|| Some(existing.platform_scopes.clone())),
             mcp_server_ids: params
                 .data
                 .mcp_server_ids
@@ -1317,7 +1267,7 @@ where
             display_name: created.summary.display_name.clone(),
             description: created.summary.description.clone(),
             command: created.command.clone(),
-            platform_scopes: params.data.platform_scopes.clone().unwrap_or_default(),
+            platform_scopes: created.platform_scopes.clone(),
             ability_ids: params.data.ability_ids.clone().unwrap_or_default(),
             mcp_server_ids: params.data.mcp_server_ids.clone().unwrap_or_default(),
             prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
@@ -1356,12 +1306,6 @@ where
                 .data
                 .command
                 .or_else(|| Some(existing.command.clone())),
-            platform_scopes: Some(
-                params
-                    .data
-                    .platform_scopes
-                    .unwrap_or_else(|| existing.platform_scopes.clone()),
-            ),
             ability_ids: Some(
                 params
                     .data
@@ -1375,11 +1319,6 @@ where
                     .unwrap_or_else(|| existing.mcp_server_ids.clone()),
             ),
         };
-        if let Some(policy) = &self.access_policy
-            && !policy.validate_domain_scopes(merged.platform_scopes.as_deref().unwrap_or(&[]))
-        {
-            return Err(anyhow!("requested domain scopes exceed caller permissions"));
-        }
         let updated = self
             .platform_client
             .update_domain_document(params.id, &merged)

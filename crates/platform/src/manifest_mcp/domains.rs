@@ -11,14 +11,6 @@ fn uuid_list_schema(description: &str) -> serde_json::Value {
     })
 }
 
-fn string_list_schema(description: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "array",
-        "description": description,
-        "items": { "type": "string" }
-    })
-}
-
 fn domain_id_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
@@ -37,7 +29,6 @@ fn domain_create_schema() -> serde_json::Value {
             "display_name": { "type": "string", "description": "Human-readable name shown in the UI." },
             "description": { "type": ["string", "null"], "description": "Optional domain description." },
             "command": { "type": "string", "description": "The slash/hash-style command used to activate this domain, such as `#creator`." },
-            "platform_scopes": string_list_schema("Platform scopes activated by this domain."),
             "ability_ids": uuid_list_schema("Ability ids activated by this domain."),
             "mcp_server_ids": uuid_list_schema("MCP server ids activated by this domain."),
             "prompt_config": {
@@ -63,7 +54,6 @@ fn domain_update_schema() -> serde_json::Value {
             "display_name": { "type": "string", "description": "Replace the human-readable display name." },
             "description": { "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." },
             "command": { "type": "string", "description": "Replace the activation command for this domain." },
-            "platform_scopes": string_list_schema("Full replacement platform scope list for this domain."),
             "ability_ids": uuid_list_schema("Full replacement list of ability ids activated by this domain."),
             "mcp_server_ids": uuid_list_schema("Full replacement list of MCP server ids activated by this domain.")
         },
@@ -121,7 +111,7 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_domain".to_string(),
-            description: "Create one domain with top-level name, path, display_name, description, command, platform_scopes, ability_ids, mcp_server_ids, and optional prompt_config."
+            description: "Create one domain with top-level name, path, display_name, description, command, ability_ids, mcp_server_ids, and optional prompt_config. Domain platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -133,7 +123,7 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_domain".to_string(),
-            description: "Update one domain's name, display_name, description, command, platform_scopes, ability_ids, or mcp_server_ids by id; use update_domain_prompt to change prompt_config. Valid platform scope strings are agents:read, agents:write, abilities:read, abilities:write, domains:read, domains:write, projects:read, projects:write, routines:read, routines:write, models:read, models:write, councils:read, councils:write, context_blocks:read, context_blocks:write, mcp_servers:read, mcp_servers:write, chat:read, and chat:write."
+            description: "Update one domain's name, display_name, description, command, ability_ids, or mcp_server_ids by id; use update_domain_prompt to change prompt_config. Domain platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -144,7 +134,6 @@ pub fn domain_tools() -> Vec<ToolSpec> {
                     "display_name": domain_update_schema()["properties"]["display_name"].clone(),
                     "description": domain_update_schema()["properties"]["description"].clone(),
                     "command": domain_update_schema()["properties"]["command"].clone(),
-                    "platform_scopes": domain_update_schema()["properties"]["platform_scopes"].clone(),
                     "ability_ids": domain_update_schema()["properties"]["ability_ids"].clone(),
                     "mcp_server_ids": domain_update_schema()["properties"]["mcp_server_ids"].clone()
                 },
