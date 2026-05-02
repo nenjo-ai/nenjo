@@ -1017,6 +1017,49 @@ fn direct_task_turn_event_to_response(
             encrypted_payload: None,
             agent,
         }),
+        nenjo::TurnEvent::DelegationStarted {
+            target_agent_name,
+            task_input,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: "step_started".to_string(),
+            step_name: target_agent_name.clone(),
+            step_type: "delegation".to_string(),
+            duration_ms: None,
+            data: serde_json::Value::Null,
+            payload: Some(serde_json::json!({
+                "task_preview": task_input,
+            })),
+            encrypted_payload: None,
+            agent,
+        }),
+        nenjo::TurnEvent::DelegationCompleted {
+            target_agent_name,
+            success,
+            final_output,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: if *success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: target_agent_name.clone(),
+            step_type: "delegation".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": success,
+            }),
+            payload: Some(serde_json::json!({
+                "output_preview": final_output,
+            })),
+            encrypted_payload: None,
+            agent,
+        }),
         nenjo::TurnEvent::Done { output } => Some(Response::TaskStepEvent {
             execution_run_id: eid,
             task_id: tid,

@@ -78,6 +78,29 @@ pub struct AbilityExecutionTrace {
     pub invocations: Vec<AbilityInvocationTrace>,
 }
 
+/// One invocation of a delegated agent during a parent agent run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationInvocationTrace {
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub success: Option<bool>,
+    pub target_agent_name: String,
+    pub target_agent_id: Uuid,
+    pub task_input: String,
+    pub caller_history_snapshot: Vec<ChatMessage>,
+    pub final_output: Option<String>,
+    pub events: Vec<TraceEvent>,
+}
+
+/// Aggregated trace file for agent-to-agent delegations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationExecutionTrace {
+    pub trace_type: String,
+    pub parent_agent_name: String,
+    pub delegate_tool_name: String,
+    pub invocations: Vec<DelegationInvocationTrace>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskTraceLocation<'a> {
     pub project_slug: &'a str,
@@ -115,6 +138,8 @@ pub struct ExecutionTraceRecorder {
     agent_trace: AgentExecutionTrace,
     ability_traces: HashMap<String, AbilityExecutionTrace>,
     active_ability_invocations: HashMap<String, usize>,
+    delegation_traces: HashMap<String, DelegationExecutionTrace>,
+    active_delegation_invocations: HashMap<String, usize>,
 }
 
 impl ExecutionTraceRecorder {
@@ -208,6 +233,8 @@ impl ExecutionTraceRecorder {
             },
             ability_traces: HashMap::new(),
             active_ability_invocations: HashMap::new(),
+            delegation_traces: HashMap::new(),
+            active_delegation_invocations: HashMap::new(),
         }
     }
 
@@ -246,6 +273,37 @@ impl ExecutionTraceRecorder {
                     .insert(ability_tool_name.clone(), entry.invocations.len() - 1);
                 self.flush_ability(ability_tool_name)?;
             }
+            TurnEvent::DelegationStarted {
+                delegate_tool_name,
+                target_agent_name,
+                target_agent_id,
+                task_input,
+                caller_history,
+            } => {
+                let entry = self
+                    .delegation_traces
+                    .entry(delegate_tool_name.clone())
+                    .or_insert_with(|| DelegationExecutionTrace {
+                        trace_type: "delegation".into(),
+                        parent_agent_name: self.agent_trace.agent_name.clone(),
+                        delegate_tool_name: delegate_tool_name.clone(),
+                        invocations: Vec::new(),
+                    });
+                entry.invocations.push(DelegationInvocationTrace {
+                    started_at: Utc::now().to_rfc3339(),
+                    completed_at: None,
+                    success: None,
+                    target_agent_name: target_agent_name.clone(),
+                    target_agent_id: *target_agent_id,
+                    task_input: task_input.clone(),
+                    caller_history_snapshot: caller_history.clone(),
+                    final_output: None,
+                    events: Vec::new(),
+                });
+                self.active_delegation_invocations
+                    .insert(delegate_tool_name.clone(), entry.invocations.len() - 1);
+                self.flush_delegation(delegate_tool_name)?;
+            }
             TurnEvent::ToolCallStart {
                 parent_tool_name,
                 calls,
@@ -261,8 +319,18 @@ impl ExecutionTraceRecorder {
                                 text_preview: call.text_preview.clone(),
                                 started_at: now.clone(),
                             }));
+                    } else if let Some(invocation) = self.active_delegation_mut(parent) {
+                        invocation
+                            .events
+                            .extend(calls.iter().map(|call| TraceEvent::ToolStart {
+                                tool_name: call.tool_name.clone(),
+                                tool_args: call.tool_args.clone(),
+                                text_preview: call.text_preview.clone(),
+                                started_at: now.clone(),
+                            }));
                     }
                     self.flush_ability(parent)?;
+                    self.flush_delegation(parent)?;
                 } else {
                     self.agent_trace.events.extend(calls.iter().map(|call| {
                         TraceEvent::ToolStart {
@@ -290,8 +358,11 @@ impl ExecutionTraceRecorder {
                 if let Some(parent) = parent_tool_name {
                     if let Some(invocation) = self.active_invocation_mut(parent) {
                         invocation.events.push(trace_event);
+                    } else if let Some(invocation) = self.active_delegation_mut(parent) {
+                        invocation.events.push(trace_event);
                     }
                     self.flush_ability(parent)?;
+                    self.flush_delegation(parent)?;
                 } else {
                     self.agent_trace.events.push(trace_event);
                     self.flush_agent()?;
@@ -310,6 +381,21 @@ impl ExecutionTraceRecorder {
                 }
                 self.flush_ability(ability_tool_name)?;
                 self.active_ability_invocations.remove(ability_tool_name);
+            }
+            TurnEvent::DelegationCompleted {
+                delegate_tool_name,
+                success,
+                final_output,
+                ..
+            } => {
+                if let Some(invocation) = self.active_delegation_mut(delegate_tool_name) {
+                    invocation.completed_at = Some(Utc::now().to_rfc3339());
+                    invocation.success = Some(*success);
+                    invocation.final_output = Some(final_output.clone());
+                }
+                self.flush_delegation(delegate_tool_name)?;
+                self.active_delegation_invocations
+                    .remove(delegate_tool_name);
             }
             TurnEvent::Done { output } => {
                 self.agent_trace.completed_at = Some(Utc::now().to_rfc3339());
@@ -350,6 +436,16 @@ impl ExecutionTraceRecorder {
             .and_then(|trace| trace.invocations.get_mut(idx))
     }
 
+    fn active_delegation_mut(
+        &mut self,
+        delegate_tool_name: &str,
+    ) -> Option<&mut DelegationInvocationTrace> {
+        let idx = *self.active_delegation_invocations.get(delegate_tool_name)?;
+        self.delegation_traces
+            .get_mut(delegate_tool_name)
+            .and_then(|trace| trace.invocations.get_mut(idx))
+    }
+
     fn flush_agent(&self) -> Result<()> {
         write_json(
             &self.agent_trace_path,
@@ -364,6 +460,15 @@ impl ExecutionTraceRecorder {
         if let Some(trace) = self.ability_traces.get(ability_tool_name) {
             let path = self.ability_trace_path(ability_tool_name);
             let key = self.ability_trace_key(ability_tool_name);
+            write_json(&path, key.as_deref(), self.content_store.as_deref(), trace)?;
+        }
+        Ok(())
+    }
+
+    fn flush_delegation(&self, delegate_tool_name: &str) -> Result<()> {
+        if let Some(trace) = self.delegation_traces.get(delegate_tool_name) {
+            let path = self.delegation_trace_path(delegate_tool_name);
+            let key = self.delegation_trace_key(delegate_tool_name);
             write_json(&path, key.as_deref(), self.content_store.as_deref(), trace)?;
         }
         Ok(())
@@ -391,6 +496,33 @@ impl ExecutionTraceRecorder {
                 self.task_slug.as_deref().unwrap_or("task"),
                 safe_agent,
                 safe_ability,
+                step_suffix
+            )),
+        }
+    }
+
+    fn delegation_trace_key(&self, delegate_tool_name: &str) -> Option<String> {
+        let safe_agent = sanitize(&self.agent_trace.agent_name);
+        let safe_delegation = sanitize(delegate_tool_name);
+        let step_suffix = match (&self.step_name, self.step_id) {
+            (Some(name), Some(id)) => format!("_{}_{}", sanitize(name), id),
+            _ => String::new(),
+        };
+        match self.mode {
+            TraceMode::Chat { session_id } => Some(if self.project_slug.is_empty() {
+                format!("chat_history/traces/{safe_agent}_{session_id}_{safe_delegation}.json")
+            } else {
+                format!(
+                    "{}/chat_history/traces/{safe_agent}_{session_id}_{safe_delegation}.json",
+                    self.project_slug
+                )
+            }),
+            TraceMode::Task { .. } => Some(format!(
+                "{}/execution_traces/{}/{}_{}{}.json",
+                self.project_slug,
+                self.task_slug.as_deref().unwrap_or("task"),
+                safe_agent,
+                safe_delegation,
                 step_suffix
             )),
         }
@@ -424,6 +556,37 @@ impl ExecutionTraceRecorder {
                 .join("execution_traces")
                 .join(self.task_slug.as_deref().unwrap_or("task"))
                 .join(format!("{safe_agent}_{safe_ability}{step_suffix}.json")),
+        }
+    }
+
+    fn delegation_trace_path(&self, delegate_tool_name: &str) -> PathBuf {
+        let safe_agent = sanitize(&self.agent_trace.agent_name);
+        let safe_delegation = sanitize(delegate_tool_name);
+        let step_suffix = match (&self.step_name, self.step_id) {
+            (Some(name), Some(id)) => format!("_{}_{}", sanitize(name), id),
+            _ => String::new(),
+        };
+        match self.mode {
+            TraceMode::Chat { session_id } => {
+                if self.project_slug.is_empty() {
+                    self.workspace_dir
+                        .join("chat_history")
+                        .join("traces")
+                        .join(format!("{safe_agent}_{session_id}_{safe_delegation}.json"))
+                } else {
+                    self.workspace_dir
+                        .join(&self.project_slug)
+                        .join("chat_history")
+                        .join("traces")
+                        .join(format!("{safe_agent}_{session_id}_{safe_delegation}.json"))
+                }
+            }
+            TraceMode::Task { .. } => self
+                .workspace_dir
+                .join(&self.project_slug)
+                .join("execution_traces")
+                .join(self.task_slug.as_deref().unwrap_or("task"))
+                .join(format!("{safe_agent}_{safe_delegation}{step_suffix}.json")),
         }
     }
 }

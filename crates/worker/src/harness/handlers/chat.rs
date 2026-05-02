@@ -494,6 +494,49 @@ pub async fn handle_chat(
                                     TranscriptState::MidTurn,
                                 )?;
                             }
+                            nenjo::TurnEvent::DelegationStarted {
+                                delegate_tool_name,
+                                target_agent_name,
+                                target_agent_id,
+                                task_input,
+                                ..
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::DelegationStarted {
+                                        delegate_tool_name: delegate_tool_name.clone(),
+                                        target_agent_name: target_agent_name.clone(),
+                                        target_agent_id: *target_agent_id,
+                                        task_input: task_input.clone(),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
+                            nenjo::TurnEvent::DelegationCompleted {
+                                delegate_tool_name,
+                                target_agent_name,
+                                target_agent_id,
+                                success,
+                                final_output,
+                            } => {
+                                let _ = append_transcript_event(
+                                    &*ctx.session_store,
+                                    &*ctx.session_content,
+                                    session_id,
+                                    Some(turn_id),
+                                    SessionTranscriptEventPayload::DelegationCompleted {
+                                        delegate_tool_name: delegate_tool_name.clone(),
+                                        target_agent_name: target_agent_name.clone(),
+                                        target_agent_id: *target_agent_id,
+                                        success: *success,
+                                        final_output: final_output.clone(),
+                                    },
+                                    TranscriptState::MidTurn,
+                                )?;
+                            }
                             nenjo::TurnEvent::Done { output } => {
                                 let _ = append_transcript_event(
                                     &*ctx.session_store,

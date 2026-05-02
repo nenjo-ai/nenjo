@@ -102,6 +102,39 @@ pub fn turn_event_to_stream_event(
             })),
             encrypted_payload: None,
         }),
+        nenjo::TurnEvent::DelegationStarted {
+            delegate_tool_name,
+            target_agent_name,
+            target_agent_id,
+            task_input,
+            ..
+        } => Some(StreamEvent::DelegationStarted {
+            agent: agent_name.to_string(),
+            target_agent: target_agent_name.clone(),
+            target_agent_id: *target_agent_id,
+            delegate_tool_name: delegate_tool_name.clone(),
+            payload: Some(serde_json::json!({
+                "task_preview": task_input,
+            })),
+            encrypted_payload: None,
+        }),
+        nenjo::TurnEvent::DelegationCompleted {
+            delegate_tool_name,
+            target_agent_name,
+            target_agent_id,
+            success,
+            final_output,
+        } => Some(StreamEvent::DelegationCompleted {
+            agent: agent_name.to_string(),
+            target_agent: target_agent_name.clone(),
+            target_agent_id: *target_agent_id,
+            delegate_tool_name: delegate_tool_name.clone(),
+            success: *success,
+            payload: Some(serde_json::json!({
+                "result_preview": final_output,
+            })),
+            encrypted_payload: None,
+        }),
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
             messages_after,
@@ -152,6 +185,18 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             task_input.len(),
             caller_history.len()
         ),
+        nenjo::TurnEvent::DelegationStarted {
+            delegate_tool_name,
+            target_agent_name,
+            task_input,
+            caller_history,
+            ..
+        } => format!(
+            "delegation_started(tool={delegate_tool_name}, target={target_agent_name}, task_preview={:?}, task_len={}, caller_messages={})",
+            truncate_preview(task_input, 80),
+            task_input.len(),
+            caller_history.len()
+        ),
         nenjo::TurnEvent::ToolCallStart {
             parent_tool_name,
             calls,
@@ -187,6 +232,16 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             final_output,
         } => format!(
             "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
+            final_output.len()
+        ),
+        nenjo::TurnEvent::DelegationCompleted {
+            delegate_tool_name,
+            target_agent_name,
+            success,
+            final_output,
+            ..
+        } => format!(
+            "delegation_completed(tool={delegate_tool_name}, target={target_agent_name}, success={success}, output_len={})",
             final_output.len()
         ),
         nenjo::TurnEvent::MessageCompacted {
@@ -247,6 +302,23 @@ pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
             ..
         } => format!(
             "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success})"
+        ),
+        StreamEvent::DelegationStarted {
+            agent,
+            target_agent,
+            delegate_tool_name,
+            ..
+        } => format!(
+            "delegation_started(agent={agent}, target={target_agent}, tool={delegate_tool_name})"
+        ),
+        StreamEvent::DelegationCompleted {
+            agent,
+            target_agent,
+            delegate_tool_name,
+            success,
+            ..
+        } => format!(
+            "delegation_completed(agent={agent}, target={target_agent}, tool={delegate_tool_name}, success={success})"
         ),
         StreamEvent::Error { message, .. } => {
             format!(
@@ -556,6 +628,49 @@ fn routine_agent_event_to_response(
             encrypted_payload: None,
             agent,
         }),
+        nenjo::TurnEvent::DelegationStarted {
+            target_agent_name,
+            task_input,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: "step_started".to_string(),
+            step_name: target_agent_name.clone(),
+            step_type: "delegation".to_string(),
+            duration_ms: None,
+            data: serde_json::Value::Null,
+            payload: Some(serde_json::json!({
+                "task_preview": task_input,
+            })),
+            encrypted_payload: None,
+            agent,
+        }),
+        nenjo::TurnEvent::DelegationCompleted {
+            target_agent_name,
+            success,
+            final_output,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: execution_run_id.to_string(),
+            task_id: task_id.map(|id| id.to_string()),
+            event_type: if *success {
+                "step_completed".to_string()
+            } else {
+                "step_failed".to_string()
+            },
+            step_name: target_agent_name.clone(),
+            step_type: "delegation".to_string(),
+            duration_ms: None,
+            data: serde_json::json!({
+                "success": success,
+            }),
+            payload: Some(serde_json::json!({
+                "output_preview": final_output,
+            })),
+            encrypted_payload: None,
+            agent,
+        }),
         // The enclosing routine step already emits StepCompleted/StepFailed.
         // Suppress the nested agent Done event here to avoid a duplicate
         // synthetic "agent_response" step in task timelines.
@@ -585,4 +700,77 @@ pub fn agent_name(manifest: &Manifest, agent_id: Uuid) -> String {
         .find(|a| a.id == agent_id)
         .map(|a| a.name.clone())
         .unwrap_or_else(|| agent_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nenjo_models::ChatMessage;
+
+    #[test]
+    fn bridges_delegation_lifecycle_to_stream_events() {
+        let target_agent_id = Uuid::new_v4();
+
+        let started = turn_event_to_stream_event(
+            &nenjo::TurnEvent::DelegationStarted {
+                delegate_tool_name: "delegate_to".to_string(),
+                target_agent_name: "specialist".to_string(),
+                target_agent_id,
+                task_input: "review this".to_string(),
+                caller_history: vec![ChatMessage::user("review this")],
+            },
+            "leader",
+        )
+        .expect("delegation start should bridge");
+
+        match started {
+            StreamEvent::DelegationStarted {
+                agent,
+                target_agent,
+                target_agent_id: bridged_id,
+                delegate_tool_name,
+                payload,
+                ..
+            } => {
+                assert_eq!(agent, "leader");
+                assert_eq!(target_agent, "specialist");
+                assert_eq!(bridged_id, target_agent_id);
+                assert_eq!(delegate_tool_name, "delegate_to");
+                assert_eq!(payload.unwrap()["task_preview"], "review this");
+            }
+            other => panic!("unexpected stream event: {other:?}"),
+        }
+
+        let completed = turn_event_to_stream_event(
+            &nenjo::TurnEvent::DelegationCompleted {
+                delegate_tool_name: "delegate_to".to_string(),
+                target_agent_name: "specialist".to_string(),
+                target_agent_id,
+                success: true,
+                final_output: "done".to_string(),
+            },
+            "leader",
+        )
+        .expect("delegation completion should bridge");
+
+        match completed {
+            StreamEvent::DelegationCompleted {
+                agent,
+                target_agent,
+                target_agent_id: bridged_id,
+                delegate_tool_name,
+                success,
+                payload,
+                ..
+            } => {
+                assert_eq!(agent, "leader");
+                assert_eq!(target_agent, "specialist");
+                assert_eq!(bridged_id, target_agent_id);
+                assert_eq!(delegate_tool_name, "delegate_to");
+                assert!(success);
+                assert_eq!(payload.unwrap()["result_preview"], "done");
+            }
+            other => panic!("unexpected stream event: {other:?}"),
+        }
+    }
 }

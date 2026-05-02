@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
+use super::runner::turn_loop;
+use super::runner::types::TurnEvent;
 use crate::config::AgentConfig;
 use crate::manifest::Manifest;
 use crate::memory::Memory;
@@ -249,8 +251,82 @@ impl Tool for DelegateToTool {
                 })
         );
 
-        // Execute the delegation (simple API, no streaming for nested calls).
-        match runner.chat(&task).await {
+        let delegate_tool_name = self.name().to_string();
+        let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
+        if let Some(parent_tx) = turn_loop::current_events_tx() {
+            let _ = parent_tx.send(TurnEvent::DelegationStarted {
+                delegate_tool_name: delegate_tool_name.clone(),
+                target_agent_name: agent_name.clone(),
+                target_agent_id: target_id,
+                task_input: task.clone(),
+                caller_history: caller_history_snapshot,
+            });
+        }
+
+        let mut handle = match runner.chat_stream(&task).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let error = format!("Delegation to '{}' failed: {}", agent_name, e);
+                if let Some(parent_tx) = turn_loop::current_events_tx() {
+                    let _ = parent_tx.send(TurnEvent::DelegationCompleted {
+                        delegate_tool_name,
+                        target_agent_name: agent_name.clone(),
+                        target_agent_id: target_id,
+                        success: false,
+                        final_output: error.clone(),
+                    });
+                }
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error),
+                });
+            }
+        };
+
+        let parent_events_tx = turn_loop::current_events_tx();
+        while let Some(event) = handle.recv().await {
+            let Some(parent_tx) = parent_events_tx.as_ref() else {
+                continue;
+            };
+            match event {
+                TurnEvent::ToolCallStart {
+                    parent_tool_name,
+                    calls,
+                } => {
+                    let _ = parent_tx.send(TurnEvent::ToolCallStart {
+                        parent_tool_name: parent_tool_name
+                            .or_else(|| Some(delegate_tool_name.clone())),
+                        calls,
+                    });
+                }
+                TurnEvent::ToolCallEnd {
+                    parent_tool_name,
+                    tool_name,
+                    result,
+                } => {
+                    let _ = parent_tx.send(TurnEvent::ToolCallEnd {
+                        parent_tool_name: parent_tool_name
+                            .or_else(|| Some(delegate_tool_name.clone())),
+                        tool_name,
+                        result,
+                    });
+                }
+                TurnEvent::AbilityStarted { .. }
+                | TurnEvent::AbilityCompleted { .. }
+                | TurnEvent::DelegationStarted { .. }
+                | TurnEvent::DelegationCompleted { .. }
+                | TurnEvent::MessageCompacted { .. } => {
+                    let _ = parent_tx.send(event);
+                }
+                TurnEvent::TranscriptMessage { .. }
+                | TurnEvent::Paused
+                | TurnEvent::Resumed
+                | TurnEvent::Done { .. } => {}
+            }
+        }
+
+        match handle.output().await {
             Ok(output) => {
                 debug!(
                     target = %agent_name,
@@ -258,6 +334,15 @@ impl Tool for DelegateToTool {
                     tokens_out = output.output_tokens,
                     "Delegation completed"
                 );
+                if let Some(parent_tx) = turn_loop::current_events_tx() {
+                    let _ = parent_tx.send(TurnEvent::DelegationCompleted {
+                        delegate_tool_name,
+                        target_agent_name: agent_name.clone(),
+                        target_agent_id: target_id,
+                        success: true,
+                        final_output: output.text.clone(),
+                    });
+                }
                 Ok(ToolResult {
                     success: true,
                     output: output.text,
@@ -266,10 +351,20 @@ impl Tool for DelegateToTool {
             }
             Err(e) => {
                 warn!(target = %agent_name, error = %e, "Delegation failed");
+                let error = format!("Delegation to '{}' failed: {}", agent_name, e);
+                if let Some(parent_tx) = turn_loop::current_events_tx() {
+                    let _ = parent_tx.send(TurnEvent::DelegationCompleted {
+                        delegate_tool_name,
+                        target_agent_name: agent_name.clone(),
+                        target_agent_id: target_id,
+                        success: false,
+                        final_output: error.clone(),
+                    });
+                }
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Delegation to '{}' failed: {}", agent_name, e)),
+                    error: Some(error),
                 })
             }
         }

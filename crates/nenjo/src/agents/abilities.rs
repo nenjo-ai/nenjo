@@ -187,6 +187,9 @@ impl Tool for AssignedAbilityTool {
                         TurnEvent::AbilityStarted { .. } => {
                             let _ = parent_tx.send(event);
                         }
+                        TurnEvent::DelegationStarted { .. } => {
+                            let _ = parent_tx.send(event);
+                        }
                         TurnEvent::ToolCallStart {
                             parent_tool_name,
                             calls,
@@ -210,6 +213,9 @@ impl Tool for AssignedAbilityTool {
                             });
                         }
                         TurnEvent::AbilityCompleted { .. } => {
+                            let _ = parent_tx.send(event);
+                        }
+                        TurnEvent::DelegationCompleted { .. } => {
                             let _ = parent_tx.send(event);
                         }
                         TurnEvent::MessageCompacted { .. } => {
