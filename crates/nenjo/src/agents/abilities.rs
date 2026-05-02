@@ -237,6 +237,7 @@ impl Tool for AssignedAbilityTool {
 
         match result {
             Ok(output) => {
+                turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
                 if let Some(parent_tx) = turn_loop::current_events_tx() {
                     debug!(
                         ability = ability.name,

@@ -328,6 +328,7 @@ impl Tool for DelegateToTool {
 
         match handle.output().await {
             Ok(output) => {
+                turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
                 debug!(
                     target = %agent_name,
                     tokens_in = output.input_tokens,

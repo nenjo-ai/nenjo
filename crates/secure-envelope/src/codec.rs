@@ -299,6 +299,8 @@ impl SecureEnvelopeCodec {
             StreamEvent::Done {
                 payload,
                 encrypted_payload: _,
+                total_input_tokens,
+                total_output_tokens,
                 project_id,
                 agent_id,
                 session_id,
@@ -307,6 +309,8 @@ impl SecureEnvelopeCodec {
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "agent_response", payload)
                     .await?,
+                total_input_tokens,
+                total_output_tokens,
                 project_id,
                 agent_id,
                 session_id,

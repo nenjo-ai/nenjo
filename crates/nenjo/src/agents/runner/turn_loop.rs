@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use anyhow::Result;
 use regex::Regex;
@@ -54,12 +55,38 @@ tokio::task_local! {
     static CURRENT_CHAT_HISTORY: Vec<ChatMessage>;
 }
 
+#[derive(Default)]
+struct NestedTokenUsage {
+    input_tokens: AtomicU64,
+    output_tokens: AtomicU64,
+    run_depth: AtomicU32,
+}
+
+tokio::task_local! {
+    static CURRENT_NESTED_TOKEN_USAGE: Arc<NestedTokenUsage>;
+}
+
 pub(crate) fn current_events_tx() -> Option<mpsc::UnboundedSender<TurnEvent>> {
     CURRENT_EVENTS_TX.try_with(Clone::clone).ok().flatten()
 }
 
 pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
+}
+
+pub(crate) fn record_nested_token_usage(input_tokens: u64, output_tokens: u64) {
+    if input_tokens == 0 && output_tokens == 0 {
+        return;
+    }
+
+    if let Ok(usage) = CURRENT_NESTED_TOKEN_USAGE.try_with(Clone::clone) {
+        usage
+            .input_tokens
+            .fetch_add(input_tokens, Ordering::Relaxed);
+        usage
+            .output_tokens
+            .fetch_add(output_tokens, Ordering::Relaxed);
+    }
 }
 
 /// Conservative fallback context window when the provider doesn't report one.
@@ -116,8 +143,17 @@ pub async fn run(
     let mut total_output_tokens: u64 = 0;
     let mut total_tool_calls: u32 = 0;
 
-    CURRENT_EVENTS_TX
-        .scope(events_tx.clone(), async {
+    let nested_usage = CURRENT_NESTED_TOKEN_USAGE
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| Arc::new(NestedTokenUsage::default()));
+    let run_depth = nested_usage.run_depth.fetch_add(1, Ordering::Relaxed) + 1;
+    let nested_input_baseline = nested_usage.input_tokens.load(Ordering::Relaxed);
+    let nested_output_baseline = nested_usage.output_tokens.load(Ordering::Relaxed);
+
+    let run_result = CURRENT_NESTED_TOKEN_USAGE
+        .scope(nested_usage.clone(), async {
+            CURRENT_EVENTS_TX
+                .scope(events_tx.clone(), async {
             // Log tool specs being sent to the provider (once, before the loop)
             if !tool_specs.is_empty() {
                 let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();
@@ -506,6 +542,17 @@ pub async fn run(
                     .unwrap_or_else(|| "Max iterations reached without a final response.".into());
             }
 
+            if run_depth == 1 {
+                total_input_tokens += nested_usage
+                    .input_tokens
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(nested_input_baseline);
+                total_output_tokens += nested_usage
+                    .output_tokens
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(nested_output_baseline);
+            }
+
             let output = TurnOutput {
                 text: final_text,
                 input_tokens: total_input_tokens,
@@ -521,8 +568,13 @@ pub async fn run(
             });
 
             Ok(output)
+                })
+                .await
         })
-        .await
+        .await;
+
+    nested_usage.run_depth.fetch_sub(1, Ordering::Relaxed);
+    run_result
 }
 
 /// Execute a single tool call against the tool registry.

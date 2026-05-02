@@ -405,6 +405,10 @@ pub enum StreamEvent {
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
+        #[serde(default)]
+        total_input_tokens: u64,
+        #[serde(default)]
+        total_output_tokens: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -778,6 +782,8 @@ mod tests {
             payload: StreamEvent::Done {
                 payload: Some(serde_json::Value::String("result".into())),
                 encrypted_payload: None,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 project_id: None,
                 agent_id: None,
                 session_id: None,
@@ -825,6 +831,8 @@ mod tests {
                     nonce: "bm9uY2U=".into(),
                     ciphertext: "Y2lwaGVydGV4dA==".into(),
                 }),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 project_id: None,
                 agent_id: None,
                 session_id: None,

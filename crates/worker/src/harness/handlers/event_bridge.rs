@@ -148,6 +148,8 @@ pub fn turn_event_to_stream_event(
         nenjo::TurnEvent::Done { output } => Some(StreamEvent::Done {
             payload: Some(serde_json::Value::String(output.text.clone())),
             encrypted_payload: None,
+            total_input_tokens: output.input_tokens,
+            total_output_tokens: output.output_tokens,
             project_id: None,
             agent_id: None,
             session_id: None,
@@ -330,13 +332,17 @@ pub(crate) fn summarize_stream_event(event: &StreamEvent) -> String {
         StreamEvent::Done {
             payload,
             encrypted_payload,
+            total_input_tokens,
+            total_output_tokens,
             project_id,
             agent_id,
             session_id,
         } => format!(
-            "done(payload={}, encrypted={}, project_id={}, agent_id={}, session_id={})",
+            "done(payload={}, encrypted={}, input_tokens={}, output_tokens={}, project_id={}, agent_id={}, session_id={})",
             if payload.is_some() { "yes" } else { "no" },
             encrypted_payload.is_some(),
+            total_input_tokens,
+            total_output_tokens,
             project_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_string()),
