@@ -295,9 +295,7 @@ impl Harness {
             let Some(agent_id) = persisted.agent_id else {
                 continue;
             };
-            let Some(project_id) = persisted.project_id else {
-                continue;
-            };
+            let project_id = persisted.project_id.unwrap_or_else(Uuid::nil);
 
             match Self::rebuild_domain_session(
                 provider,

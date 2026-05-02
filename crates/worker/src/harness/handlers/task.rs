@@ -810,6 +810,7 @@ async fn execute_direct_task(
         ctx.session_content.clone(),
     );
 
+    let task_started_at = std::time::Instant::now();
     let mut handle = runner.task_stream(task).await?;
 
     // Update the registry with the actual pause token from the execution handle
@@ -824,6 +825,11 @@ async fn execute_direct_task(
                 match event {
                     Some(ev) => {
                         let _ = trace_recorder.record(&ev);
+                        let agent_duration_ms = if matches!(ev, nenjo::TurnEvent::Done { .. }) {
+                            Some(task_started_at.elapsed().as_millis() as u64)
+                        } else {
+                            None
+                        };
                         if let Some(response) = direct_task_turn_event_to_response(
                             &ev,
                             execution_run_id,
@@ -831,6 +837,7 @@ async fn execute_direct_task(
                             agent_id,
                             &aname,
                             &manifest,
+                            agent_duration_ms,
                         ) {
                             let _ = ctx.response_tx.send(response);
                         }
@@ -894,6 +901,7 @@ fn direct_task_turn_event_to_response(
     agent_id: Uuid,
     agent_name: &str,
     manifest: &nenjo::manifest::Manifest,
+    agent_duration_ms: Option<u64>,
 ) -> Option<Response> {
     let eid = execution_run_id.to_string();
     let tid = Some(task_id.to_string());
@@ -924,6 +932,7 @@ fn direct_task_turn_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
+                "tool_args": calls.iter().map(|c| c.tool_args.clone()).collect::<Vec<_>>(),
             }),
             payload: calls.first().and_then(|c| {
                 c.text_preview
@@ -1014,7 +1023,7 @@ fn direct_task_turn_event_to_response(
             event_type: "step_completed".to_string(),
             step_name: "agent_response".to_string(),
             step_type: "agent".to_string(),
-            duration_ms: None,
+            duration_ms: agent_duration_ms,
             data: serde_json::json!({
                 "input_tokens": output.input_tokens,
                 "output_tokens": output.output_tokens,

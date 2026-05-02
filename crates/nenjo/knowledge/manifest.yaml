@@ -2,28 +2,38 @@ pack_id: nenjo.builtin
 schema_version: 1
 root_uri: builtin://nenjo/
 docs:
-  - id: nenjo.domain.nenjo_platform
-    virtual_path: builtin://nenjo/domain/nenjo-platform.md
-    source_path: crates/nenjo/knowledge/docs/domain/nenjo_platform.md
-    title: Nenjo Platform
-    summary: High-level domain document describing Nenjo as a modular agentic workflow platform, its stakeholders, and success criteria.
+  - id: nenjo.domain.nenjo
+    virtual_path: builtin://nenjo/domain/nenjo.md
+    source_path: crates/nenjo/knowledge/docs/domain/nenjo.md
+    title: Nenjo
+    summary: High-level domain document describing Nenjo, Nenji, shared resource concepts, and the platform versus SDK surface split.
     kind: domain
     authority: canonical
     status: stable
     tags:
-      - domain:platform
+      - domain:nenjo
       - operation:design
       - audience:agent
       - audience:user
     aliases:
       - nenjo
-      - platform overview
+      - nenji
+      - nenjo overview
+      - product overview
     keywords:
-      - manifests
       - workflows
       - nenji
       - agent platform
+      - platform
+      - sdk
+      - resource surfaces
     related:
+      - type: references
+        target: nenjo.domain.platform
+      - type: references
+        target: nenjo.domain.sdk
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.agents
       - type: references
@@ -32,6 +42,91 @@ docs:
         target: nenjo.guide.routines
       - type: references
         target: nenjo.guide.tasks
+
+  - id: nenjo.domain.platform
+    virtual_path: builtin://nenjo/domain/platform.md
+    source_path: crates/nenjo/knowledge/docs/domain/platform.md
+    title: Platform
+    summary: User-facing platform domain covering dashboard, chat, project documents, routine editor, agent builder, settings, workers, MCP, and encryption UX.
+    kind: domain
+    authority: canonical
+    status: stable
+    tags:
+      - domain:platform
+      - operation:design
+      - operation:configure
+      - audience:agent
+      - audience:user
+    aliases:
+      - dashboard
+      - chat interface
+      - platform UI
+      - platform product
+      - nenjo platform
+    keywords:
+      - chat
+      - project documents
+      - routine editor
+      - document editor
+      - agent builder
+      - mcp servers
+      - worker status
+      - encryption
+    related:
+      - type: part_of
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
+      - type: references
+        target: nenjo.guide.projects
+      - type: references
+        target: nenjo.guide.routines
+      - type: references
+        target: nenjo.guide.agents
+      - type: references
+        target: nenjo.guide.context_blocks
+      - type: references
+        target: nenjo.guide.scopes
+
+  - id: nenjo.domain.sdk
+    virtual_path: builtin://nenjo/domain/sdk.md
+    source_path: crates/nenjo/knowledge/docs/domain/sdk.md
+    title: SDK
+    summary: Developer-facing SDK domain covering manifest files, runtime APIs, provider builder, prompt context, knowledge graph APIs, tools, memory, and worker integration.
+    kind: domain
+    authority: canonical
+    status: stable
+    tags:
+      - domain:sdk
+      - operation:build
+      - operation:configure
+      - audience:developer
+      - audience:agent
+    aliases:
+      - rust sdk
+      - sdk manifests
+      - manifest files
+      - local manifests
+      - runtime api
+    keywords:
+      - manifests
+      - provider builder
+      - model factory
+      - tool factory
+      - template variables
+      - knowledge graph
+      - worker harness
+    related:
+      - type: part_of
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
+      - type: references
+        target: nenjo.reference.template_vars
+      - type: references
+        target: nenjo.guide.prompt_structuring
+      - type: references
+        target: nenjo.reference.resource_dependency_order
 
   - id: nenjo.guide.abilities
     virtual_path: builtin://nenjo/guide/abilities.md
@@ -57,7 +152,9 @@ docs:
       - nested specialist
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.agents
       - type: references
@@ -87,7 +184,9 @@ docs:
       - runtime modes
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.abilities
       - type: references
@@ -122,9 +221,59 @@ docs:
       - path references
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: depends_on
         target: nenjo.reference.template_vars
+      - type: references
+        target: nenjo.guide.prompt_structuring
+
+  - id: nenjo.guide.prompt_structuring
+    virtual_path: builtin://nenjo/guide/prompt-structuring.md
+    source_path: crates/nenjo/knowledge/docs/guide/prompt-structuring.md
+    title: Prompt Structuring
+    summary: Practical context-engineering guide for composing agent prompts, context blocks, template variables, memory, project knowledge, and retrieval evidence.
+    kind: guide
+    authority: pattern
+    status: stable
+    tags:
+      - domain:prompting
+      - resource:template_vars
+      - resource:context_blocks
+      - operation:configure
+      - audience:agent
+    aliases:
+      - prompt engineering
+      - context engineering
+      - prompt structure
+      - prompt composition
+    keywords:
+      - system prompt
+      - developer prompt
+      - context blocks
+      - git_worktree
+      - worktree prompts
+      - template variables
+      - "{{ project.documents }}"
+      - "{{ available_abilities }}"
+      - "{{ builtin.documents }}"
+      - memory-aware prompts
+    related:
+      - type: depends_on
+        target: nenjo.reference.template_vars
+      - type: references
+        target: nenjo.guide.context_blocks
+      - type: references
+        target: nenjo.guide.agents
+      - type: references
+        target: nenjo.guide.abilities
+      - type: references
+        target: nenjo.guide.memory
+      - type: references
+        target: nenjo.guide.projects
+      - type: references
+        target: nenjo.guide.routines
 
   - id: nenjo.guide.councils
     virtual_path: builtin://nenjo/guide/councils.md
@@ -148,7 +297,7 @@ docs:
       - members
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
       - type: references
         target: nenjo.guide.agents
       - type: references
@@ -181,7 +330,9 @@ docs:
       - expansion
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.abilities
       - type: references
@@ -267,11 +418,16 @@ docs:
       - project workspaces
     keywords:
       - repository context
+      - synced Git repository
+      - git worktree flow
+      - task worktree
       - documents
       - execution runs
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.tasks
       - type: references
@@ -304,7 +460,9 @@ docs:
       - terminal
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: references
         target: nenjo.guide.agents
       - type: references
@@ -316,7 +474,7 @@ docs:
     virtual_path: builtin://nenjo/guide/scopes.md
     source_path: crates/nenjo/knowledge/docs/guide/scopes.md
     title: Platform Scopes
-    summary: Permission layer for platform operations and resource/action access boundaries.
+    summary: Canonical reference for exact platform scope strings, read/write semantics, and least-privilege resource/action access boundaries.
     kind: guide
     authority: canonical
     status: stable
@@ -331,13 +489,23 @@ docs:
       - permissions
       - permission scopes
       - access control
+      - valid scopes
+      - canonical scopes
+      - platform scope reference
     keywords:
       - projects:read
+      - projects:write
+      - agents:read
       - agents:write
       - context_blocks:read
+      - mcp_servers:read
+      - workers:approve
+      - canonical scope list
     related:
       - type: part_of
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
+      - type: references
+        target: nenjo.taxonomy.resource_surfaces
       - type: governs
         target: nenjo.guide.agents
       - type: governs
@@ -398,7 +566,7 @@ docs:
       - industry
     related:
       - type: classifies
-        target: nenjo.domain.nenjo_platform
+        target: nenjo.domain.nenjo
 
   - id: nenjo.reference.knowledge.entity_documents
     virtual_path: builtin://nenjo/reference/knowledge/entity-documents.md
@@ -538,6 +706,8 @@ docs:
       - type: classifies
         target: nenjo.taxonomy.tasks
       - type: classifies
+        target: nenjo.taxonomy.resource_surfaces
+      - type: classifies
         target: nenjo.taxonomy.workflow_patterns
 
   - id: nenjo.reference.resource_dependency_order
@@ -591,16 +761,24 @@ docs:
       - prompt variables
       - template vars
       - variables
+      - context engineering variables
     keywords:
       - "{{ self }}"
       - "{{ task }}"
       - "{{ project.documents }}"
       - "{{ builtin.documents }}"
+      - "{{ available_agents }}"
+      - "{{ available_abilities }}"
+      - "{{ memories }}"
     related:
       - type: defines
         target: nenjo.guide.context_blocks
       - type: references
+        target: nenjo.guide.prompt_structuring
+      - type: references
         target: nenjo.guide.agents
+      - type: references
+        target: nenjo.guide.abilities
       - type: references
         target: nenjo.guide.tasks
       - type: references
@@ -638,6 +816,57 @@ docs:
         target: nenjo.guide.tasks
       - type: governs
         target: nenjo.guide.executions
+
+  - id: nenjo.taxonomy.resource_surfaces
+    virtual_path: builtin://nenjo/taxonomy/resource-surfaces.md
+    source_path: crates/nenjo/knowledge/docs/taxonomy/resource_surfaces.md
+    title: Resource Surface Taxonomy
+    summary: Classification system for platform UI, platform MCP, SDK manifest, SDK runtime, and shared-field resource surfaces.
+    kind: taxonomy
+    authority: canonical
+    status: stable
+    tags:
+      - domain:nenjo
+      - resource:resources
+      - operation:classify
+      - operation:design
+      - risk:routing
+      - audience:agent
+      - audience:user
+    aliases:
+      - resource surfaces
+      - platform versus sdk
+      - platform vs sdk
+      - manifest routing
+      - resource field routing
+    keywords:
+      - platform_ui
+      - platform_mcp
+      - sdk_manifest
+      - sdk_runtime
+      - shared_fields
+      - manifest files
+      - platform chat
+      - resource fields
+    related:
+      - type: classifies
+        target: nenjo.guide.agents
+      - type: classifies
+        target: nenjo.guide.abilities
+      - type: classifies
+        target: nenjo.guide.domains
+      - type: classifies
+        target: nenjo.guide.routines
+      - type: classifies
+        target: nenjo.guide.projects
+      - type: classifies
+        target: nenjo.guide.context_blocks
+      - type: classifies
+        target: nenjo.guide.scopes
+      - type: references
+        target: nenjo.domain.platform
+      - type: references
+        target: nenjo.domain.sdk
 
   - id: nenjo.taxonomy.workflow_patterns
     virtual_path: builtin://nenjo/taxonomy/workflow-patterns.md

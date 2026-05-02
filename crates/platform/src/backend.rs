@@ -411,8 +411,14 @@ struct ProjectDocTreeEntry {
 
 #[derive(Debug, Clone, Serialize)]
 struct ProjectDocNeighbor {
+    target: String,
+    edges: Vec<ProjectDocNeighborEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocNeighborEdge {
     edge_type: String,
-    direction: String,
+    source: String,
     target: String,
     note: Option<String>,
 }
@@ -647,7 +653,7 @@ where
         .iter()
         .map(|candidate| (candidate.virtual_path.clone(), candidate))
         .collect::<std::collections::HashMap<_, _>>();
-    let mut neighbors = Vec::new();
+    let mut neighbors = std::collections::BTreeMap::<String, ProjectDocNeighbor>::new();
 
     for edge in &doc.related {
         if let Some(filter) = edge_type
@@ -656,12 +662,16 @@ where
             continue;
         }
         if let Some(target) = docs_by_virtual_path.get(&edge.target) {
-            neighbors.push(ProjectDocNeighbor {
-                edge_type: edge.edge_type.clone(),
-                direction: "outgoing".to_string(),
-                target: target.virtual_path.clone(),
-                note: edge.description.clone(),
-            });
+            push_project_neighbor_edge(
+                &mut neighbors,
+                target.virtual_path.clone(),
+                ProjectDocNeighborEdge {
+                    edge_type: edge.edge_type.clone(),
+                    source: doc.virtual_path.clone(),
+                    target: target.virtual_path.clone(),
+                    note: edge.description.clone(),
+                },
+            );
         }
     }
 
@@ -675,29 +685,48 @@ where
             {
                 continue;
             }
-            neighbors.push(ProjectDocNeighbor {
-                edge_type: edge.edge_type.clone(),
-                direction: "incoming".to_string(),
-                target: candidate.virtual_path.clone(),
-                note: edge.description.clone(),
-            });
+            push_project_neighbor_edge(
+                &mut neighbors,
+                candidate.virtual_path.clone(),
+                ProjectDocNeighborEdge {
+                    edge_type: edge.edge_type.clone(),
+                    source: candidate.virtual_path.clone(),
+                    target: doc.virtual_path.clone(),
+                    note: edge.description.clone(),
+                },
+            );
         }
     }
 
-    neighbors.sort_by(|left, right| {
-        left.target
-            .cmp(&right.target)
-            .then_with(|| left.direction.cmp(&right.direction))
-            .then_with(|| left.edge_type.cmp(&right.edge_type))
-    });
-    neighbors.dedup_by(|left, right| {
-        left.target == right.target
-            && left.direction == right.direction
-            && left.edge_type == right.edge_type
-            && left.note == right.note
-    });
+    Ok(neighbors.into_values().collect())
+}
 
-    Ok(neighbors)
+fn push_project_neighbor_edge(
+    neighbors: &mut std::collections::BTreeMap<String, ProjectDocNeighbor>,
+    neighbor_target: String,
+    edge: ProjectDocNeighborEdge,
+) {
+    let neighbor = neighbors
+        .entry(neighbor_target.clone())
+        .or_insert_with(|| ProjectDocNeighbor {
+            target: neighbor_target,
+            edges: Vec::new(),
+        });
+    if !neighbor.edges.iter().any(|existing| {
+        existing.edge_type == edge.edge_type
+            && existing.source == edge.source
+            && existing.target == edge.target
+            && existing.note == edge.note
+    }) {
+        neighbor.edges.push(edge);
+        neighbor.edges.sort_by(|left, right| {
+            left.source
+                .cmp(&right.source)
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.edge_type.cmp(&right.edge_type))
+                .then_with(|| left.note.cmp(&right.note))
+        });
+    }
 }
 
 async fn search_project_docs<L, E>(
@@ -2231,5 +2260,200 @@ where
             deleted: true,
             id: params.id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+
+    use nenjo::manifest::ProjectManifest;
+    use nenjo::manifest::local::LocalManifestStore;
+    use nenjo::{ManifestResource, ManifestWriter};
+
+    use super::*;
+
+    async fn project_backend_fixture() -> Result<(
+        PlatformManifestBackend<LocalManifestStore, NoopSensitivePayloadEncoder>,
+        Uuid,
+        TempDir,
+    )> {
+        let temp = tempdir()?;
+        let manifests_dir = temp.path().join("manifests");
+        let workspace_dir = temp.path().join("workspace");
+        let project_id = Uuid::new_v4();
+        let project_slug = "graph-eval";
+        let project_dir = workspace_dir.join(project_slug);
+        std::fs::create_dir_all(project_dir.join("docs"))?;
+
+        let store = Arc::new(LocalManifestStore::new(manifests_dir));
+        store
+            .upsert_resource(&ManifestResource::Project(ProjectManifest {
+                id: project_id,
+                name: "Graph Eval".to_string(),
+                slug: project_slug.to_string(),
+                description: None,
+                settings: json!({}),
+            }))
+            .await?;
+
+        let overview_path = format!("project://{project_id}/docs/overview.md");
+        let routine_path = format!("project://{project_id}/docs/routine.md");
+        let gate_path = format!("project://{project_id}/docs/gate.md");
+        let unrelated_path = format!("project://{project_id}/docs/unrelated.md");
+        let manifest = json!({
+            "pack_id": format!("project-{project_id}"),
+            "pack_version": "1",
+            "schema_version": 1,
+            "root_uri": format!("project://{project_id}/"),
+            "synced_at": "2026-01-01T00:00:00Z",
+            "docs": [
+                {
+                    "id": "overview",
+                    "virtual_path": overview_path,
+                    "source_path": "docs/overview.md",
+                    "title": "Overview",
+                    "summary": "Project overview",
+                    "description": null,
+                    "kind": "guide",
+                    "authority": "canonical",
+                    "status": "stable",
+                    "tags": ["domain:project"],
+                    "aliases": ["overview.md"],
+                    "keywords": ["overview"],
+                    "related": [
+                        {
+                            "type": "references",
+                            "target": routine_path,
+                            "description": "Overview references routine design"
+                        }
+                    ]
+                },
+                {
+                    "id": "routine",
+                    "virtual_path": routine_path,
+                    "source_path": "docs/routine.md",
+                    "title": "Routine",
+                    "summary": "Routine design",
+                    "description": null,
+                    "kind": "guide",
+                    "authority": "canonical",
+                    "status": "stable",
+                    "tags": ["resource:routine"],
+                    "aliases": ["routine.md"],
+                    "keywords": ["routine"],
+                    "related": [
+                        {
+                            "type": "depends_on",
+                            "target": gate_path,
+                            "description": "Routine depends on gate design"
+                        }
+                    ]
+                },
+                {
+                    "id": "gate",
+                    "virtual_path": gate_path,
+                    "source_path": "docs/gate.md",
+                    "title": "Gate",
+                    "summary": "Gate design",
+                    "description": null,
+                    "kind": "reference",
+                    "authority": "reference",
+                    "status": "stable",
+                    "tags": ["resource:gate"],
+                    "aliases": ["gate.md"],
+                    "keywords": ["gate"],
+                    "related": []
+                },
+                {
+                    "id": "unrelated",
+                    "virtual_path": unrelated_path,
+                    "source_path": "docs/unrelated.md",
+                    "title": "Unrelated",
+                    "summary": "Unrelated document",
+                    "description": null,
+                    "kind": "reference",
+                    "authority": "reference",
+                    "status": "stable",
+                    "tags": ["domain:other"],
+                    "aliases": ["unrelated.md"],
+                    "keywords": ["unrelated"],
+                    "related": []
+                }
+            ]
+        });
+        std::fs::write(
+            project_dir.join("knowledge_manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        for filename in ["overview.md", "routine.md", "gate.md", "unrelated.md"] {
+            std::fs::write(
+                project_dir.join("docs").join(filename),
+                format!("# {filename}\n"),
+            )?;
+        }
+
+        let client = PlatformManifestClient::new("http://localhost:9", "test")?;
+        let backend = PlatformManifestBackend::new(store, client, NoopSensitivePayloadEncoder)
+            .with_workspace_dir(workspace_dir);
+
+        Ok((backend, project_id, temp))
+    }
+
+    #[tokio::test]
+    async fn project_document_neighbors_expose_outgoing_and_incoming_edges() {
+        let (backend, project_id, _temp) = project_backend_fixture().await.unwrap();
+        let routine_path = format!("project://{project_id}/docs/routine.md");
+        let overview_path = format!("project://{project_id}/docs/overview.md");
+        let gate_path = format!("project://{project_id}/docs/gate.md");
+
+        let value = backend
+            .list_project_document_neighbors(json!({
+                "project_id": project_id,
+                "id_or_path": "routine"
+            }))
+            .await
+            .unwrap();
+        let neighbors = value.as_array().expect("neighbors array");
+
+        assert!(neighbors.iter().any(|neighbor| {
+            neighbor["target"] == overview_path
+                && neighbor["edges"].as_array().is_some_and(|edges| {
+                    edges.iter().any(|edge| {
+                        edge["edge_type"] == "references"
+                            && edge["source"] == overview_path
+                            && edge["target"] == routine_path
+                            && edge["note"] == "Overview references routine design"
+                    })
+                })
+        }));
+        assert!(neighbors.iter().any(|neighbor| {
+            neighbor["target"] == gate_path
+                && neighbor["edges"].as_array().is_some_and(|edges| {
+                    edges.iter().any(|edge| {
+                        edge["edge_type"] == "depends_on"
+                            && edge["source"] == routine_path
+                            && edge["target"] == gate_path
+                            && edge["note"] == "Routine depends on gate design"
+                    })
+                })
+        }));
+
+        let filtered = backend
+            .list_project_document_neighbors(json!({
+                "project_id": project_id,
+                "id_or_path": routine_path,
+                "edge_type": "depends_on"
+            }))
+            .await
+            .unwrap();
+        let filtered = filtered.as_array().expect("filtered neighbors array");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["target"], gate_path);
+        assert_eq!(filtered[0]["edges"][0]["edge_type"], "depends_on");
     }
 }

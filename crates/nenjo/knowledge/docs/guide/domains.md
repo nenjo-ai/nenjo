@@ -55,7 +55,7 @@ When a user activates a domain:
 
 ## Key Relationships (Canonical)
 
-- `part_of` → `nenjo.domain.nenjo_platform`
+- `part_of` → `nenjo.domain.nenjo`
 - `governs` → expanded scopes, abilities, and MCP servers during the session
 - `defines` → developer_prompt_addon and activation command
 - `references` → Abilities and MCP servers made available in the domain

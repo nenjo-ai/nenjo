@@ -78,7 +78,7 @@ Agents gain power through explicit assignments (not by default):
 
 ## Key Relationships (Canonical)
 
-- `part_of` → `nenjo.domain.nenjo_platform`
+- `part_of` → `nenjo.domain.nenjo`
 - `references` → `nenjo.kind.memory` (via memory_profile)
 - `references` → Abilities, Domains, Scopes, and MCP servers
 - `defines` → its own prompt configuration and runtime behavior

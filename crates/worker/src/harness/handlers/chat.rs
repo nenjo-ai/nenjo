@@ -67,7 +67,7 @@ fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
 
 struct ChatSessionUpsert {
     session_id: Uuid,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
     agent_id: Uuid,
     project_slug: String,
     agent_name: String,
@@ -97,7 +97,7 @@ fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
             session_id,
             kind: SessionKind::Chat,
             status,
-            project_id: Some(project_id),
+            project_id,
             agent_id: Some(agent_id),
             task_id: None,
             routine_id: None,
@@ -116,7 +116,7 @@ fn upsert_chat_session(ctx: &CommandContext, params: ChatSessionUpsert) {
 
     record.kind = SessionKind::Chat;
     record.status = status;
-    record.project_id = Some(project_id);
+    record.project_id = project_id;
     record.agent_id = Some(agent_id);
     record.version += 1;
     record.updated_at = now;
@@ -152,9 +152,7 @@ async fn restore_domain_session(ctx: &CommandContext, session_id: Uuid) -> Resul
     let agent_id = persisted
         .agent_id
         .context("domain session missing agent_id")?;
-    let project_id = persisted
-        .project_id
-        .context("domain session missing project_id")?;
+    let project_id = persisted.project_id.unwrap_or_else(Uuid::nil);
 
     let session = crate::harness::Harness::rebuild_domain_session(
         &ctx.provider,
@@ -205,7 +203,7 @@ pub async fn handle_chat(
         ctx,
         ChatSessionUpsert {
             session_id,
-            project_id: effective_project_id,
+            project_id,
             agent_id,
             project_slug: slug.clone(),
             agent_name: aname.clone(),
@@ -298,10 +296,25 @@ pub async fn handle_chat(
                     turn_number,
                 )
                 .await?;
+                let mut instance = rebuilt.runner.instance().clone();
+                if let Some(ref mut active_domain) = instance.prompt_context.active_domain {
+                    active_domain.session_id = session_id;
+                }
+                let active_domain_name = instance
+                    .prompt_context
+                    .active_domain
+                    .as_ref()
+                    .map(|domain| domain.domain_name.clone());
                 let runner = nenjo::AgentRunner::from_instance(
-                    rebuilt.runner.instance().clone(),
+                    instance,
                     rebuilt.runner.memory().cloned(),
                     rebuilt.runner.memory_scope().cloned(),
+                );
+                debug!(
+                    domain_session_id = %dsid,
+                    chat_session_id = %session_id,
+                    active_domain = ?active_domain_name,
+                    "Using domain-expanded chat runner"
                 );
                 ctx.domains.insert(dsid, rebuilt);
                 runner

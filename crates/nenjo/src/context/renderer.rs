@@ -53,3 +53,28 @@ impl ContextRenderer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::types::RenderContextBlock;
+
+    #[test]
+    fn renders_path_blocks_as_nested_dotted_vars() {
+        let renderer = ContextRenderer::from_blocks(&[RenderContextBlock {
+            name: "methodology".into(),
+            path: "nenjo/core".into(),
+            template: "<methodology>{{ self.role }}</methodology>".into(),
+        }]);
+        let vars = HashMap::from([("self.role".into(), "system".into())]);
+
+        let rendered_blocks = renderer.render_all(&vars);
+        let mut prompt_vars = vars.clone();
+        prompt_vars.extend(rendered_blocks);
+
+        let prompt =
+            nenjo_xml::template::render_template("{{ nenjo.core.methodology }}", &prompt_vars);
+
+        assert_eq!(prompt, "<methodology>system</methodology>");
+    }
+}

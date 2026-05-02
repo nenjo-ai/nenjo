@@ -52,12 +52,27 @@ This reference includes:
 
 Teams are encouraged to copy and adapt these templates when initializing the knowledge layer of a new Project.
 
+## Repository Connections & Worktrees
+
+Projects can be synced with a Git repository through the project repository connection. When a project has a synced Git repository, task execution becomes workspace-backed: executions that process project tasks create a Git worktree flow so the executing worker can operate against an isolated checkout for the task or run.
+
+This means repository-connected projects are not just metadata containers. They provide the code workspace that agents should inspect, modify, test, and report against during task execution.
+
+Agent implications:
+
+- Treat the synced repository as the source workspace for implementation tasks.
+- Expect task executions in repository-connected projects to use an isolated Git worktree flow.
+- Inspect the worktree state before making claims about code changes.
+- Keep task acceptance criteria tied to verifiable repository changes when the project is code-backed.
+- Include Git/worktree operating guidance in prompts for agents that work on repository files.
+
 ## Runtime Behavior
 
 - All tasks created inside a Project inherit its settings and memory scope
 - Agents operating on Project tasks use the Project’s `project_focus` memory
 - Execution runs are scoped to the Project
 - Document-based knowledge is available to any agent or routine running inside the Project
+- If the Project is synced with a Git repository, executions that run tasks use the repository worktree flow for workspace-backed code work
 
 ## Key Relationships (Canonical)
 
@@ -66,6 +81,7 @@ Teams are encouraged to copy and adapt these templates when initializing the kno
 - `defines` → Project-level settings and knowledge graph structure
 - `governs` → Memory scoping and execution boundaries
 - `references` → `nenjo.reference.knowledge` (templates and examples)
+- `references` → Git repository connection and task worktree flow when code execution is enabled
 
 ## Common Patterns
 
@@ -88,6 +104,7 @@ Teams are encouraged to copy and adapt these templates when initializing the kno
 - Neglecting to build a proper document-based knowledge graph for complex projects
 - Mixing unrelated work into a single Project (hurts memory isolation and clarity)
 - Forgetting to connect a repository when workspace-driven workflows are needed
+- Designing code-working agents without Git/worktree context
 
 ## Best Practices
 
@@ -96,4 +113,5 @@ Teams are encouraged to copy and adapt these templates when initializing the kno
 - Use the knowledge graph to make agents dramatically more effective inside the Project
 - Keep project memory profiles focused and regularly reviewed
 - Leverage repository connections for version-controlled knowledge and code
+- For repository-backed projects, make task definitions and acceptance criteria concrete enough for isolated worktree execution
 - Start from the templates in `nenjo.reference.knowledge` to accelerate setup

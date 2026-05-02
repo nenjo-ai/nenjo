@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use regex::Regex;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use nenjo_models::{ChatMessage, ChatRequest};
 use nenjo_tools::{Tool, ToolCategory};
@@ -128,6 +128,21 @@ pub async fn run(
                     tools = ?tool_names,
                     "Turn loop starting with tools"
                 );
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    let tool_names = tool_specs
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n- ");
+                    trace!(
+                        agent = agent_name,
+                        model,
+                        tool_count = tool_specs.len(),
+                        "\nTool belt sent to provider for {}:\n- {}",
+                        agent_name,
+                        tool_names,
+                    );
+                }
             } else {
                 warn!(
                     agent = agent_name,
@@ -273,7 +288,16 @@ pub async fn run(
 
                     debug!(
                         agent = agent_name,
-                        model, "Tool call response: {assistant_content}"
+                        model,
+                        tool_call_count = tool_calls_json.len(),
+                        assistant_text_len = response.text.as_deref().map(str::len).unwrap_or(0),
+                        assistant_text_preview = response
+                            .text
+                            .as_deref()
+                            .map(|text| truncate_str(text, 300))
+                            .unwrap_or("(none)"),
+                        tool_calls = %serde_json::Value::Array(tool_calls_json.clone()),
+                        "LLM requested tool calls"
                     );
                     let assistant_message = ChatMessage::assistant(assistant_content.to_string());
                     messages.push(assistant_message.clone());
@@ -398,6 +422,17 @@ pub async fn run(
                             )
                         };
 
+                        debug!(
+                            agent = agent_name,
+                            model,
+                            tool = %tool_call.name,
+                            tool_call_id = %tool_call.id,
+                            success = tool_result.success,
+                            response_len = raw_content.len(),
+                            response_preview = %truncate(&raw_content, 500),
+                            "Tool call response"
+                        );
+
                         let tool_content = serde_json::json!({
                             "tool_call_id": tool_call.id,
                             "content": raw_content,
@@ -501,7 +536,7 @@ async fn execute_tool(
         agent = agent_name,
         tool = %tool_call.name,
         args = %truncate(&tool_call.arguments, 200),
-        "Tool call"
+        "Executing tool call"
     );
 
     // Find the tool — also match against sanitized names since strict providers

@@ -118,6 +118,21 @@ pub struct BuiltinDocRead {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltinDocNeighbor {
+    pub target: String,
+    pub edges: Vec<BuiltinDocNeighborEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltinDocNeighborEdge {
+    pub edge_type: BuiltinDocEdgeType,
+    pub source: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuiltinDocSearchHit {
     pub id: String,

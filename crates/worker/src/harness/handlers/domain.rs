@@ -68,7 +68,11 @@ pub async fn handle_domain_enter(
                 session_id,
                 kind: SessionKind::Domain,
                 status: SessionStatus::Active,
-                project_id: Some(project_id),
+                project_id: if project_id.is_nil() {
+                    None
+                } else {
+                    Some(project_id)
+                },
                 agent_id: Some(agent_id),
                 task_id: None,
                 routine_id: None,

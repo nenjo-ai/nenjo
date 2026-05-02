@@ -52,7 +52,7 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     abilities: Vec<nenjo::manifest::AbilityManifest>,
     #[serde(default)]
-    context_blocks: Vec<nenjo::manifest::ContextBlockManifest>,
+    context_blocks: Vec<BootstrapContextBlockManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +82,20 @@ struct BootstrapAgentManifest {
     prompt_locked: bool,
     #[serde(default)]
     heartbeat: Option<nenjo::manifest::AgentHeartbeatManifest>,
+    #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapContextBlockManifest {
+    id: Uuid,
+    name: String,
+    #[serde(default)]
+    path: String,
+    display_name: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    template: String,
     #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
 }
@@ -290,6 +304,19 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let mut context_blocks = Vec::with_capacity(bootstrap.context_blocks.len());
+    for block in bootstrap.context_blocks {
+        let template = resolve_bootstrap_context_block_template(&block, state_dir).await?;
+        context_blocks.push(ContextBlockManifest {
+            id: block.id,
+            name: block.name,
+            path: block.path,
+            display_name: block.display_name,
+            description: block.description,
+            template,
+        });
+    }
+
     Ok(Manifest {
         auth: Some(ManifestAuth {
             user_id: bootstrap.user_id,
@@ -304,7 +331,7 @@ async fn hydrate_bootstrap_manifest(
         projects: bootstrap.projects,
         mcp_servers: bootstrap.mcp_servers,
         abilities: bootstrap.abilities,
-        context_blocks: bootstrap.context_blocks,
+        context_blocks,
     })
 }
 
@@ -350,7 +377,7 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
     check_section!("projects", Vec<nenjo::manifest::ProjectManifest>);
     check_section!("mcp_servers", Vec<nenjo::manifest::McpServerManifest>);
     check_section!("abilities", Vec<nenjo::manifest::AbilityManifest>);
-    check_section!("context_blocks", Vec<nenjo::manifest::ContextBlockManifest>);
+    check_section!("context_blocks", Vec<BootstrapContextBlockManifest>);
 }
 
 async fn ensure_worker_ack(
@@ -428,6 +455,53 @@ async fn decrypt_prompt_config_payload(
         format!(
             "Failed to parse decrypted bootstrap prompt config JSON for agent {}",
             agent_id
+        )
+    })
+}
+
+async fn resolve_bootstrap_context_block_template(
+    block: &BootstrapContextBlockManifest,
+    state_dir: &Path,
+) -> Result<String> {
+    let Some(payload) = block.encrypted_payload.as_ref() else {
+        return Ok(block.template.clone());
+    };
+
+    decrypt_context_block_template_payload(payload, state_dir, block.id).await
+}
+
+async fn decrypt_context_block_template_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    block_id: Uuid,
+) -> Result<String> {
+    if payload.object_type
+        != ManifestKind::ContextBlock
+            .encrypted_object_type()
+            .expect("context block content object type")
+    {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for context block {}",
+            payload.object_type,
+            block_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap context block decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap context block payload for context block {}",
+                block_id
+            )
+        })?;
+
+    serde_json::from_str::<String>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap context block template JSON for context block {}",
+            block_id
         )
     })
 }

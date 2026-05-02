@@ -471,6 +471,7 @@ fn routine_agent_event_to_response(
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
+                "tool_args": calls.iter().map(|c| c.tool_args.clone()).collect::<Vec<_>>(),
             }),
             payload: calls.first().and_then(|c| {
                 c.text_preview

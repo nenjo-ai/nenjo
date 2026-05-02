@@ -14,7 +14,7 @@ use nenjo_tools::{Tool, ToolCategory, ToolResult};
 use super::instance::AgentInstance;
 use super::runner::turn_loop;
 use super::runner::types::TurnEvent;
-use crate::manifest::{AbilityManifest, Manifest, PromptConfig};
+use crate::manifest::{AbilityManifest, Manifest, PromptConfig, PromptTemplates};
 use crate::types::TaskType;
 
 /// A single assigned ability exposed as a first-class tool.
@@ -310,7 +310,10 @@ async fn build_ability_instance(
     let prompt_config = PromptConfig {
         system_prompt: caller.prompt_config.system_prompt.clone(),
         developer_prompt: ability.prompt_config.developer_prompt.clone(),
-        templates: Default::default(),
+        templates: PromptTemplates {
+            chat_task: "{{ chat.message }}".into(),
+            ..Default::default()
+        },
         memory_profile: caller.prompt_config.memory_profile.clone(),
     };
 
@@ -432,7 +435,7 @@ mod tests {
     use super::*;
     use crate::agents::prompts::PromptContext;
     use crate::config::AgentConfig;
-    use crate::context::ContextRenderer;
+    use crate::context::{ContextRenderer, types::RenderContextBlock};
     use crate::manifest::{
         AbilityPromptConfig, AgentManifest, DomainManifest, DomainPromptConfig, PromptConfig,
     };
@@ -657,6 +660,55 @@ mod tests {
         let tool_names: Vec<_> = sub_instance.tools.iter().map(|tool| tool.name()).collect();
         assert!(tool_names.contains(&"list_agents"));
         assert!(tool_names.contains(&"create_agent"));
+    }
+
+    #[tokio::test]
+    async fn ability_sub_instance_renders_context_blocks_and_user_message() {
+        let mut caller = test_instance_with_active_domain();
+        caller.prompt_config.system_prompt = "{{ nenjo.core.methodology }}".into();
+        caller.context_renderer = ContextRenderer::from_blocks(&[
+            RenderContextBlock {
+                name: "methodology".into(),
+                path: "nenjo/core".into(),
+                template: "<methodology>{{ agent.role }}</methodology>".into(),
+            },
+            RenderContextBlock {
+                name: "tool_usage".into(),
+                path: "nenjo/core".into(),
+                template: "<tool_usage>{{ agent.role }}</tool_usage>".into(),
+            },
+        ]);
+        let ability = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "agent_builder".into(),
+            tool_name: "design_agent".into(),
+            path: "nenjo/platform".into(),
+            display_name: Some("Agent Builder".into()),
+            description: Some("Builds agents".into()),
+            activation_condition: "When building agents".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "{{ nenjo.core.tool_usage }}".into(),
+            },
+            platform_scopes: vec!["agents:write".into()],
+            mcp_server_ids: vec![],
+        };
+
+        let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
+        let prompts = sub_instance.build_prompts(&TaskType::Chat {
+            user_message: "build an agent".into(),
+            history: vec![],
+            project_id: uuid::Uuid::nil(),
+        });
+
+        assert_eq!(
+            prompts.system,
+            "<methodology>nenji:agent_builder</methodology>"
+        );
+        assert_eq!(
+            prompts.developer,
+            "<tool_usage>nenji:agent_builder</tool_usage>"
+        );
+        assert_eq!(prompts.user_message, "build an agent");
     }
 
     #[tokio::test]

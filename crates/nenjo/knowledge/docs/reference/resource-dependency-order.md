@@ -14,4 +14,8 @@ Defines the recommended creation order when building Nenjo resources to avoid ci
 ## Rules
 - Never wire downstream resources before upstream ones exist
 - Always verify upstream resources before using them
-- If order is unsafe, correct it explicitly before writing manifests
+- If order is unsafe, correct it explicitly before writing platform resources or
+  SDK manifests
+- In platform chat, describe the fields and platform actions needed to create or
+  update resources. Only switch to manifest-file instructions when the user asks
+  for SDK, local files, import/export, or code-level authoring.

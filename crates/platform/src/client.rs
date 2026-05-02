@@ -406,9 +406,6 @@ pub struct ProjectTaskListQuery {
     /// Optional routine ID filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<Uuid>,
-    /// Optional user assignment filter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assigned_to: Option<Uuid>,
     /// Optional agent assignment filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_agent_id: Option<Uuid>,
@@ -1268,9 +1265,6 @@ impl PlatformManifestClient {
             }
             if let Some(routine_id) = query.routine_id {
                 pairs.append_pair("routine_id", &routine_id.to_string());
-            }
-            if let Some(assigned_to) = query.assigned_to {
-                pairs.append_pair("assigned_to", &assigned_to.to_string());
             }
             if let Some(assigned_agent_id) = query.assigned_agent_id {
                 pairs.append_pair("assigned_agent_id", &assigned_agent_id.to_string());
