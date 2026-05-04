@@ -107,6 +107,7 @@ pub struct PlatformManifestBackend<L, E> {
     sensitive_payload_encoder: E,
     access_policy: Option<ManifestAccessPolicy>,
     workspace_dir: Option<PathBuf>,
+    cached_org_id: Option<Uuid>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -122,6 +123,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
             sensitive_payload_encoder,
             access_policy: None,
             workspace_dir: None,
+            cached_org_id: None,
         }
     }
 
@@ -134,6 +136,12 @@ impl<L, E> PlatformManifestBackend<L, E> {
     /// Attach the worker workspace root used for local-first project document reads.
     pub fn with_workspace_dir(mut self, workspace_dir: PathBuf) -> Self {
         self.workspace_dir = Some(workspace_dir);
+        self
+    }
+
+    /// Attach the org id cached from worker bootstrap metadata.
+    pub fn with_cached_org_id(mut self, org_id: Option<Uuid>) -> Self {
+        self.cached_org_id = org_id.filter(|id| !id.is_nil());
         self
     }
 
@@ -175,12 +183,14 @@ where
     }
 
     async fn local_manifest_org_id(&self) -> Result<Uuid> {
-        self.local_store
-            .load_manifest()
-            .await?
-            .auth
-            .map(|auth| auth.org_id)
-            .ok_or_else(|| anyhow!("local manifest is missing auth.org_id"))
+        if let Some(org_id) = self.cached_org_id {
+            return Ok(org_id);
+        }
+
+        self.platform_client
+            .current_org_id()
+            .await
+            .context("failed to derive org_id from authenticated platform context")
     }
 
     async fn cached_or_remote_ability(&self, id: Uuid) -> Result<AbilityManifest> {
@@ -2394,5 +2404,14 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0]["target"], gate_path);
         assert_eq!(filtered[0]["edges"][0]["edge_type"], "depends_on");
+    }
+
+    #[tokio::test]
+    async fn local_manifest_org_id_uses_cached_bootstrap_org_id() {
+        let (backend, _project_id, _temp) = project_backend_fixture().await.unwrap();
+        let org_id = Uuid::new_v4();
+        let backend = backend.with_cached_org_id(Some(org_id));
+
+        assert_eq!(backend.local_manifest_org_id().await.unwrap(), org_id);
     }
 }

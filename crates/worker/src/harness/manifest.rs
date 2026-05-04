@@ -20,10 +20,10 @@ use crate::crypto::decrypt_text_with_provider;
 use crate::harness::doc_sync;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::NenjoClient;
-use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestAuth, ManifestLoader};
+use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::EncryptedPayload;
 use nenjo_platform::ManifestKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -31,10 +31,7 @@ static TREE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 struct BootstrapManifestResponse {
-    user_id: Uuid,
-    org_id: Uuid,
-    #[serde(default)]
-    api_key_id: Option<Uuid>,
+    auth: BootstrapAuth,
     #[serde(default)]
     routines: Vec<nenjo::manifest::RoutineManifest>,
     #[serde(default)]
@@ -53,14 +50,120 @@ struct BootstrapManifestResponse {
     abilities: Vec<nenjo::manifest::AbilityManifest>,
     #[serde(default)]
     context_blocks: Vec<BootstrapContextBlockManifest>,
+    #[serde(default)]
+    nats: BootstrapNatsConfig,
+}
+
+struct HydratedBootstrap {
+    auth: BootstrapAuth,
+    manifest: Manifest,
+    nats: BootstrapNatsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapAuth {
+    pub user_id: Uuid,
+    pub org_id: Uuid,
+    #[serde(default)]
+    pub api_key_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BootstrapNatsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub tls_required: bool,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub auth: BootstrapNatsAuth,
+    #[serde(default)]
+    pub stream: BootstrapNatsStream,
+    #[serde(default)]
+    pub reconnect: BootstrapNatsReconnect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapNatsAuth {
+    #[serde(default = "default_nats_auth_method")]
+    pub method: String,
+}
+
+impl Default for BootstrapNatsAuth {
+    fn default() -> Self {
+        Self {
+            method: default_nats_auth_method(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapNatsStream {
+    #[serde(default = "default_nats_stream_name")]
+    pub name: String,
+}
+
+impl Default for BootstrapNatsStream {
+    fn default() -> Self {
+        Self {
+            name: default_nats_stream_name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapNatsReconnect {
+    #[serde(default = "default_nats_max_reconnects")]
+    pub max_reconnects: i32,
+    #[serde(default = "default_nats_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    #[serde(default = "default_nats_max_delay_ms")]
+    pub max_delay_ms: u64,
+    #[serde(default = "default_nats_jitter_ms")]
+    pub jitter_ms: u64,
+}
+
+impl Default for BootstrapNatsReconnect {
+    fn default() -> Self {
+        Self {
+            max_reconnects: default_nats_max_reconnects(),
+            initial_delay_ms: default_nats_initial_delay_ms(),
+            max_delay_ms: default_nats_max_delay_ms(),
+            jitter_ms: default_nats_jitter_ms(),
+        }
+    }
+}
+
+fn default_nats_auth_method() -> String {
+    "api_key_token".to_string()
+}
+
+fn default_nats_stream_name() -> String {
+    "AGENT_REQUESTS".to_string()
+}
+
+fn default_nats_max_reconnects() -> i32 {
+    -1
+}
+
+fn default_nats_initial_delay_ms() -> u64 {
+    250
+}
+
+fn default_nats_max_delay_ms() -> u64 {
+    30_000
+}
+
+fn default_nats_jitter_ms() -> u64 {
+    500
 }
 
 #[derive(Debug, Deserialize)]
-struct BootstrapAuthResponse {
-    #[serde(default)]
-    user_id: Option<Uuid>,
-    #[serde(default)]
-    api_key_id: Option<Uuid>,
+struct BootstrapAuthEnvelope {
+    auth: BootstrapAuth,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,52 +325,48 @@ pub async fn sync(
         }
     };
 
-    let auth: BootstrapAuthResponse = serde_json::from_value(bootstrap.clone())
+    let auth: BootstrapAuthEnvelope = serde_json::from_value(bootstrap.clone())
         .context("Failed to deserialize bootstrap auth response")?;
-    ensure_worker_ack(api, state_dir, auth.user_id, auth.api_key_id)
-        .await
-        .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
+    ensure_worker_ack(
+        api,
+        state_dir,
+        Some(auth.auth.user_id),
+        auth.auth.api_key_id,
+    )
+    .await
+    .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
     let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
+    let manifest = &data.manifest;
 
     info!(
-        projects = data.projects.len(),
-        routines = data.routines.len(),
-        models = data.models.len(),
-        agents = data.agents.len(),
-        councils = data.councils.len(),
-        domains = data.domains.len(),
-        mcp_servers = data.mcp_servers.len(),
+        projects = manifest.projects.len(),
+        routines = manifest.routines.len(),
+        models = manifest.models.len(),
+        agents = manifest.agents.len(),
+        councils = manifest.councils.len(),
+        domains = manifest.domains.len(),
+        mcp_servers = manifest.mcp_servers.len(),
         "Manifest fetched successfully"
     );
 
-    let auth = data.auth.as_ref();
     // Write auth info (user_id + api_key_id) as a single file.
-    debug!(
-        user_id = ?auth.map(|auth| auth.user_id),
-        api_key_id = ?auth.and_then(|auth| auth.api_key_id),
-        "Writing auth.json"
-    );
-    atomic_write_json(
-        manifests_dir,
-        "auth.json",
-        &serde_json::json!({
-            "user_id": auth.map(|auth| auth.user_id),
-            "org_id": auth.map(|auth| auth.org_id),
-            "api_key_id": auth.and_then(|auth| auth.api_key_id),
-        }),
+    atomic_write_json(manifests_dir, "auth.json", &data.auth)?;
+    atomic_write_json(manifests_dir, "nats.json", &data.nats)?;
+    atomic_write_json(manifests_dir, "projects.json", &manifest.projects)?;
+    atomic_write_json(manifests_dir, "routines.json", &manifest.routines)?;
+    atomic_write_json(manifests_dir, "models.json", &manifest.models)?;
+    atomic_write_json(manifests_dir, "agents.json", &manifest.agents)?;
+    atomic_write_json(manifests_dir, "councils.json", &manifest.councils)?;
+    atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)?;
+    sync_tree(&manifests_dir.join("domains"), &manifest.domains)?;
+    sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)?;
+    sync_tree(
+        &manifests_dir.join("context_blocks"),
+        &manifest.context_blocks,
     )?;
-    atomic_write_json(manifests_dir, "projects.json", &data.projects)?;
-    atomic_write_json(manifests_dir, "routines.json", &data.routines)?;
-    atomic_write_json(manifests_dir, "models.json", &data.models)?;
-    atomic_write_json(manifests_dir, "agents.json", &data.agents)?;
-    atomic_write_json(manifests_dir, "councils.json", &data.councils)?;
-    atomic_write_json(manifests_dir, "mcp_servers.json", &data.mcp_servers)?;
-    sync_tree(&manifests_dir.join("domains"), &data.domains)?;
-    sync_tree(&manifests_dir.join("abilities"), &data.abilities)?;
-    sync_tree(&manifests_dir.join("context_blocks"), &data.context_blocks)?;
 
     // Sync project documents to workspace
-    doc_sync::sync_all(api, workspace_dir, state_dir, &data.projects).await?;
+    doc_sync::sync_all(api, workspace_dir, state_dir, &manifest.projects).await?;
 
     Ok(())
 }
@@ -276,7 +375,7 @@ async fn hydrate_bootstrap_manifest(
     api: &NenjoClient,
     bootstrap: serde_json::Value,
     state_dir: &Path,
-) -> Result<Manifest> {
+) -> Result<HydratedBootstrap> {
     let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
         Ok(value) => value,
         Err(err) => {
@@ -317,22 +416,45 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
-    Ok(Manifest {
-        auth: Some(ManifestAuth {
-            user_id: bootstrap.user_id,
-            org_id: bootstrap.org_id,
-            api_key_id: bootstrap.api_key_id,
-        }),
-        routines: bootstrap.routines,
-        models: bootstrap.models,
-        agents,
-        councils: bootstrap.councils,
-        domains: bootstrap.domains,
-        projects: bootstrap.projects,
-        mcp_servers: bootstrap.mcp_servers,
-        abilities: bootstrap.abilities,
-        context_blocks,
+    Ok(HydratedBootstrap {
+        auth: bootstrap.auth.clone(),
+        manifest: Manifest {
+            routines: bootstrap.routines,
+            models: bootstrap.models,
+            agents,
+            councils: bootstrap.councils,
+            domains: bootstrap.domains,
+            projects: bootstrap.projects,
+            mcp_servers: bootstrap.mcp_servers,
+            abilities: bootstrap.abilities,
+            context_blocks,
+        },
+        nats: bootstrap.nats,
     })
+}
+
+pub fn load_cached_bootstrap_auth(manifests_dir: &Path) -> Option<BootstrapAuth> {
+    let path = manifests_dir.join("auth.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<BootstrapAuth>(&content) {
+        Ok(auth) => Some(auth),
+        Err(error) => {
+            warn!(file = %path.display(), %error, "Failed to parse cached bootstrap auth");
+            None
+        }
+    }
+}
+
+pub fn load_cached_nats_config(manifests_dir: &Path) -> Option<BootstrapNatsConfig> {
+    let path = manifests_dir.join("nats.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<BootstrapNatsConfig>(&content) {
+        Ok(config) => Some(config),
+        Err(error) => {
+            warn!(file = %path.display(), %error, "Failed to parse cached NATS bootstrap config");
+            None
+        }
+    }
 }
 
 fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_json::Error) {

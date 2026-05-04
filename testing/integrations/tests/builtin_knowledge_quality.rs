@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use nenjo::builtin_knowledge::{BuiltinDocFilter, BuiltinDocSearchHit, builtin_knowledge_pack};
+use nenjo::config::AgentConfig;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
 };
@@ -504,6 +505,10 @@ async fn builtin_knowledge_intent_graph_expand_quality() {
         .with_manifest(manifest)
         .with_model_factory(OpenRouterFactory { api_key })
         .with_tool_factory(BuiltinEvalToolFactory { log: log.clone() })
+        .with_agent_config(AgentConfig {
+            max_tool_iterations: 8,
+            ..Default::default()
+        })
         .build()
         .await
         .unwrap();

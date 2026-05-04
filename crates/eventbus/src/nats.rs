@@ -235,7 +235,7 @@ impl AckHandle for NatsAckHandle {
 ///     .await?;
 /// ```
 pub struct NatsTransportBuilder {
-    url: String,
+    urls: Vec<String>,
     token: Option<String>,
     stream_name: String,
     stream_subjects: Vec<String>,
@@ -250,7 +250,7 @@ impl NatsTransport {
     /// Create a builder for configuring a NATS transport.
     pub fn builder() -> NatsTransportBuilder {
         NatsTransportBuilder {
-            url: DEFAULT_URL.to_string(),
+            urls: vec![DEFAULT_URL.to_string()],
             token: None,
             stream_name: DEFAULT_STREAM_NAME.to_string(),
             stream_subjects: DEFAULT_STREAM_SUBJECTS
@@ -272,9 +272,9 @@ impl NatsTransport {
 }
 
 impl NatsTransportBuilder {
-    /// Set the NATS server URL (e.g., `nats://localhost:4222` or `tls://nats.example.com`).
-    pub fn url(mut self, url: impl Into<String>) -> Self {
-        self.url = url.into();
+    /// Set the NATS server URL pool used for initial connection and reconnects.
+    pub fn urls(mut self, urls: Vec<String>) -> Self {
+        self.urls = urls;
         self
     }
 
@@ -284,13 +284,13 @@ impl NatsTransportBuilder {
         self
     }
 
-    /// Override the JetStream stream name (default: `AGENT_EVENTS`).
+    /// Override the JetStream stream name (default: `AGENT_REQUESTS`).
     pub fn stream_name(mut self, name: impl Into<String>) -> Self {
         self.stream_name = name.into();
         self
     }
 
-    /// Override the JetStream stream subjects (default: `["agent.>"]`).
+    /// Override the JetStream stream subjects (default: `["requests.>"]`).
     pub fn stream_subjects(mut self, subjects: Vec<String>) -> Self {
         self.stream_subjects = subjects;
         self
@@ -331,15 +331,22 @@ impl NatsTransportBuilder {
 
     /// Connect to NATS and create/verify the JetStream stream.
     pub async fn build(self) -> Result<NatsTransport, EventBusError> {
-        // Enforce TLS for non-local connections.
-        let is_local = self.url.contains("localhost")
-            || self.url.contains("127.0.0.1")
-            || self.url.contains("[::1]");
-
-        if !is_local && !self.url.starts_with("tls://") {
+        if self.urls.is_empty() {
             return Err(EventBusError::Builder(
-                "non-local NATS connections require tls:// scheme".into(),
+                "at least one NATS URL is required".into(),
             ));
+        }
+
+        // Enforce TLS for non-local connections.
+        for url in &self.urls {
+            let is_local =
+                url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]");
+
+            if !is_local && !url.starts_with("tls://") {
+                return Err(EventBusError::Builder(
+                    "non-local NATS connections require tls:// scheme".into(),
+                ));
+            }
         }
 
         // Build connect options with automatic reconnection.
@@ -373,11 +380,11 @@ impl NatsTransportBuilder {
             });
 
         let client = opts
-            .connect(&self.url)
+            .connect(self.urls.clone())
             .await
             .map_err(|e| EventBusError::Transport(format!("NATS connect failed: {e}")))?;
 
-        debug!(url = %self.url, "Connected to NATS server");
+        debug!(urls = ?self.urls, "Connected to NATS server");
 
         let jetstream = jetstream::new(client);
 
@@ -416,7 +423,7 @@ mod tests {
     #[test]
     fn builder_defaults() {
         let builder = NatsTransport::builder();
-        assert_eq!(builder.url, "nats://localhost:4222");
+        assert_eq!(builder.urls, vec!["nats://localhost:4222"]);
         assert_eq!(builder.stream_name, "AGENT_REQUESTS");
         assert_eq!(builder.max_deliver, 3);
         assert_ne!(builder.worker_id, uuid::Uuid::nil());
@@ -425,16 +432,27 @@ mod tests {
     #[test]
     fn builder_overrides() {
         let builder = NatsTransport::builder()
-            .url("tls://nats.prod.example.com")
+            .urls(vec!["tls://nats.prod.example.com".to_string()])
             .token("secret")
             .stream_name("CUSTOM_STREAM")
             .max_deliver(5)
             .ack_wait(Duration::from_secs(30));
 
-        assert_eq!(builder.url, "tls://nats.prod.example.com");
+        assert_eq!(builder.urls, vec!["tls://nats.prod.example.com"]);
         assert_eq!(builder.token.as_deref(), Some("secret"));
         assert_eq!(builder.stream_name, "CUSTOM_STREAM");
         assert_eq!(builder.max_deliver, 5);
         assert_eq!(builder.ack_wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn builder_accepts_url_pool() {
+        let builder = NatsTransport::builder().urls(vec![
+            "tls://nats-a.example.com:4222".to_string(),
+            "tls://nats-b.example.com:4222".to_string(),
+        ]);
+
+        assert_eq!(builder.urls.len(), 2);
+        assert_eq!(builder.urls[0], "tls://nats-a.example.com:4222");
     }
 }

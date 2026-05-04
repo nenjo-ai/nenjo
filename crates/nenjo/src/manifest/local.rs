@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::store::{ManifestReader, ManifestWriter};
 use super::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    Manifest, ManifestAuth, ManifestLoader, ManifestResource, ManifestResourceKind,
-    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
+    Manifest, ManifestLoader, ManifestResource, ManifestResourceKind, McpServerManifest,
+    ModelManifest, ProjectManifest, RoutineManifest,
 };
 
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -53,42 +53,12 @@ impl LocalManifestStore {
             self.load_json(legacy_file)
         }
     }
-
-    fn auth(&self) -> Option<ManifestAuth> {
-        let auth_path = self.root.join("auth.json");
-
-        if let Ok(s) = std::fs::read_to_string(&auth_path) {
-            let value: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
-            let user_id: Uuid = value
-                .get("user_id")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let org_id: Uuid = value
-                .get("org_id")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            let api_key_id = value
-                .get("api_key_id")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-            if user_id.is_nil() && org_id.is_nil() && api_key_id.is_none() {
-                return None;
-            } else {
-                return Some(ManifestAuth {
-                    user_id,
-                    org_id,
-                    api_key_id,
-                });
-            }
-        }
-        None
-    }
 }
 
 #[async_trait]
 impl ManifestReader for LocalManifestStore {
     async fn load_manifest(&self) -> Result<Manifest> {
         Ok(Manifest {
-            auth: self.auth(),
             projects: self.load_json("projects.json"),
             routines: self.load_json("routines.json"),
             models: self.load_json("models.json"),
@@ -220,15 +190,6 @@ impl ManifestWriter for LocalManifestStore {
             )
         })?;
 
-        atomic_write_json(
-            &self.root,
-            "auth.json",
-            &serde_json::json!({
-                "user_id": manifest.auth.as_ref().map(|auth| auth.user_id),
-                "org_id": manifest.auth.as_ref().map(|auth| auth.org_id),
-                "api_key_id": manifest.auth.as_ref().and_then(|auth| auth.api_key_id),
-            }),
-        )?;
         atomic_write_json(&self.root, "projects.json", &manifest.projects)?;
         atomic_write_json(&self.root, "routines.json", &manifest.routines)?;
         atomic_write_json(&self.root, "models.json", &manifest.models)?;
@@ -455,11 +416,6 @@ mod tests {
         };
 
         Manifest {
-            auth: Some(ManifestAuth {
-                user_id: Uuid::new_v4(),
-                org_id: Uuid::new_v4(),
-                api_key_id: Some(Uuid::new_v4()),
-            }),
             models: vec![model],
             agents: vec![agent],
             abilities: vec![ability],
@@ -476,18 +432,6 @@ mod tests {
         store.replace_manifest(&manifest).await.unwrap();
         let loaded = store.load_manifest().await.unwrap();
 
-        assert_eq!(
-            loaded.auth.as_ref().map(|auth| auth.user_id),
-            manifest.auth.as_ref().map(|auth| auth.user_id)
-        );
-        assert_eq!(
-            loaded.auth.as_ref().and_then(|auth| auth.api_key_id),
-            manifest.auth.as_ref().and_then(|auth| auth.api_key_id)
-        );
-        assert_eq!(
-            loaded.auth.as_ref().map(|auth| auth.org_id),
-            manifest.auth.as_ref().map(|auth| auth.org_id)
-        );
         assert_eq!(loaded.models.len(), 1);
         assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.abilities.len(), 1);

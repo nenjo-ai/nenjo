@@ -467,11 +467,7 @@ impl Harness {
             .context("Failed to build Provider")?;
 
         let provider = Arc::new(ArcSwap::from_pointee(provider));
-        let worker_id = provider
-            .load_full()
-            .manifest()
-            .auth
-            .as_ref()
+        let worker_id = crate::harness::manifest::load_cached_bootstrap_auth(&config.manifests_dir)
             .and_then(|auth| auth.api_key_id)
             .map(|id| id.to_string())
             .unwrap_or_else(|| "local-worker".to_string());

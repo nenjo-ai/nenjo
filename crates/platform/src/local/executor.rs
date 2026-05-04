@@ -1375,11 +1375,6 @@ mod tests {
         };
 
         let manifest = Manifest {
-            auth: Some(nenjo::manifest::ManifestAuth {
-                user_id: Uuid::new_v4(),
-                org_id: Uuid::new_v4(),
-                api_key_id: Some(Uuid::new_v4()),
-            }),
             models: vec![model, alt_model.clone()],
             agents: vec![agent],
             abilities: vec![ability.clone()],

@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::{decrypt_text_with_provider, encrypt_text_with_provider};
+use crate::harness::manifest::load_cached_bootstrap_auth;
 
 // Re-export core tool types.
 pub use nenjo_tools::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
@@ -56,6 +57,7 @@ pub struct HarnessToolFactory {
     manifest_store: Arc<LocalManifestStore>,
     platform_client: Option<Arc<PlatformManifestClient>>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
+    cached_org_id: Option<Uuid>,
     manifest_backend:
         Option<Arc<PlatformManifestBackend<LocalManifestStore, WorkerAgentPromptPayloadEncoder>>>,
 }
@@ -160,6 +162,9 @@ impl HarnessToolFactory {
                     error
                 })
                 .ok();
+        let cached_org_id = load_cached_bootstrap_auth(&config.manifests_dir)
+            .map(|auth| auth.org_id)
+            .filter(|org_id| !org_id.is_nil());
         Self {
             manifest_backend: platform_client.as_ref().map(|client| {
                 Arc::new(
@@ -168,7 +173,8 @@ impl HarnessToolFactory {
                         client.as_ref().clone(),
                         payload_encoder.clone(),
                     )
-                    .with_workspace_dir(config.workspace_dir.clone()),
+                    .with_workspace_dir(config.workspace_dir.clone())
+                    .with_cached_org_id(cached_org_id),
                 )
             }),
             security,
@@ -178,6 +184,7 @@ impl HarnessToolFactory {
             manifest_store: local_store,
             platform_client,
             payload_encoder,
+            cached_org_id,
         }
     }
 
@@ -263,6 +270,7 @@ impl HarnessToolFactory {
                     client: client.clone(),
                     manifest_store: self.manifest_store.clone(),
                     payload_encoder: self.payload_encoder.clone(),
+                    cached_org_id: self.cached_org_id,
                 });
         add_project_tools(&mut tools, manifest_backend, project_backend, &policy);
 
@@ -789,6 +797,7 @@ struct PlatformProjectToolsBackend {
     client: Arc<PlatformManifestClient>,
     manifest_store: Arc<LocalManifestStore>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
+    cached_org_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -856,12 +865,7 @@ impl PlatformProjectToolsBackend {
     }
 
     async fn org_id(&self) -> Result<Uuid> {
-        let manifest = self.manifest_store.load_manifest().await?;
-        if let Some(org_id) = manifest
-            .auth
-            .map(|auth| auth.org_id)
-            .filter(|org_id| !org_id.is_nil())
-        {
+        if let Some(org_id) = self.cached_org_id {
             return Ok(org_id);
         }
 
@@ -1837,11 +1841,6 @@ mod tests {
 
         store
             .replace_manifest(&Manifest {
-                auth: Some(nenjo::manifest::ManifestAuth {
-                    user_id: Uuid::new_v4(),
-                    org_id: Uuid::new_v4(),
-                    api_key_id: Some(Uuid::new_v4()),
-                }),
                 agents: vec![visible_agent.clone(), hidden_agent.clone()],
                 abilities: vec![visible_ability.clone(), hidden_ability.clone()],
                 domains: vec![visible_domain.clone(), hidden_domain.clone()],

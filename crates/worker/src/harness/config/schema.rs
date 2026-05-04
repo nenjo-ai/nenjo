@@ -758,6 +758,11 @@ impl Config {
             .unwrap_or(DEFAULT_NATS_URL)
     }
 
+    /// Explicitly configured NATS URL, if one was provided in config/env/CLI.
+    pub fn configured_nats_url(&self) -> Option<&str> {
+        self.nats_url.as_deref().filter(|s| !s.is_empty())
+    }
+
     pub fn load_or_init(nenjo_dir_override: Option<&str>) -> Result<Self> {
         let home = UserDirs::new()
             .map(|u| u.home_dir().to_path_buf())
