@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::types::*;
 
@@ -55,21 +55,57 @@ impl BuiltinKnowledgePack {
         &self,
         id_or_path: &str,
         edge_type: Option<BuiltinDocEdgeType>,
-    ) -> Vec<&BuiltinDocManifest> {
+    ) -> Vec<BuiltinDocNeighbor> {
         let Some(source) = self.read_manifest(id_or_path) else {
             return Vec::new();
         };
 
-        source
-            .related
-            .iter()
-            .filter(|edge| {
-                edge_type
-                    .map(|expected| edge.edge_type == expected)
-                    .unwrap_or(true)
-            })
-            .filter_map(|edge| self.read_manifest(&edge.target))
-            .collect()
+        let mut neighbors: BTreeMap<String, BuiltinDocNeighbor> = BTreeMap::new();
+
+        for edge in &source.related {
+            if let Some(expected) = edge_type
+                && edge.edge_type != expected
+            {
+                continue;
+            }
+            if let Some(target) = self.read_manifest(&edge.target) {
+                push_neighbor_edge(
+                    &mut neighbors,
+                    target.virtual_path.clone(),
+                    BuiltinDocNeighborEdge {
+                        edge_type: edge.edge_type,
+                        source: source.virtual_path.clone(),
+                        target: target.virtual_path.clone(),
+                        note: edge.description.clone(),
+                    },
+                );
+            }
+        }
+
+        for candidate in &self.manifest.docs {
+            for edge in &candidate.related {
+                if edge.target != source.id {
+                    continue;
+                }
+                if let Some(expected) = edge_type
+                    && edge.edge_type != expected
+                {
+                    continue;
+                }
+                push_neighbor_edge(
+                    &mut neighbors,
+                    candidate.virtual_path.clone(),
+                    BuiltinDocNeighborEdge {
+                        edge_type: edge.edge_type,
+                        source: candidate.virtual_path.clone(),
+                        target: source.virtual_path.clone(),
+                        note: edge.description.clone(),
+                    },
+                );
+            }
+        }
+
+        neighbors.into_values().collect()
     }
 
     pub fn search_paths(&self, query: &str, filter: BuiltinDocFilter) -> Vec<BuiltinDocSearchHit> {
@@ -195,6 +231,29 @@ impl BuiltinKnowledgePack {
         self.docs
             .iter()
             .find(|doc| doc.id == manifest.id || doc.virtual_path == manifest.virtual_path)
+    }
+}
+
+fn push_neighbor_edge(
+    neighbors: &mut BTreeMap<String, BuiltinDocNeighbor>,
+    neighbor_target: String,
+    edge: BuiltinDocNeighborEdge,
+) {
+    let neighbor = neighbors
+        .entry(neighbor_target.clone())
+        .or_insert_with(|| BuiltinDocNeighbor {
+            target: neighbor_target,
+            edges: Vec::new(),
+        });
+    if !neighbor.edges.contains(&edge) {
+        neighbor.edges.push(edge);
+        neighbor.edges.sort_by(|left, right| {
+            left.source
+                .cmp(&right.source)
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.edge_type.as_str().cmp(right.edge_type.as_str()))
+                .then_with(|| left.note.cmp(&right.note))
+        });
     }
 }
 

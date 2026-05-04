@@ -89,12 +89,7 @@ pub async fn handle_manifest_changed(
         ResourceType::Document => {
             if let Some(pid) = project_id {
                 let manifest = ctx.provider().manifest().clone();
-                let slug = manifest
-                    .projects
-                    .iter()
-                    .find(|p| p.id == pid)
-                    .map(|p| p.slug.clone())
-                    .unwrap_or_else(|| pid.to_string());
+                let slug = project_workspace_slug(&manifest, pid);
                 let project_dir = ctx.config.workspace_dir.join(&slug);
                 if action == ResourceAction::Deleted {
                     match crate::harness::doc_sync::remove_manifest_entry(&project_dir, resource_id)
@@ -199,6 +194,15 @@ fn should_refresh_domain_sessions(resource_type: ResourceType) -> bool {
             | ResourceType::Domain
             | ResourceType::McpServer
     )
+}
+
+fn project_workspace_slug(manifest: &nenjo::manifest::Manifest, project_id: Uuid) -> String {
+    manifest
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .map(|project| project.slug.clone())
+        .unwrap_or_else(|| project_id.to_string())
 }
 
 async fn refresh_active_domain_sessions(ctx: &CommandContext) {
@@ -590,12 +594,7 @@ async fn apply_inline_encrypted_upsert(
             };
 
             let manifest = ctx.provider().manifest().clone();
-            let slug = manifest
-                .projects
-                .iter()
-                .find(|project| project.id == metadata.project_id)
-                .map(|project| project.slug.clone())
-                .unwrap_or_else(|| metadata.project_id.to_string());
+            let slug = project_workspace_slug(&manifest, metadata.project_id);
             let project_dir = ctx.config.workspace_dir.join(slug);
 
             if let Err(error) = crate::harness::doc_sync::write_document_content(

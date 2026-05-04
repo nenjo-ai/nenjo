@@ -68,7 +68,7 @@ Routines are typically built using well-known patterns:
 
 ## Key Relationships (Canonical)
 
-- `part_of` → `nenjo.domain.nenjo_platform`
+- `part_of` → `nenjo.domain.nenjo`
 - `references` → Agents (as step executors)
 - `references` → Councils (as collaboration steps)
 - `references` → Workflow Patterns (Gated Pipeline, Fan Out, Review Pipeline, Linear Pipeline)

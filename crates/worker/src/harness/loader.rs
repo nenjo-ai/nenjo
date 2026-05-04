@@ -13,7 +13,7 @@ use tracing::warn;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    Manifest, ManifestAuth, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
+    Manifest, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
 };
 
 /// Loads a [`Manifest`] from cached JSON files on disk.
@@ -94,40 +94,7 @@ fn walk_json_files<T: serde::de::DeserializeOwned>(dir: &Path, items: &mut Vec<T
 #[async_trait::async_trait]
 impl nenjo::ManifestLoader for FileSystemManifestLoader {
     async fn load(&self) -> Result<Manifest> {
-        // Read auth info (user_id + api_key_id).
-        // Falls back to legacy user_id.json for backward compat.
-        let auth = {
-            let auth_path = self.manifests_dir.join("auth.json");
-
-            if let Ok(s) = std::fs::read_to_string(&auth_path) {
-                let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
-                let uid: uuid::Uuid = v
-                    .get("user_id")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let org_id: uuid::Uuid = v
-                    .get("org_id")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let kid = v
-                    .get("api_key_id")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                if uid.is_nil() && org_id.is_nil() && kid.is_none() {
-                    None
-                } else {
-                    Some(ManifestAuth {
-                        user_id: uid,
-                        org_id,
-                        api_key_id: kid,
-                    })
-                }
-            } else {
-                None
-            }
-        };
-
         Ok(Manifest {
-            auth,
             projects: self.load_json::<ProjectManifest>("projects.json"),
             routines: self.load_json::<RoutineManifest>("routines.json"),
             models: self.load_json::<ModelManifest>("models.json"),

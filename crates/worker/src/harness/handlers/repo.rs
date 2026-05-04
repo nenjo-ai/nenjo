@@ -21,6 +21,36 @@ pub async fn handle_repo_sync(
     let manifest = provider.manifest();
     let slug = project_slug(manifest, project_id);
     let repo_dir = ctx.config.workspace_dir.join(&slug).join("repo");
+    let git_lock = ctx
+        .git_locks
+        .entry(repo_dir.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let guard = match git_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            info!(
+                %project_id,
+                slug = %slug,
+                dir = %repo_dir.display(),
+                "Repo sync already in progress; waiting"
+            );
+            let guard = git_lock.lock().await;
+            if repo_dir.join(".git").exists() {
+                info!(%project_id, slug = %slug, "Repo sync already complete");
+                let _ = ctx.response_tx.send(Response::RepoSyncComplete {
+                    project_id,
+                    success: true,
+                    error: None,
+                });
+                drop(guard);
+                evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
+                return Ok(());
+            }
+            guard
+        }
+    };
 
     info!(
         %project_id,
@@ -33,6 +63,11 @@ pub async fn handle_repo_sync(
 
     let result = if repo_dir.join(".git").exists() {
         git_pull(&repo_dir, target_branch).await
+    } else if repo_dir.exists() {
+        Err(anyhow::anyhow!(
+            "repo directory exists but is not a git repository: {}",
+            repo_dir.display()
+        ))
     } else {
         git_clone(repo_url, &repo_dir, target_branch).await
     };
@@ -57,6 +92,8 @@ pub async fn handle_repo_sync(
         }
     }
 
+    drop(guard);
+    evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
     result
 }
 
@@ -66,9 +103,16 @@ pub async fn handle_repo_unsync(ctx: &CommandContext, project_id: Uuid) -> Resul
     let manifest = provider.manifest();
     let slug = project_slug(manifest, project_id);
     let repo_dir = ctx.config.workspace_dir.join(&slug).join("repo");
+    let git_lock = ctx
+        .git_locks
+        .entry(repo_dir.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = git_lock.lock().await;
 
     if !repo_dir.exists() {
         info!(%project_id, slug = %slug, "Repo directory doesn't exist, nothing to unsync");
+        evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
         return Ok(());
     }
 
@@ -85,7 +129,18 @@ pub async fn handle_repo_unsync(ctx: &CommandContext, project_id: Uuid) -> Resul
         .with_context(|| format!("Failed to remove repo directory: {}", repo_dir.display()))?;
 
     info!(%project_id, slug = %slug, "Repo unsynced");
+    evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
     Ok(())
+}
+
+fn evict_git_lock(
+    locks: &crate::harness::GitLocks,
+    repo_dir: &Path,
+    lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    if std::sync::Arc::strong_count(lock) <= 2 {
+        locks.remove(repo_dir);
+    }
 }
 
 /// Clone a repository to the target directory, checking out `target_branch`.

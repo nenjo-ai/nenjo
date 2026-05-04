@@ -46,7 +46,7 @@ Good council members should be **deliberately distinct**. Each member should hav
 
 ## Key Relationships (Canonical)
 
-- `part_of` → `nenjo.domain.nenjo_platform`
+- `part_of` → `nenjo.domain.nenjo`
 - `references` → Agents (leader + members)
 - `references` → Delegation Strategies
 - `defines` → collaboration topology and member roles

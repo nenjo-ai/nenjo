@@ -23,13 +23,14 @@ use nenjo_platform::{
     rest::projects::project_rest_tools,
 };
 use nenjo_tools::security::SecurityPolicy;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::{decrypt_text_with_provider, encrypt_text_with_provider};
+use crate::harness::manifest::load_cached_bootstrap_auth;
 
 // Re-export core tool types.
 pub use nenjo_tools::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
@@ -56,6 +57,7 @@ pub struct HarnessToolFactory {
     manifest_store: Arc<LocalManifestStore>,
     platform_client: Option<Arc<PlatformManifestClient>>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
+    cached_org_id: Option<Uuid>,
     manifest_backend:
         Option<Arc<PlatformManifestBackend<LocalManifestStore, WorkerAgentPromptPayloadEncoder>>>,
 }
@@ -160,6 +162,9 @@ impl HarnessToolFactory {
                     error
                 })
                 .ok();
+        let cached_org_id = load_cached_bootstrap_auth(&config.manifests_dir)
+            .map(|auth| auth.org_id)
+            .filter(|org_id| !org_id.is_nil());
         Self {
             manifest_backend: platform_client.as_ref().map(|client| {
                 Arc::new(
@@ -168,7 +173,8 @@ impl HarnessToolFactory {
                         client.as_ref().clone(),
                         payload_encoder.clone(),
                     )
-                    .with_workspace_dir(config.workspace_dir.clone()),
+                    .with_workspace_dir(config.workspace_dir.clone())
+                    .with_cached_org_id(cached_org_id),
                 )
             }),
             security,
@@ -178,6 +184,7 @@ impl HarnessToolFactory {
             manifest_store: local_store,
             platform_client,
             payload_encoder,
+            cached_org_id,
         }
     }
 
@@ -263,6 +270,7 @@ impl HarnessToolFactory {
                     client: client.clone(),
                     manifest_store: self.manifest_store.clone(),
                     payload_encoder: self.payload_encoder.clone(),
+                    cached_org_id: self.cached_org_id,
                 });
         add_project_tools(&mut tools, manifest_backend, project_backend, &policy);
 
@@ -789,6 +797,7 @@ struct PlatformProjectToolsBackend {
     client: Arc<PlatformManifestClient>,
     manifest_store: Arc<LocalManifestStore>,
     payload_encoder: WorkerAgentPromptPayloadEncoder,
+    cached_org_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -804,13 +813,59 @@ struct CurrentTaskState {
 }
 
 impl PlatformProjectToolsBackend {
-    async fn org_id(&self) -> Result<Uuid> {
+    async fn normalize_project_tool_args(
+        &self,
+        mut args: serde_json::Value,
+        kind: ProjectRestToolKind,
+    ) -> Result<serde_json::Value> {
+        if !matches!(
+            kind,
+            ProjectRestToolKind::ListProjectTasks
+                | ProjectRestToolKind::CreateProjectTasks
+                | ProjectRestToolKind::ListProjectExecutionRuns
+                | ProjectRestToolKind::StartProjectExecution
+        ) {
+            return Ok(args);
+        }
+
+        let Some(object) = args.as_object_mut() else {
+            return Ok(args);
+        };
+        let Some((field_name, raw_project_id)) = object
+            .get("project_id")
+            .or_else(|| object.get("id"))
+            .and_then(|value| value.as_str())
+            .map(|value| {
+                if object.contains_key("project_id") {
+                    ("project_id", value.to_string())
+                } else {
+                    ("id", value.to_string())
+                }
+            })
+        else {
+            return Ok(args);
+        };
+
+        if Uuid::parse_str(&raw_project_id).is_ok() {
+            return Ok(args);
+        }
+
         let manifest = self.manifest_store.load_manifest().await?;
-        if let Some(org_id) = manifest
-            .auth
-            .map(|auth| auth.org_id)
-            .filter(|org_id| !org_id.is_nil())
-        {
+        let project_ids = manifest
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>();
+
+        if let Some(corrected) = unique_near_uuid_match(&raw_project_id, &project_ids) {
+            object.insert(field_name.to_string(), json!(corrected));
+        }
+
+        Ok(args)
+    }
+
+    async fn org_id(&self) -> Result<Uuid> {
+        if let Some(org_id) = self.cached_org_id {
             return Ok(org_id);
         }
 
@@ -874,7 +929,6 @@ impl PlatformProjectToolsBackend {
             "slug": args.slug,
             "complexity": args.complexity,
             "order_index": args.order_index,
-            "assigned_to": args.assigned_to,
             "assigned_agent_id": args.assigned_agent_id,
             "routine_id": args.routine_id,
             "encrypted_payload": encrypted_payload,
@@ -919,9 +973,6 @@ impl PlatformProjectToolsBackend {
         }
         if let Some(order_index) = args.order_index {
             body.insert("order_index".into(), json!(order_index));
-        }
-        if let Some(assigned_to) = args.assigned_to {
-            body.insert("assigned_to".into(), json!(assigned_to));
         }
         if let Some(assigned_agent_id) = args.assigned_agent_id {
             body.insert("assigned_agent_id".into(), json!(assigned_agent_id));
@@ -1058,10 +1109,17 @@ impl Tool for ProjectRestTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let args = self
+            .backend
+            .normalize_project_tool_args(args, self.kind)
+            .await?;
         let output = match self.kind {
             ProjectRestToolKind::ListProjectTasks => {
-                let args: ListProjectTasksArgs =
-                    serde_json::from_value(args).context("invalid list_project_tasks args")?;
+                let args: ListProjectTasksArgs = parse_project_tool_args(
+                    args,
+                    "list_project_tasks",
+                    "Expected {\"project_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .list_project_tasks(&ProjectTaskListQuery {
@@ -1071,7 +1129,6 @@ impl Tool for ProjectRestTool {
                         task_type: args.task_type,
                         tags: args.tags.map(|tags| tags.join(",")),
                         routine_id: args.routine_id,
-                        assigned_to: args.assigned_to,
                         assigned_agent_id: args.assigned_agent_id,
                         limit: args.limit,
                         offset: args.offset,
@@ -1079,19 +1136,28 @@ impl Tool for ProjectRestTool {
                     .await?
             }
             ProjectRestToolKind::GetProjectTask => {
-                let args: GetProjectTaskArgs =
-                    serde_json::from_value(args).context("invalid get_project_task args")?;
+                let args: GetProjectTaskArgs = parse_project_tool_args(
+                    args,
+                    "get_project_task",
+                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend.client.get_project_task(args.task_id).await?
             }
             ProjectRestToolKind::CreateProjectTasks => {
-                let args: CreateProjectTasksArgs =
-                    serde_json::from_value(args).context("invalid create_project_tasks args")?;
+                let args: CreateProjectTasksArgs = parse_project_tool_args(
+                    args,
+                    "create_project_tasks",
+                    "Expected {\"project_id\":\"<canonical 8-4-4-4-12 UUID>\",\"tasks\":[{\"title\":\"...\"}]}.",
+                )?;
                 let body = self.backend.create_tasks_body(&args).await?;
                 self.backend.client.bulk_create_project_tasks(&body).await?
             }
             ProjectRestToolKind::UpdateProjectTask => {
-                let args: UpdateProjectTaskArgs =
-                    serde_json::from_value(args).context("invalid update_project_task args")?;
+                let args: UpdateProjectTaskArgs = parse_project_tool_args(
+                    args,
+                    "update_project_task",
+                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\", ...fields}.",
+                )?;
                 let body = self.backend.update_task_body(&args).await?;
                 self.backend
                     .client
@@ -1099,8 +1165,11 @@ impl Tool for ProjectRestTool {
                     .await?
             }
             ProjectRestToolKind::DeleteProjectTask => {
-                let args: DeleteProjectTaskArgs =
-                    serde_json::from_value(args).context("invalid delete_project_task args")?;
+                let args: DeleteProjectTaskArgs = parse_project_tool_args(
+                    args,
+                    "delete_project_task",
+                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .delete_project_task(args.task_id)
@@ -1108,8 +1177,11 @@ impl Tool for ProjectRestTool {
                 json!({ "deleted": true, "task_id": args.task_id })
             }
             ProjectRestToolKind::ListProjectExecutionRuns => {
-                let args: ListProjectExecutionRunsArgs = serde_json::from_value(args)
-                    .context("invalid list_project_execution_runs args")?;
+                let args: ListProjectExecutionRunsArgs = parse_project_tool_args(
+                    args,
+                    "list_project_execution_runs",
+                    "Expected {\"project_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .list_project_execution_runs(&ProjectExecutionListQuery {
@@ -1123,16 +1195,22 @@ impl Tool for ProjectRestTool {
                     .await?
             }
             ProjectRestToolKind::GetProjectExecutionRun => {
-                let args: GetProjectExecutionRunArgs = serde_json::from_value(args)
-                    .context("invalid get_project_execution_run args")?;
+                let args: GetProjectExecutionRunArgs = parse_project_tool_args(
+                    args,
+                    "get_project_execution_run",
+                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .get_project_execution_run(args.execution_run_id)
                     .await?
             }
             ProjectRestToolKind::StartProjectExecution => {
-                let args: StartProjectExecutionArgs =
-                    serde_json::from_value(args).context("invalid start_project_execution args")?;
+                let args: StartProjectExecutionArgs = parse_project_tool_args(
+                    args,
+                    "start_project_execution",
+                    "Expected {\"project_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .create_execution_run(&CreateExecutionRequest {
@@ -1145,16 +1223,22 @@ impl Tool for ProjectRestTool {
                     .await?
             }
             ProjectRestToolKind::PauseProjectExecution => {
-                let args: CommandProjectExecutionArgs =
-                    serde_json::from_value(args).context("invalid pause_project_execution args")?;
+                let args: CommandProjectExecutionArgs = parse_project_tool_args(
+                    args,
+                    "pause_project_execution",
+                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .command_project_execution_run(args.execution_run_id, "pause")
                     .await?
             }
             ProjectRestToolKind::ResumeProjectExecution => {
-                let args: CommandProjectExecutionArgs = serde_json::from_value(args)
-                    .context("invalid resume_project_execution args")?;
+                let args: CommandProjectExecutionArgs = parse_project_tool_args(
+                    args,
+                    "resume_project_execution",
+                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
                 self.backend
                     .client
                     .command_project_execution_run(args.execution_run_id, "resume")
@@ -1175,7 +1259,9 @@ impl Tool for ProjectRestTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListProjectTasksArgs {
+    #[serde(alias = "id")]
     project_id: Uuid,
     status: Option<String>,
     priority: Option<String>,
@@ -1183,24 +1269,66 @@ struct ListProjectTasksArgs {
     task_type: Option<String>,
     tags: Option<Vec<String>>,
     routine_id: Option<Uuid>,
-    assigned_to: Option<Uuid>,
     assigned_agent_id: Option<Uuid>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetProjectTaskArgs {
     task_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(try_from = "CreateProjectTasksInput")]
 struct CreateProjectTasksArgs {
     project_id: Uuid,
     tasks: Vec<CreateProjectTaskItemArgs>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(untagged)]
+enum CreateProjectTasksInput {
+    Bulk {
+        #[serde(alias = "id")]
+        project_id: Uuid,
+        tasks: Vec<CreateProjectTaskItemArgs>,
+    },
+    SingleNested {
+        #[serde(alias = "id")]
+        project_id: Uuid,
+        task: CreateProjectTaskItemArgs,
+    },
+    SingleFlat {
+        #[serde(alias = "id")]
+        project_id: Uuid,
+        #[serde(flatten)]
+        task: CreateProjectTaskItemArgs,
+    },
+}
+
+impl TryFrom<CreateProjectTasksInput> for CreateProjectTasksArgs {
+    type Error = String;
+
+    fn try_from(input: CreateProjectTasksInput) -> std::result::Result<Self, Self::Error> {
+        let (project_id, tasks) = match input {
+            CreateProjectTasksInput::Bulk { project_id, tasks } => (project_id, tasks),
+            CreateProjectTasksInput::SingleNested { project_id, task }
+            | CreateProjectTasksInput::SingleFlat { project_id, task } => (project_id, vec![task]),
+        };
+
+        if tasks.is_empty() {
+            return Err("tasks must contain at least one task".into());
+        }
+
+        Ok(Self { project_id, tasks })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateProjectTaskItemArgs {
     title: String,
     description: Option<String>,
@@ -1214,13 +1342,13 @@ struct CreateProjectTaskItemArgs {
     required_tags: Option<Vec<String>>,
     slug: Option<String>,
     order_index: Option<i32>,
-    assigned_to: Option<Uuid>,
     assigned_agent_id: Option<Uuid>,
     routine_id: Option<Uuid>,
     metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateProjectTaskArgs {
     task_id: Uuid,
     title: Option<String>,
@@ -1235,19 +1363,20 @@ struct UpdateProjectTaskArgs {
     required_tags: Option<Vec<String>>,
     slug: Option<String>,
     order_index: Option<i32>,
-    assigned_to: Option<Uuid>,
     assigned_agent_id: Option<Uuid>,
     routine_id: Option<Uuid>,
     metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteProjectTaskArgs {
     task_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListProjectExecutionRunsArgs {
+    #[serde(alias = "id")]
     project_id: Uuid,
     agent_id: Option<Uuid>,
     routine_id: Option<Uuid>,
@@ -1263,6 +1392,7 @@ struct GetProjectExecutionRunArgs {
 
 #[derive(Debug, Deserialize)]
 struct StartProjectExecutionArgs {
+    #[serde(alias = "id")]
     project_id: Uuid,
     config: Option<serde_json::Value>,
     model_count: Option<i32>,
@@ -1278,6 +1408,76 @@ fn project_rest_tool_spec(kind: ProjectRestToolKind) -> Option<nenjo::ToolSpec> 
     project_rest_tools()
         .into_iter()
         .find(|tool| tool.name == kind.tool_name())
+}
+
+fn parse_project_tool_args<T>(
+    args: serde_json::Value,
+    tool_name: &str,
+    expected_shape: &str,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(args.clone()).map_err(|error| {
+        let received = serde_json::to_string(&args).unwrap_or_else(|_| "<unprintable>".into());
+        anyhow!("invalid {tool_name} args: {error}. {expected_shape} Received: {received}")
+    })
+}
+
+fn unique_near_uuid_match(raw: &str, candidates: &[Uuid]) -> Option<Uuid> {
+    let normalized_raw = raw.trim().to_ascii_lowercase();
+    let mut matches = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| edit_distance_at_most_one(&normalized_raw, &candidate.to_string()));
+
+    let first = matches.next()?;
+    if matches.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn edit_distance_at_most_one(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let len_delta = left.len().abs_diff(right.len());
+    if len_delta > 1 {
+        return false;
+    }
+
+    let mut i = 0;
+    let mut j = 0;
+    let mut edits = 0;
+
+    while i < left.len() && j < right.len() {
+        if left[i] == right[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+
+        match left.len().cmp(&right.len()) {
+            std::cmp::Ordering::Greater => i += 1,
+            std::cmp::Ordering::Less => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+
+    edits + usize::from(i < left.len() || j < right.len()) <= 1
 }
 
 impl ManifestContractTool {
@@ -1452,6 +1652,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn create_project_tasks_args_accept_bulk_and_single_task_shapes() {
+        let project_id = Uuid::new_v4();
+
+        let bulk: CreateProjectTasksArgs = parse_project_tool_args(
+            json!({
+                "project_id": project_id,
+                "tasks": [
+                    {
+                        "title": "Bulk task",
+                        "description": "Bulk task body"
+                    }
+                ]
+            }),
+            "create_project_tasks",
+            "expected shape",
+        )
+        .unwrap();
+        assert_eq!(bulk.project_id, project_id);
+        assert_eq!(bulk.tasks.len(), 1);
+        assert_eq!(bulk.tasks[0].title, "Bulk task");
+
+        let nested: CreateProjectTasksArgs = parse_project_tool_args(
+            json!({
+                "project_id": project_id,
+                "task": {
+                    "title": "Nested single task"
+                }
+            }),
+            "create_project_tasks",
+            "expected shape",
+        )
+        .unwrap();
+        assert_eq!(nested.tasks.len(), 1);
+        assert_eq!(nested.tasks[0].title, "Nested single task");
+
+        let flat: CreateProjectTasksArgs = parse_project_tool_args(
+            json!({
+                "project_id": project_id,
+                "title": "Flat single task",
+                "acceptance_criteria": "Done criteria"
+            }),
+            "create_project_tasks",
+            "expected shape",
+        )
+        .unwrap();
+        assert_eq!(flat.tasks.len(), 1);
+        assert_eq!(flat.tasks[0].title, "Flat single task");
+        assert_eq!(
+            flat.tasks[0].acceptance_criteria.as_deref(),
+            Some("Done criteria")
+        );
+    }
+
+    #[test]
+    fn project_tool_arg_errors_include_uuid_detail_and_received_args() {
+        let error = parse_project_tool_args::<ListProjectTasksArgs>(
+            json!({"project_id": "48e857455-ebb8-4678-8dd8-a9c1b7e9e140"}),
+            "list_project_tasks",
+            "Expected project_id.",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("invalid list_project_tasks args"));
+        assert!(error.contains("UUID parsing failed"));
+        assert!(error.contains("Received:"));
+        assert!(error.contains("48e857455-ebb8-4678-8dd8-a9c1b7e9e140"));
+    }
+
+    #[test]
+    fn malformed_project_id_can_be_repaired_from_unique_cached_project_id() {
+        let project_id = Uuid::parse_str("48e85745-ebb8-46f8-8dd8-a9c1b7e9e140").unwrap();
+        let raw = "48e857455-ebb8-46f8-8dd8-a9c1b7e9e140";
+
+        assert_eq!(unique_near_uuid_match(raw, &[project_id]), Some(project_id));
+    }
+
+    #[test]
+    fn malformed_project_id_repair_requires_unique_match() {
+        let first = Uuid::parse_str("48e85745-ebb8-46f8-8dd8-a9c1b7e9e140").unwrap();
+        let second = Uuid::parse_str("48e85755-ebb8-46f8-8dd8-a9c1b7e9e140").unwrap();
+
+        assert_eq!(
+            unique_near_uuid_match("48e8575-ebb8-46f8-8dd8-a9c1b7e9e140", &[first, second]),
+            None
+        );
+    }
+
     async fn scoped_backend(
         caller_scopes: Vec<String>,
     ) -> (
@@ -1552,11 +1841,6 @@ mod tests {
 
         store
             .replace_manifest(&Manifest {
-                auth: Some(nenjo::manifest::ManifestAuth {
-                    user_id: Uuid::new_v4(),
-                    org_id: Uuid::new_v4(),
-                    api_key_id: Some(Uuid::new_v4()),
-                }),
                 agents: vec![visible_agent.clone(), hidden_agent.clone()],
                 abilities: vec![visible_ability.clone(), hidden_ability.clone()],
                 domains: vec![visible_domain.clone(), hidden_domain.clone()],
@@ -1691,6 +1975,22 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("nenjo.guide.scopes"));
         assert!(!result.output.contains("# Platform Scopes"));
+
+        let neighbor_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::Neighbors);
+        let result = neighbor_tool
+            .execute(json!({"id_or_path": "nenjo.guide.routines"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("\"edge_type\""));
+        assert!(result.output.contains("\"edges\""));
+        assert!(result.output.contains("\"source\""));
+        assert!(result.output.contains("\"target\""));
+        assert!(
+            result
+                .output
+                .contains("builtin://nenjo/taxonomy/workflow-patterns.md")
+        );
     }
 
     #[tokio::test]

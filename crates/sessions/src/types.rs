@@ -140,6 +140,19 @@ pub enum SessionTranscriptEventPayload {
         success: bool,
         final_output: String,
     },
+    DelegationStarted {
+        delegate_tool_name: String,
+        target_agent_name: String,
+        target_agent_id: Uuid,
+        task_input: String,
+    },
+    DelegationCompleted {
+        delegate_tool_name: String,
+        target_agent_name: String,
+        target_agent_id: Uuid,
+        success: bool,
+        final_output: String,
+    },
     TurnCompleted {
         final_output: String,
     },

@@ -431,6 +431,14 @@ impl AgentRunner {
         let system_prompt = prompts.system;
         let developer_prompt = prompts.developer;
         let templated_user_message = prompts.user_message;
+        trace!(
+            agent = inst.name,
+            "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
+            inst.name,
+            system_prompt,
+            developer_prompt,
+            templated_user_message,
+        );
 
         // 4. Build initial messages.
         let mut messages: Vec<ChatMessage> = Vec::new();

@@ -8,16 +8,6 @@ fn agent_id_schema() -> serde_json::Value {
     })
 }
 
-fn string_list_schema(description: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "array",
-        "description": description,
-        "items": {
-            "type": "string"
-        }
-    })
-}
-
 fn agent_update_data_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -39,8 +29,7 @@ fn agent_update_data_schema() -> serde_json::Value {
                 "type": ["string", "null"],
                 "format": "uuid",
                 "description": "Directly assigned model id for this agent. Use null to clear the current model assignment, or omit to leave it unchanged."
-            },
-            "platform_scopes": string_list_schema("Platform API scopes granted to this agent, such as `projects:read` or `agents:write`. Provide the full replacement list to change scopes, or omit to leave them unchanged.")
+            }
         },
         "additionalProperties": false
     })
@@ -157,7 +146,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_agent".to_string(),
-            description: "Create one agent with top-level name, description, color, model_id, and platform_scopes."
+            description: "Create one agent with top-level name, description, color, and model_id. Agent platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -169,8 +158,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                     },
                     "description": agent_update_data_schema()["properties"]["description"].clone(),
                     "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone(),
-                    "platform_scopes": agent_update_data_schema()["properties"]["platform_scopes"].clone()
+                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone()
                 },
                 "additionalProperties": false
             }),
@@ -178,7 +166,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_agent".to_string(),
-            description: "Update one agent's top-level fields by id: name, description, color, model_id, or platform_scopes; use update_agent_prompt for prompt_config. Valid platform scope strings are agents:read, agents:write, abilities:read, abilities:write, domains:read, domains:write, projects:read, projects:write, routines:read, routines:write, models:read, models:write, councils:read, councils:write, context_blocks:read, context_blocks:write, mcp_servers:read, mcp_servers:write, chat:read, and chat:write."
+            description: "Update one agent's top-level fields by id: name, description, color, or model_id; use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -188,8 +176,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                     "name": agent_update_data_schema()["properties"]["name"].clone(),
                     "description": agent_update_data_schema()["properties"]["description"].clone(),
                     "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone(),
-                    "platform_scopes": agent_update_data_schema()["properties"]["platform_scopes"].clone()
+                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone()
                 },
                 "additionalProperties": false
             }),

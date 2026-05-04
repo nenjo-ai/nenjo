@@ -40,7 +40,7 @@ Do **not** use an ability when:
 - `description` — Clear explanation of what the ability does
 - `activation_condition` — When the agent should consider using this ability
 - `prompt_config.developer_prompt` — Specialized guidance used only while the ability is running
-- `platform_scopes` — Permissions granted to the ability during execution
+- `platform_scopes` — Permissions granted to the ability during execution, assigned through an admin/platform-controlled path
 - `mcp_server_ids` — External tools available to the ability
 
 ## Runtime Behavior
@@ -82,7 +82,7 @@ This design allows abilities to be powerful specialists while remaining tightly 
 ## Pitfalls to Avoid
 
 - Making abilities too broad (they should be narrow and focused)
-- Giving abilities overly broad scopes (principle of least privilege)
+- Treating ability scope assignment as an agent-side write; agents may recommend required scopes, but a user/admin must assign them
 - Using abilities for long-running or stateful work (use Agents instead)
 - Confusing Abilities with Domains (Abilities = agent-invoked tools, Domains = user-activated modes)
 - Creating too many similar abilities instead of one well-designed one
@@ -91,6 +91,6 @@ This design allows abilities to be powerful specialists while remaining tightly 
 
 - Keep abilities focused with a clear input/output contract
 - Write strong `activation_condition` guidance so agents know when to use them
-- Give abilities the minimum scopes and MCP servers they actually need
+- Recommend only the minimum scopes and MCP servers they actually need, and tell the user/admin to assign platform scopes through the controlled scope-management path
 - Version abilities carefully — changes affect all agents that use them
 - Document the expected output format clearly (especially for downstream gates)

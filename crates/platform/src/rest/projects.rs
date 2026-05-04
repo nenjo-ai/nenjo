@@ -40,7 +40,6 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                     "type": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "routine_id": {"type": "string", "format": "uuid"},
-                    "assigned_to": {"type": "string", "format": "uuid"},
                     "assigned_agent_id": {"type": "string", "format": "uuid"},
                     "limit": {"type": "integer"},
                     "offset": {"type": "integer"}
@@ -86,7 +85,6 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                                 "required_tags": {"type": "array", "items": {"type": "string"}},
                                 "slug": {"type": "string"},
                                 "order_index": {"type": "integer"},
-                                "assigned_to": {"type": "string", "format": "uuid"},
                                 "assigned_agent_id": {"type": "string", "format": "uuid"},
                                 "routine_id": {"type": "string", "format": "uuid"},
                                 "metadata": {"type": "object"}
@@ -119,7 +117,6 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                     "required_tags": {"type": "array", "items": {"type": "string"}},
                     "slug": {"type": "string"},
                     "order_index": {"type": "integer"},
-                    "assigned_to": {"type": "string", "format": "uuid"},
                     "assigned_agent_id": {"type": "string", "format": "uuid"},
                     "routine_id": {"type": "string", "format": "uuid"},
                     "metadata": {"type": "object"}

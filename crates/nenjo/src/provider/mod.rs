@@ -27,7 +27,7 @@ use crate::routines::{
 };
 use crate::types::RenderContextVars;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, trace};
 
 // ---------------------------------------------------------------------------
 // Factory traits
@@ -248,6 +248,20 @@ impl Provider {
             })?;
 
         let tools = self.tool_factory.create_tools(agent).await;
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let tool_names = tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>()
+                .join("\n- ");
+            trace!(
+                agent = %agent.name,
+                tool_count = tools.len(),
+                "\nTool belt for {}:\n- {}",
+                agent.name,
+                tool_names,
+            );
+        }
 
         // Memory backend is passed to the builder; scope and tools are
         // constructed in build() based on the project context set at that point.

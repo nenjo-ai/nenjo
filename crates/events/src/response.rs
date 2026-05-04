@@ -365,6 +365,31 @@ pub enum StreamEvent {
         encrypted_payload: Option<EncryptedPayload>,
     },
 
+    /// A delegation to another agent was started.
+    DelegationStarted {
+        agent: String,
+        target_agent: String,
+        target_agent_id: Uuid,
+        delegate_tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// A delegation to another agent finished.
+    DelegationCompleted {
+        agent: String,
+        target_agent: String,
+        target_agent_id: Uuid,
+        delegate_tool_name: String,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
     /// An error occurred during execution.
     Error {
         message: String,
@@ -380,6 +405,10 @@ pub enum StreamEvent {
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
+        #[serde(default)]
+        total_input_tokens: u64,
+        #[serde(default)]
+        total_output_tokens: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +475,20 @@ impl std::fmt::Display for StreamEvent {
             } => write!(
                 f,
                 "ability_completed({ability}, agent={agent}, success={success})"
+            ),
+            Self::DelegationStarted {
+                agent,
+                target_agent,
+                ..
+            } => write!(f, "delegation_started({target_agent}, agent={agent})"),
+            Self::DelegationCompleted {
+                agent,
+                target_agent,
+                success,
+                ..
+            } => write!(
+                f,
+                "delegation_completed({target_agent}, agent={agent}, success={success})"
             ),
             Self::Error { message, .. } => write!(f, "error({message})"),
             Self::Done {
@@ -739,6 +782,8 @@ mod tests {
             payload: StreamEvent::Done {
                 payload: Some(serde_json::Value::String("result".into())),
                 encrypted_payload: None,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 project_id: None,
                 agent_id: None,
                 session_id: None,
@@ -786,6 +831,8 @@ mod tests {
                     nonce: "bm9uY2U=".into(),
                     ciphertext: "Y2lwaGVydGV4dA==".into(),
                 }),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 project_id: None,
                 agent_id: None,
                 session_id: None,

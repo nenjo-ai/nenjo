@@ -25,6 +25,14 @@ pub enum TurnEvent {
         task_input: String,
         caller_history: Vec<ChatMessage>,
     },
+    /// An agent-to-agent delegation started.
+    DelegationStarted {
+        delegate_tool_name: String,
+        target_agent_name: String,
+        target_agent_id: uuid::Uuid,
+        task_input: String,
+        caller_history: Vec<ChatMessage>,
+    },
     /// One or more tool calls are starting.
     ToolCallStart {
         parent_tool_name: Option<String>,
@@ -40,6 +48,14 @@ pub enum TurnEvent {
     AbilityCompleted {
         ability_tool_name: String,
         ability_name: String,
+        success: bool,
+        final_output: String,
+    },
+    /// An agent-to-agent delegation finished.
+    DelegationCompleted {
+        delegate_tool_name: String,
+        target_agent_name: String,
+        target_agent_id: uuid::Uuid,
         success: bool,
         final_output: String,
     },

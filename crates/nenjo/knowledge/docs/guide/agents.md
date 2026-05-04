@@ -14,7 +14,7 @@ An agent owns the complete definition of its behavior and surface:
 - Prompt configuration (system + developer prompts + mode-specific templates)
 - Memory profile (core, project, shared focus)
 - Model assignment
-- Platform scopes (permissions)
+- Platform scopes (permissions assigned outside agent-facing creation tools)
 - Assigned abilities (specialist tools)
 - Assigned domains (user-activated modes)
 - Assigned MCP servers (external tools)
@@ -37,7 +37,7 @@ The same agent can operate in different runtime semantics. The **role stays cons
 
 ## Prompt Configuration
 
-Agent prompts are split into stable, versionable parts. Prompt content is stored as a dedicated subresource — metadata updates (name, scopes, abilities) and prompt updates are treated as **separate operations**.
+Agent prompts are split into stable, versionable parts. Prompt content is stored as a dedicated subresource — metadata updates (name, model, assignments) and prompt updates are treated as **separate operations**.
 
 ### Core Prompt Components
 
@@ -69,18 +69,18 @@ Every agent has a `memory_profile` that controls **what** it remembers and **whe
 
 Agents gain power through explicit assignments (not by default):
 
-- **Platform Scopes** — Fine-grained permissions (`projects:read`, `agents:write`, `context_blocks:read`, etc.)
+- **Platform Scopes** — Fine-grained permissions assigned by admin or platform-controlled surfaces, not by agent-facing creation tools
 - **Abilities** — Reusable specialist execution modes (narrow, high-signal tools)
 - **Domains** — User-activated execution modes (elevated permissions + prompt addons)
 - **MCP Servers** — External tool surfaces (stdio or HTTP)
 
-**Design Principle**: Give agents the *minimum* capabilities required. Over-assigning scopes or abilities increases risk and reduces predictability.
+**Design Principle**: Give agents the *minimum* capabilities required. Agents can design behavior and assignments, but platform scope changes require an explicit admin/platform path.
 
 ## Key Relationships (Canonical)
 
-- `part_of` → `nenjo.domain.nenjo_platform`
+- `part_of` → `nenjo.domain.nenjo`
 - `references` → `nenjo.kind.memory` (via memory_profile)
-- `references` → Abilities, Domains, Scopes, and MCP servers
+- `references` → Abilities, Domains, assigned platform permissions, and MCP servers
 - `defines` → its own prompt configuration and runtime behavior
 
 ## Agent Guidance
@@ -93,13 +93,13 @@ Agents gain power through explicit assignments (not by default):
 
 ## Common Patterns
 
-- **Bootstrap Agent (Nenji)**: Heavy on `core_focus`, broad scopes, many abilities
-- **Specialist Agent**: Narrow `project_focus`, specific abilities, minimal scopes
+- **Bootstrap Agent (Nenji)**: Heavy on `core_focus`, broad platform-managed permissions, many abilities
+- **Specialist Agent**: Narrow `project_focus`, specific abilities, minimal platform-managed permissions
 - **Council Member**: Strong `shared_focus`, clear delegation strategy awareness
 
 ## Pitfalls to Avoid
 
 - Overloading `core_focus` with project-specific data (causes leakage)
 - Forgetting to update `project_focus` after major requirement changes
-- Giving production agents overly broad scopes
+- Assuming an agent builder can assign its own platform scopes during creation
 - Treating prompt updates and metadata updates as the same operation

@@ -60,8 +60,6 @@ pub struct AgentUpdateDocument {
     pub color: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<Option<Uuid>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
 }
 
 impl From<AgentManifest> for AgentDocument {
@@ -120,7 +118,6 @@ impl From<AgentDocument> for AgentUpdateDocument {
             description: Some(agent.summary.description),
             color: Some(agent.summary.color),
             model_id: Some(agent.summary.model_id),
-            platform_scopes: Some(agent.platform_scopes),
         }
     }
 }
@@ -135,8 +132,6 @@ pub struct AgentCreateDocument {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,8 +179,6 @@ pub struct AbilityCreateDocument {
     pub activation_condition: String,
     pub prompt_config: AbilityPromptConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_ids: Option<Vec<Uuid>>,
 }
 
@@ -201,8 +194,6 @@ pub struct AbilityUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_condition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_ids: Option<Vec<Uuid>>,
 }
 
@@ -213,7 +204,6 @@ impl AbilityUpdateDocument {
             && self.tool_name.is_none()
             && self.description.is_none()
             && self.activation_condition.is_none()
-            && self.platform_scopes.is_none()
             && self.mcp_server_ids.is_none()
     }
 }
@@ -356,8 +346,6 @@ pub struct DomainCreateDocument {
     pub description: Option<String>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_ids: Option<Vec<Uuid>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_ids: Option<Vec<Uuid>>,
@@ -377,8 +365,6 @@ pub struct DomainUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_ids: Option<Vec<Uuid>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_ids: Option<Vec<Uuid>>,
@@ -391,7 +377,6 @@ impl DomainUpdateDocument {
             && self.display_name.is_none()
             && self.description.is_none()
             && self.command.is_none()
-            && self.platform_scopes.is_none()
             && self.ability_ids.is_none()
             && self.mcp_server_ids.is_none()
     }
@@ -879,5 +864,43 @@ impl From<CouncilDocument> for CouncilManifest {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_resource_update_documents_do_not_serialize_platform_scopes() {
+        let agent = serde_json::to_value(AgentUpdateDocument {
+            name: Some("agent".into()),
+            description: None,
+            color: None,
+            model_id: None,
+        })
+        .unwrap();
+        assert!(agent.get("platform_scopes").is_none());
+
+        let ability = serde_json::to_value(AbilityUpdateDocument {
+            tool_name: None,
+            display_name: Some(Some("Ability".into())),
+            description: None,
+            activation_condition: None,
+            mcp_server_ids: None,
+        })
+        .unwrap();
+        assert!(ability.get("platform_scopes").is_none());
+
+        let domain = serde_json::to_value(DomainUpdateDocument {
+            name: None,
+            display_name: Some("Domain".into()),
+            description: None,
+            command: None,
+            ability_ids: None,
+            mcp_server_ids: None,
+        })
+        .unwrap();
+        assert!(domain.get("platform_scopes").is_none());
     }
 }

@@ -246,6 +246,42 @@ impl SecureEnvelopeCodec {
                     .encrypt_user_payload(user_id, ack, "ability_result_payload", payload)
                     .await?,
             })),
+            StreamEvent::DelegationStarted {
+                agent,
+                target_agent,
+                target_agent_id,
+                delegate_tool_name,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::DelegationStarted {
+                agent,
+                target_agent,
+                target_agent_id,
+                delegate_tool_name,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "delegation_task_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::DelegationCompleted {
+                agent,
+                target_agent,
+                target_agent_id,
+                delegate_tool_name,
+                success,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::DelegationCompleted {
+                agent,
+                target_agent,
+                target_agent_id,
+                delegate_tool_name,
+                success,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "delegation_result_payload", payload)
+                    .await?,
+            })),
             StreamEvent::Error {
                 message, payload, ..
             } => Ok(Some(StreamEvent::Error {
@@ -263,6 +299,8 @@ impl SecureEnvelopeCodec {
             StreamEvent::Done {
                 payload,
                 encrypted_payload: _,
+                total_input_tokens,
+                total_output_tokens,
                 project_id,
                 agent_id,
                 session_id,
@@ -271,6 +309,8 @@ impl SecureEnvelopeCodec {
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "agent_response", payload)
                     .await?,
+                total_input_tokens,
+                total_output_tokens,
                 project_id,
                 agent_id,
                 session_id,

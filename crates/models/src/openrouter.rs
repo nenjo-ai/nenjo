@@ -5,7 +5,10 @@ use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, Token
 use async_trait::async_trait;
 use nenjo_tools::ToolSpec;
 use reqwest::Client;
+use reqwest::header::ACCEPT_ENCODING;
 use serde::{Deserialize, Serialize};
+
+const OPENROUTER_MAX_TRANSPORT_ATTEMPTS: u32 = 3;
 
 pub struct OpenRouterProvider {
     api_key: Option<String>,
@@ -284,28 +287,71 @@ impl ModelProvider for OpenRouterProvider {
             provider: provider_routing,
         };
 
-        let response = self
-            .client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("HTTP-Referer", "https://github.com/nenjo-ai/nenjo")
-            .header("X-Title", "Nenjo")
-            .json(&native_request)
-            .send()
-            .await?;
+        let body_text = {
+            let mut last_error = None;
+            let mut body = None;
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(crate::api_error("OpenRouter", response).await);
-        }
+            for attempt in 1..=OPENROUTER_MAX_TRANSPORT_ATTEMPTS {
+                let response = match self
+                    .client
+                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header("HTTP-Referer", "https://github.com/nenjo-ai/nenjo")
+                    .header("X-Title", "Nenjo")
+                    .header(ACCEPT_ENCODING, "identity")
+                    .json(&native_request)
+                    .send()
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        last_error = Some(anyhow::anyhow!(
+                            "OpenRouter: request failed (~{estimated_tokens} input tokens, \
+                             {messages_count} messages, attempt {attempt}/{OPENROUTER_MAX_TRANSPORT_ATTEMPTS}): {error}",
+                            messages_count = native_request.messages.len(),
+                        ));
+                        if attempt < OPENROUTER_MAX_TRANSPORT_ATTEMPTS {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                250 * u64::from(attempt),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        break;
+                    }
+                };
 
-        let body_text = response.text().await.map_err(|e| {
-            anyhow::anyhow!(
-                "OpenRouter: failed to read response body (status {status}, \
-                 ~{estimated_tokens} input tokens, {messages_count} messages): {e}",
-                messages_count = native_request.messages.len(),
-            )
-        })?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(crate::api_error("OpenRouter", response).await);
+                }
+
+                match response.text().await {
+                    Ok(text) => {
+                        body = Some(text);
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(anyhow::anyhow!(
+                            "OpenRouter: failed to read response body (status {status}, \
+                             ~{estimated_tokens} input tokens, {messages_count} messages, \
+                             attempt {attempt}/{OPENROUTER_MAX_TRANSPORT_ATTEMPTS}): {error}",
+                            messages_count = native_request.messages.len(),
+                        ));
+                        if attempt < OPENROUTER_MAX_TRANSPORT_ATTEMPTS {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                250 * u64::from(attempt),
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            }
+
+            body.ok_or_else(|| {
+                last_error.unwrap_or_else(|| anyhow::anyhow!("OpenRouter: empty response body"))
+            })?
+        };
         // OpenRouter can return HTTP 200 with an error payload when a
         // downstream provider (e.g. Clarifai) fails.  Detect this before
         // trying to parse as a normal chat completion.

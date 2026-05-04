@@ -26,8 +26,6 @@ pub trait ManifestLoader: Send + Sync {
 /// contributes a partial manifest; the builder merges them in order.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
-    #[serde(default)]
-    pub auth: Option<ManifestAuth>,
     pub routines: Vec<RoutineManifest>,
     pub models: Vec<ModelManifest>,
     pub agents: Vec<AgentManifest>,
@@ -39,23 +37,12 @@ pub struct Manifest {
     pub context_blocks: Vec<ContextBlockManifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestAuth {
-    pub user_id: uuid::Uuid,
-    pub org_id: uuid::Uuid,
-    #[serde(default)]
-    pub api_key_id: Option<uuid::Uuid>,
-}
-
 impl Manifest {
     /// Merge another manifest into this one (additive).
     ///
     /// Collections are extended. For context blocks, if a name collides
     /// the incoming entry wins (last-write-wins).
     pub fn merge(&mut self, other: Manifest) {
-        if self.auth.is_none() && other.auth.is_some() {
-            self.auth = other.auth;
-        }
         self.routines.extend(other.routines);
         self.models.extend(other.models);
         self.agents.extend(other.agents);

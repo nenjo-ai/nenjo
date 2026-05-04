@@ -20,6 +20,10 @@ path = "tests/memory.rs"
 name = "routines"
 path = "tests/routines.rs"
 
+[[test]]
+name = "builtin_knowledge_quality"
+path = "tests/builtin_knowledge_quality.rs"
+
 [dependencies]
 nenjo = { workspace = true }
 nenjo-models = { workspace = true }
@@ -29,4 +33,5 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 uuid = { workspace = true, features = ["v4"] }

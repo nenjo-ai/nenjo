@@ -114,6 +114,32 @@ mod tests {
     }
 
     #[test]
+    fn scoped_resource_mutation_tools_do_not_accept_platform_scopes() {
+        let tools = all_tools();
+
+        for tool_name in [
+            "create_agent",
+            "update_agent",
+            "create_ability",
+            "update_ability",
+            "create_domain",
+            "update_domain",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap_or_else(|| panic!("missing tool: {tool_name}"));
+            assert!(
+                tool.parameters["properties"]
+                    .get("platform_scopes")
+                    .is_none(),
+                "{tool_name} should not expose platform_scopes"
+            );
+            assert_eq!(tool.parameters["additionalProperties"], false);
+        }
+    }
+
+    #[test]
     fn manifest_tool_registry_matches_expected_name_and_category_snapshot() {
         assert_eq!(
             tool_snapshot(),

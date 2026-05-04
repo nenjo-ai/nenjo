@@ -36,6 +36,8 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Poll interval while waiting for a worker enrollment to be approved.
 const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+const DEFAULT_NATS_STREAM_NAME: &str = "AGENT_REQUESTS";
+
 /// CLI arguments for `nenjo run`.
 #[derive(Args, Debug, Default)]
 pub struct RunArgs {
@@ -187,9 +189,12 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     let harness = Harness::new(config.clone(), auth_provider.clone()).await?;
 
     // The api_key_id is the stable worker identifier used for presence tracking.
-    let auth = harness.provider().manifest().auth.clone().ok_or_else(|| {
-        anyhow::anyhow!("Backend did not return auth in manifest. Ensure bootstrap is up to date.")
-    })?;
+    let auth = crate::harness::manifest::load_cached_bootstrap_auth(&config.manifests_dir)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Backend did not return bootstrap auth. Ensure bootstrap is up to date."
+            )
+        })?;
     let api_key_id = auth.api_key_id.ok_or_else(|| {
         anyhow::anyhow!(
             "Backend did not return auth.api_key_id in manifest. \
@@ -226,9 +231,11 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     )
     .await?;
 
+    let nats = resolve_nats_connection(config);
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
-        .url(config.nats_url())
+        .urls(nats.urls.clone())
         .token(&config.api_key)
+        .stream_name(nats.stream_name.clone())
         .worker_id(api_key_id)
         .build()
         .await
@@ -246,7 +253,12 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
     let secure_bus = SecureEnvelopeBus::new(bus, codec);
 
-    info!(nats_url = %config.nats_url(), "Eventbus transport connected");
+    info!(
+        nats_urls = ?nats.urls,
+        stream = %nats.stream_name,
+        source = %nats.source,
+        "Eventbus transport connected"
+    );
 
     // Wire up the harness's own shutdown to the global one.
     let harness_shutdown = harness.shutdown_token();
@@ -270,6 +282,60 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedNatsConnection {
+    urls: Vec<String>,
+    stream_name: String,
+    source: &'static str,
+}
+
+fn resolve_nats_connection(config: &Config) -> ResolvedNatsConnection {
+    let cached = crate::harness::manifest::load_cached_nats_config(&config.manifests_dir);
+    let stream_name = cached
+        .as_ref()
+        .map(|nats| nats.stream.name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(DEFAULT_NATS_STREAM_NAME)
+        .to_string();
+
+    if let Some(url) = config.configured_nats_url() {
+        return ResolvedNatsConnection {
+            urls: vec![url.to_string()],
+            stream_name,
+            source: "config",
+        };
+    }
+
+    if let Some(nats) = cached {
+        let urls: Vec<String> = nats
+            .urls
+            .into_iter()
+            .filter(|url| is_safe_nats_url(url))
+            .collect();
+
+        if nats.enabled && nats.auth.method == "api_key_token" && !urls.is_empty() {
+            return ResolvedNatsConnection {
+                urls,
+                stream_name,
+                source: "bootstrap",
+            };
+        }
+    }
+
+    ResolvedNatsConnection {
+        urls: vec![config.nats_url().to_string()],
+        stream_name,
+        source: "default",
+    }
+}
+
+fn is_safe_nats_url(url: &str) -> bool {
+    if url.contains('@') {
+        return false;
+    }
+    url.starts_with("nats://") || url.starts_with("tls://")
 }
 
 async fn wait_for_enrollment_approval(
@@ -393,5 +459,66 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         ctrl_c.await.ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nats_connection_prefers_bootstrap_when_no_explicit_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("nats.json"),
+            serde_json::json!({
+                "enabled": true,
+                "urls": ["tls://nats-a.example.com:4222", "tls://nats-b.example.com:4222"],
+                "auth": { "method": "api_key_token" },
+                "stream": { "name": "AGENT_REQUESTS" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut config = Config::new_for_dir(dir.path().to_path_buf());
+        config.manifests_dir = manifests;
+
+        let nats = resolve_nats_connection(&config);
+
+        assert_eq!(nats.source, "bootstrap");
+        assert_eq!(nats.urls.len(), 2);
+        assert_eq!(nats.urls[0], "tls://nats-a.example.com:4222");
+        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
+    }
+
+    #[test]
+    fn nats_connection_uses_explicit_config_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("nats.json"),
+            serde_json::json!({
+                "enabled": true,
+                "urls": ["tls://nats-a.example.com:4222"],
+                "auth": { "method": "api_key_token" },
+                "stream": { "name": "AGENT_REQUESTS" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut config = Config::new_for_dir(dir.path().to_path_buf());
+        config.manifests_dir = manifests;
+        config.nats_url = Some("tls://override.example.com:4222".to_string());
+
+        let nats = resolve_nats_connection(&config);
+
+        assert_eq!(nats.source, "config");
+        assert_eq!(nats.urls, vec!["tls://override.example.com:4222"]);
+        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
     }
 }

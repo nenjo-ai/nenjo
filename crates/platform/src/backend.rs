@@ -107,6 +107,7 @@ pub struct PlatformManifestBackend<L, E> {
     sensitive_payload_encoder: E,
     access_policy: Option<ManifestAccessPolicy>,
     workspace_dir: Option<PathBuf>,
+    cached_org_id: Option<Uuid>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -122,6 +123,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
             sensitive_payload_encoder,
             access_policy: None,
             workspace_dir: None,
+            cached_org_id: None,
         }
     }
 
@@ -134,6 +136,12 @@ impl<L, E> PlatformManifestBackend<L, E> {
     /// Attach the worker workspace root used for local-first project document reads.
     pub fn with_workspace_dir(mut self, workspace_dir: PathBuf) -> Self {
         self.workspace_dir = Some(workspace_dir);
+        self
+    }
+
+    /// Attach the org id cached from worker bootstrap metadata.
+    pub fn with_cached_org_id(mut self, org_id: Option<Uuid>) -> Self {
+        self.cached_org_id = org_id.filter(|id| !id.is_nil());
         self
     }
 
@@ -174,27 +182,15 @@ where
             .unwrap_or(true)
     }
 
-    fn validate_agent_scopes(&self, scopes: &[String]) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.validate_agent_scopes(scopes))
-            .unwrap_or(true)
-    }
-
-    fn validate_ability_scopes(&self, scopes: &[String]) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.validate_ability_scopes(scopes))
-            .unwrap_or(true)
-    }
-
     async fn local_manifest_org_id(&self) -> Result<Uuid> {
-        self.local_store
-            .load_manifest()
-            .await?
-            .auth
-            .map(|auth| auth.org_id)
-            .ok_or_else(|| anyhow!("local manifest is missing auth.org_id"))
+        if let Some(org_id) = self.cached_org_id {
+            return Ok(org_id);
+        }
+
+        self.platform_client
+            .current_org_id()
+            .await
+            .context("failed to derive org_id from authenticated platform context")
     }
 
     async fn cached_or_remote_ability(&self, id: Uuid) -> Result<AbilityManifest> {
@@ -411,8 +407,14 @@ struct ProjectDocTreeEntry {
 
 #[derive(Debug, Clone, Serialize)]
 struct ProjectDocNeighbor {
+    target: String,
+    edges: Vec<ProjectDocNeighborEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectDocNeighborEdge {
     edge_type: String,
-    direction: String,
+    source: String,
     target: String,
     note: Option<String>,
 }
@@ -647,7 +649,7 @@ where
         .iter()
         .map(|candidate| (candidate.virtual_path.clone(), candidate))
         .collect::<std::collections::HashMap<_, _>>();
-    let mut neighbors = Vec::new();
+    let mut neighbors = std::collections::BTreeMap::<String, ProjectDocNeighbor>::new();
 
     for edge in &doc.related {
         if let Some(filter) = edge_type
@@ -656,12 +658,16 @@ where
             continue;
         }
         if let Some(target) = docs_by_virtual_path.get(&edge.target) {
-            neighbors.push(ProjectDocNeighbor {
-                edge_type: edge.edge_type.clone(),
-                direction: "outgoing".to_string(),
-                target: target.virtual_path.clone(),
-                note: edge.description.clone(),
-            });
+            push_project_neighbor_edge(
+                &mut neighbors,
+                target.virtual_path.clone(),
+                ProjectDocNeighborEdge {
+                    edge_type: edge.edge_type.clone(),
+                    source: doc.virtual_path.clone(),
+                    target: target.virtual_path.clone(),
+                    note: edge.description.clone(),
+                },
+            );
         }
     }
 
@@ -675,29 +681,48 @@ where
             {
                 continue;
             }
-            neighbors.push(ProjectDocNeighbor {
-                edge_type: edge.edge_type.clone(),
-                direction: "incoming".to_string(),
-                target: candidate.virtual_path.clone(),
-                note: edge.description.clone(),
-            });
+            push_project_neighbor_edge(
+                &mut neighbors,
+                candidate.virtual_path.clone(),
+                ProjectDocNeighborEdge {
+                    edge_type: edge.edge_type.clone(),
+                    source: candidate.virtual_path.clone(),
+                    target: doc.virtual_path.clone(),
+                    note: edge.description.clone(),
+                },
+            );
         }
     }
 
-    neighbors.sort_by(|left, right| {
-        left.target
-            .cmp(&right.target)
-            .then_with(|| left.direction.cmp(&right.direction))
-            .then_with(|| left.edge_type.cmp(&right.edge_type))
-    });
-    neighbors.dedup_by(|left, right| {
-        left.target == right.target
-            && left.direction == right.direction
-            && left.edge_type == right.edge_type
-            && left.note == right.note
-    });
+    Ok(neighbors.into_values().collect())
+}
 
-    Ok(neighbors)
+fn push_project_neighbor_edge(
+    neighbors: &mut std::collections::BTreeMap<String, ProjectDocNeighbor>,
+    neighbor_target: String,
+    edge: ProjectDocNeighborEdge,
+) {
+    let neighbor = neighbors
+        .entry(neighbor_target.clone())
+        .or_insert_with(|| ProjectDocNeighbor {
+            target: neighbor_target,
+            edges: Vec::new(),
+        });
+    if !neighbor.edges.iter().any(|existing| {
+        existing.edge_type == edge.edge_type
+            && existing.source == edge.source
+            && existing.target == edge.target
+            && existing.note == edge.note
+    }) {
+        neighbor.edges.push(edge);
+        neighbor.edges.sort_by(|left, right| {
+            left.source
+                .cmp(&right.source)
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.edge_type.cmp(&right.edge_type))
+                .then_with(|| left.note.cmp(&right.note))
+        });
+    }
 }
 
 async fn search_project_docs<L, E>(
@@ -847,17 +872,11 @@ where
     }
 
     async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
-        let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
-        if !self.validate_agent_scopes(&requested_scopes) {
-            return Err(anyhow!("requested agent scopes exceed caller scopes"));
-        }
-
         let create = AgentCreateDocument {
             name: params.data.name,
             description: params.data.description,
             color: params.data.color,
             model_id: params.data.model_id,
-            platform_scopes: Some(requested_scopes),
         };
 
         let created = self.platform_client.create_agent_document(&create).await?;
@@ -879,14 +898,6 @@ where
         if !self.allow_agent(&existing) {
             return Err(anyhow!("agent not found in local manifest: {}", params.id));
         }
-        let requested_scopes = params
-            .data
-            .platform_scopes
-            .clone()
-            .unwrap_or_else(|| existing.platform_scopes.clone());
-        if !self.validate_agent_scopes(&requested_scopes) {
-            return Err(anyhow!("requested agent scopes exceed caller scopes"));
-        }
         let merged = AgentUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: Some(
@@ -897,12 +908,6 @@ where
             ),
             color: Some(params.data.color.unwrap_or_else(|| existing.color.clone())),
             model_id: Some(params.data.model_id.unwrap_or(existing.model_id)),
-            platform_scopes: Some(
-                params
-                    .data
-                    .platform_scopes
-                    .unwrap_or_else(|| existing.platform_scopes.clone()),
-            ),
         };
         let updated = self
             .platform_client
@@ -1036,10 +1041,6 @@ where
     }
 
     async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
-        let requested_scopes = params.data.platform_scopes.clone().unwrap_or_default();
-        if !self.validate_ability_scopes(&requested_scopes) {
-            return Err(anyhow!("requested ability scopes exceed caller scopes"));
-        }
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
@@ -1086,14 +1087,6 @@ where
                 params.id
             ));
         }
-        let requested_scopes = params
-            .data
-            .platform_scopes
-            .clone()
-            .unwrap_or_else(|| existing.platform_scopes.clone());
-        if !self.validate_ability_scopes(&requested_scopes) {
-            return Err(anyhow!("requested ability scopes exceed caller scopes"));
-        }
         let merged = AbilityUpdateDocument {
             tool_name: params
                 .data
@@ -1115,10 +1108,6 @@ where
                 .data
                 .activation_condition
                 .or_else(|| Some(existing.activation_condition.clone())),
-            platform_scopes: params
-                .data
-                .platform_scopes
-                .or_else(|| Some(existing.platform_scopes.clone())),
             mcp_server_ids: params
                 .data
                 .mcp_server_ids
@@ -1288,7 +1277,7 @@ where
             display_name: created.summary.display_name.clone(),
             description: created.summary.description.clone(),
             command: created.command.clone(),
-            platform_scopes: params.data.platform_scopes.clone().unwrap_or_default(),
+            platform_scopes: created.platform_scopes.clone(),
             ability_ids: params.data.ability_ids.clone().unwrap_or_default(),
             mcp_server_ids: params.data.mcp_server_ids.clone().unwrap_or_default(),
             prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
@@ -1327,12 +1316,6 @@ where
                 .data
                 .command
                 .or_else(|| Some(existing.command.clone())),
-            platform_scopes: Some(
-                params
-                    .data
-                    .platform_scopes
-                    .unwrap_or_else(|| existing.platform_scopes.clone()),
-            ),
             ability_ids: Some(
                 params
                     .data
@@ -1346,11 +1329,6 @@ where
                     .unwrap_or_else(|| existing.mcp_server_ids.clone()),
             ),
         };
-        if let Some(policy) = &self.access_policy
-            && !policy.validate_domain_scopes(merged.platform_scopes.as_deref().unwrap_or(&[]))
-        {
-            return Err(anyhow!("requested domain scopes exceed caller permissions"));
-        }
         let updated = self
             .platform_client
             .update_domain_document(params.id, &merged)
@@ -2231,5 +2209,209 @@ where
             deleted: true,
             id: params.id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+
+    use nenjo::manifest::ProjectManifest;
+    use nenjo::manifest::local::LocalManifestStore;
+    use nenjo::{ManifestResource, ManifestWriter};
+
+    use super::*;
+
+    async fn project_backend_fixture() -> Result<(
+        PlatformManifestBackend<LocalManifestStore, NoopSensitivePayloadEncoder>,
+        Uuid,
+        TempDir,
+    )> {
+        let temp = tempdir()?;
+        let manifests_dir = temp.path().join("manifests");
+        let workspace_dir = temp.path().join("workspace");
+        let project_id = Uuid::new_v4();
+        let project_slug = "graph-eval";
+        let project_dir = workspace_dir.join(project_slug);
+        std::fs::create_dir_all(project_dir.join("docs"))?;
+
+        let store = Arc::new(LocalManifestStore::new(manifests_dir));
+        store
+            .upsert_resource(&ManifestResource::Project(ProjectManifest {
+                id: project_id,
+                name: "Graph Eval".to_string(),
+                slug: project_slug.to_string(),
+                description: None,
+                settings: json!({}),
+            }))
+            .await?;
+
+        let overview_path = format!("project://{project_id}/docs/overview.md");
+        let routine_path = format!("project://{project_id}/docs/routine.md");
+        let gate_path = format!("project://{project_id}/docs/gate.md");
+        let unrelated_path = format!("project://{project_id}/docs/unrelated.md");
+        let manifest = json!({
+            "pack_id": format!("project-{project_id}"),
+            "pack_version": "1",
+            "schema_version": 1,
+            "root_uri": format!("project://{project_id}/"),
+            "synced_at": "2026-01-01T00:00:00Z",
+            "docs": [
+                {
+                    "id": "overview",
+                    "virtual_path": overview_path,
+                    "source_path": "docs/overview.md",
+                    "title": "Overview",
+                    "summary": "Project overview",
+                    "description": null,
+                    "kind": "guide",
+                    "authority": "canonical",
+                    "status": "stable",
+                    "tags": ["domain:project"],
+                    "aliases": ["overview.md"],
+                    "keywords": ["overview"],
+                    "related": [
+                        {
+                            "type": "references",
+                            "target": routine_path,
+                            "description": "Overview references routine design"
+                        }
+                    ]
+                },
+                {
+                    "id": "routine",
+                    "virtual_path": routine_path,
+                    "source_path": "docs/routine.md",
+                    "title": "Routine",
+                    "summary": "Routine design",
+                    "description": null,
+                    "kind": "guide",
+                    "authority": "canonical",
+                    "status": "stable",
+                    "tags": ["resource:routine"],
+                    "aliases": ["routine.md"],
+                    "keywords": ["routine"],
+                    "related": [
+                        {
+                            "type": "depends_on",
+                            "target": gate_path,
+                            "description": "Routine depends on gate design"
+                        }
+                    ]
+                },
+                {
+                    "id": "gate",
+                    "virtual_path": gate_path,
+                    "source_path": "docs/gate.md",
+                    "title": "Gate",
+                    "summary": "Gate design",
+                    "description": null,
+                    "kind": "reference",
+                    "authority": "reference",
+                    "status": "stable",
+                    "tags": ["resource:gate"],
+                    "aliases": ["gate.md"],
+                    "keywords": ["gate"],
+                    "related": []
+                },
+                {
+                    "id": "unrelated",
+                    "virtual_path": unrelated_path,
+                    "source_path": "docs/unrelated.md",
+                    "title": "Unrelated",
+                    "summary": "Unrelated document",
+                    "description": null,
+                    "kind": "reference",
+                    "authority": "reference",
+                    "status": "stable",
+                    "tags": ["domain:other"],
+                    "aliases": ["unrelated.md"],
+                    "keywords": ["unrelated"],
+                    "related": []
+                }
+            ]
+        });
+        std::fs::write(
+            project_dir.join("knowledge_manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        for filename in ["overview.md", "routine.md", "gate.md", "unrelated.md"] {
+            std::fs::write(
+                project_dir.join("docs").join(filename),
+                format!("# {filename}\n"),
+            )?;
+        }
+
+        let client = PlatformManifestClient::new("http://localhost:9", "test")?;
+        let backend = PlatformManifestBackend::new(store, client, NoopSensitivePayloadEncoder)
+            .with_workspace_dir(workspace_dir);
+
+        Ok((backend, project_id, temp))
+    }
+
+    #[tokio::test]
+    async fn project_document_neighbors_expose_outgoing_and_incoming_edges() {
+        let (backend, project_id, _temp) = project_backend_fixture().await.unwrap();
+        let routine_path = format!("project://{project_id}/docs/routine.md");
+        let overview_path = format!("project://{project_id}/docs/overview.md");
+        let gate_path = format!("project://{project_id}/docs/gate.md");
+
+        let value = backend
+            .list_project_document_neighbors(json!({
+                "project_id": project_id,
+                "id_or_path": "routine"
+            }))
+            .await
+            .unwrap();
+        let neighbors = value.as_array().expect("neighbors array");
+
+        assert!(neighbors.iter().any(|neighbor| {
+            neighbor["target"] == overview_path
+                && neighbor["edges"].as_array().is_some_and(|edges| {
+                    edges.iter().any(|edge| {
+                        edge["edge_type"] == "references"
+                            && edge["source"] == overview_path
+                            && edge["target"] == routine_path
+                            && edge["note"] == "Overview references routine design"
+                    })
+                })
+        }));
+        assert!(neighbors.iter().any(|neighbor| {
+            neighbor["target"] == gate_path
+                && neighbor["edges"].as_array().is_some_and(|edges| {
+                    edges.iter().any(|edge| {
+                        edge["edge_type"] == "depends_on"
+                            && edge["source"] == routine_path
+                            && edge["target"] == gate_path
+                            && edge["note"] == "Routine depends on gate design"
+                    })
+                })
+        }));
+
+        let filtered = backend
+            .list_project_document_neighbors(json!({
+                "project_id": project_id,
+                "id_or_path": routine_path,
+                "edge_type": "depends_on"
+            }))
+            .await
+            .unwrap();
+        let filtered = filtered.as_array().expect("filtered neighbors array");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["target"], gate_path);
+        assert_eq!(filtered[0]["edges"][0]["edge_type"], "depends_on");
+    }
+
+    #[tokio::test]
+    async fn local_manifest_org_id_uses_cached_bootstrap_org_id() {
+        let (backend, _project_id, _temp) = project_backend_fixture().await.unwrap();
+        let org_id = Uuid::new_v4();
+        let backend = backend.with_cached_org_id(Some(org_id));
+
+        assert_eq!(backend.local_manifest_org_id().await.unwrap(), org_id);
     }
 }

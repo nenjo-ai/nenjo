@@ -12,9 +12,19 @@ macro_rules! doc {
 
 pub static BUILTIN_DOCS: &[BuiltinKnowledgeDoc] = &[
     doc!(
-        "nenjo.domain.nenjo_platform",
-        "builtin://nenjo/domain/nenjo-platform.md",
-        include_str!("../../knowledge/docs/domain/nenjo_platform.md")
+        "nenjo.domain.nenjo",
+        "builtin://nenjo/domain/nenjo.md",
+        include_str!("../../knowledge/docs/domain/nenjo.md")
+    ),
+    doc!(
+        "nenjo.domain.platform",
+        "builtin://nenjo/domain/platform.md",
+        include_str!("../../knowledge/docs/domain/platform.md")
+    ),
+    doc!(
+        "nenjo.domain.sdk",
+        "builtin://nenjo/domain/sdk.md",
+        include_str!("../../knowledge/docs/domain/sdk.md")
     ),
     doc!(
         "nenjo.guide.abilities",
@@ -30,6 +40,11 @@ pub static BUILTIN_DOCS: &[BuiltinKnowledgeDoc] = &[
         "nenjo.guide.context_blocks",
         "builtin://nenjo/guide/context-blocks.md",
         include_str!("../../knowledge/docs/guide/context-blocks.md")
+    ),
+    doc!(
+        "nenjo.guide.prompt_structuring",
+        "builtin://nenjo/guide/prompt-structuring.md",
+        include_str!("../../knowledge/docs/guide/prompt-structuring.md")
     ),
     doc!(
         "nenjo.guide.councils",
@@ -115,6 +130,11 @@ pub static BUILTIN_DOCS: &[BuiltinKnowledgeDoc] = &[
         "nenjo.taxonomy.tasks",
         "builtin://nenjo/taxonomy/tasks.md",
         include_str!("../../knowledge/docs/taxonomy/tasks.md")
+    ),
+    doc!(
+        "nenjo.taxonomy.resource_surfaces",
+        "builtin://nenjo/taxonomy/resource-surfaces.md",
+        include_str!("../../knowledge/docs/taxonomy/resource_surfaces.md")
     ),
     doc!(
         "nenjo.taxonomy.workflow_patterns",
