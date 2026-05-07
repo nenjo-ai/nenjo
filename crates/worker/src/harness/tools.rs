@@ -37,9 +37,9 @@ pub use nenjo_tools::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpe
 
 // Re-export built-in tool implementations.
 pub use nenjo_tools::{
-    BrowserOpenTool, BrowserTool, ContentSearchTool, FileEditTool, FileReadTool, FileWriteTool,
-    GitOperationsTool, GlobSearchTool, HttpRequestTool, MemoryForgetTool, MemoryRecallTool,
-    MemoryStoreTool, ScreenshotTool, ShellTool, WebFetchTool, WebSearchTool,
+    BrowserOpenTool, BrowserTool, ContentSearchTool, FileDeleteTool, FileEditTool, FileReadTool,
+    FileWriteTool, GitOperationsTool, GlobSearchTool, HttpRequestTool, MemoryForgetTool,
+    MemoryRecallTool, MemoryStoreTool, ScreenshotTool, ShellTool, WebFetchTool, WebSearchTool,
 };
 
 // Re-export per-ability tool type from nenjo SDK.
@@ -200,6 +200,7 @@ impl HarnessToolFactory {
             Arc::new(FileReadTool::new(security.clone())),
             Arc::new(FileWriteTool::new(security.clone())),
             Arc::new(FileEditTool::new(security.clone())),
+            Arc::new(FileDeleteTool::new(security.clone())),
             Arc::new(GitOperationsTool::new(security.clone())),
             Arc::new(ContentSearchTool::new(security.clone())),
             Arc::new(GlobSearchTool::new(security.clone())),
@@ -926,7 +927,6 @@ impl PlatformProjectToolsBackend {
             "metadata": args.metadata,
             "tags": args.tags,
             "required_tags": args.required_tags,
-            "slug": args.slug,
             "complexity": args.complexity,
             "order_index": args.order_index,
             "assigned_agent_id": args.assigned_agent_id,
@@ -964,9 +964,6 @@ impl PlatformProjectToolsBackend {
         }
         if let Some(required_tags) = args.required_tags.as_ref() {
             body.insert("required_tags".into(), json!(required_tags));
-        }
-        if let Some(slug) = args.slug.as_ref() {
-            body.insert("slug".into(), json!(slug));
         }
         if let Some(complexity) = args.complexity {
             body.insert("complexity".into(), json!(complexity));
@@ -1340,7 +1337,6 @@ struct CreateProjectTaskItemArgs {
     complexity: Option<i16>,
     tags: Option<Vec<String>>,
     required_tags: Option<Vec<String>>,
-    slug: Option<String>,
     order_index: Option<i32>,
     assigned_agent_id: Option<Uuid>,
     routine_id: Option<Uuid>,
@@ -1361,7 +1357,6 @@ struct UpdateProjectTaskArgs {
     complexity: Option<i16>,
     tags: Option<Vec<String>>,
     required_tags: Option<Vec<String>>,
-    slug: Option<String>,
     order_index: Option<i32>,
     assigned_agent_id: Option<Uuid>,
     routine_id: Option<Uuid>,

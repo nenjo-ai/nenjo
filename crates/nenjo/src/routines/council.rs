@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::RoutineEvent;
 use super::types::RoutineState;
-use super::{apply_session_binding_memory_scope, gate};
+use super::{apply_session_binding_memory_scope, gate, with_agent_step_tools};
 use crate::agents::runner::types::TurnOutput;
 use crate::manifest::{CouncilDelegationStrategy, CouncilManifest, RoutineStepManifest};
 use crate::provider::Provider;
@@ -65,10 +65,7 @@ async fn run_streamed_task(
     step_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput> {
-    let builder = provider
-        .agent_by_id(agent_id)
-        .await?
-        .with_tool(gate::PassVerdictTool::new());
+    let builder = with_agent_step_tools(provider.agent_by_id(agent_id).await?);
     let runner = apply_session_binding_memory_scope(builder, state.input.session_binding.as_ref())
         .build()
         .await?;
@@ -199,10 +196,11 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: aggregate_result.text,
+        output: verdict.output.clone().unwrap_or(aggregate_result.text),
         data: serde_json::json!({
             "verdict": if verdict.passed { "pass" } else { "fail" },
             "reasoning": verdict.reasoning,
+            "output": verdict.output,
             "member_results": member_results.iter().map(|r| serde_json::json!({
                 "step_name": r.step_name,
                 "passed": r.passed,
@@ -260,14 +258,19 @@ async fn execute_dynamic(
     );
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
+    let step_output = verdict
+        .output
+        .clone()
+        .unwrap_or_else(|| output.text.clone());
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
+        "output": verdict.output,
     });
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: output.text,
+        output: step_output,
         data,
         step_id: step.id,
         step_name: step.name.clone(),

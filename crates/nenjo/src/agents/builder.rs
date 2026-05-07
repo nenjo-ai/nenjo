@@ -41,6 +41,7 @@ pub struct AgentBuilder {
     model: ModelManifest,
     provider: Arc<dyn ModelProvider>,
     tools: Vec<Arc<dyn Tool>>,
+    extra_tools: Vec<Arc<dyn Tool>>,
     prompt_config: PromptConfig,
     prompt_context: PromptContext,
     agent_config: AgentConfig,
@@ -67,6 +68,7 @@ impl AgentBuilder {
             model: params.model,
             provider: params.provider,
             tools: params.tools,
+            extra_tools: Vec::new(),
             prompt_config: params.prompt_config,
             prompt_context: params.prompt_context,
             agent_config: params.agent_config,
@@ -117,7 +119,7 @@ impl AgentBuilder {
 
     /// Add an additional tool to this agent.
     pub fn with_tool(mut self, tool: impl Tool + 'static) -> Self {
-        self.tools.push(Arc::new(tool));
+        self.extra_tools.push(Arc::new(tool));
         self
     }
 
@@ -220,6 +222,7 @@ impl AgentBuilder {
                 .create_tools_with_security(&self.agent, security.clone())
                 .await;
         }
+        self.tools.extend(self.extra_tools);
 
         // Build memory scope and inject tools. This is the single place
         // where memory/resource tools are added — scope is derived from the

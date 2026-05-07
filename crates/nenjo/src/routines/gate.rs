@@ -55,7 +55,7 @@ impl Tool for PassVerdictTool {
         "Submit the required final verdict for this routine execution. You MUST call this tool exactly once \
          as your final action after you have completed the work. Use verdict \"pass\" when the step output \
          should allow execution to continue, or \"fail\" when the step should fail or route down a failure path. \
-         Always include concise reasoning that explains the decision."
+         Include output with the final response text for the completed work, and concise reasoning that explains the decision."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -72,6 +72,10 @@ impl Tool for PassVerdictTool {
                     "type": "string",
                     "minLength": 1,
                     "description": "Short explanation of why the completed work should pass or fail."
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Generic final response text from the agent for this routine step."
                 }
             },
             "required": ["verdict", "reasoning"]
@@ -92,10 +96,16 @@ impl Tool for PassVerdictTool {
             .and_then(|v| v.as_str())
             .unwrap_or("pass");
         let reasoning = args.get("reasoning").and_then(|v| v.as_str()).unwrap_or("");
+        let output = args.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let output_suffix = if output.is_empty() {
+            String::new()
+        } else {
+            format!(" Output: {output}")
+        };
 
         Ok(ToolResult {
             success: true,
-            output: format!("Pass verdict recorded: {verdict}. {reasoning}"),
+            output: format!("Pass verdict recorded: {verdict}. {reasoning}{output_suffix}"),
             error: None,
         })
     }
@@ -153,11 +163,22 @@ pub fn extract_pass_verdict(messages: &[ChatMessage]) -> Option<bool> {
 pub struct PassVerdict {
     pub passed: bool,
     pub reasoning: Option<String>,
+    pub output: Option<String>,
 }
 
 /// Extract the reasoning string from a `pass_verdict` tool call in the
 /// conversation messages. Returns `None` if the tool was never called.
 pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
+    extract_pass_verdict_string_field(messages, "reasoning")
+}
+
+/// Extract the generic final output string from a `pass_verdict` tool call in
+/// the conversation messages. Returns `None` if omitted or empty.
+pub fn extract_pass_output(messages: &[ChatMessage]) -> Option<String> {
+    extract_pass_verdict_string_field(messages, "output")
+}
+
+fn extract_pass_verdict_string_field(messages: &[ChatMessage], field: &str) -> Option<String> {
     for msg in messages.iter().rev() {
         if msg.role != "assistant" {
             continue;
@@ -176,10 +197,10 @@ pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
             let args_str = tc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
             let args: serde_json::Value =
                 serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
-            if let Some(reasoning) = args.get("reasoning").and_then(|v| v.as_str())
-                && !reasoning.is_empty()
+            if let Some(value) = args.get(field).and_then(|v| v.as_str())
+                && !value.is_empty()
             {
-                return Some(reasoning.to_string());
+                return Some(value.to_string());
             }
         }
     }
@@ -193,7 +214,12 @@ pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
 pub fn resolve_pass_verdict(messages: &[ChatMessage]) -> Result<PassVerdict> {
     if let Some(passed) = extract_pass_verdict(messages) {
         let reasoning = extract_pass_reasoning(messages);
-        return Ok(PassVerdict { passed, reasoning });
+        let output = extract_pass_output(messages);
+        return Ok(PassVerdict {
+            passed,
+            reasoning,
+            output,
+        });
     }
 
     bail!("Agent did not call required pass_verdict tool")
@@ -318,6 +344,13 @@ mod tests {
     }
 
     #[test]
+    fn tool_schema_accepts_output_field() {
+        let tool = PassVerdictTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["output"]["type"], "string");
+    }
+
+    #[test]
     fn tool_schema_verdict_is_enum() {
         let tool = PassVerdictTool::new();
         let schema = tool.parameters_schema();
@@ -409,6 +442,18 @@ mod tests {
         assert_eq!(extract_pass_reasoning(&[msg]), None);
     }
 
+    #[test]
+    fn extract_output_from_tool_call() {
+        let msg = make_tool_call_message(
+            "pass_verdict",
+            r#"{"verdict": "pass", "reasoning": "Complete", "output": "Final answer text"}"#,
+        );
+        assert_eq!(
+            extract_pass_output(&[msg]),
+            Some("Final answer text".to_string())
+        );
+    }
+
     // -- resolve_pass_verdict --
 
     #[test]
@@ -418,6 +463,19 @@ mod tests {
         let v = resolve_pass_verdict(&[msg]).unwrap();
         assert!(!v.passed);
         assert_eq!(v.reasoning.as_deref(), Some("Bad"));
+        assert_eq!(v.output, None);
+    }
+
+    #[test]
+    fn resolve_includes_output_when_present() {
+        let msg = make_tool_call_message(
+            "pass_verdict",
+            r#"{"verdict": "pass", "reasoning": "Done", "output": "Here is the final result."}"#,
+        );
+        let v = resolve_pass_verdict(&[msg]).unwrap();
+        assert!(v.passed);
+        assert_eq!(v.reasoning.as_deref(), Some("Done"));
+        assert_eq!(v.output.as_deref(), Some("Here is the final result."));
     }
 
     #[test]

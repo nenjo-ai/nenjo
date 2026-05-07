@@ -43,6 +43,10 @@ pub use types::{
     SessionBinding, StepMetrics, StepResult, StepType,
 };
 
+pub(crate) fn with_agent_step_tools(builder: AgentBuilder) -> AgentBuilder {
+    builder.with_tool(gate::PassVerdictTool::new())
+}
+
 pub(crate) fn apply_session_binding_memory_scope(
     builder: AgentBuilder,
     binding: Option<&SessionBinding>,

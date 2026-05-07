@@ -334,10 +334,7 @@ async fn execute_agent_step(
         builder = builder.with_work_dir(&git.work_dir);
     }
 
-    let runner = builder
-        .with_tool(gate::PassVerdictTool::new())
-        .build()
-        .await?;
+    let runner = super::with_agent_step_tools(builder).build().await?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -370,14 +367,19 @@ async fn execute_agent_step(
             .await?;
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
+    let step_output = verdict
+        .output
+        .clone()
+        .unwrap_or_else(|| output.text.clone());
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
+        "output": verdict.output,
     });
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: output.text,
+        output: step_output,
         data,
         step_id: step.id,
         step_name: step.name.clone(),
@@ -403,14 +405,12 @@ async fn execute_gate_step(
         .with_context(|| format!("Gate step '{}' is missing agent_id", step.name))?;
 
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
-    let runner = provider
+    let builder = provider
         .agent_by_id(agent_id)
         .await?
-        .with_tool(gate::PassVerdictTool::new())
         .with_routine_context(routine_ctx)
-        .with_step_context(step_ctx)
-        .build()
-        .await?;
+        .with_step_context(step_ctx);
+    let runner = super::with_agent_step_tools(builder).build().await?;
 
     let criteria = step
         .config
@@ -437,17 +437,22 @@ async fn execute_gate_step(
             .await?;
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
+    let step_output = verdict
+        .output
+        .clone()
+        .unwrap_or_else(|| output.text.clone());
 
     // Store verdict + reasoning in `data` so the event bus and gate_feedback
     // can surface structured information instead of raw LLM text.
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
+        "output": verdict.output,
     });
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: output.text,
+        output: step_output,
         data,
         step_id: step.id,
         step_name: step.name.clone(),
@@ -475,14 +480,12 @@ async fn execute_cron_step(
     let cycle_result = match &config.mode {
         CronMode::Agent(agent_id) => {
             let (routine_ctx, step_ctx) = build_routine_ctx(state);
-            let runner = provider
+            let builder = provider
                 .agent_by_id(*agent_id)
                 .await?
-                .with_tool(gate::PassVerdictTool::new())
                 .with_routine_context(routine_ctx)
-                .with_step_context(step_ctx)
-                .build()
-                .await?;
+                .with_step_context(step_ctx);
+            let runner = super::with_agent_step_tools(builder).build().await?;
             // Use TaskType::Cron so the agent's cron_task template is selected.
             let inner_task = state
                 .input
@@ -512,13 +515,15 @@ async fn execute_cron_step(
 
     if let Some(passed) = gate::extract_pass_verdict(&cycle_result.messages) {
         let reasoning = gate::extract_pass_reasoning(&cycle_result.messages);
+        let verdict_output = gate::extract_pass_output(&cycle_result.messages);
         let data = serde_json::json!({
             "verdict": if passed { "pass" } else { "fail" },
             "reasoning": reasoning,
+            "output": verdict_output,
         });
         return Ok(StepResult {
             passed,
-            output: cycle_result.text,
+            output: verdict_output.unwrap_or(cycle_result.text),
             data,
             step_id: step.id,
             step_name: step.name.clone(),
