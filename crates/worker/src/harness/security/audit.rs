@@ -204,29 +204,6 @@ impl AuditLogger {
         self.log(&event)
     }
 
-    /// Backward-compatible helper to log a command execution event.
-    #[allow(clippy::too_many_arguments)]
-    pub fn log_command(
-        &self,
-        channel: &str,
-        command: &str,
-        risk_level: &str,
-        approved: bool,
-        allowed: bool,
-        success: bool,
-        duration_ms: u64,
-    ) -> Result<()> {
-        self.log_command_event(CommandExecutionLog {
-            channel,
-            command,
-            risk_level,
-            approved,
-            allowed,
-            success,
-            duration_ms,
-        })
-    }
-
     /// Rotate log if it exceeds max size
     fn rotate_if_needed(&self) -> Result<()> {
         if let Ok(metadata) = std::fs::metadata(&self.log_path) {

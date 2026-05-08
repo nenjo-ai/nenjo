@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::str::FromStr;
 
 // ── Layer types (from layers.rs) ──────────────────────────────────
 
@@ -39,15 +41,18 @@ impl MemoryItemStatus {
             Self::Unverified => "unverified",
         }
     }
+}
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Self {
+impl FromStr for MemoryItemStatus {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "active" => Self::Active,
-            "superseded" => Self::Superseded,
-            "archived" => Self::Archived,
-            "unverified" => Self::Unverified,
-            _ => Self::Active,
+            "active" => Ok(Self::Active),
+            "superseded" => Ok(Self::Superseded),
+            "archived" => Ok(Self::Archived),
+            "unverified" => Ok(Self::Unverified),
+            _ => Ok(Self::Active),
         }
     }
 }
@@ -313,9 +318,11 @@ pub trait AgentMemory: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Verify the trait is object-safe (can be used as `dyn AgentMemory`).
-    #[allow(dead_code)]
-    fn assert_object_safe(_: &dyn AgentMemory) {}
+    #[test]
+    fn agent_memory_trait_is_object_safe() {
+        fn assert_object_safe<T: AgentMemory + ?Sized>() {}
+        assert_object_safe::<dyn AgentMemory>();
+    }
 
     #[test]
     fn memory_item_status_roundtrip() {
@@ -334,15 +341,15 @@ mod tests {
     #[test]
     fn memory_item_status_from_str() {
         assert_eq!(
-            MemoryItemStatus::from_str("active"),
+            MemoryItemStatus::from_str("active").unwrap(),
             MemoryItemStatus::Active
         );
         assert_eq!(
-            MemoryItemStatus::from_str("superseded"),
+            MemoryItemStatus::from_str("superseded").unwrap(),
             MemoryItemStatus::Superseded
         );
         assert_eq!(
-            MemoryItemStatus::from_str("unknown"),
+            MemoryItemStatus::from_str("unknown").unwrap(),
             MemoryItemStatus::Active
         );
     }

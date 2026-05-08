@@ -1,5 +1,4 @@
 //! Auto-detection of available security features
-#![allow(unexpected_cfgs)]
 
 use crate::harness::config::{SandboxBackend, SecurityConfig};
 use crate::harness::security::traits::Sandbox;
@@ -17,17 +16,8 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
     // If specific backend requested, try that
     match backend {
         SandboxBackend::Landlock => {
-            #[cfg(feature = "sandbox-landlock")]
-            {
-                #[cfg(target_os = "linux")]
-                {
-                    if let Ok(sandbox) = super::landlock::LandlockSandbox::new() {
-                        return Arc::new(sandbox);
-                    }
-                }
-            }
             tracing::warn!(
-                "Landlock requested but not available, falling back to application-layer"
+                "Landlock requested but no Landlock backend is compiled, falling back to application-layer"
             );
             Arc::new(super::traits::NoopSandbox)
         }
@@ -44,17 +34,8 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
             Arc::new(super::traits::NoopSandbox)
         }
         SandboxBackend::Bubblewrap => {
-            #[cfg(feature = "sandbox-bubblewrap")]
-            {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
-                {
-                    if let Ok(sandbox) = super::bubblewrap::BubblewrapSandbox::new() {
-                        return Arc::new(sandbox);
-                    }
-                }
-            }
             tracing::warn!(
-                "Bubblewrap requested but not available, falling back to application-layer"
+                "Bubblewrap requested but no Bubblewrap backend is compiled, falling back to application-layer"
             );
             Arc::new(super::traits::NoopSandbox)
         }
@@ -76,31 +57,10 @@ pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
 fn detect_best_sandbox() -> Arc<dyn Sandbox> {
     #[cfg(target_os = "linux")]
     {
-        // Try Landlock first (native, no dependencies)
-        #[cfg(feature = "sandbox-landlock")]
-        {
-            if let Ok(sandbox) = super::landlock::LandlockSandbox::probe() {
-                tracing::info!("Landlock sandbox enabled (Linux kernel 5.13+)");
-                return Arc::new(sandbox);
-            }
-        }
-
-        // Try Firejail second (user-space tool)
+        // Try Firejail first on Linux (user-space tool).
         if let Ok(sandbox) = super::firejail::FirejailSandbox::probe() {
             tracing::info!("Firejail sandbox enabled");
             return Arc::new(sandbox);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // Try Bubblewrap on macOS
-        #[cfg(feature = "sandbox-bubblewrap")]
-        {
-            if let Ok(sandbox) = super::bubblewrap::BubblewrapSandbox::probe() {
-                tracing::info!("Bubblewrap sandbox enabled");
-                return Arc::new(sandbox);
-            }
         }
     }
 
