@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// A capability that a worker can handle.
 ///
 /// Each capability maps to a set of [`Command`](crate::Command) variants.
-/// Workers subscribe to `requests.<capability>` for each capability they
+/// Workers subscribe to `work_requests.<capability>` for each capability they
 /// support (local subject within their per-user NATS account).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

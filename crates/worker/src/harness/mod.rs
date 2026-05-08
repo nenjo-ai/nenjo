@@ -5,7 +5,7 @@
 //! execution handles for cancellation and lifecycle tracking.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -138,6 +138,16 @@ pub type DomainRegistry = Arc<DashMap<Uuid, DomainSession>>;
 /// Git's `.git/config` lock does not support concurrent writes.
 pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>>;
 
+type SeenMessageIds = Arc<DashMap<Uuid, Instant>>;
+
+const SEEN_MESSAGE_TTL: Duration = Duration::from_secs(600);
+
+fn mark_message_seen(seen: &SeenMessageIds, message_id: Uuid) -> bool {
+    let now = Instant::now();
+    seen.retain(|_, inserted_at| now.duration_since(*inserted_at) <= SEEN_MESSAGE_TTL);
+    seen.insert(message_id, now).is_none()
+}
+
 /// Shared context passed to each command handler.
 ///
 /// Handlers load the current Provider from `provider` (lock-free via ArcSwap).
@@ -189,6 +199,7 @@ pub struct Harness {
     executions: ExecutionRegistry,
     domains: DomainRegistry,
     git_locks: GitLocks,
+    seen_message_ids: SeenMessageIds,
     shutdown: CancellationToken,
 }
 
@@ -248,11 +259,20 @@ impl Harness {
         turn_number: u32,
     ) -> Result<DomainSession> {
         let provider_snapshot = provider.load_full();
-        let base_runner = provider_snapshot
-            .agent_by_id(agent_id)
-            .await?
-            .build()
-            .await?;
+        let mut builder = provider_snapshot.agent_by_id(agent_id).await?;
+        if !project_id.is_nil() {
+            if let Some(project) = provider_snapshot
+                .manifest()
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+            {
+                builder = builder.with_project_context(project);
+            } else {
+                warn!(%project_id, %agent_id, "Project not found in manifest for domain session rebuild");
+            }
+        }
+        let base_runner = builder.build().await?;
         let domain_runner = base_runner.domain_expansion(domain_command).await?;
 
         let mut instance = domain_runner.instance().clone();
@@ -481,6 +501,7 @@ impl Harness {
         let executions = Arc::new(DashMap::new());
         let domains = Arc::new(DashMap::new());
         let git_locks = Arc::new(DashMap::new());
+        let seen_message_ids = Arc::new(DashMap::new());
         let shutdown = CancellationToken::new();
 
         Self::restore_domain_sessions(&provider, &session_store, &domains).await;
@@ -503,6 +524,7 @@ impl Harness {
             executions,
             domains,
             git_locks,
+            seen_message_ids,
             shutdown,
         })
     }
@@ -577,6 +599,7 @@ impl Harness {
         let heartbeat_tx = system_response_tx.clone();
         let heartbeat_shutdown = self.shutdown.clone();
         let heartbeat_caps = capabilities;
+        let seen_message_ids = self.seen_message_ids.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             interval.tick().await;
@@ -641,6 +664,28 @@ impl Harness {
                 ReceivedInput::Command(received) => {
                     let command = received.command.clone();
                     let actor_user_id = received.envelope.user_id;
+                    let message_id = received.envelope.message_id;
+                    let source = received.source().cloned();
+                    if !mark_message_seen(&seen_message_ids, message_id) {
+                        if let Err(e) = received.ack().await {
+                            warn!(error = %e, %message_id, "Failed to ack duplicate command");
+                        }
+                        warn!(
+                            user_id = %actor_user_id,
+                            %message_id,
+                            command = %command,
+                            source = ?source,
+                            "Dropping duplicate worker command"
+                        );
+                        continue;
+                    }
+                    info!(
+                        user_id = %actor_user_id,
+                        %message_id,
+                        command = %command,
+                        source = ?source,
+                        "Received worker command"
+                    );
                     if let Err(e) = received.ack().await {
                         warn!(error = %e, "Failed to ack command");
                     }
@@ -670,7 +715,22 @@ impl Harness {
                 }
                 ReceivedInput::DecodeFailure(received) => {
                     let actor_user_id = received.envelope.user_id;
+                    let message_id = received.envelope.message_id;
+                    let source = received.source().cloned();
                     let failure = received.failure.clone();
+                    if !mark_message_seen(&seen_message_ids, message_id) {
+                        if let Err(e) = received.ack().await {
+                            warn!(error = %e, %message_id, "Failed to ack duplicate decode failure");
+                        }
+                        warn!(
+                            user_id = %actor_user_id,
+                            %message_id,
+                            code = failure.code,
+                            source = ?source,
+                            "Dropping duplicate decode failure"
+                        );
+                        continue;
+                    }
                     if let Err(e) = received.ack().await {
                         warn!(error = %e, "Failed to ack decode failure");
                     }
@@ -704,12 +764,18 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchedulerRestoreAction, scheduler_restore_action};
+    use super::{
+        SEEN_MESSAGE_TTL, SchedulerRestoreAction, SeenMessageIds, mark_message_seen,
+        scheduler_restore_action,
+    };
     use chrono::Utc;
+    use dashmap::DashMap;
     use nenjo_sessions::{
         CronScheduleState, HeartbeatScheduleState, ScheduleState, SessionRecord, SessionRefs,
         SessionStatus, SessionSummary,
     };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
 
     fn base_record(status: SessionStatus) -> SessionRecord {
@@ -734,6 +800,29 @@ mod tests {
             updated_at: now,
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn message_dedupe_rejects_seen_message_ids() {
+        let seen: SeenMessageIds = Arc::new(DashMap::new());
+        let message_id = Uuid::new_v4();
+
+        assert!(mark_message_seen(&seen, message_id));
+        assert!(!mark_message_seen(&seen, message_id));
+    }
+
+    #[test]
+    fn message_dedupe_expires_old_entries() {
+        let seen: SeenMessageIds = Arc::new(DashMap::new());
+        let old_message_id = Uuid::new_v4();
+        let new_message_id = Uuid::new_v4();
+        seen.insert(
+            old_message_id,
+            Instant::now() - SEEN_MESSAGE_TTL - Duration::from_secs(1),
+        );
+
+        assert!(mark_message_seen(&seen, new_message_id));
+        assert!(!seen.contains_key(&old_message_id));
     }
 
     #[test]

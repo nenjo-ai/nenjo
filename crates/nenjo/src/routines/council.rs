@@ -14,17 +14,30 @@ use uuid::Uuid;
 
 use super::RoutineEvent;
 use super::types::RoutineState;
-use super::{apply_session_binding_memory_scope, gate, with_agent_step_tools};
+use super::{
+    apply_session_binding_memory_scope, gate, with_agent_step_tools, with_routine_step_max_turns,
+};
+use crate::AgentBuilder;
 use crate::agents::runner::types::TurnOutput;
 use crate::manifest::{CouncilDelegationStrategy, CouncilManifest, RoutineStepManifest};
 use crate::provider::Provider;
 use crate::routines::types::StepResult;
 use crate::types::TaskType;
 
+fn scope_tools_to_work_dir(mut builder: AgentBuilder, state: &RoutineState) -> AgentBuilder {
+    if let Some(ref git) = state.input.git
+        && !git.work_dir.is_empty()
+    {
+        builder = builder.with_work_dir(&git.work_dir);
+    }
+    builder
+}
+
 /// Execute a council step, dispatching based on the council's delegation_strategy.
 pub(crate) async fn execute_council(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
@@ -40,19 +53,19 @@ pub(crate) async fn execute_council(
 
     match council.delegation_strategy {
         CouncilDelegationStrategy::Dynamic => {
-            execute_dynamic(provider, step, state, &council, events_tx).await
+            execute_dynamic(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Decompose => {
-            execute_decompose(provider, step, state, &council, events_tx).await
+            execute_decompose(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Broadcast => {
-            execute_broadcast(provider, step, state, &council, events_tx).await
+            execute_broadcast(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::RoundRobin => {
-            execute_round_robin(provider, step, state, &council, events_tx).await
+            execute_round_robin(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Vote => {
-            execute_vote(provider, step, state, &council, events_tx).await
+            execute_vote(provider, step, step_run_id, state, &council, events_tx).await
         }
     }
 }
@@ -61,16 +74,30 @@ async fn run_streamed_task(
     provider: &Provider,
     agent_id: Uuid,
     state: &RoutineState,
+    step: &RoutineStepManifest,
     task: TaskType,
     step_id: Uuid,
+    step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput> {
-    let builder = with_agent_step_tools(provider.agent_by_id(agent_id).await?);
-    let runner = apply_session_binding_memory_scope(builder, state.input.session_binding.as_ref())
+    let builder = apply_session_binding_memory_scope(
+        provider.agent_by_id(agent_id).await?,
+        state.input.session_binding.as_ref(),
+    );
+    let builder = scope_tools_to_work_dir(builder, state);
+    let runner = with_agent_step_tools(with_routine_step_max_turns(builder, step))
         .build()
         .await?;
 
-    gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step_id, events_tx).await
+    gate::execute_with_pass_verdict(
+        &runner,
+        task,
+        state.input.project_id,
+        step_id,
+        step_run_id,
+        events_tx,
+    )
+    .await
 }
 
 fn member_agent_ids(council: &CouncilManifest) -> Result<Vec<Uuid>> {
@@ -84,6 +111,7 @@ fn member_agent_ids(council: &CouncilManifest) -> Result<Vec<Uuid>> {
 async fn run_member_tasks(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     members: &[(Uuid, String)],
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -105,7 +133,18 @@ async fn run_member_tasks(
             project_id: state.input.project_id,
         };
 
-        match run_streamed_task(provider, *agent_id, state, task, step.id, events_tx).await {
+        match run_streamed_task(
+            provider,
+            *agent_id,
+            state,
+            step,
+            task,
+            step.id,
+            step_run_id,
+            events_tx,
+        )
+        .await
+        {
             Ok(output) => member_results.push(StepResult {
                 passed: gate::resolve_pass_verdict(&output.messages)?.passed,
                 output: output.text,
@@ -133,6 +172,7 @@ async fn run_member_tasks(
 struct AggregateMemberResultsParams<'a> {
     provider: &'a Provider,
     step: &'a RoutineStepManifest,
+    step_run_id: Uuid,
     state: &'a RoutineState,
     council: &'a CouncilManifest,
     events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
@@ -145,6 +185,7 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
     let AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -175,12 +216,14 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
         provider,
         council.leader_agent_id,
         state,
+        step,
         TaskType::Chat {
             user_message: prompt,
             history: Vec::new(),
             project_id: state.input.project_id,
         },
         step.id,
+        step_run_id,
         events_tx,
     )
     .await?;
@@ -193,10 +236,11 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
         + aggregate_result.output_tokens;
     let total_tool_calls =
         member_results.iter().map(|r| r.tool_calls).sum::<u32>() + aggregate_result.tool_calls;
+    let output = gate::pass_verdict_display_output(&verdict, &aggregate_result.text);
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: verdict.output.clone().unwrap_or(aggregate_result.text),
+        output,
         data: serde_json::json!({
             "verdict": if verdict.passed { "pass" } else { "fail" },
             "reasoning": verdict.reasoning,
@@ -225,6 +269,7 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
 async fn execute_dynamic(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -242,12 +287,14 @@ async fn execute_dynamic(
         provider,
         leader_agent_id,
         state,
+        step,
         TaskType::Chat {
             user_message: state.initial_input.clone(),
             history: Vec::new(),
             project_id: state.input.project_id,
         },
         step.id,
+        step_run_id,
         events_tx,
     )
     .await?;
@@ -258,10 +305,7 @@ async fn execute_dynamic(
     );
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = verdict
-        .output
-        .clone()
-        .unwrap_or_else(|| output.text.clone());
+    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
@@ -285,6 +329,7 @@ async fn execute_dynamic(
 async fn execute_decompose(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -317,12 +362,14 @@ async fn execute_decompose(
         provider,
         leader_agent_id,
         state,
+        step,
         TaskType::Chat {
             user_message: decompose_message,
             history: Vec::new(),
             project_id: state.input.project_id,
         },
         step.id,
+        step_run_id,
         events_tx,
     )
     .await?;
@@ -335,11 +382,13 @@ async fn execute_decompose(
         .zip(subtasks.iter())
         .map(|(agent_id, subtask)| (*agent_id, subtask.clone()))
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
 
     let mut result = aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -362,6 +411,7 @@ async fn execute_decompose(
 async fn execute_broadcast(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -379,10 +429,12 @@ async fn execute_broadcast(
             )
         })
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -397,6 +449,7 @@ async fn execute_broadcast(
 async fn execute_round_robin(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -420,11 +473,18 @@ async fn execute_round_robin(
             )
         };
         let single_member = vec![(*agent_id, task)];
-        let result = run_member_tasks(provider, step, state, &single_member, events_tx)
-            .await?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let result = run_member_tasks(
+            provider,
+            step,
+            step_run_id,
+            state,
+            &single_member,
+            events_tx,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
         running_context.push_str(&format!(
             "\n--- Contribution {} ---\n{}\n",
             index + 1,
@@ -436,6 +496,7 @@ async fn execute_round_robin(
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -453,6 +514,7 @@ async fn execute_round_robin(
 async fn execute_vote(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -470,10 +532,12 @@ async fn execute_vote(
             )
         })
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,

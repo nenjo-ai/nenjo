@@ -225,6 +225,21 @@ pub fn resolve_pass_verdict(messages: &[ChatMessage]) -> Result<PassVerdict> {
     bail!("Agent did not call required pass_verdict tool")
 }
 
+pub fn pass_verdict_display_output(verdict: &PassVerdict, fallback: &str) -> String {
+    verdict
+        .output
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            verdict
+                .reasoning
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or(fallback)
+        .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Convenience: create the tool as Arc<dyn Tool>
 // ---------------------------------------------------------------------------
@@ -263,11 +278,16 @@ async fn stream_turn_output(
     runner: &AgentRunner,
     task: TaskType,
     step_id: Uuid,
+    step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput> {
     let mut handle = runner.task_stream(task).await?;
     while let Some(event) = handle.recv().await {
-        let _ = events_tx.send(RoutineEvent::AgentEvent { step_id, event });
+        let _ = events_tx.send(RoutineEvent::AgentEvent {
+            step_id,
+            step_run_id,
+            event,
+        });
     }
     handle.output().await
 }
@@ -277,6 +297,7 @@ pub async fn execute_with_pass_verdict(
     task: TaskType,
     project_id: Uuid,
     step_id: Uuid,
+    step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput> {
     let mut attempts = 0usize;
@@ -286,7 +307,8 @@ pub async fn execute_with_pass_verdict(
     let mut total_tool_calls = 0u32;
 
     loop {
-        let output = stream_turn_output(runner, pending_task, step_id, events_tx).await?;
+        let output =
+            stream_turn_output(runner, pending_task, step_id, step_run_id, events_tx).await?;
         total_input_tokens += output.input_tokens;
         total_output_tokens += output.output_tokens;
         total_tool_calls += output.tool_calls;
@@ -476,6 +498,20 @@ mod tests {
         assert!(v.passed);
         assert_eq!(v.reasoning.as_deref(), Some("Done"));
         assert_eq!(v.output.as_deref(), Some("Here is the final result."));
+    }
+
+    #[test]
+    fn display_output_prefers_reasoning_over_fallback_when_output_missing() {
+        let verdict = PassVerdict {
+            passed: true,
+            reasoning: Some("Verified acceptance criteria".to_string()),
+            output: None,
+        };
+
+        assert_eq!(
+            pass_verdict_display_output(&verdict, r#"{"content":"","tool_calls":[]}"#),
+            "Verified acceptance criteria"
+        );
     }
 
     #[test]

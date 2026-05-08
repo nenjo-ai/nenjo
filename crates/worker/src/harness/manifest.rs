@@ -142,7 +142,7 @@ fn default_nats_auth_method() -> String {
 }
 
 fn default_nats_stream_name() -> String {
-    "AGENT_REQUESTS".to_string()
+    "AGENT_WORK_REQUESTS".to_string()
 }
 
 fn default_nats_max_reconnects() -> i32 {

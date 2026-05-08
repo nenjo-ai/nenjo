@@ -1,4 +1,4 @@
-//! Commands sent from the backend to the harness (`requests.<capability>`).
+//! Commands sent from the backend to the harness (`work_requests.<capability>`).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

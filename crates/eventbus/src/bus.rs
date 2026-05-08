@@ -69,7 +69,7 @@ impl<T: Transport> EventBus<T> {
 pub struct ReceivedEnvelope {
     /// The deserialized transport envelope.
     pub envelope: Envelope,
-    msg: Message,
+    pub msg: Message,
 }
 
 impl std::fmt::Debug for ReceivedEnvelope {

@@ -346,7 +346,9 @@ impl ExecutionTraceRecorder {
             TurnEvent::ToolCallEnd {
                 parent_tool_name,
                 tool_name,
+                tool_args: _,
                 result,
+                ..
             } => {
                 let trace_event = TraceEvent::ToolEnd {
                     tool_name: tool_name.clone(),

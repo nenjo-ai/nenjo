@@ -42,7 +42,7 @@ mod transport;
 
 pub use bus::{EventBus, EventBusBuilder, ReceivedEnvelope};
 pub use error::EventBusError;
-pub use transport::{AckHandle, Message, NoOpAck, Transport};
+pub use transport::{AckHandle, Message, MessageSource, NoOpAck, Transport};
 
 // Re-export event types for convenience.
 pub use nenjo_events::Envelope;

@@ -587,7 +587,8 @@ async fn stream_events_single_step() {
                 assert!(result.passed);
                 saw_step_completed = true;
             }
-            RoutineEvent::Done { result } => {
+            RoutineEvent::Done { task_id, result } => {
+                assert_eq!(task_id, Some(Uuid::nil()));
                 assert_eq!(result.output, "Streamed output.");
                 saw_done = true;
             }
@@ -912,6 +913,233 @@ async fn gate_step_pass() {
 
     // Terminal step returns the last result
     assert!(result.passed);
+}
+
+#[tokio::test]
+async fn gate_always_edge_is_invalid() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step1_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let terminal_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "invalid-gate-routing".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: step1_id,
+                routine_id,
+                name: "analyze_and_develop".into(),
+                step_type: RoutineStepType::Agent,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: gate_id,
+                routine_id,
+                name: "verify".into(),
+                step_type: RoutineStepType::Gate,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                id: terminal_id,
+                routine_id,
+                name: "complete".into(),
+                step_type: RoutineStepType::Terminal,
+                council_id: None,
+                agent_id: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: step1_id,
+                target_step_id: gate_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: terminal_id,
+                condition: RoutineEdgeCondition::Always,
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            verdict_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let task = test_task(Uuid::new_v4(), "Task", "Build feature");
+    let err = provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(task)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("must route with on_pass/on_fail"));
+}
+
+#[tokio::test]
+async fn gate_on_fail_routes_back_before_completion() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step1_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let terminal_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "retry-gated-routine".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: step1_id,
+                routine_id,
+                name: "analyze_and_develop".into(),
+                step_type: RoutineStepType::Agent,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: gate_id,
+                routine_id,
+                name: "verify".into(),
+                step_type: RoutineStepType::Gate,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                id: terminal_id,
+                routine_id,
+                name: "complete".into(),
+                step_type: RoutineStepType::Terminal,
+                council_id: None,
+                agent_id: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: step1_id,
+                target_step_id: gate_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: step1_id,
+                condition: RoutineEdgeCondition::OnFail,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: terminal_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            verdict_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+            verdict_response(
+                "Implementation revised.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Looks good.", "pass", "Criteria were satisfied"),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let task = test_task(Uuid::new_v4(), "Task", "Build feature");
+    let mut handle = provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run_stream(task)
+        .await
+        .unwrap();
+
+    let mut analyze_starts = 0;
+    let mut verify_starts = 0;
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            match step_name.as_str() {
+                "analyze_and_develop" => analyze_starts += 1,
+                "verify" => verify_starts += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let result = handle.output().await.unwrap();
+
+    assert!(result.passed);
+    assert_eq!(analyze_starts, 2);
+    assert_eq!(verify_starts, 2);
 }
 
 /// Routine not found → error.

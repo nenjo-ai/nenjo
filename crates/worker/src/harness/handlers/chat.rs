@@ -349,13 +349,21 @@ pub async fn handle_chat(
             }
         }
     } else {
-        apply_session_memory_scope(
-            ctx.provider().agent_by_id(agent_id).await?,
-            &*ctx.session_store,
-            session_id,
-        )
-        .build()
-        .await?
+        let mut builder = provider.agent_by_id(agent_id).await?;
+        if let Some(project_id) = project_id {
+            if let Some(project) = manifest
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+            {
+                builder = builder.with_project_context(project);
+            } else {
+                warn!(%project_id, %agent_id, "Project not found in manifest for chat session");
+            }
+        }
+        apply_session_memory_scope(builder, &*ctx.session_store, session_id)
+            .build()
+            .await?
     };
 
     // Start streaming execution
@@ -435,7 +443,9 @@ pub async fn handle_chat(
                             nenjo::TurnEvent::ToolCallEnd {
                                 parent_tool_name,
                                 tool_name,
+                                tool_args: _,
                                 result,
+                                ..
                             } => {
                                 let _ = append_transcript_event(
                                     &*ctx.session_store,

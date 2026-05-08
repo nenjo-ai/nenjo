@@ -5,7 +5,8 @@
 //!
 //! | PLATFORM subject              | Worker local subject  |
 //! |-------------------------------|-----------------------|
-//! | `requests.org.<org_id>.>`     | `requests.>`          |
+//! | `work_requests.org.<org_id>.>` | `work_requests.>`     |
+//! | `worker_requests.org.<org_id>.>` | `worker_requests.>` |
 //! | `responses.<user_id>`         | `responses.<user_id>` |
 
 use uuid::Uuid;
@@ -17,15 +18,33 @@ use crate::{Capability, Response};
 // ---------------------------------------------------------------------------
 
 /// Local NATS subject for receiving commands for a specific capability.
-/// `requests.<capability>`
+/// `work_requests.<capability>`
 pub fn requests_subject(capability: Capability) -> String {
-    format!("requests.{capability}")
+    format!("work_requests.{capability}")
 }
 
 /// Local NATS wildcard subject for all capabilities.
-/// `requests.*`
+/// `work_requests.*`
 pub fn requests_subject_all() -> String {
-    "requests.>".to_string()
+    "work_requests.>".to_string()
+}
+
+/// Local NATS subject for receiving commands targeted to one worker.
+/// `worker_requests.<worker_id>.<capability>`
+pub fn worker_requests_subject(worker_id: Uuid, capability: Capability) -> String {
+    format!("worker_requests.{worker_id}.{capability}")
+}
+
+/// Local NATS wildcard subject for commands targeted to one worker.
+/// `worker_requests.<worker_id>.>`
+pub fn worker_requests_subject_all(worker_id: Uuid) -> String {
+    format!("worker_requests.{worker_id}.>")
+}
+
+/// Local NATS wildcard subject for fanout worker commands.
+/// `broadcast_requests.*`
+pub fn broadcast_requests_subject_all() -> String {
+    "broadcast_requests.>".to_string()
 }
 
 /// Local NATS subject for sending responses back to the backend.
@@ -52,10 +71,16 @@ pub fn response_subject(user_id: Uuid, response: &Response) -> String {
 }
 
 /// The JetStream stream name workers consume commands from.
-pub const REQUESTS_STREAM_NAME: &str = "AGENT_REQUESTS";
+pub const REQUESTS_STREAM_NAME: &str = "AGENT_WORK_REQUESTS";
+
+/// The JetStream stream name workers consume fanout commands from.
+pub const BROADCAST_REQUESTS_STREAM_NAME: &str = "AGENT_BROADCAST_REQUESTS";
 
 /// Stream subjects for the requests stream.
-pub const REQUESTS_STREAM_SUBJECTS: &[&str] = &["requests.>"];
+pub const REQUESTS_STREAM_SUBJECTS: &[&str] = &["work_requests.*", "worker_requests.*.*"];
+
+/// Stream subjects for the broadcast requests stream.
+pub const BROADCAST_REQUESTS_STREAM_SUBJECTS: &[&str] = &["broadcast_requests.*"];
 
 #[cfg(test)]
 mod tests {
@@ -63,12 +88,30 @@ mod tests {
 
     #[test]
     fn requests_subject_format() {
-        assert_eq!(requests_subject(Capability::Chat), "requests.chat");
+        assert_eq!(requests_subject(Capability::Chat), "work_requests.chat");
     }
 
     #[test]
     fn requests_subject_all_format() {
-        assert_eq!(requests_subject_all(), "requests.>");
+        assert_eq!(requests_subject_all(), "work_requests.>");
+    }
+
+    #[test]
+    fn worker_requests_subject_format() {
+        let worker_id = Uuid::nil();
+        assert_eq!(
+            worker_requests_subject(worker_id, Capability::Task),
+            format!("worker_requests.{worker_id}.task")
+        );
+        assert_eq!(
+            worker_requests_subject_all(worker_id),
+            format!("worker_requests.{worker_id}.>")
+        );
+    }
+
+    #[test]
+    fn broadcast_requests_subject_all_format() {
+        assert_eq!(broadcast_requests_subject_all(), "broadcast_requests.>");
     }
 
     #[test]

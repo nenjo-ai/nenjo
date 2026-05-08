@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
     Command, EncryptedPayload, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
-    ToolCall,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -185,13 +184,7 @@ impl SecureEnvelopeCodec {
                 payload,
                 ..
             } => Ok(Some(StreamEvent::ToolCalls {
-                tool_calls: tool_calls
-                    .into_iter()
-                    .map(|call| ToolCall {
-                        tool_name: call.tool_name,
-                        tool_args: "{}".to_string(),
-                    })
-                    .collect(),
+                tool_calls,
                 agent_name,
                 parent_tool_name,
                 payload: None,
@@ -545,7 +538,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
-    use nenjo_events::Command;
+    use nenjo_events::{Command, Response, StreamEvent, ToolCall};
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
@@ -689,6 +682,59 @@ mod tests {
                 other => panic!("unexpected decoded command payload: {other:?}"),
             },
             other => panic!("unexpected decoded command result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_args_remain_inline_when_response_is_encoded() {
+        let actor_user_id = Uuid::new_v4();
+        let actor_key = ContentKey::from_bytes([7_u8; 32]);
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider
+            .insert_user_key(actor_user_id, actor_key.clone())
+            .await;
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let ctx = CodecContext::for_actor(actor_user_id);
+
+        let encoded = codec
+            .encode_response(
+                &ctx,
+                Response::AgentResponse {
+                    session_id: None,
+                    payload: StreamEvent::ToolCalls {
+                        tool_calls: vec![ToolCall {
+                            tool_name: "glob_search".into(),
+                            tool_args: r#"{"pattern":"*.md","path":"."}"#.into(),
+                        }],
+                        agent_name: "coder".into(),
+                        parent_tool_name: None,
+                        payload: Some(serde_json::json!({ "text_preview": "searching" })),
+                        encrypted_payload: None,
+                    },
+                },
+            )
+            .await
+            .expect("encode should succeed")
+            .expect("response should be retained");
+
+        match encoded {
+            Response::AgentResponse {
+                payload:
+                    StreamEvent::ToolCalls {
+                        tool_calls,
+                        payload,
+                        encrypted_payload,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(tool_calls[0].tool_args, r#"{"pattern":"*.md","path":"."}"#);
+                assert!(payload.is_none());
+                assert!(encrypted_payload.is_some());
+            }
+            other => panic!("unexpected encoded response: {other:?}"),
         }
     }
 }

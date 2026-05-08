@@ -146,6 +146,11 @@ impl RenderContextVars {
         } else {
             self._self.id.to_string()
         };
+        let project_id = if self.project.id == uuid::Uuid::nil().to_string() {
+            String::new()
+        } else {
+            self.project.id.clone()
+        };
         let routine_id = if self.routine.id.is_nil() {
             String::new()
         } else {
@@ -190,7 +195,7 @@ impl RenderContextVars {
             ),
             // Project — singular XML + fields
             ("project", project_xml.as_str()),
-            ("project.id", &self.project.id),
+            ("project.id", project_id.as_str()),
             ("project.name", &self.project.name),
             ("project.slug", &self.project.slug),
             ("project.description", &self.project.description),
@@ -255,5 +260,33 @@ impl RenderContextVars {
         vars.extend(self.context_blocks.clone());
 
         vars
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::RenderContextVars;
+
+    #[test]
+    fn nil_project_id_is_not_rendered() {
+        let mut ctx = RenderContextVars::default();
+        ctx.project.id = Uuid::nil().to_string();
+
+        let vars = ctx.to_vars();
+
+        assert_eq!(vars.get("project.id"), None);
+    }
+
+    #[test]
+    fn non_nil_project_id_is_rendered() {
+        let mut ctx = RenderContextVars::default();
+        let project_id = Uuid::new_v4();
+        ctx.project.id = project_id.to_string();
+
+        let vars = ctx.to_vars();
+
+        assert_eq!(vars.get("project.id"), Some(&project_id.to_string()));
     }
 }

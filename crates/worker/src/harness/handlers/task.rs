@@ -2,8 +2,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use dashmap::mapref::entry::Entry;
 use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
     ExecutionPhase, SessionCheckpoint, SessionKind, SessionRecord, SessionRefs, SessionStatus,
@@ -172,6 +173,34 @@ fn task_worktree_snapshot(
     })
 }
 
+#[derive(Debug, Clone)]
+struct TaskExecutionOutcome {
+    success: bool,
+    error: Option<String>,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+}
+
+impl TaskExecutionOutcome {
+    fn success(total_input_tokens: u64, total_output_tokens: u64) -> Self {
+        Self {
+            success: true,
+            error: None,
+            total_input_tokens,
+            total_output_tokens,
+        }
+    }
+
+    fn failed(error: impl Into<String>, total_input_tokens: u64, total_output_tokens: u64) -> Self {
+        Self {
+            success: false,
+            error: Some(error.into()),
+            total_input_tokens,
+            total_output_tokens,
+        }
+    }
+}
+
 /// Handle a task execution command.
 ///
 /// If the project has a synced git repo, creates a worktree for this task
@@ -200,6 +229,32 @@ pub async fn handle_task_execute(
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.config.workspace_dir.join(&pslug).join("repo");
     let checkpoint_ref = task_checkpoint_ref(&pslug, task_slug, task_id);
+    let cancel = CancellationToken::new();
+    let pause = nenjo::agents::runner::types::PauseToken::new();
+    let registry_token = Uuid::new_v4();
+
+    match ctx.executions.entry(task_id) {
+        Entry::Occupied(entry) => {
+            let active = entry.get();
+            warn!(
+                task_id = %task_id,
+                execution_run_id = %execution_run_id,
+                active_execution_run_id = ?active.execution_run_id,
+                active_kind = ?active.kind,
+                "Ignoring duplicate task.execute for already active task"
+            );
+            return Ok(());
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(ActiveExecution {
+                kind: crate::harness::ExecutionKind::Task,
+                registry_token,
+                execution_run_id: Some(execution_run_id),
+                cancel: cancel.clone(),
+                pause: Some(pause.clone()),
+            });
+        }
+    }
 
     // Resolve target branch from project settings.
     let target_branch = manifest
@@ -360,6 +415,7 @@ pub async fn handle_task_execute(
                         status: SessionStatus::Failed,
                     },
                 );
+                ctx.executions.remove(&task_id);
                 return Ok(());
             }
         }
@@ -383,18 +439,6 @@ pub async fn handle_task_execute(
         git: git_ctx.clone(),
     });
 
-    let cancel = CancellationToken::new();
-    let pause = nenjo::agents::runner::types::PauseToken::new();
-    ctx.executions.insert(
-        task_id,
-        ActiveExecution {
-            kind: crate::harness::ExecutionKind::Task,
-            registry_token: Uuid::new_v4(),
-            execution_run_id: Some(execution_run_id),
-            cancel: cancel.clone(),
-            pause: Some(pause.clone()),
-        },
-    );
     let _ = update_checkpoint_with_worktree(
         &*ctx.session_store,
         &*ctx.session_content,
@@ -409,28 +453,17 @@ pub async fn handle_task_execute(
         execute_direct_task(ctx, aid, task, execution_run_id, task_id, &cancel).await
     } else {
         warn!("TaskExecute without routine_id or assigned_agent_id");
-        send_task_failed(ctx, &eid, &tid, "No routine_id or assigned_agent_id");
-        Ok(())
+        Err(anyhow!("No routine_id or assigned_agent_id"))
+    };
+
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(ref e) => TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0),
     };
 
     // If execution itself errored (e.g. routine not found, agent build failure),
-    // send TaskCompleted failed and clean up.
-    if let Err(ref e) = result {
-        let error_msg = format!("{e:#}");
-        send_task_failed(ctx, &eid, &tid, &error_msg);
-        upsert_task_session(
-            ctx,
-            TaskSessionUpsert {
-                task_id,
-                project_id,
-                agent_id: assigned_agent_id,
-                memory_namespace: task_memory_namespace.as_deref(),
-                execution_run_id,
-                trace_ref: None,
-                checkpoint_ref: Some(checkpoint_ref.clone()),
-                status: SessionStatus::Failed,
-            },
-        );
+    // clean up before telling the platform the task is terminal.
+    if !outcome.success {
         let _ = update_checkpoint_with_worktree(
             &*ctx.session_store,
             &*ctx.session_content,
@@ -446,6 +479,20 @@ pub async fn handle_task_execute(
                 warn!(error = %e, branch = %wt.branch, "Failed to clean up worktree");
             }
         }
+        upsert_task_session(
+            ctx,
+            TaskSessionUpsert {
+                task_id,
+                project_id,
+                agent_id: assigned_agent_id,
+                memory_namespace: task_memory_namespace.as_deref(),
+                execution_run_id,
+                trace_ref: None,
+                checkpoint_ref: Some(checkpoint_ref.clone()),
+                status: SessionStatus::Failed,
+            },
+        );
+        send_task_completed(ctx, &eid, &tid, &outcome);
         evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
         return Ok(());
     }
@@ -457,19 +504,6 @@ pub async fn handle_task_execute(
     } else {
         SessionStatus::Completed
     };
-    upsert_task_session(
-        ctx,
-        TaskSessionUpsert {
-            task_id,
-            project_id,
-            agent_id: assigned_agent_id,
-            memory_namespace: task_memory_namespace.as_deref(),
-            execution_run_id,
-            trace_ref: None,
-            checkpoint_ref: Some(checkpoint_ref.clone()),
-            status: final_status,
-        },
-    );
     if final_status != SessionStatus::Cancelled {
         let _ = update_checkpoint_with_worktree(
             &*ctx.session_store,
@@ -538,6 +572,20 @@ pub async fn handle_task_execute(
         }
     }
 
+    upsert_task_session(
+        ctx,
+        TaskSessionUpsert {
+            task_id,
+            project_id,
+            agent_id: assigned_agent_id,
+            memory_namespace: task_memory_namespace.as_deref(),
+            execution_run_id,
+            trace_ref: None,
+            checkpoint_ref: Some(checkpoint_ref.clone()),
+            status: final_status,
+        },
+    );
+    send_task_completed(ctx, &eid, &tid, &outcome);
     evict_git_lock(&ctx.git_locks, &repo_dir, &git_lock);
     Ok(())
 }
@@ -636,7 +684,7 @@ async fn execute_routine_task(
     execution_run_id: Uuid,
     task_id: Uuid,
     cancel: &CancellationToken,
-) -> Result<()> {
+) -> Result<TaskExecutionOutcome> {
     let provider = ctx.provider();
     let project_slug_value = match &task {
         nenjo::types::TaskType::Task(t) => project_slug(provider.manifest(), t.project_id),
@@ -674,10 +722,10 @@ async fn execute_routine_task(
                 match event {
                     Some(ev) => {
                         // Track agent identity across step events.
-                        if let nenjo::RoutineEvent::StepStarted { step_id, step_name, agent_id, .. } = &ev {
+                        if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, agent_id, .. } = &ev {
                             current_agent_id = *agent_id;
                             if let Some(agent_id) = agent_id {
-                                step_agents.insert(*step_id, (*agent_id, step_name.clone()));
+                                step_agents.insert(*step_run_id, (*agent_id, step_name.clone()));
                             }
                         }
                         // Track token totals from completed steps
@@ -685,10 +733,10 @@ async fn execute_routine_task(
                             total_input_tokens += result.input_tokens;
                             total_output_tokens += result.output_tokens;
                         }
-                        if let nenjo::RoutineEvent::AgentEvent { step_id, event } = &ev
-                            && let Some((agent_id, step_name)) = step_agents.get(step_id)
+                        if let nenjo::RoutineEvent::AgentEvent { step_id, step_run_id, event } = &ev
+                            && let Some((agent_id, step_name)) = step_agents.get(step_run_id)
                         {
-                            let recorder = trace_recorders.entry((*agent_id, *step_id)).or_insert_with(|| {
+                            let recorder = trace_recorders.entry((*agent_id, *step_run_id)).or_insert_with(|| {
                                 let agent = provider
                                     .manifest()
                                     .agents
@@ -731,21 +779,13 @@ async fn execute_routine_task(
     }
 
     let result = handle.output().await?;
-    let _ = ctx.response_tx.send(Response::TaskCompleted {
-        execution_run_id: execution_run_id.to_string(),
-        task_id: Some(task_id.to_string()),
-        success: result.passed,
-        error: if result.passed {
-            None
-        } else {
-            Some(result.output)
-        },
-        merge_error: None,
-        total_input_tokens,
-        total_output_tokens,
-    });
-
-    Ok(())
+    Ok(if cancel.is_cancelled() {
+        TaskExecutionOutcome::failed("Cancelled", total_input_tokens, total_output_tokens)
+    } else if result.passed {
+        TaskExecutionOutcome::success(total_input_tokens, total_output_tokens)
+    } else {
+        TaskExecutionOutcome::failed(result.output, total_input_tokens, total_output_tokens)
+    })
 }
 
 async fn execute_direct_task(
@@ -755,8 +795,21 @@ async fn execute_direct_task(
     execution_run_id: Uuid,
     task_id: Uuid,
     cancel: &CancellationToken,
-) -> Result<()> {
-    let mut builder = ctx.provider().agent_by_id(agent_id).await?;
+) -> Result<TaskExecutionOutcome> {
+    let provider = ctx.provider();
+    let manifest = provider.manifest().clone();
+    let mut builder = provider.agent_by_id(agent_id).await?;
+    if let nenjo::types::TaskType::Task(ref t) = task {
+        if let Some(project) = manifest
+            .projects
+            .iter()
+            .find(|project| project.id == t.project_id)
+        {
+            builder = builder.with_project_context(project);
+        } else {
+            warn!(project_id = %t.project_id, %agent_id, "Project not found in manifest for direct task");
+        }
+    }
     // Scope tools to the git worktree if one was created.
     if let nenjo::types::TaskType::Task(ref t) = task
         && let Some(ref git) = t.git
@@ -767,8 +820,6 @@ async fn execute_direct_task(
     let runner = apply_session_memory_scope(builder, &*ctx.session_store, task_id)
         .build()
         .await?;
-    let provider = ctx.provider();
-    let manifest = provider.manifest().clone();
     let aname = agent_name(&manifest, agent_id);
     let project_slug = match &task {
         nenjo::types::TaskType::Task(t) => project_slug(&manifest, t.project_id),
@@ -853,45 +904,13 @@ async fn execute_direct_task(
         }
     }
 
-    let (success, total_input_tokens, total_output_tokens) = if !cancel.is_cancelled() {
+    let outcome = if !cancel.is_cancelled() {
         let output = handle.output().await?;
-        (true, output.input_tokens, output.output_tokens)
+        TaskExecutionOutcome::success(output.input_tokens, output.output_tokens)
     } else {
-        (false, 0, 0)
+        TaskExecutionOutcome::failed("Cancelled", 0, 0)
     };
-
-    let _ = ctx.response_tx.send(Response::TaskCompleted {
-        execution_run_id: execution_run_id.to_string(),
-        task_id: Some(task_id.to_string()),
-        success,
-        error: if success {
-            None
-        } else {
-            Some("Cancelled".to_string())
-        },
-        merge_error: None,
-        total_input_tokens,
-        total_output_tokens,
-    });
-    upsert_task_session(
-        ctx,
-        TaskSessionUpsert {
-            task_id,
-            project_id: task_project_id,
-            agent_id: Some(agent_id),
-            memory_namespace: task_memory_namespace(Some(&aname), &project_slug).as_deref(),
-            execution_run_id,
-            trace_ref: None,
-            checkpoint_ref: None,
-            status: if success {
-                SessionStatus::Completed
-            } else {
-                SessionStatus::Cancelled
-            },
-        },
-    );
-
-    Ok(())
+    Ok(outcome)
 }
 
 fn direct_task_turn_event_to_response(
@@ -931,6 +950,7 @@ fn direct_task_turn_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
+                "tool_call_ids": calls.iter().map(|c| c.tool_call_id.clone()).collect::<Vec<_>>(),
                 "tool_names": calls.iter().map(|c| c.tool_name.clone()).collect::<Vec<_>>(),
                 "tool_args": calls.iter().map(|c| c.tool_args.clone()).collect::<Vec<_>>(),
             }),
@@ -944,7 +964,9 @@ fn direct_task_turn_event_to_response(
         }),
         nenjo::TurnEvent::ToolCallEnd {
             parent_tool_name,
+            tool_call_id,
             tool_name,
+            tool_args,
             result,
             ..
         } => Some(Response::TaskStepEvent {
@@ -960,6 +982,8 @@ fn direct_task_turn_event_to_response(
             duration_ms: None,
             data: serde_json::json!({
                 "parent_tool_name": parent_tool_name,
+                "tool_call_id": tool_call_id,
+                "tool_args": tool_args,
                 "success": result.success,
                 "error": if result.error.is_some() {
                     serde_json::Value::String("Tool execution failed".to_string())
@@ -1083,20 +1107,29 @@ fn direct_task_turn_event_to_response(
     }
 }
 
-/// Send `TaskCompleted` (failed) to the platform.
-///
-/// Used for early termination when the task cannot proceed (e.g. worktree
-/// setup failure, missing routine/agent).
-fn send_task_failed(ctx: &CommandContext, eid: &str, tid: &Option<String>, error: &str) {
+fn send_task_completed(
+    ctx: &CommandContext,
+    eid: &str,
+    tid: &Option<String>,
+    outcome: &TaskExecutionOutcome,
+) {
     let _ = ctx.response_tx.send(Response::TaskCompleted {
         execution_run_id: eid.to_string(),
         task_id: tid.clone(),
-        success: false,
-        error: Some(error.to_string()),
+        success: outcome.success,
+        error: outcome.error.clone(),
         merge_error: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
+        total_input_tokens: outcome.total_input_tokens,
+        total_output_tokens: outcome.total_output_tokens,
     });
+}
+
+/// Send `TaskCompleted` (failed) to the platform.
+///
+/// Used for early termination when the task cannot proceed before the normal
+/// execution/finalization path is reached.
+fn send_task_failed(ctx: &CommandContext, eid: &str, tid: &Option<String>, error: &str) {
+    send_task_completed(ctx, eid, tid, &TaskExecutionOutcome::failed(error, 0, 0));
 }
 
 // ---------------------------------------------------------------------------

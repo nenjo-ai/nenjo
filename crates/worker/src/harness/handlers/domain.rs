@@ -41,7 +41,19 @@ pub async fn handle_domain_enter(
     let pslug = super::event_bridge::project_slug(manifest, project_id);
 
     // First do the domain expansion to get the session prompt/scoped activations.
-    let base_runner = provider.agent_by_id(agent_id).await?.build().await?;
+    let mut builder = provider.agent_by_id(agent_id).await?;
+    if !project_id.is_nil() {
+        if let Some(project) = manifest
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+        {
+            builder = builder.with_project_context(project);
+        } else {
+            warn!(%project_id, %agent_id, "Project not found in manifest for domain session");
+        }
+    }
+    let base_runner = builder.build().await?;
 
     match base_runner.domain_expansion(domain_command).await {
         Ok(domain_runner) => {

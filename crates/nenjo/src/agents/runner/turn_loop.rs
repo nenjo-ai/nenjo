@@ -133,10 +133,10 @@ pub async fn run(
     let tool_specs = agent.tool_specs();
     let tool_specs = tool_specs.as_slice();
     let config = TurnLoopConfig {
-        max_iterations: agent.agent_config.max_tool_iterations as u32,
+        max_turns: agent.agent_config.max_turns as u32,
         parallel_tools: agent.agent_config.parallel_tools,
     };
-    let max_iterations = config.max_iterations;
+    let max_turns = config.max_turns;
 
     let mut final_text = String::new();
     let mut total_input_tokens: u64 = 0;
@@ -186,7 +186,7 @@ pub async fn run(
                 );
             }
 
-            for iteration in 0..max_iterations {
+            for iteration in 0..max_turns {
                 debug!(
                     agent = agent_name,
                     iteration,
@@ -375,6 +375,7 @@ pub async fn run(
                                 .tool_calls
                                 .iter()
                                 .map(|tc| ToolCall {
+                                    tool_call_id: Some(tc.id.clone()),
                                     tool_name: tc.name.clone(),
                                     tool_args: truncate(&tc.arguments, 120),
                                     text_preview: tool_text_preview.clone(),
@@ -420,7 +421,9 @@ pub async fn run(
                         let _ = events_tx.as_ref().map(|tx| {
                             tx.send(TurnEvent::ToolCallEnd {
                                 parent_tool_name: None,
+                                tool_call_id: Some(tool_call.id.clone()),
                                 tool_name: tool_call.name.clone(),
+                                tool_args: truncate(&tool_call.arguments, 120),
                                 result: tool_result.clone(),
                             })
                         });
@@ -489,7 +492,28 @@ pub async fn run(
                             agent = agent_name,
                             model, "Terminal tool called, ending turn loop"
                         );
-                        final_text = response.text.as_deref().unwrap_or("").to_string();
+                        let terminal_tool_text = tool_results
+                            .iter()
+                            .find(|(tc, _)| {
+                                tool_for_call(tools, tc).is_some_and(|t| t.is_terminal())
+                            })
+                            .map(|(_, result)| {
+                                if result.success {
+                                    result.output.clone()
+                                } else {
+                                    result
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| result.output.clone())
+                                }
+                            })
+                            .unwrap_or_default();
+                        final_text = response
+                            .text
+                            .as_deref()
+                            .filter(|text| !text.trim().is_empty())
+                            .map(ToOwned::to_owned)
+                            .unwrap_or(terminal_tool_text);
                         break;
                     }
 
@@ -529,10 +553,12 @@ pub async fn run(
                 break;
             }
 
-            if final_text.is_empty() && max_iterations > 0 {
+            if final_text.is_empty() && max_turns > 0 {
                 warn!(
                     agent = agent_name,
-                    model, "Turn loop reached max iterations without final response"
+                    model,
+                    max_turns,
+                    "Turn loop reached max turns without final response"
                 );
                 final_text = messages
                     .iter()

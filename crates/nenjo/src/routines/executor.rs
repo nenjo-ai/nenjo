@@ -8,7 +8,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::manifest::{RoutineManifest, RoutineStepManifest, RoutineStepType};
+use crate::AgentBuilder;
+use crate::manifest::{
+    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
+    RoutineStepType,
+};
 use crate::provider::Provider;
 use crate::routines::types::StepResult;
 use crate::routines::{apply_session_binding_memory_scope, gate};
@@ -39,6 +43,15 @@ fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContex
     (routine, step)
 }
 
+fn scope_tools_to_work_dir(mut builder: AgentBuilder, state: &RoutineState) -> AgentBuilder {
+    if let Some(ref git) = state.input.git
+        && !git.work_dir.is_empty()
+    {
+        builder = builder.with_work_dir(&git.work_dir);
+    }
+    builder
+}
+
 /// Execute a routine once (one-shot). For cron execution, the Provider
 /// wraps this in the cron poll loop.
 pub(crate) async fn execute_routine(
@@ -60,7 +73,7 @@ pub(crate) async fn execute_routine_once(
     routine: &RoutineManifest,
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    _cancel: &CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<StepResult> {
     let steps = &routine.steps;
     let edges = &routine.edges;
@@ -92,6 +105,15 @@ pub(crate) async fn execute_routine_once(
     let max_iterations = steps.len() * 100;
 
     for iteration in 0..max_iterations {
+        if cancel.is_cancelled() {
+            last_result = StepResult {
+                passed: false,
+                output: "Cancelled".to_string(),
+                ..Default::default()
+            };
+            break;
+        }
+
         debug!(
             iteration,
             step = %current_step.name,
@@ -99,6 +121,7 @@ pub(crate) async fn execute_routine_once(
             "Executing routine step"
         );
 
+        let step_run_id = Uuid::new_v4();
         state.current_step_name = Some(current_step.name.clone());
         state.current_step_type = Some(current_step.step_type.to_string());
         state.current_agent_id = current_step.agent_id;
@@ -121,6 +144,7 @@ pub(crate) async fn execute_routine_once(
         // Emit step started
         let _ = events_tx.send(RoutineEvent::StepStarted {
             step_id: current_step.id,
+            step_run_id,
             step_name: current_step.name.clone(),
             step_type: current_step.step_type.to_string(),
             agent_id: current_step.agent_id,
@@ -128,7 +152,7 @@ pub(crate) async fn execute_routine_once(
 
         // Execute the step
         let step_start = std::time::Instant::now();
-        let result = execute_step(provider, &current_step, state, events_tx).await;
+        let result = execute_step(provider, &current_step, step_run_id, state, events_tx).await;
         let duration_ms = step_start.elapsed().as_millis() as u64;
 
         match result {
@@ -142,6 +166,7 @@ pub(crate) async fn execute_routine_once(
 
                 let _ = events_tx.send(RoutineEvent::StepCompleted {
                     step_id: current_step.id,
+                    step_run_id,
                     result: step_result.clone(),
                     duration_ms,
                 });
@@ -176,6 +201,7 @@ pub(crate) async fn execute_routine_once(
 
                 let _ = events_tx.send(RoutineEvent::StepFailed {
                     step_id: current_step.id,
+                    step_run_id,
                     error: error_msg.clone(),
                     duration_ms,
                 });
@@ -191,6 +217,17 @@ pub(crate) async fn execute_routine_once(
                     .step_results
                     .insert(current_step.id, last_result.clone());
             }
+        }
+
+        if cancel.is_cancelled() {
+            last_result = StepResult {
+                passed: false,
+                output: "Cancelled".to_string(),
+                step_id: current_step.id,
+                step_name: current_step.name.clone(),
+                ..Default::default()
+            };
+            break;
         }
 
         // Check for terminal steps
@@ -216,9 +253,18 @@ pub(crate) async fn execute_routine_once(
             .filter(|e| e.source_step_id == current_step.id)
             .collect();
 
-        let next_edge = outgoing
-            .iter()
-            .find(|e| e.condition.is_satisfied(last_result.passed));
+        if current_step.step_type == RoutineStepType::Gate
+            && outgoing
+                .iter()
+                .any(|edge| edge.condition == RoutineEdgeCondition::Always)
+        {
+            bail!(
+                "Gate step '{}' must route with on_pass/on_fail edges, not always",
+                current_step.name
+            );
+        }
+
+        let next_edge = choose_next_edge(&outgoing, last_result.passed);
 
         match next_edge {
             Some(edge) => {
@@ -236,26 +282,56 @@ pub(crate) async fn execute_routine_once(
     }
 
     let _ = events_tx.send(RoutineEvent::Done {
+        task_id: state.input.task_id,
         result: last_result.clone(),
     });
 
     Ok(last_result)
 }
 
+fn choose_next_edge<'a>(
+    outgoing: &'a [&'a RoutineEdgeManifest],
+    passed: bool,
+) -> Option<&'a RoutineEdgeManifest> {
+    let preferred = if passed {
+        RoutineEdgeCondition::OnPass
+    } else {
+        RoutineEdgeCondition::OnFail
+    };
+
+    outgoing
+        .iter()
+        .copied()
+        .find(|edge| edge.condition == preferred)
+        .or_else(|| {
+            outgoing
+                .iter()
+                .copied()
+                .find(|edge| edge.condition == RoutineEdgeCondition::Always)
+        })
+}
+
 /// Execute a single step based on its type.
 async fn execute_step(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
     match step.step_type {
-        RoutineStepType::Agent => execute_agent_step(provider, step, state, events_tx).await,
-        RoutineStepType::Gate => execute_gate_step(provider, step, state, events_tx).await,
-        RoutineStepType::Council => {
-            super::council::execute_council(provider, step, state, events_tx).await
+        RoutineStepType::Agent => {
+            execute_agent_step(provider, step, step_run_id, state, events_tx).await
         }
-        RoutineStepType::Cron => execute_cron_step(provider, step, state, events_tx).await,
+        RoutineStepType::Gate => {
+            execute_gate_step(provider, step, step_run_id, state, events_tx).await
+        }
+        RoutineStepType::Council => {
+            super::council::execute_council(provider, step, step_run_id, state, events_tx).await
+        }
+        RoutineStepType::Cron => {
+            execute_cron_step(provider, step, step_run_id, state, events_tx).await
+        }
         RoutineStepType::Terminal => {
             // Terminal step: return the most recent step result
             let last = state
@@ -297,6 +373,7 @@ async fn execute_step(
 async fn execute_agent_step(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
@@ -327,14 +404,11 @@ async fn execute_agent_step(
         .with_routine_context(routine_ctx)
         .with_step_context(step_ctx);
 
-    // Scope the agent's tools to the git worktree if one was created.
-    if let Some(ref git) = state.input.git
-        && !git.work_dir.is_empty()
-    {
-        builder = builder.with_work_dir(&git.work_dir);
-    }
+    builder = scope_tools_to_work_dir(builder, state);
 
-    let runner = super::with_agent_step_tools(builder).build().await?;
+    let runner = super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
+        .build()
+        .await?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -362,15 +436,18 @@ async fn execute_agent_step(
         build_task_type(step, state, task_description)
     };
 
-    let output =
-        gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step.id, events_tx)
-            .await?;
+    let output = gate::execute_with_pass_verdict(
+        &runner,
+        task,
+        state.input.project_id,
+        step.id,
+        step_run_id,
+        events_tx,
+    )
+    .await?;
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = verdict
-        .output
-        .clone()
-        .unwrap_or_else(|| output.text.clone());
+    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
@@ -397,6 +474,7 @@ async fn execute_agent_step(
 async fn execute_gate_step(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
@@ -405,12 +483,16 @@ async fn execute_gate_step(
         .with_context(|| format!("Gate step '{}' is missing agent_id", step.name))?;
 
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
-    let builder = provider
-        .agent_by_id(agent_id)
-        .await?
-        .with_routine_context(routine_ctx)
-        .with_step_context(step_ctx);
-    let runner = super::with_agent_step_tools(builder).build().await?;
+    let builder = apply_session_binding_memory_scope(
+        provider.agent_by_id(agent_id).await?,
+        state.input.session_binding.as_ref(),
+    )
+    .with_routine_context(routine_ctx)
+    .with_step_context(step_ctx);
+    let builder = scope_tools_to_work_dir(builder, state);
+    let runner = super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
+        .build()
+        .await?;
 
     let criteria = step
         .config
@@ -432,15 +514,18 @@ async fn execute_gate_step(
         task: Some(build_task(state, state.input.description.clone())),
     };
 
-    let output =
-        gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step.id, events_tx)
-            .await?;
+    let output = gate::execute_with_pass_verdict(
+        &runner,
+        task,
+        state.input.project_id,
+        step.id,
+        step_run_id,
+        events_tx,
+    )
+    .await?;
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = verdict
-        .output
-        .clone()
-        .unwrap_or_else(|| output.text.clone());
+    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
 
     // Store verdict + reasoning in `data` so the event bus and gate_feedback
     // can surface structured information instead of raw LLM text.
@@ -470,6 +555,7 @@ async fn execute_gate_step(
 async fn execute_cron_step(
     provider: &Provider,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult> {
@@ -480,12 +566,17 @@ async fn execute_cron_step(
     let cycle_result = match &config.mode {
         CronMode::Agent(agent_id) => {
             let (routine_ctx, step_ctx) = build_routine_ctx(state);
-            let builder = provider
-                .agent_by_id(*agent_id)
-                .await?
-                .with_routine_context(routine_ctx)
-                .with_step_context(step_ctx);
-            let runner = super::with_agent_step_tools(builder).build().await?;
+            let builder = apply_session_binding_memory_scope(
+                provider.agent_by_id(*agent_id).await?,
+                state.input.session_binding.as_ref(),
+            )
+            .with_routine_context(routine_ctx)
+            .with_step_context(step_ctx);
+            let builder = scope_tools_to_work_dir(builder, state);
+            let runner =
+                super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
+                    .build()
+                    .await?;
             // Use TaskType::Cron so the agent's cron_task template is selected.
             let inner_task = state
                 .input
@@ -504,6 +595,7 @@ async fn execute_cron_step(
                 task,
                 state.input.project_id,
                 step.id,
+                step_run_id,
                 events_tx,
             )
             .await?
@@ -516,6 +608,16 @@ async fn execute_cron_step(
     if let Some(passed) = gate::extract_pass_verdict(&cycle_result.messages) {
         let reasoning = gate::extract_pass_reasoning(&cycle_result.messages);
         let verdict_output = gate::extract_pass_output(&cycle_result.messages);
+        let step_output = verdict_output
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                reasoning
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or(&cycle_result.text)
+            .to_string();
         let data = serde_json::json!({
             "verdict": if passed { "pass" } else { "fail" },
             "reasoning": reasoning,
@@ -523,7 +625,7 @@ async fn execute_cron_step(
         });
         return Ok(StepResult {
             passed,
-            output: verdict_output.unwrap_or(cycle_result.text),
+            output: step_output,
             data,
             step_id: step.id,
             step_name: step.name.clone(),

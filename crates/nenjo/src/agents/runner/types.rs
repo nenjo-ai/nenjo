@@ -10,6 +10,7 @@ use tokio::sync::Notify;
 /// A single tool call with its name and arguments.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
+    pub tool_call_id: Option<String>,
     pub tool_name: String,
     pub tool_args: String,
     pub text_preview: Option<String>,
@@ -41,7 +42,9 @@ pub enum TurnEvent {
     /// A tool call completed with a result.
     ToolCallEnd {
         parent_tool_name: Option<String>,
+        tool_call_id: Option<String>,
         tool_name: String,
+        tool_args: String,
         result: ToolResult,
     },
     /// An ability sub-execution finished.
@@ -142,7 +145,7 @@ pub struct TurnOutput {
 #[derive(Debug, Clone)]
 pub struct TurnLoopConfig {
     /// Maximum number of LLM call iterations before forcing a stop.
-    pub max_iterations: u32,
+    pub max_turns: u32,
     /// Whether to execute multiple tool calls in parallel.
     pub parallel_tools: bool,
 }
@@ -150,7 +153,7 @@ pub struct TurnLoopConfig {
 impl Default for TurnLoopConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 50,
+            max_turns: 50,
             parallel_tools: true,
         }
     }

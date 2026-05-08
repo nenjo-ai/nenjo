@@ -238,6 +238,10 @@ impl std::fmt::Debug for ReceivedCommand {
 }
 
 impl ReceivedCommand {
+    pub fn source(&self) -> Option<&nenjo_eventbus::MessageSource> {
+        self.received.msg.source.as_ref()
+    }
+
     /// Acknowledge the underlying transport envelope.
     pub async fn ack(self) -> Result<(), EventBusError> {
         self.received.ack().await
@@ -260,6 +264,10 @@ pub struct ReceivedDecodeFailure {
 }
 
 impl ReceivedDecodeFailure {
+    pub fn source(&self) -> Option<&nenjo_eventbus::MessageSource> {
+        self.received.msg.source.as_ref()
+    }
+
     /// Acknowledge the underlying transport envelope.
     pub async fn ack(self) -> Result<(), EventBusError> {
         self.received.ack().await

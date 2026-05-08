@@ -6,8 +6,18 @@ use crate::EventBusError;
 pub struct Message {
     /// Raw payload bytes (UTF-8 JSON).
     pub payload: Vec<u8>,
+    /// Transport-specific delivery source, useful for diagnosing duplicate deliveries.
+    pub source: Option<MessageSource>,
     /// Opaque handle for acknowledging the message.
     ack_fn: Box<dyn AckHandle>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSource {
+    pub stream: Option<String>,
+    pub consumer: Option<String>,
+    pub filter_subject: Option<String>,
+    pub subject: Option<String>,
 }
 
 impl Message {
@@ -18,8 +28,14 @@ impl Message {
     pub fn new(payload: Vec<u8>, ack_fn: impl AckHandle + 'static) -> Self {
         Self {
             payload,
+            source: None,
             ack_fn: Box::new(ack_fn),
         }
+    }
+
+    pub fn with_source(mut self, source: MessageSource) -> Self {
+        self.source = Some(source);
+        self
     }
 
     /// Acknowledge successful processing of this message.

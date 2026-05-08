@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::AgentBuilder;
+use crate::manifest::RoutineStepManifest;
 use crate::memory::MemoryScope;
 
 use crate::agents::runner::types::TurnEvent;
@@ -45,6 +46,27 @@ pub use types::{
 
 pub(crate) fn with_agent_step_tools(builder: AgentBuilder) -> AgentBuilder {
     builder.with_tool(gate::PassVerdictTool::new())
+}
+
+const DEFAULT_ROUTINE_STEP_MAX_TURNS: usize = 50;
+
+pub(crate) fn with_routine_step_max_turns(
+    builder: AgentBuilder,
+    step: &RoutineStepManifest,
+) -> AgentBuilder {
+    let configured = step
+        .config
+        .get("max_turns")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+        })
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ROUTINE_STEP_MAX_TURNS);
+
+    builder.with_max_turns(configured)
 }
 
 pub(crate) fn apply_session_binding_memory_scope(
@@ -69,26 +91,36 @@ pub enum RoutineEvent {
     /// A step is about to execute.
     StepStarted {
         step_id: Uuid,
+        step_run_id: Uuid,
         step_name: String,
         step_type: String,
         agent_id: Option<Uuid>,
     },
     /// A turn-loop event from an agent or gate step (tool calls, etc.).
-    AgentEvent { step_id: Uuid, event: TurnEvent },
+    AgentEvent {
+        step_id: Uuid,
+        step_run_id: Uuid,
+        event: TurnEvent,
+    },
     /// A step completed successfully.
     StepCompleted {
         step_id: Uuid,
+        step_run_id: Uuid,
         result: StepResult,
         duration_ms: u64,
     },
     /// A step failed.
     StepFailed {
         step_id: Uuid,
+        step_run_id: Uuid,
         error: String,
         duration_ms: u64,
     },
     /// The entire routine finished.
-    Done { result: StepResult },
+    Done {
+        task_id: Option<Uuid>,
+        result: StepResult,
+    },
     /// A cron cycle is starting.
     CronCycleStarted { cycle: u32 },
     /// A cron cycle completed with a result.

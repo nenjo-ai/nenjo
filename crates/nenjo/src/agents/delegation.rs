@@ -302,13 +302,17 @@ impl Tool for DelegateToTool {
                 }
                 TurnEvent::ToolCallEnd {
                     parent_tool_name,
+                    tool_call_id,
                     tool_name,
+                    tool_args,
                     result,
                 } => {
                     let _ = parent_tx.send(TurnEvent::ToolCallEnd {
                         parent_tool_name: parent_tool_name
                             .or_else(|| Some(delegate_tool_name.clone())),
+                        tool_call_id,
                         tool_name,
+                        tool_args,
                         result,
                     });
                 }

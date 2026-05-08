@@ -36,7 +36,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Poll interval while waiting for a worker enrollment to be approved.
 const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-const DEFAULT_NATS_STREAM_NAME: &str = "AGENT_REQUESTS";
+const DEFAULT_NATS_STREAM_NAME: &str = "AGENT_WORK_REQUESTS";
 
 /// CLI arguments for `nenjo run`.
 #[derive(Args, Debug, Default)]
@@ -297,6 +297,13 @@ fn resolve_nats_connection(config: &Config) -> ResolvedNatsConnection {
         .as_ref()
         .map(|nats| nats.stream.name.trim())
         .filter(|name| !name.is_empty())
+        .map(|name| {
+            if name == "AGENT_REQUESTS" {
+                DEFAULT_NATS_STREAM_NAME
+            } else {
+                name
+            }
+        })
         .unwrap_or(DEFAULT_NATS_STREAM_NAME)
         .to_string();
 
@@ -477,7 +484,7 @@ mod tests {
                 "enabled": true,
                 "urls": ["tls://nats-a.example.com:4222", "tls://nats-b.example.com:4222"],
                 "auth": { "method": "api_key_token" },
-                "stream": { "name": "AGENT_REQUESTS" }
+                "stream": { "name": "AGENT_WORK_REQUESTS" }
             })
             .to_string(),
         )
@@ -491,7 +498,7 @@ mod tests {
         assert_eq!(nats.source, "bootstrap");
         assert_eq!(nats.urls.len(), 2);
         assert_eq!(nats.urls[0], "tls://nats-a.example.com:4222");
-        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
+        assert_eq!(nats.stream_name, "AGENT_WORK_REQUESTS");
     }
 
     #[test]
@@ -505,7 +512,7 @@ mod tests {
                 "enabled": true,
                 "urls": ["tls://nats-a.example.com:4222"],
                 "auth": { "method": "api_key_token" },
-                "stream": { "name": "AGENT_REQUESTS" }
+                "stream": { "name": "AGENT_WORK_REQUESTS" }
             })
             .to_string(),
         )
@@ -519,6 +526,6 @@ mod tests {
 
         assert_eq!(nats.source, "config");
         assert_eq!(nats.urls, vec!["tls://override.example.com:4222"]);
-        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
+        assert_eq!(nats.stream_name, "AGENT_WORK_REQUESTS");
     }
 }

@@ -129,6 +129,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Override only the maximum number of LLM/tool-call turns.
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.agent_config.max_turns = max_turns;
+        self
+    }
+
     /// Inject project context so the agent's prompts can reference
     /// `{{ project.name }}`, `{{ project.description }}`, etc.
     ///
