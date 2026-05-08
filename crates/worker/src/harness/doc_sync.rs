@@ -997,15 +997,13 @@ mod tests {
 
     #[test]
     fn load_manifest_missing_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_missing_manifest");
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(load_manifest(&dir).is_none());
+        let dir = tempdir().unwrap();
+        assert!(load_manifest(dir.path()).is_none());
     }
 
     #[test]
     fn write_and_load_manifest() {
-        let dir = std::env::temp_dir().join("nenjo_test_write_manifest");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = tempdir().unwrap();
 
         let manifest = DocumentManifest {
             project_id: Uuid::from_u128(42),
@@ -1013,13 +1011,10 @@ mod tests {
             documents: vec![entry(1, "test.md", "2026-02-22", 512)],
         };
 
-        write_manifest(&dir, &manifest).unwrap();
-        let loaded = load_manifest(&dir).unwrap();
+        write_manifest(dir.path(), &manifest).unwrap();
+        let loaded = load_manifest(dir.path()).unwrap();
         assert_eq!(loaded.project_id, Uuid::from_u128(42));
         assert_eq!(loaded.documents[0].filename, "test.md");
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

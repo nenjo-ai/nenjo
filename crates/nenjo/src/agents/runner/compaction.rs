@@ -57,12 +57,10 @@ pub(crate) async fn compact_messages_with_summary(
         drop_oldest_messages(messages, max_tokens);
     }
 
-    if summarized {
-        let _ = events_tx.map(|tx| {
-            tx.send(TurnEvent::MessageCompacted {
-                messages_before,
-                messages_after: messages.len(),
-            })
+    if summarized && let Some(tx) = events_tx {
+        let _ = tx.send(TurnEvent::MessageCompacted {
+            messages_before,
+            messages_after: messages.len(),
         });
     }
 

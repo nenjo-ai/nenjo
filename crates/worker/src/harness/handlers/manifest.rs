@@ -17,7 +17,6 @@ use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use crate::harness::CommandContext;
-use crate::harness::loader::FileSystemManifestLoader;
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1172,7 +1171,7 @@ async fn full_refresh(ctx: &CommandContext) -> Result<()> {
     )
     .await?;
 
-    let loader = FileSystemManifestLoader::new(&ctx.config.manifests_dir);
+    let loader = nenjo::LocalManifestStore::new(&ctx.config.manifests_dir);
     let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
     ctx.external_mcp.reconcile(&manifest.mcp_servers).await;

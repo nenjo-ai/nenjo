@@ -197,6 +197,10 @@ mod tests {
         })
     }
 
+    fn temp_workspace() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
     #[test]
     fn file_write_name() {
         let tool = FileWriteTool::new(test_security(std::env::temp_dir()));
@@ -216,9 +220,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_write_creates_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security(dir.clone()));
         let result = tool
@@ -232,15 +235,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "written!");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_write_creates_parent_dirs() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_nested");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security(dir.clone()));
         let result = tool
@@ -253,15 +253,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "deep");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_write_overwrites_existing() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_overwrite");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("exist.txt"), "old")
             .await
             .unwrap();
@@ -277,15 +274,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "new");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_write_blocks_path_traversal() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_traversal");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security(dir.clone()));
         let result = tool
@@ -294,8 +288,6 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -325,9 +317,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_write_empty_content() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_empty");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security(dir.clone()));
         let result = tool
@@ -336,8 +327,6 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert!(result.output.contains("0 bytes"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[cfg(unix)]
@@ -345,11 +334,11 @@ mod tests {
     async fn file_write_blocks_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join("nenjo_test_file_write_symlink_escape");
+        let temp = temp_workspace();
+        let root = temp.path().to_path_buf();
         let workspace = root.join("workspace");
         let outside = root.join("outside");
 
-        let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::create_dir_all(&outside).await.unwrap();
 
@@ -370,15 +359,12 @@ mod tests {
                 .contains("escapes workspace")
         );
         assert!(!outside.join("hijack.txt").exists());
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]
     async fn file_write_blocks_readonly_mode() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_readonly");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security_with(dir.clone(), AutonomyLevel::ReadOnly, 20));
         let result = tool
@@ -389,15 +375,12 @@ mod tests {
         assert!(!result.success);
         assert!(result.error.as_deref().unwrap_or("").contains("read-only"));
         assert!(!dir.join("out.txt").exists());
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_write_blocks_when_rate_limited() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_write_rate_limited");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileWriteTool::new(test_security_with(
             dir.clone(),
@@ -418,7 +401,5 @@ mod tests {
                 .contains("Rate limit exceeded")
         );
         assert!(!dir.join("out.txt").exists());
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

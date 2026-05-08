@@ -7,8 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, PromptConfig,
-    RoutineManifest,
+    ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter};
 use serde::{Deserialize, Serialize};
@@ -18,28 +17,7 @@ use crate::client::PlatformManifestClient;
 use crate::manifest_contract::ManifestKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
-
-fn merge_json_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
-    match (target, patch) {
-        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
-            for (key, value) in patch {
-                match target.get_mut(&key) {
-                    Some(existing) => merge_json_patch(existing, value),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
-            }
-        }
-        (target, patch) => *target = patch,
-    }
-}
-
-fn merge_prompt_config(current: &PromptConfig, patch: serde_json::Value) -> Result<PromptConfig> {
-    let mut value = serde_json::to_value(current)?;
-    merge_json_patch(&mut value, patch);
-    Ok(serde_json::from_value(value)?)
-}
+use crate::prompt_merge::merge_prompt_config;
 
 fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {

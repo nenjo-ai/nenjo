@@ -103,48 +103,48 @@ impl Transport for NatsTransport {
         Box::pin(async move {
             let (tx, rx) = mpsc::channel(buffer);
             if subject == "work_requests.>" {
-                spawn_consumer(
-                    jetstream.clone(),
-                    stream_name.clone(),
-                    DEFAULT_WORK_CONSUMER_SUBJECT.to_string(),
-                    "worker-requests".to_string(),
-                    self.manage_streams,
+                spawn_consumer(ConsumerSpawnSpec {
+                    jetstream: jetstream.clone(),
+                    stream_name: stream_name.clone(),
+                    subject: DEFAULT_WORK_CONSUMER_SUBJECT.to_string(),
+                    consumer_name: "worker-requests".to_string(),
+                    require_stream_handle: self.manage_streams,
                     max_deliver,
                     ack_wait,
-                    tx.clone(),
-                )
+                    tx: tx.clone(),
+                })
                 .await?;
 
                 if let Some(broadcast_stream_name) = broadcast_stream_name {
                     for broadcast_subject in DEFAULT_BROADCAST_CONSUMER_SUBJECTS {
-                        spawn_consumer(
-                            jetstream.clone(),
-                            broadcast_stream_name.clone(),
-                            (*broadcast_subject).to_string(),
-                            format!(
+                        spawn_consumer(ConsumerSpawnSpec {
+                            jetstream: jetstream.clone(),
+                            stream_name: broadcast_stream_name.clone(),
+                            subject: (*broadcast_subject).to_string(),
+                            consumer_name: format!(
                                 "worker-broadcast-requests-{worker_id}-{}",
                                 broadcast_subject.replace('.', "-")
                             ),
-                            self.manage_streams,
+                            require_stream_handle: self.manage_streams,
                             max_deliver,
                             ack_wait,
-                            tx.clone(),
-                        )
+                            tx: tx.clone(),
+                        })
                         .await?;
                     }
                 }
             } else {
                 let work_queue_consumer = subject.replace('.', "-");
-                spawn_consumer(
+                spawn_consumer(ConsumerSpawnSpec {
                     jetstream,
                     stream_name,
-                    subject.clone(),
-                    work_queue_consumer,
-                    self.manage_streams,
+                    subject,
+                    consumer_name: work_queue_consumer,
+                    require_stream_handle: self.manage_streams,
                     max_deliver,
                     ack_wait,
                     tx,
-                )
+                })
                 .await?;
             }
 
@@ -153,7 +153,7 @@ impl Transport for NatsTransport {
     }
 }
 
-async fn spawn_consumer(
+struct ConsumerSpawnSpec {
     jetstream: jetstream::Context,
     stream_name: String,
     subject: String,
@@ -162,7 +162,20 @@ async fn spawn_consumer(
     max_deliver: i64,
     ack_wait: Duration,
     tx: mpsc::Sender<Message>,
-) -> Result<(), EventBusError> {
+}
+
+async fn spawn_consumer(spec: ConsumerSpawnSpec) -> Result<(), EventBusError> {
+    let ConsumerSpawnSpec {
+        jetstream,
+        stream_name,
+        subject,
+        consumer_name,
+        require_stream_handle,
+        max_deliver,
+        ack_wait,
+        tx,
+    } = spec;
+
     let consumer_config = pull::Config {
         durable_name: Some(consumer_name.clone()),
         filter_subject: subject.clone(),

@@ -28,7 +28,6 @@ pub mod doc_sync;
 pub mod execution_trace;
 pub mod external_mcp;
 pub mod handlers;
-pub mod loader;
 pub mod manifest;
 pub mod preview;
 pub mod prompt;
@@ -43,7 +42,6 @@ pub use nenjo::client as api_client;
 use api_client::NenjoClient;
 use config::Config;
 use external_mcp::ExternalMcpPool;
-use loader::FileSystemManifestLoader;
 use providers::registry::ProviderRegistry;
 use session::local_content::FileSessionContentStore;
 use session::local_coordinator::LocalSessionCoordinator;
@@ -454,7 +452,7 @@ impl Harness {
         )
         .await?;
 
-        let loader = FileSystemManifestLoader::new(&config.manifests_dir);
+        let loader = nenjo::LocalManifestStore::new(&config.manifests_dir);
         let manifest = nenjo::ManifestLoader::load(&loader).await?;
 
         let mcp_servers = manifest.mcp_servers.clone();

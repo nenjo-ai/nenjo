@@ -70,16 +70,27 @@ pub(crate) async fn execute_council(
     }
 }
 
-async fn run_streamed_task(
-    provider: &Provider,
+struct StreamedTaskParams<'a> {
+    provider: &'a Provider,
     agent_id: Uuid,
-    state: &RoutineState,
-    step: &RoutineStepManifest,
+    state: &'a RoutineState,
+    step: &'a RoutineStepManifest,
     task: TaskType,
-    step_id: Uuid,
     step_run_id: Uuid,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<TurnOutput> {
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+}
+
+async fn run_streamed_task(params: StreamedTaskParams<'_>) -> Result<TurnOutput> {
+    let StreamedTaskParams {
+        provider,
+        agent_id,
+        state,
+        step,
+        task,
+        step_run_id,
+        events_tx,
+    } = params;
+
     let builder = apply_session_binding_memory_scope(
         provider.agent_by_id(agent_id).await?,
         state.input.session_binding.as_ref(),
@@ -93,7 +104,7 @@ async fn run_streamed_task(
         &runner,
         task,
         state.input.project_id,
-        step_id,
+        step.id,
         step_run_id,
         events_tx,
     )
@@ -133,16 +144,15 @@ async fn run_member_tasks(
             project_id: state.input.project_id,
         };
 
-        match run_streamed_task(
+        match run_streamed_task(StreamedTaskParams {
             provider,
-            *agent_id,
+            agent_id: *agent_id,
             state,
             step,
             task,
-            step.id,
             step_run_id,
             events_tx,
-        )
+        })
         .await
         {
             Ok(output) => member_results.push(StepResult {
@@ -212,20 +222,19 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
         "\nSynthesize the final result and submit a pass_verdict that reflects the council outcome.",
     );
 
-    let aggregate_result = run_streamed_task(
+    let aggregate_result = run_streamed_task(StreamedTaskParams {
         provider,
-        council.leader_agent_id,
+        agent_id: council.leader_agent_id,
         state,
         step,
-        TaskType::Chat {
+        task: TaskType::Chat {
             user_message: prompt,
             history: Vec::new(),
             project_id: state.input.project_id,
         },
-        step.id,
         step_run_id,
         events_tx,
-    )
+    })
     .await?;
 
     let verdict = gate::resolve_pass_verdict(&aggregate_result.messages)?;
@@ -283,20 +292,19 @@ async fn execute_dynamic(
         "Starting dynamic council execution"
     );
 
-    let output = run_streamed_task(
+    let output = run_streamed_task(StreamedTaskParams {
         provider,
-        leader_agent_id,
+        agent_id: leader_agent_id,
         state,
         step,
-        TaskType::Chat {
+        task: TaskType::Chat {
             user_message: state.initial_input.clone(),
             history: Vec::new(),
             project_id: state.input.project_id,
         },
-        step.id,
         step_run_id,
         events_tx,
-    )
+    })
     .await?;
 
     info!(
@@ -358,20 +366,19 @@ async fn execute_decompose(
         state.initial_input
     );
 
-    let decompose_result = run_streamed_task(
+    let decompose_result = run_streamed_task(StreamedTaskParams {
         provider,
-        leader_agent_id,
+        agent_id: leader_agent_id,
         state,
         step,
-        TaskType::Chat {
+        task: TaskType::Chat {
             user_message: decompose_message,
             history: Vec::new(),
             project_id: state.input.project_id,
         },
-        step.id,
         step_run_id,
         events_tx,
-    )
+    })
     .await?;
     let subtasks = parse_subtasks(&decompose_result.text, member_agent_ids.len());
 

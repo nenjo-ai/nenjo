@@ -47,6 +47,12 @@ fn tool_for_call<'a>(
     })
 }
 
+fn emit_event(events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>, event: TurnEvent) {
+    if let Some(tx) = events_tx {
+        let _ = tx.send(event);
+    }
+}
+
 tokio::task_local! {
     static CURRENT_EVENTS_TX: Option<mpsc::UnboundedSender<TurnEvent>>;
 }
@@ -229,9 +235,9 @@ pub async fn run(
                 if let Some(ref pt) = pause_token
                     && pt.is_paused()
                 {
-                    let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Paused));
+                    emit_event(events_tx.as_ref(), TurnEvent::Paused);
                     pt.wait_if_paused().await;
-                    let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Resumed));
+                    emit_event(events_tx.as_ref(), TurnEvent::Resumed);
                 }
 
                 // Call LLM
@@ -337,11 +343,12 @@ pub async fn run(
                     );
                     let assistant_message = ChatMessage::assistant(assistant_content.to_string());
                     messages.push(assistant_message.clone());
-                    let _ = events_tx.as_ref().map(|tx| {
-                        tx.send(TurnEvent::TranscriptMessage {
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::TranscriptMessage {
                             message: assistant_message,
-                        })
-                    });
+                        },
+                    );
 
                     // Execute tool calls — parallel when the model returns multiple
                     // calls in one response (it understands ordering dependencies),
@@ -368,8 +375,9 @@ pub async fn run(
                         .and_then(sanitize_tool_text_preview);
 
                     // Emit a single start event with all tool calls.
-                    let _ = events_tx.as_ref().map(|tx| {
-                        tx.send(TurnEvent::ToolCallStart {
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::ToolCallStart {
                             parent_tool_name: None,
                             calls: response
                                 .tool_calls
@@ -381,8 +389,8 @@ pub async fn run(
                                     text_preview: tool_text_preview.clone(),
                                 })
                                 .collect(),
-                        })
-                    });
+                        },
+                    );
 
                     let tool_results: Vec<(&nenjo_models::ToolCall, nenjo_tools::ToolResult)> =
                         if run_parallel {
@@ -418,15 +426,16 @@ pub async fn run(
 
                     // Emit result events and build messages in order.
                     for (tool_call, tool_result) in &tool_results {
-                        let _ = events_tx.as_ref().map(|tx| {
-                            tx.send(TurnEvent::ToolCallEnd {
+                        emit_event(
+                            events_tx.as_ref(),
+                            TurnEvent::ToolCallEnd {
                                 parent_tool_name: None,
                                 tool_call_id: Some(tool_call.id.clone()),
                                 tool_name: tool_call.name.clone(),
                                 tool_args: truncate(&tool_call.arguments, 120),
                                 result: tool_result.clone(),
-                            })
-                        });
+                            },
+                        );
 
                         // Log tool failures so auth issues (e.g. `gh` CLI) are
                         // visible in worker logs instead of being silently swallowed.
@@ -478,11 +487,12 @@ pub async fn run(
                         });
                         let tool_message = ChatMessage::tool(tool_content.to_string());
                         messages.push(tool_message.clone());
-                        let _ = events_tx.as_ref().map(|tx| {
-                            tx.send(TurnEvent::TranscriptMessage {
+                        emit_event(
+                            events_tx.as_ref(),
+                            TurnEvent::TranscriptMessage {
                                 message: tool_message,
-                            })
-                        });
+                            },
+                        );
                     }
 
                     // Terminal tool: stop the loop. The verdict is already recorded
@@ -545,11 +555,12 @@ pub async fn run(
                 final_text = text.clone();
                 let assistant_message = ChatMessage::assistant(text);
                 messages.push(assistant_message.clone());
-                let _ = events_tx.as_ref().map(|tx| {
-                    tx.send(TurnEvent::TranscriptMessage {
+                emit_event(
+                    events_tx.as_ref(),
+                    TurnEvent::TranscriptMessage {
                         message: assistant_message,
-                    })
-                });
+                    },
+                );
                 break;
             }
 
@@ -587,11 +598,12 @@ pub async fn run(
                 messages,
             };
 
-            let _ = events_tx.as_ref().map(|tx| {
-                tx.send(TurnEvent::Done {
+            emit_event(
+                events_tx.as_ref(),
+                TurnEvent::Done {
                     output: output.clone(),
-                })
-            });
+                },
+            );
 
             Ok(output)
                 })

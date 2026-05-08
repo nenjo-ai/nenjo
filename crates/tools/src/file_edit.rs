@@ -254,15 +254,21 @@ mod tests {
         })
     }
 
+    fn temp_workspace() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create temporary workspace")
+    }
+
     #[test]
     fn file_edit_name() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         assert_eq!(tool.name(), "file_edit");
     }
 
     #[test]
     fn file_edit_schema_has_required_params() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["old_string"].is_object());
@@ -275,9 +281,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_replaces_single_match() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_single");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello world")
             .await
             .unwrap();
@@ -299,15 +304,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "goodbye world");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_not_found() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_notfound");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello world")
             .await
             .unwrap();
@@ -330,15 +332,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello world");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_multiple_matches() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_multi");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "aaa bbb aaa")
             .await
             .unwrap();
@@ -367,15 +366,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "aaa bbb aaa");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_delete_via_empty_new_string() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_delete");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "keep remove keep")
             .await
             .unwrap();
@@ -400,13 +396,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "keep keep");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_missing_path_param() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         let result = tool
             .execute(json!({"old_string": "a", "new_string": "b"}))
             .await;
@@ -415,7 +410,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_missing_old_string_param() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         let result = tool
             .execute(json!({"path": "f.txt", "new_string": "b"}))
             .await;
@@ -424,7 +420,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_missing_new_string_param() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         let result = tool
             .execute(json!({"path": "f.txt", "old_string": "a"}))
             .await;
@@ -433,9 +430,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_rejects_empty_old_string() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_empty_old_string");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello")
             .await
             .unwrap();
@@ -463,15 +459,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_blocks_path_traversal() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_traversal");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileEditTool::new(test_security(dir.clone()));
         let result = tool
@@ -485,13 +478,12 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_blocks_absolute_path() {
-        let tool = FileEditTool::new(test_security(std::env::temp_dir()));
+        let temp = temp_workspace();
+        let tool = FileEditTool::new(test_security(temp.path().to_path_buf()));
         let result = tool
             .execute(json!({
                 "path": "/etc/passwd",
@@ -510,11 +502,11 @@ mod tests {
     async fn file_edit_blocks_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join("nenjo_test_file_edit_symlink_escape");
+        let temp = temp_workspace();
+        let root = temp.path().to_path_buf();
         let workspace = root.join("workspace");
         let outside = root.join("outside");
 
-        let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::create_dir_all(&outside).await.unwrap();
 
@@ -538,8 +530,6 @@ mod tests {
                 .unwrap_or("")
                 .contains("escapes workspace")
         );
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[cfg(unix)]
@@ -547,11 +537,11 @@ mod tests {
     async fn file_edit_blocks_symlink_target_file() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join("nenjo_test_file_edit_symlink_target");
+        let temp = temp_workspace();
+        let root = temp.path().to_path_buf();
         let workspace = root.join("workspace");
         let outside = root.join("outside");
 
-        let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::create_dir_all(&outside).await.unwrap();
 
@@ -580,15 +570,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "original", "original file must not be modified");
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]
     async fn file_edit_blocks_readonly_mode() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_readonly");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello")
             .await
             .unwrap();
@@ -610,15 +597,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_blocks_when_rate_limited() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_rate_limited");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello")
             .await
             .unwrap();
@@ -650,15 +634,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_nonexistent_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_nofile");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileEditTool::new(test_security(dir.clone()));
         let result = tool
@@ -678,15 +659,12 @@ mod tests {
                 .unwrap_or("")
                 .contains("Failed to read file")
         );
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_edit_blocks_null_byte_in_path() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_edit_null_byte");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileEditTool::new(test_security(dir.clone()));
         let result = tool
@@ -699,7 +677,5 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

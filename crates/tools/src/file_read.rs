@@ -169,6 +169,10 @@ mod tests {
         })
     }
 
+    fn temp_workspace() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
     #[test]
     fn file_read_name() {
         let tool = FileReadTool::new(test_security(std::env::temp_dir()));
@@ -190,9 +194,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_existing_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello world")
             .await
             .unwrap();
@@ -202,29 +205,23 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output, "hello world");
         assert!(result.error.is_none());
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_read_nonexistent_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_missing");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileReadTool::new(test_security(dir.clone()));
         let result = tool.execute(json!({"path": "nope.txt"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("Failed to resolve"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_read_blocks_path_traversal() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_traversal");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         let tool = FileReadTool::new(test_security(dir.clone()));
         let result = tool
@@ -233,8 +230,6 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -247,9 +242,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_blocks_when_rate_limited() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_rate_limited");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "hello world")
             .await
             .unwrap();
@@ -269,15 +263,12 @@ mod tests {
                 .unwrap_or("")
                 .contains("Rate limit exceeded")
         );
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_read_allows_readonly_mode() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_readonly");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("test.txt"), "readonly ok")
             .await
             .unwrap();
@@ -287,8 +278,6 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.output, "readonly ok");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -300,23 +289,20 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_empty_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_empty");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::write(dir.join("empty.txt"), "").await.unwrap();
 
         let tool = FileReadTool::new(test_security(dir.clone()));
         let result = tool.execute(json!({"path": "empty.txt"})).await.unwrap();
         assert!(result.success);
         assert_eq!(result.output, "");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_read_nested_path() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_nested");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
         tokio::fs::create_dir_all(dir.join("sub/dir"))
             .await
             .unwrap();
@@ -331,8 +317,6 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert_eq!(result.output, "deep content");
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[cfg(unix)]
@@ -340,11 +324,11 @@ mod tests {
     async fn file_read_blocks_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join("nenjo_test_file_read_symlink_escape");
+        let temp = temp_workspace();
+        let root = temp.path().to_path_buf();
         let workspace = root.join("workspace");
         let outside = root.join("outside");
 
-        let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::create_dir_all(&outside).await.unwrap();
 
@@ -365,15 +349,12 @@ mod tests {
                 .unwrap_or("")
                 .contains("escapes workspace")
         );
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]
     async fn file_read_nonexistent_consumes_rate_limit_budget() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_probe");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         // Allow only 2 actions total
         let tool = FileReadTool::new(test_security_with(
@@ -399,15 +380,12 @@ mod tests {
             "Expected rate limit error, got: {:?}",
             r3.error
         );
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn file_read_rejects_oversized_file() {
-        let dir = std::env::temp_dir().join("nenjo_test_file_read_large");
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
 
         // Create a file just over 10 MB
         let big = vec![b'x'; 10 * 1024 * 1024 + 1];
@@ -417,7 +395,5 @@ mod tests {
         let result = tool.execute(json!({"path": "huge.bin"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("File too large"));
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

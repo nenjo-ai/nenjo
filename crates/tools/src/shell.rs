@@ -443,10 +443,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_requires_approval_for_medium_risk_command() {
+        let temp = tempfile::tempdir().unwrap();
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             blocked_commands: vec![],
-            workspace_dir: std::env::temp_dir(),
+            workspace_dir: temp.path().to_path_buf(),
             ..SecurityPolicy::default()
         });
 
@@ -472,7 +473,6 @@ mod tests {
             .await
             .unwrap();
         assert!(allowed.success);
-
-        let _ = std::fs::remove_file(std::env::temp_dir().join("nenjo_shell_approval_test"));
+        assert!(temp.path().join("nenjo_shell_approval_test").exists());
     }
 }

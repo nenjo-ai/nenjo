@@ -20,6 +20,7 @@ pub mod manifest_contract;
 pub mod manifest_mcp;
 /// Access-policy helpers for filtering manifest resources by platform scopes.
 pub mod policy;
+mod prompt_merge;
 /// REST tool specs shared by worker-side REST-backed tooling.
 pub mod rest;
 /// Platform scope parsing and implication rules.
