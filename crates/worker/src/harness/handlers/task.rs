@@ -201,28 +201,47 @@ impl TaskExecutionOutcome {
     }
 }
 
+pub struct TaskExecuteRequest<'a> {
+    pub task_id: Uuid,
+    pub project_id: Uuid,
+    pub routine_id: Option<Uuid>,
+    pub assigned_agent_id: Option<Uuid>,
+    pub execution_run_id: Uuid,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub slug: Option<&'a str>,
+    pub acceptance_criteria: Option<&'a str>,
+    pub tags: &'a [String],
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub task_type: Option<&'a str>,
+    pub complexity: Option<&'a str>,
+}
+
 /// Handle a task execution command.
 ///
 /// If the project has a synced git repo, creates a worktree for this task
 /// and sets the git context on the Task. Cleans up the worktree after execution.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_task_execute(
     ctx: &CommandContext,
-    task_id: Uuid,
-    project_id: Uuid,
-    routine_id: Option<Uuid>,
-    assigned_agent_id: Option<Uuid>,
-    execution_run_id: Uuid,
-    title: &str,
-    description: &str,
-    slug: Option<&str>,
-    acceptance_criteria: Option<&str>,
-    tags: &[String],
-    status: Option<&str>,
-    priority: Option<&str>,
-    task_type: Option<&str>,
-    complexity: Option<&str>,
+    request: TaskExecuteRequest<'_>,
 ) -> Result<()> {
+    let TaskExecuteRequest {
+        task_id,
+        project_id,
+        routine_id,
+        assigned_agent_id,
+        execution_run_id,
+        title,
+        description,
+        slug,
+        acceptance_criteria,
+        tags,
+        status,
+        priority,
+        task_type,
+        complexity,
+    } = request;
     let provider = ctx.provider();
     let manifest = provider.manifest();
     let pslug = project_slug(manifest, project_id);

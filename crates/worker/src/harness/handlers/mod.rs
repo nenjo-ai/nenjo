@@ -81,20 +81,22 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             })?;
             task::handle_task_execute(
                 &ctx,
-                task_id,
-                project_id,
-                routine_id,
-                assigned_agent_id,
-                execution_run_id,
-                &payload.title,
-                payload.description.as_deref().unwrap_or(""),
-                payload.slug.as_deref(),
-                payload.acceptance_criteria.as_deref(),
-                &payload.tags,
-                payload.status.as_deref(),
-                payload.priority.as_deref(),
-                payload.task_type.as_deref(),
-                payload.complexity.as_deref(),
+                task::TaskExecuteRequest {
+                    task_id,
+                    project_id,
+                    routine_id,
+                    assigned_agent_id,
+                    execution_run_id,
+                    title: &payload.title,
+                    description: payload.description.as_deref().unwrap_or(""),
+                    slug: payload.slug.as_deref(),
+                    acceptance_criteria: payload.acceptance_criteria.as_deref(),
+                    tags: &payload.tags,
+                    status: payload.status.as_deref(),
+                    priority: payload.priority.as_deref(),
+                    task_type: payload.task_type.as_deref(),
+                    complexity: payload.complexity.as_deref(),
+                },
             )
             .await
         }

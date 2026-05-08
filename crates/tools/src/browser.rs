@@ -1,10 +1,7 @@
 //! Browser automation tool with pluggable backends.
 //!
 //! By default this uses Vercel's `agent-browser` CLI for automation.
-//! Optionally, a Rust-native backend can be enabled at build time via
-//! `--features browser-native` and selected through config.
 //! Computer-use (OS-level) actions are supported via an optional sidecar endpoint.
-#![allow(unexpected_cfgs)]
 
 use crate::security::SecurityPolicy;
 use crate::{Tool, ToolCategory, ToolResult};
@@ -45,28 +42,38 @@ impl Default for ComputerUseConfig {
     }
 }
 
+/// Browser automation tool settings.
+#[derive(Debug, Clone)]
+pub struct BrowserToolConfig {
+    pub allowed_domains: Vec<String>,
+    pub session_name: Option<String>,
+    pub backend: String,
+    pub computer_use: ComputerUseConfig,
+}
+
+impl Default for BrowserToolConfig {
+    fn default() -> Self {
+        Self {
+            allowed_domains: Vec::new(),
+            session_name: None,
+            backend: "agent_browser".into(),
+            computer_use: ComputerUseConfig::default(),
+        }
+    }
+}
+
 /// Browser automation tool using pluggable backends.
 pub struct BrowserTool {
     security: Arc<SecurityPolicy>,
     allowed_domains: Vec<String>,
     session_name: Option<String>,
     backend: String,
-    // Used only when `browser-native` feature is enabled.
-    #[allow(dead_code)]
-    native_headless: bool,
-    #[allow(dead_code)]
-    native_webdriver_url: String,
-    #[allow(dead_code)]
-    native_chrome_path: Option<String>,
     computer_use: ComputerUseConfig,
-    #[cfg(feature = "browser-native")]
-    native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserBackendKind {
     AgentBrowser,
-    RustNative,
     ComputerUse,
     Auto,
 }
@@ -74,7 +81,6 @@ enum BrowserBackendKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedBackend {
     AgentBrowser,
-    RustNative,
     ComputerUse,
 }
 
@@ -83,11 +89,10 @@ impl BrowserBackendKind {
         let key = raw.trim().to_ascii_lowercase().replace('-', "_");
         match key.as_str() {
             "agent_browser" | "agentbrowser" => Ok(Self::AgentBrowser),
-            "rust_native" | "native" => Ok(Self::RustNative),
             "computer_use" | "computeruse" => Ok(Self::ComputerUse),
             "auto" => Ok(Self::Auto),
             _ => anyhow::bail!(
-                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', or 'auto'"
+                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'computer_use', or 'auto'"
             ),
         }
     }
@@ -95,7 +100,6 @@ impl BrowserBackendKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::AgentBrowser => "agent_browser",
-            Self::RustNative => "rust_native",
             Self::ComputerUse => "computer_use",
             Self::Auto => "auto",
         }
@@ -194,40 +198,23 @@ impl BrowserTool {
         allowed_domains: Vec<String>,
         session_name: Option<String>,
     ) -> Self {
-        Self::new_with_backend(
+        Self::new_with_config(
             security,
-            allowed_domains,
-            session_name,
-            "agent_browser".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig::default(),
+            BrowserToolConfig {
+                allowed_domains,
+                session_name,
+                ..BrowserToolConfig::default()
+            },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_backend(
-        security: Arc<SecurityPolicy>,
-        allowed_domains: Vec<String>,
-        session_name: Option<String>,
-        backend: String,
-        native_headless: bool,
-        native_webdriver_url: String,
-        native_chrome_path: Option<String>,
-        computer_use: ComputerUseConfig,
-    ) -> Self {
+    pub fn new_with_config(security: Arc<SecurityPolicy>, config: BrowserToolConfig) -> Self {
         Self {
             security,
-            allowed_domains: normalize_domains(allowed_domains),
-            session_name,
-            backend,
-            native_headless,
-            native_webdriver_url,
-            native_chrome_path,
-            computer_use,
-            #[cfg(feature = "browser-native")]
-            native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
+            allowed_domains: normalize_domains(config.allowed_domains),
+            session_name: config.session_name,
+            backend: config.backend,
+            computer_use: config.computer_use,
         }
     }
 
@@ -250,25 +237,6 @@ impl BrowserTool {
 
     fn configured_backend(&self) -> anyhow::Result<BrowserBackendKind> {
         BrowserBackendKind::parse(&self.backend)
-    }
-
-    fn rust_native_compiled() -> bool {
-        cfg!(feature = "browser-native")
-    }
-
-    fn rust_native_available(&self) -> bool {
-        #[cfg(feature = "browser-native")]
-        {
-            native_backend::NativeBrowserState::is_available(
-                self.native_headless,
-                &self.native_webdriver_url,
-                self.native_chrome_path.as_deref(),
-            )
-        }
-        #[cfg(not(feature = "browser-native"))]
-        {
-            false
-        }
     }
 
     fn computer_use_endpoint_url(&self) -> anyhow::Result<reqwest::Url> {
@@ -331,19 +299,6 @@ impl BrowserTool {
                     )
                 }
             }
-            BrowserBackendKind::RustNative => {
-                if !Self::rust_native_compiled() {
-                    anyhow::bail!(
-                        "browser.backend='rust_native' requires build feature 'browser-native'"
-                    );
-                }
-                if !self.rust_native_available() {
-                    anyhow::bail!(
-                        "Rust-native browser backend is enabled but WebDriver endpoint is unreachable. Set browser.native_webdriver_url and start a compatible driver"
-                    );
-                }
-                Ok(ResolvedBackend::RustNative)
-            }
             BrowserBackendKind::ComputerUse => {
                 if !self.computer_use_available()? {
                     anyhow::bail!(
@@ -353,9 +308,6 @@ impl BrowserTool {
                 Ok(ResolvedBackend::ComputerUse)
             }
             BrowserBackendKind::Auto => {
-                if Self::rust_native_compiled() && self.rust_native_available() {
-                    return Ok(ResolvedBackend::RustNative);
-                }
                 if Self::is_agent_browser_available().await {
                     return Ok(ResolvedBackend::AgentBrowser);
                 }
@@ -366,25 +318,14 @@ impl BrowserTool {
                     Err(err) => Some(err.to_string()),
                 };
 
-                if Self::rust_native_compiled() {
-                    if let Some(err) = computer_use_err {
-                        anyhow::bail!(
-                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
-                        );
-                    }
-                    anyhow::bail!(
-                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
-                    )
-                }
-
                 if let Some(err) = computer_use_err {
                     anyhow::bail!(
-                        "browser.backend='auto' needs agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
+                        "browser.backend='auto' needs agent-browser CLI or valid computer-use sidecar (error: {err})"
                     );
                 }
 
                 anyhow::bail!(
-                    "browser.backend='auto' needs agent-browser CLI, browser-native, or computer-use sidecar"
+                    "browser.backend='auto' needs agent-browser CLI or computer-use sidecar"
                 )
             }
         }
@@ -476,17 +417,11 @@ impl BrowserTool {
         }
     }
 
-    /// Execute a browser action via agent-browser CLI
-    #[allow(clippy::too_many_lines)]
-    async fn execute_agent_browser_action(
-        &self,
-        action: BrowserAction,
-    ) -> anyhow::Result<ToolResult> {
+    fn agent_browser_args(&self, action: BrowserAction) -> anyhow::Result<Vec<String>> {
         match action {
             BrowserAction::Open { url } => {
                 self.validate_url(&url)?;
-                let resp = self.run_command(&["open", &url]).await?;
-                self.to_result(resp)
+                Ok(vec!["open".into(), url])
             }
 
             BrowserAction::Snapshot {
@@ -494,111 +429,73 @@ impl BrowserTool {
                 compact,
                 depth,
             } => {
-                let mut args = vec!["snapshot"];
+                let mut args = vec!["snapshot".into()];
                 if interactive_only {
-                    args.push("-i");
+                    args.push("-i".into());
                 }
                 if compact {
-                    args.push("-c");
+                    args.push("-c".into());
                 }
-                let depth_str;
                 if let Some(d) = depth {
-                    args.push("-d");
-                    depth_str = d.to_string();
-                    args.push(&depth_str);
+                    args.push("-d".into());
+                    args.push(d.to_string());
                 }
-                let resp = self.run_command(&args).await?;
-                self.to_result(resp)
+                Ok(args)
             }
 
-            BrowserAction::Click { selector } => {
-                let resp = self.run_command(&["click", &selector]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Click { selector } => Ok(vec!["click".into(), selector]),
 
-            BrowserAction::Fill { selector, value } => {
-                let resp = self.run_command(&["fill", &selector, &value]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Fill { selector, value } => Ok(vec!["fill".into(), selector, value]),
 
-            BrowserAction::Type { selector, text } => {
-                let resp = self.run_command(&["type", &selector, &text]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Type { selector, text } => Ok(vec!["type".into(), selector, text]),
 
-            BrowserAction::GetText { selector } => {
-                let resp = self.run_command(&["get", "text", &selector]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::GetText { selector } => Ok(vec!["get".into(), "text".into(), selector]),
 
-            BrowserAction::GetTitle => {
-                let resp = self.run_command(&["get", "title"]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::GetTitle => Ok(vec!["get".into(), "title".into()]),
 
-            BrowserAction::GetUrl => {
-                let resp = self.run_command(&["get", "url"]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::GetUrl => Ok(vec!["get".into(), "url".into()]),
 
             BrowserAction::Screenshot { path, full_page } => {
-                let mut args = vec!["screenshot"];
-                if let Some(ref p) = path {
+                let mut args = vec!["screenshot".into()];
+                if let Some(p) = path {
                     args.push(p);
                 }
                 if full_page {
-                    args.push("--full");
+                    args.push("--full".into());
                 }
-                let resp = self.run_command(&args).await?;
-                self.to_result(resp)
+                Ok(args)
             }
 
             BrowserAction::Wait { selector, ms, text } => {
-                let mut args = vec!["wait"];
-                let ms_str;
-                if let Some(sel) = selector.as_ref() {
+                let mut args = vec!["wait".into()];
+                if let Some(sel) = selector {
                     args.push(sel);
                 } else if let Some(millis) = ms {
-                    ms_str = millis.to_string();
-                    args.push(&ms_str);
-                } else if let Some(ref t) = text {
-                    args.push("--text");
+                    args.push(millis.to_string());
+                } else if let Some(t) = text {
+                    args.push("--text".into());
                     args.push(t);
                 }
-                let resp = self.run_command(&args).await?;
-                self.to_result(resp)
+                Ok(args)
             }
 
-            BrowserAction::Press { key } => {
-                let resp = self.run_command(&["press", &key]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Press { key } => Ok(vec!["press".into(), key]),
 
-            BrowserAction::Hover { selector } => {
-                let resp = self.run_command(&["hover", &selector]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Hover { selector } => Ok(vec!["hover".into(), selector]),
 
             BrowserAction::Scroll { direction, pixels } => {
-                let mut args = vec!["scroll", &direction];
-                let px_str;
+                let mut args = vec!["scroll".into(), direction];
                 if let Some(px) = pixels {
-                    px_str = px.to_string();
-                    args.push(&px_str);
+                    args.push(px.to_string());
                 }
-                let resp = self.run_command(&args).await?;
-                self.to_result(resp)
+                Ok(args)
             }
 
             BrowserAction::IsVisible { selector } => {
-                let resp = self.run_command(&["is", "visible", &selector]).await?;
-                self.to_result(resp)
+                Ok(vec!["is".into(), "visible".into(), selector])
             }
 
-            BrowserAction::Close => {
-                let resp = self.run_command(&["close"]).await?;
-                self.to_result(resp)
-            }
+            BrowserAction::Close => Ok(vec!["close".into()]),
 
             BrowserAction::Find {
                 by,
@@ -606,48 +503,24 @@ impl BrowserTool {
                 action,
                 fill_value,
             } => {
-                let mut args = vec!["find", &by, &value, &action];
-                if let Some(ref fv) = fill_value {
+                let mut args = vec!["find".into(), by, value, action];
+                if let Some(fv) = fill_value {
                     args.push(fv);
                 }
-                let resp = self.run_command(&args).await?;
-                self.to_result(resp)
+                Ok(args)
             }
         }
     }
 
-    #[allow(clippy::unused_async)]
-    async fn execute_rust_native_action(
+    /// Execute a browser action via agent-browser CLI.
+    async fn execute_agent_browser_action(
         &self,
         action: BrowserAction,
     ) -> anyhow::Result<ToolResult> {
-        #[cfg(feature = "browser-native")]
-        {
-            let mut state = self.native_state.lock().await;
-
-            let output = state
-                .execute_action(
-                    action,
-                    self.native_headless,
-                    &self.native_webdriver_url,
-                    self.native_chrome_path.as_deref(),
-                )
-                .await?;
-
-            Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&output).unwrap_or_default(),
-                error: None,
-            })
-        }
-
-        #[cfg(not(feature = "browser-native"))]
-        {
-            let _ = action;
-            anyhow::bail!(
-                "Rust-native browser backend is not compiled. Rebuild with --features browser-native"
-            )
-        }
+        let args = self.agent_browser_args(action)?;
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let resp = self.run_command(&arg_refs).await?;
+        Ok(Self::to_result(resp))
     }
 
     fn validate_coordinate(&self, key: &str, value: i64, max: Option<i64>) -> anyhow::Result<()> {
@@ -830,36 +703,250 @@ impl BrowserTool {
     ) -> anyhow::Result<ToolResult> {
         match backend {
             ResolvedBackend::AgentBrowser => self.execute_agent_browser_action(action).await,
-            ResolvedBackend::RustNative => self.execute_rust_native_action(action).await,
             ResolvedBackend::ComputerUse => anyhow::bail!(
                 "Internal error: computer_use backend must be handled before BrowserAction parsing"
             ),
         }
     }
 
-    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-    fn to_result(&self, resp: AgentBrowserResponse) -> anyhow::Result<ToolResult> {
+    fn to_result(resp: AgentBrowserResponse) -> ToolResult {
         if resp.success {
             let output = resp
                 .data
                 .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
                 .unwrap_or_default();
-            Ok(ToolResult {
+            ToolResult {
                 success: true,
                 output,
                 error: None,
-            })
+            }
         } else {
-            Ok(ToolResult {
+            ToolResult {
                 success: false,
                 output: String::new(),
                 error: resp.error,
-            })
+            }
         }
     }
 }
 
-#[allow(clippy::too_many_lines)]
+fn browser_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["open", "snapshot", "click", "fill", "type", "get_text",
+                         "get_title", "get_url", "screenshot", "wait", "press",
+                         "hover", "scroll", "is_visible", "close", "find",
+                         "mouse_move", "mouse_click", "mouse_drag", "key_type",
+                         "key_press", "screen_capture"],
+                "description": "Browser action to perform (OS-level actions require backend=computer_use)"
+            },
+            "url": {
+                "type": "string",
+                "description": "URL to navigate to (for 'open' action)"
+            },
+            "selector": {
+                "type": "string",
+                "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
+            },
+            "value": {
+                "type": "string",
+                "description": "Value to fill or type"
+            },
+            "text": {
+                "type": "string",
+                "description": "Text to type or wait for"
+            },
+            "key": {
+                "type": "string",
+                "description": "Key to press (Enter, Tab, Escape, etc.)"
+            },
+            "x": {
+                "type": "integer",
+                "description": "Screen X coordinate (computer_use: mouse_move/mouse_click)"
+            },
+            "y": {
+                "type": "integer",
+                "description": "Screen Y coordinate (computer_use: mouse_move/mouse_click)"
+            },
+            "from_x": {
+                "type": "integer",
+                "description": "Drag source X coordinate (computer_use: mouse_drag)"
+            },
+            "from_y": {
+                "type": "integer",
+                "description": "Drag source Y coordinate (computer_use: mouse_drag)"
+            },
+            "to_x": {
+                "type": "integer",
+                "description": "Drag target X coordinate (computer_use: mouse_drag)"
+            },
+            "to_y": {
+                "type": "integer",
+                "description": "Drag target Y coordinate (computer_use: mouse_drag)"
+            },
+            "button": {
+                "type": "string",
+                "enum": ["left", "right", "middle"],
+                "description": "Mouse button for computer_use mouse_click"
+            },
+            "direction": {
+                "type": "string",
+                "enum": ["up", "down", "left", "right"],
+                "description": "Scroll direction"
+            },
+            "pixels": {
+                "type": "integer",
+                "description": "Pixels to scroll"
+            },
+            "interactive_only": {
+                "type": "boolean",
+                "description": "For snapshot: only show interactive elements"
+            },
+            "compact": {
+                "type": "boolean",
+                "description": "For snapshot: remove empty structural elements"
+            },
+            "depth": {
+                "type": "integer",
+                "description": "For snapshot: limit tree depth"
+            },
+            "full_page": {
+                "type": "boolean",
+                "description": "For screenshot: capture full page"
+            },
+            "path": {
+                "type": "string",
+                "description": "File path for screenshot"
+            },
+            "ms": {
+                "type": "integer",
+                "description": "Milliseconds to wait"
+            },
+            "by": {
+                "type": "string",
+                "enum": ["role", "text", "label", "placeholder", "testid"],
+                "description": "For find: semantic locator type"
+            },
+            "find_action": {
+                "type": "string",
+                "enum": ["click", "fill", "text", "hover", "check"],
+                "description": "For find: action to perform on found element"
+            },
+            "fill_value": {
+                "type": "string",
+                "description": "For find with fill action: value to fill"
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn browser_action_unavailable(action_str: &str, backend: ResolvedBackend) -> ToolResult {
+    ToolResult {
+        success: false,
+        output: String::new(),
+        error: Some(format!(
+            "Action '{action_str}' is unavailable for backend '{}'",
+            match backend {
+                ResolvedBackend::AgentBrowser => "agent_browser",
+                ResolvedBackend::ComputerUse => "computer_use",
+            }
+        )),
+    }
+}
+
+fn required_browser_str<'a>(args: &'a Value, key: &str, context: &str) -> anyhow::Result<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Missing '{key}' for {context}"))
+}
+
+fn parse_browser_action(
+    action_str: &str,
+    args: &Value,
+    backend: ResolvedBackend,
+) -> anyhow::Result<Result<BrowserAction, ToolResult>> {
+    let action = match action_str {
+        "open" => BrowserAction::Open {
+            url: required_browser_str(args, "url", "open action")?.into(),
+        },
+        "snapshot" => BrowserAction::Snapshot {
+            interactive_only: args
+                .get("interactive_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            compact: args.get("compact").and_then(Value::as_bool).unwrap_or(true),
+            depth: args
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map(|d| u32::try_from(d).unwrap_or(u32::MAX)),
+        },
+        "click" => BrowserAction::Click {
+            selector: required_browser_str(args, "selector", "click")?.into(),
+        },
+        "fill" => BrowserAction::Fill {
+            selector: required_browser_str(args, "selector", "fill")?.into(),
+            value: required_browser_str(args, "value", "fill")?.into(),
+        },
+        "type" => BrowserAction::Type {
+            selector: required_browser_str(args, "selector", "type")?.into(),
+            text: required_browser_str(args, "text", "type")?.into(),
+        },
+        "get_text" => BrowserAction::GetText {
+            selector: required_browser_str(args, "selector", "get_text")?.into(),
+        },
+        "get_title" => BrowserAction::GetTitle,
+        "get_url" => BrowserAction::GetUrl,
+        "screenshot" => BrowserAction::Screenshot {
+            path: args.get("path").and_then(Value::as_str).map(String::from),
+            full_page: args
+                .get("full_page")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        "wait" => BrowserAction::Wait {
+            selector: args
+                .get("selector")
+                .and_then(Value::as_str)
+                .map(String::from),
+            ms: args.get("ms").and_then(Value::as_u64),
+            text: args.get("text").and_then(Value::as_str).map(String::from),
+        },
+        "press" => BrowserAction::Press {
+            key: required_browser_str(args, "key", "press")?.into(),
+        },
+        "hover" => BrowserAction::Hover {
+            selector: required_browser_str(args, "selector", "hover")?.into(),
+        },
+        "scroll" => BrowserAction::Scroll {
+            direction: required_browser_str(args, "direction", "scroll")?.into(),
+            pixels: args
+                .get("pixels")
+                .and_then(Value::as_u64)
+                .map(|p| u32::try_from(p).unwrap_or(u32::MAX)),
+        },
+        "is_visible" => BrowserAction::IsVisible {
+            selector: required_browser_str(args, "selector", "is_visible")?.into(),
+        },
+        "close" => BrowserAction::Close,
+        "find" => BrowserAction::Find {
+            by: required_browser_str(args, "by", "find")?.into(),
+            value: required_browser_str(args, "value", "find")?.into(),
+            action: required_browser_str(args, "find_action", "find")?.into(),
+            fill_value: args
+                .get("fill_value")
+                .and_then(Value::as_str)
+                .map(String::from),
+        },
+        _ => return Ok(Err(browser_action_unavailable(action_str, backend))),
+    };
+
+    Ok(Ok(action))
+}
+
 #[async_trait]
 impl Tool for BrowserTool {
     fn category(&self) -> ToolCategory {
@@ -880,117 +967,7 @@ impl Tool for BrowserTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["open", "snapshot", "click", "fill", "type", "get_text",
-                             "get_title", "get_url", "screenshot", "wait", "press",
-                             "hover", "scroll", "is_visible", "close", "find",
-                             "mouse_move", "mouse_click", "mouse_drag", "key_type",
-                             "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use)"
-                },
-                "url": {
-                    "type": "string",
-                    "description": "URL to navigate to (for 'open' action)"
-                },
-                "selector": {
-                    "type": "string",
-                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
-                },
-                "value": {
-                    "type": "string",
-                    "description": "Value to fill or type"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Text to type or wait for"
-                },
-                "key": {
-                    "type": "string",
-                    "description": "Key to press (Enter, Tab, Escape, etc.)"
-                },
-                "x": {
-                    "type": "integer",
-                    "description": "Screen X coordinate (computer_use: mouse_move/mouse_click)"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Screen Y coordinate (computer_use: mouse_move/mouse_click)"
-                },
-                "from_x": {
-                    "type": "integer",
-                    "description": "Drag source X coordinate (computer_use: mouse_drag)"
-                },
-                "from_y": {
-                    "type": "integer",
-                    "description": "Drag source Y coordinate (computer_use: mouse_drag)"
-                },
-                "to_x": {
-                    "type": "integer",
-                    "description": "Drag target X coordinate (computer_use: mouse_drag)"
-                },
-                "to_y": {
-                    "type": "integer",
-                    "description": "Drag target Y coordinate (computer_use: mouse_drag)"
-                },
-                "button": {
-                    "type": "string",
-                    "enum": ["left", "right", "middle"],
-                    "description": "Mouse button for computer_use mouse_click"
-                },
-                "direction": {
-                    "type": "string",
-                    "enum": ["up", "down", "left", "right"],
-                    "description": "Scroll direction"
-                },
-                "pixels": {
-                    "type": "integer",
-                    "description": "Pixels to scroll"
-                },
-                "interactive_only": {
-                    "type": "boolean",
-                    "description": "For snapshot: only show interactive elements"
-                },
-                "compact": {
-                    "type": "boolean",
-                    "description": "For snapshot: remove empty structural elements"
-                },
-                "depth": {
-                    "type": "integer",
-                    "description": "For snapshot: limit tree depth"
-                },
-                "full_page": {
-                    "type": "boolean",
-                    "description": "For screenshot: capture full page"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File path for screenshot"
-                },
-                "ms": {
-                    "type": "integer",
-                    "description": "Milliseconds to wait"
-                },
-                "by": {
-                    "type": "string",
-                    "enum": ["role", "text", "label", "placeholder", "testid"],
-                    "description": "For find: semantic locator type"
-                },
-                "find_action": {
-                    "type": "string",
-                    "enum": ["click", "fill", "text", "hover", "check"],
-                    "description": "For find: action to perform on found element"
-                },
-                "fill_value": {
-                    "type": "string",
-                    "description": "For find with fill action: value to fill"
-                }
-            },
-            "required": ["action"]
-        })
+        browser_parameters_schema()
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
@@ -1040,843 +1017,12 @@ impl Tool for BrowserTool {
             return self.execute_computer_use_action(action_str, &args).await;
         }
 
-        let action = match action_str {
-            "open" => {
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' for open action"))?;
-                BrowserAction::Open { url: url.into() }
-            }
-            "snapshot" => BrowserAction::Snapshot {
-                interactive_only: args
-                    .get("interactive_only")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true), // Default to interactive for AI
-                compact: args
-                    .get("compact")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true),
-                depth: args
-                    .get("depth")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|d| u32::try_from(d).unwrap_or(u32::MAX)),
-            },
-            "click" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for click"))?;
-                BrowserAction::Click {
-                    selector: selector.into(),
-                }
-            }
-            "fill" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for fill"))?;
-                let value = args
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'value' for fill"))?;
-                BrowserAction::Fill {
-                    selector: selector.into(),
-                    value: value.into(),
-                }
-            }
-            "type" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for type"))?;
-                let text = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'text' for type"))?;
-                BrowserAction::Type {
-                    selector: selector.into(),
-                    text: text.into(),
-                }
-            }
-            "get_text" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for get_text"))?;
-                BrowserAction::GetText {
-                    selector: selector.into(),
-                }
-            }
-            "get_title" => BrowserAction::GetTitle,
-            "get_url" => BrowserAction::GetUrl,
-            "screenshot" => BrowserAction::Screenshot {
-                path: args.get("path").and_then(|v| v.as_str()).map(String::from),
-                full_page: args
-                    .get("full_page")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            },
-            "wait" => BrowserAction::Wait {
-                selector: args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                ms: args.get("ms").and_then(serde_json::Value::as_u64),
-                text: args.get("text").and_then(|v| v.as_str()).map(String::from),
-            },
-            "press" => {
-                let key = args
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'key' for press"))?;
-                BrowserAction::Press { key: key.into() }
-            }
-            "hover" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for hover"))?;
-                BrowserAction::Hover {
-                    selector: selector.into(),
-                }
-            }
-            "scroll" => {
-                let direction = args
-                    .get("direction")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'direction' for scroll"))?;
-                BrowserAction::Scroll {
-                    direction: direction.into(),
-                    pixels: args
-                        .get("pixels")
-                        .and_then(serde_json::Value::as_u64)
-                        .map(|p| u32::try_from(p).unwrap_or(u32::MAX)),
-                }
-            }
-            "is_visible" => {
-                let selector = args
-                    .get("selector")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'selector' for is_visible"))?;
-                BrowserAction::IsVisible {
-                    selector: selector.into(),
-                }
-            }
-            "close" => BrowserAction::Close,
-            "find" => {
-                let by = args
-                    .get("by")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'by' for find"))?;
-                let value = args
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'value' for find"))?;
-                let action = args
-                    .get("find_action")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'find_action' for find"))?;
-                BrowserAction::Find {
-                    by: by.into(),
-                    value: value.into(),
-                    action: action.into(),
-                    fill_value: args
-                        .get("fill_value")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                }
-            }
-            _ => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Action '{action_str}' is unavailable for backend '{}'",
-                        match backend {
-                            ResolvedBackend::AgentBrowser => "agent_browser",
-                            ResolvedBackend::RustNative => "rust_native",
-                            ResolvedBackend::ComputerUse => "computer_use",
-                        }
-                    )),
-                });
-            }
+        let action = match parse_browser_action(action_str, &args, backend)? {
+            Ok(action) => action,
+            Err(result) => return Ok(result),
         };
 
         self.execute_action(action, backend).await
-    }
-}
-
-#[cfg(feature = "browser-native")]
-mod native_backend {
-    use super::BrowserAction;
-    use anyhow::{Context, Result};
-    use base64::Engine;
-    use fantoccini::actions::{InputSource, MouseActions, PointerAction};
-    use fantoccini::key::Key;
-    use fantoccini::{Client, ClientBuilder, Locator};
-    use serde_json::{Map, Value, json};
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    #[derive(Default)]
-    pub struct NativeBrowserState {
-        client: Option<Client>,
-    }
-
-    impl NativeBrowserState {
-        pub fn is_available(
-            _headless: bool,
-            webdriver_url: &str,
-            _chrome_path: Option<&str>,
-        ) -> bool {
-            webdriver_endpoint_reachable(webdriver_url, Duration::from_millis(500))
-        }
-
-        #[allow(clippy::too_many_lines)]
-        pub async fn execute_action(
-            &mut self,
-            action: BrowserAction,
-            headless: bool,
-            webdriver_url: &str,
-            chrome_path: Option<&str>,
-        ) -> Result<Value> {
-            match action {
-                BrowserAction::Open { url } => {
-                    self.ensure_session(headless, webdriver_url, chrome_path)
-                        .await?;
-                    let client = self.active_client()?;
-                    client
-                        .goto(&url)
-                        .await
-                        .with_context(|| format!("Failed to open URL: {url}"))?;
-                    let current_url = client
-                        .current_url()
-                        .await
-                        .context("Failed to read current URL after navigation")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "open",
-                        "url": current_url.as_str(),
-                    }))
-                }
-                BrowserAction::Snapshot {
-                    interactive_only,
-                    compact,
-                    depth,
-                } => {
-                    let client = self.active_client()?;
-                    let snapshot = client
-                        .execute(
-                            &snapshot_script(interactive_only, compact, depth.map(i64::from)),
-                            vec![],
-                        )
-                        .await
-                        .context("Failed to evaluate snapshot script")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "snapshot",
-                        "data": snapshot,
-                    }))
-                }
-                BrowserAction::Click { selector } => {
-                    let client = self.active_client()?;
-                    find_element(client, &selector).await?.click().await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "click",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Fill { selector, value } => {
-                    let client = self.active_client()?;
-                    let element = find_element(client, &selector).await?;
-                    let _ = element.clear().await;
-                    element.send_keys(&value).await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "fill",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Type { selector, text } => {
-                    let client = self.active_client()?;
-                    find_element(client, &selector)
-                        .await?
-                        .send_keys(&text)
-                        .await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "type",
-                        "selector": selector,
-                        "typed": text.len(),
-                    }))
-                }
-                BrowserAction::GetText { selector } => {
-                    let client = self.active_client()?;
-                    let text = find_element(client, &selector).await?.text().await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_text",
-                        "selector": selector,
-                        "text": text,
-                    }))
-                }
-                BrowserAction::GetTitle => {
-                    let client = self.active_client()?;
-                    let title = client.title().await.context("Failed to read page title")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_title",
-                        "title": title,
-                    }))
-                }
-                BrowserAction::GetUrl => {
-                    let client = self.active_client()?;
-                    let url = client
-                        .current_url()
-                        .await
-                        .context("Failed to read current URL")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_url",
-                        "url": url.as_str(),
-                    }))
-                }
-                BrowserAction::Screenshot { path, full_page } => {
-                    let client = self.active_client()?;
-                    let png = client
-                        .screenshot()
-                        .await
-                        .context("Failed to capture screenshot")?;
-                    let mut payload = json!({
-                        "backend": "rust_native",
-                        "action": "screenshot",
-                        "full_page": full_page,
-                        "bytes": png.len(),
-                    });
-
-                    if let Some(path_str) = path {
-                        std::fs::write(&path_str, &png)
-                            .with_context(|| format!("Failed to write screenshot to {path_str}"))?;
-                        payload["path"] = Value::String(path_str);
-                    } else {
-                        payload["png_base64"] =
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(&png));
-                    }
-
-                    Ok(payload)
-                }
-                BrowserAction::Wait { selector, ms, text } => {
-                    let client = self.active_client()?;
-                    if let Some(sel) = selector.as_ref() {
-                        wait_for_selector(client, sel).await?;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "selector": sel,
-                        }))
-                    } else if let Some(duration_ms) = ms {
-                        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "ms": duration_ms,
-                        }))
-                    } else if let Some(needle) = text.as_ref() {
-                        let xpath = xpath_contains_text(needle);
-                        client
-                            .wait()
-                            .for_element(Locator::XPath(&xpath))
-                            .await
-                            .with_context(|| {
-                                format!("Timed out waiting for text to appear: {needle}")
-                            })?;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "text": needle,
-                        }))
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "ms": 250,
-                        }))
-                    }
-                }
-                BrowserAction::Press { key } => {
-                    let client = self.active_client()?;
-                    let key_input = webdriver_key(&key);
-                    match client.active_element().await {
-                        Ok(element) => {
-                            element.send_keys(&key_input).await?;
-                        }
-                        Err(_) => {
-                            find_element(client, "body")
-                                .await?
-                                .send_keys(&key_input)
-                                .await?;
-                        }
-                    }
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "press",
-                        "key": key,
-                    }))
-                }
-                BrowserAction::Hover { selector } => {
-                    let client = self.active_client()?;
-                    let element = find_element(client, &selector).await?;
-                    hover_element(client, &element).await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "hover",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Scroll { direction, pixels } => {
-                    let client = self.active_client()?;
-                    let amount = i64::from(pixels.unwrap_or(600));
-                    let (dx, dy) = match direction.as_str() {
-                        "up" => (0, -amount),
-                        "down" => (0, amount),
-                        "left" => (-amount, 0),
-                        "right" => (amount, 0),
-                        _ => anyhow::bail!(
-                            "Unsupported scroll direction '{direction}'. Use up/down/left/right"
-                        ),
-                    };
-
-                    let position = client
-                        .execute(
-                            "window.scrollBy(arguments[0], arguments[1]); return { x: window.scrollX, y: window.scrollY };",
-                            vec![json!(dx), json!(dy)],
-                        )
-                        .await
-                        .context("Failed to execute scroll script")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "scroll",
-                        "position": position,
-                    }))
-                }
-                BrowserAction::IsVisible { selector } => {
-                    let client = self.active_client()?;
-                    let visible = find_element(client, &selector)
-                        .await?
-                        .is_displayed()
-                        .await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "is_visible",
-                        "selector": selector,
-                        "visible": visible,
-                    }))
-                }
-                BrowserAction::Close => {
-                    if let Some(client) = self.client.take() {
-                        let _ = client.close().await;
-                    }
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "close",
-                        "closed": true,
-                    }))
-                }
-                BrowserAction::Find {
-                    by,
-                    value,
-                    action,
-                    fill_value,
-                } => {
-                    let client = self.active_client()?;
-                    let selector = selector_for_find(&by, &value);
-                    let element = find_element(client, &selector).await?;
-
-                    let payload = match action.as_str() {
-                        "click" => {
-                            element.click().await?;
-                            json!({"result": "clicked"})
-                        }
-                        "fill" => {
-                            let fill = fill_value.ok_or_else(|| {
-                                anyhow::anyhow!("find_action='fill' requires fill_value")
-                            })?;
-                            let _ = element.clear().await;
-                            element.send_keys(&fill).await?;
-                            json!({"result": "filled", "typed": fill.len()})
-                        }
-                        "text" => {
-                            let text = element.text().await?;
-                            json!({"result": "text", "text": text})
-                        }
-                        "hover" => {
-                            hover_element(client, &element).await?;
-                            json!({"result": "hovered"})
-                        }
-                        "check" => {
-                            let checked_before = element_checked(&element).await?;
-                            if !checked_before {
-                                element.click().await?;
-                            }
-                            let checked_after = element_checked(&element).await?;
-                            json!({
-                                "result": "checked",
-                                "checked_before": checked_before,
-                                "checked_after": checked_after,
-                            })
-                        }
-                        _ => anyhow::bail!(
-                            "Unsupported find_action '{action}'. Use click/fill/text/hover/check"
-                        ),
-                    };
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "find",
-                        "by": by,
-                        "value": value,
-                        "selector": selector,
-                        "data": payload,
-                    }))
-                }
-            }
-        }
-
-        async fn ensure_session(
-            &mut self,
-            headless: bool,
-            webdriver_url: &str,
-            chrome_path: Option<&str>,
-        ) -> Result<()> {
-            if self.client.is_some() {
-                return Ok(());
-            }
-
-            let mut capabilities: Map<String, Value> = Map::new();
-            let mut chrome_options: Map<String, Value> = Map::new();
-            let mut args: Vec<Value> = Vec::new();
-
-            if headless {
-                args.push(Value::String("--headless=new".to_string()));
-                args.push(Value::String("--disable-gpu".to_string()));
-            }
-
-            if !args.is_empty() {
-                chrome_options.insert("args".to_string(), Value::Array(args));
-            }
-
-            if let Some(path) = chrome_path {
-                let trimmed = path.trim();
-                if !trimmed.is_empty() {
-                    chrome_options.insert("binary".to_string(), Value::String(trimmed.to_string()));
-                }
-            }
-
-            if !chrome_options.is_empty() {
-                capabilities.insert(
-                    "goog:chromeOptions".to_string(),
-                    Value::Object(chrome_options),
-                );
-            }
-
-            let mut builder =
-                ClientBuilder::rustls().context("Failed to initialize rustls connector")?;
-            if !capabilities.is_empty() {
-                builder.capabilities(capabilities);
-            }
-
-            let client = builder
-                .connect(webdriver_url)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to connect to WebDriver at {webdriver_url}. Start chromedriver/geckodriver first"
-                    )
-                })?;
-
-            self.client = Some(client);
-            Ok(())
-        }
-
-        fn active_client(&self) -> Result<&Client> {
-            self.client.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("No active native browser session. Run browser action='open' first")
-            })
-        }
-    }
-
-    fn webdriver_endpoint_reachable(webdriver_url: &str, timeout: Duration) -> bool {
-        let parsed = match reqwest::Url::parse(webdriver_url) {
-            Ok(url) => url,
-            Err(_) => return false,
-        };
-
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return false;
-        }
-
-        let host = match parsed.host_str() {
-            Some(h) if !h.is_empty() => h,
-            _ => return false,
-        };
-
-        let port = parsed.port_or_known_default().unwrap_or(4444);
-        let mut addrs = match (host, port).to_socket_addrs() {
-            Ok(iter) => iter,
-            Err(_) => return false,
-        };
-
-        let addr = match addrs.next() {
-            Some(a) => a,
-            None => return false,
-        };
-
-        TcpStream::connect_timeout(&addr, timeout).is_ok()
-    }
-
-    fn selector_for_find(by: &str, value: &str) -> String {
-        let escaped = css_attr_escape(value);
-        match by {
-            "role" => format!(r#"[role=\"{escaped}\"]"#),
-            "label" => format!("label={value}"),
-            "placeholder" => format!(r#"[placeholder=\"{escaped}\"]"#),
-            "testid" => format!(r#"[data-testid=\"{escaped}\"]"#),
-            _ => format!("text={value}"),
-        }
-    }
-
-    async fn wait_for_selector(client: &Client, selector: &str) -> Result<()> {
-        match parse_selector(selector) {
-            SelectorKind::Css(css) => {
-                client
-                    .wait()
-                    .for_element(Locator::Css(&css))
-                    .await
-                    .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;
-            }
-            SelectorKind::XPath(xpath) => {
-                client
-                    .wait()
-                    .for_element(Locator::XPath(&xpath))
-                    .await
-                    .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn find_element(
-        client: &Client,
-        selector: &str,
-    ) -> Result<fantoccini::elements::Element> {
-        let element = match parse_selector(selector) {
-            SelectorKind::Css(css) => client
-                .find(Locator::Css(&css))
-                .await
-                .with_context(|| format!("Failed to find element by CSS '{css}'"))?,
-            SelectorKind::XPath(xpath) => client
-                .find(Locator::XPath(&xpath))
-                .await
-                .with_context(|| format!("Failed to find element by XPath '{xpath}'"))?,
-        };
-        Ok(element)
-    }
-
-    async fn hover_element(client: &Client, element: &fantoccini::elements::Element) -> Result<()> {
-        let actions = MouseActions::new("mouse".to_string()).then(PointerAction::MoveToElement {
-            element: element.clone(),
-            duration: Some(Duration::from_millis(150)),
-            x: 0.0,
-            y: 0.0,
-        });
-
-        client
-            .perform_actions(actions)
-            .await
-            .context("Failed to perform hover action")?;
-        let _ = client.release_actions().await;
-        Ok(())
-    }
-
-    async fn element_checked(element: &fantoccini::elements::Element) -> Result<bool> {
-        let checked = element
-            .prop("checked")
-            .await
-            .context("Failed to read checkbox checked property")?
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        Ok(matches!(checked.as_str(), "true" | "checked" | "1"))
-    }
-
-    enum SelectorKind {
-        Css(String),
-        XPath(String),
-    }
-
-    fn parse_selector(selector: &str) -> SelectorKind {
-        let trimmed = selector.trim();
-        if let Some(text_query) = trimmed.strip_prefix("text=") {
-            return SelectorKind::XPath(xpath_contains_text(text_query));
-        }
-
-        if let Some(label_query) = trimmed.strip_prefix("label=") {
-            let literal = xpath_literal(label_query);
-            return SelectorKind::XPath(format!(
-                "(//label[contains(normalize-space(.), {literal})]/following::*[self::input or self::textarea or self::select][1] | //*[@aria-label and contains(normalize-space(@aria-label), {literal})] | //label[contains(normalize-space(.), {literal})])"
-            ));
-        }
-
-        if trimmed.starts_with('@') {
-            let escaped = css_attr_escape(trimmed);
-            return SelectorKind::Css(format!(r#"[data-zc-ref=\"{escaped}\"]"#));
-        }
-
-        SelectorKind::Css(trimmed.to_string())
-    }
-
-    fn css_attr_escape(input: &str) -> String {
-        input
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', " ")
-    }
-
-    fn xpath_contains_text(text: &str) -> String {
-        format!("//*[contains(normalize-space(.), {})]", xpath_literal(text))
-    }
-
-    fn xpath_literal(input: &str) -> String {
-        if !input.contains('"') {
-            return format!("\"{input}\"");
-        }
-        if !input.contains('\'') {
-            return format!("'{input}'");
-        }
-
-        let segments: Vec<&str> = input.split('"').collect();
-        let mut parts: Vec<String> = Vec::new();
-        for (index, part) in segments.iter().enumerate() {
-            if !part.is_empty() {
-                parts.push(format!("\"{part}\""));
-            }
-            if index + 1 < segments.len() {
-                parts.push("'\"'".to_string());
-            }
-        }
-
-        if parts.is_empty() {
-            "\"\"".to_string()
-        } else {
-            format!("concat({})", parts.join(","))
-        }
-    }
-
-    fn webdriver_key(key: &str) -> String {
-        match key.trim().to_ascii_lowercase().as_str() {
-            "enter" => Key::Enter.to_string(),
-            "return" => Key::Return.to_string(),
-            "tab" => Key::Tab.to_string(),
-            "escape" | "esc" => Key::Escape.to_string(),
-            "backspace" => Key::Backspace.to_string(),
-            "delete" => Key::Delete.to_string(),
-            "space" => Key::Space.to_string(),
-            "arrowup" | "up" => Key::Up.to_string(),
-            "arrowdown" | "down" => Key::Down.to_string(),
-            "arrowleft" | "left" => Key::Left.to_string(),
-            "arrowright" | "right" => Key::Right.to_string(),
-            "home" => Key::Home.to_string(),
-            "end" => Key::End.to_string(),
-            "pageup" => Key::PageUp.to_string(),
-            "pagedown" => Key::PageDown.to_string(),
-            other => other.to_string(),
-        }
-    }
-
-    fn snapshot_script(interactive_only: bool, compact: bool, depth: Option<i64>) -> String {
-        let depth_literal = depth
-            .map(|level| level.to_string())
-            .unwrap_or_else(|| "null".to_string());
-
-        format!(
-            r#"(() => {{
-  const interactiveOnly = {interactive_only};
-  const compact = {compact};
-  const maxDepth = {depth_literal};
-  const nodes = [];
-  const root = document.body || document.documentElement;
-  let counter = 0;
-
-  const isVisible = (el) => {{
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) {{
-      return false;
-    }}
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }};
-
-  const isInteractive = (el) => {{
-    if (el.matches('a,button,input,select,textarea,summary,[role],*[tabindex]')) return true;
-    return typeof el.onclick === 'function';
-  }};
-
-  const describe = (el, depth) => {{
-    const interactive = isInteractive(el);
-    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 140);
-    if (interactiveOnly && !interactive) return;
-    if (compact && !interactive && !text) return;
-
-    const ref = '@e' + (++counter);
-    el.setAttribute('data-zc-ref', ref);
-    nodes.push({{
-      ref,
-      depth,
-      tag: el.tagName.toLowerCase(),
-      id: el.id || null,
-      role: el.getAttribute('role'),
-      text,
-      interactive,
-    }});
-  }};
-
-  const walk = (el, depth) => {{
-    if (!(el instanceof Element)) return;
-    if (maxDepth !== null && depth > maxDepth) return;
-    if (isVisible(el)) {{
-      describe(el, depth);
-    }}
-    for (const child of el.children) {{
-      walk(child, depth + 1);
-      if (nodes.length >= 400) return;
-    }}
-  }};
-
-  if (root) walk(root, 0);
-
-  return {{
-    title: document.title,
-    url: window.location.href,
-    count: nodes.length,
-    nodes,
-  }};
-}})();"#
-        )
     }
 }
 
@@ -2183,10 +1329,6 @@ mod tests {
             BrowserBackendKind::AgentBrowser
         );
         assert_eq!(
-            BrowserBackendKind::parse("rust-native").unwrap(),
-            BrowserBackendKind::RustNative
-        );
-        assert_eq!(
             BrowserBackendKind::parse("computer_use").unwrap(),
             BrowserBackendKind::ComputerUse
         );
@@ -2214,15 +1356,13 @@ mod tests {
     #[test]
     fn browser_tool_accepts_auto_backend_config() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new_with_backend(
+        let tool = BrowserTool::new_with_config(
             security,
-            vec!["example.com".into()],
-            None,
-            "auto".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig::default(),
+            BrowserToolConfig {
+                allowed_domains: vec!["example.com".into()],
+                backend: "auto".into(),
+                ..BrowserToolConfig::default()
+            },
         );
         assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::Auto);
     }
@@ -2230,15 +1370,13 @@ mod tests {
     #[test]
     fn browser_tool_accepts_computer_use_backend_config() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new_with_backend(
+        let tool = BrowserTool::new_with_config(
             security,
-            vec!["example.com".into()],
-            None,
-            "computer_use".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig::default(),
+            BrowserToolConfig {
+                allowed_domains: vec!["example.com".into()],
+                backend: "computer_use".into(),
+                ..BrowserToolConfig::default()
+            },
         );
         assert_eq!(
             tool.configured_backend().unwrap(),
@@ -2249,17 +1387,16 @@ mod tests {
     #[test]
     fn computer_use_endpoint_rejects_public_http_by_default() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new_with_backend(
+        let tool = BrowserTool::new_with_config(
             security,
-            vec!["example.com".into()],
-            None,
-            "computer_use".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig {
-                endpoint: "http://computer-use.example.com/v1/actions".into(),
-                ..ComputerUseConfig::default()
+            BrowserToolConfig {
+                allowed_domains: vec!["example.com".into()],
+                backend: "computer_use".into(),
+                computer_use: ComputerUseConfig {
+                    endpoint: "http://computer-use.example.com/v1/actions".into(),
+                    ..ComputerUseConfig::default()
+                },
+                ..BrowserToolConfig::default()
             },
         );
 
@@ -2269,18 +1406,17 @@ mod tests {
     #[test]
     fn computer_use_endpoint_requires_https_for_public_remote() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new_with_backend(
+        let tool = BrowserTool::new_with_config(
             security,
-            vec!["example.com".into()],
-            None,
-            "computer_use".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig {
-                endpoint: "https://computer-use.example.com/v1/actions".into(),
-                allow_remote_endpoint: true,
-                ..ComputerUseConfig::default()
+            BrowserToolConfig {
+                allowed_domains: vec!["example.com".into()],
+                backend: "computer_use".into(),
+                computer_use: ComputerUseConfig {
+                    endpoint: "https://computer-use.example.com/v1/actions".into(),
+                    allow_remote_endpoint: true,
+                    ..ComputerUseConfig::default()
+                },
+                ..BrowserToolConfig::default()
             },
         );
 
@@ -2290,18 +1426,17 @@ mod tests {
     #[test]
     fn computer_use_coordinate_validation_applies_limits() {
         let security = Arc::new(SecurityPolicy::default());
-        let tool = BrowserTool::new_with_backend(
+        let tool = BrowserTool::new_with_config(
             security,
-            vec!["example.com".into()],
-            None,
-            "computer_use".into(),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
-            ComputerUseConfig {
-                max_coordinate_x: Some(100),
-                max_coordinate_y: Some(100),
-                ..ComputerUseConfig::default()
+            BrowserToolConfig {
+                allowed_domains: vec!["example.com".into()],
+                backend: "computer_use".into(),
+                computer_use: ComputerUseConfig {
+                    max_coordinate_x: Some(100),
+                    max_coordinate_y: Some(100),
+                    ..ComputerUseConfig::default()
+                },
+                ..BrowserToolConfig::default()
             },
         );
 
