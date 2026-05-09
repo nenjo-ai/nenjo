@@ -354,6 +354,12 @@ pub struct ProjectDocumentMetadata {
     /// Tags associated with the document.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Alternate names that should resolve to this document.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Search keywords associated with the document.
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// MIME content type for the stored document.
     pub content_type: String,
     /// Stored content size in bytes.

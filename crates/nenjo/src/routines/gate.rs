@@ -230,14 +230,31 @@ pub fn pass_verdict_display_output(verdict: &PassVerdict, fallback: &str) -> Str
         .output
         .as_deref()
         .filter(|value| !value.trim().is_empty())
+        .or_else(|| displayable_fallback(fallback))
         .or_else(|| {
             verdict
                 .reasoning
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or(fallback)
+        .unwrap_or("")
         .to_string()
+}
+
+fn displayable_fallback(fallback: &str) -> Option<&str> {
+    if fallback.trim().is_empty() {
+        return None;
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(fallback) else {
+        return Some(fallback);
+    };
+    let content = value.get("content").and_then(|content| content.as_str());
+    match content {
+        Some(content) if content.trim().is_empty() => None,
+        Some(_) => Some(fallback),
+        None => Some(fallback),
+    }
 }
 
 // ---------------------------------------------------------------------------

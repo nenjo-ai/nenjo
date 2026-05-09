@@ -15,7 +15,7 @@ Nenjo prompts have four practical layers:
 1. Stable identity: who the agent is and what role it performs.
 2. Reusable operating context: policies, methodology, standards, project, and domain rules.
 3. Runtime context: user message, task, routine, gate, memory, and available resources.
-4. Evidence gathered during the turn: tool results, builtin docs, project docs, memory recall, and file reads.
+4. Evidence gathered during the turn: tool results, built-in Nenjo docs, project docs, memory recall, and file reads.
 
 Good prompt structure keeps these layers separate. Stable instructions belong in system prompts and context blocks. Runtime facts belong in templates through variables. Evidence should be retrieved when needed instead of preloaded everywhere.
 
@@ -117,7 +117,7 @@ Use tools for specific facts that should not be dumped into every prompt.
 Good fit:
 
 - Reading selected project documents.
-- Searching builtin knowledge.
+- Searching built-in Nenjo knowledge.
 - Inspecting graph neighbors.
 - Reading files.
 - Checking git state.
@@ -163,7 +163,7 @@ Use `{{ project.documents }}` when project knowledge should influence the answer
 
 Use `{{ coding.git_worktree }}` for agents that work with synced Git repositories, repository files, or project task executions that produce code changes. Repository-backed task executions use an isolated worktree flow, so code-working agents should have the worktree rules available in either the system prompt or developer prompt.
 
-Use `{{ builtin.documents }}` when the user asks about Nenjo concepts, resource design, context engineering, routines, agents, abilities, scopes, domains, memory, tasks, or project knowledge.
+Use `{{ builtin.nenjo }}` when the user asks about Nenjo concepts, resource design, context engineering, routines, agents, abilities, scopes, domains, memory, tasks, or project knowledge.
 
 Use `{{ available_abilities }}` when the agent should decide whether to call specialist behavior.
 
@@ -192,7 +192,7 @@ Role:
 {{ agent.description }}
 
 Use builtin Nenjo knowledge when the user asks about Nenjo concepts:
-{{ builtin.documents }}
+{{ builtin.nenjo }}
 
 User request:
 {{ chat.message }}
@@ -355,19 +355,19 @@ Role:
 {{ agent.description }}
 
 Builtin Nenjo knowledge:
-{{ builtin.documents }}
+{{ builtin.nenjo }}
 
 User intent:
 {{ chat.message }}
 
-Classify the intent into likely Nenjo concepts. Search builtin docs, inspect
+Classify the intent into likely Nenjo concepts. Search built-in Nenjo docs, inspect
 graph neighbors for related concepts, then read selected docs before answering.
 Answer with a practical design recommendation and name the knowledge used.
 ```
 
 Why this works:
 
-- Treats builtin docs as a graph, not a flat search index.
+- Treats built-in Nenjo docs as a graph, not a flat search index.
 - Forces retrieval before recommendation.
 
 ### Memory-Aware Agent
@@ -419,7 +419,7 @@ The weak example mixes runtime state and memory-like facts into reusable prompt 
 
 ## Knowledge Retrieval Pattern
 
-When a prompt exposes `{{ builtin_documents }}` or `{{ project.documents }}`, the model should not rely only on the index. The index is for discovery.
+When a prompt exposes `{{ builtin.nenjo }}` or `{{ project.documents }}`, the model should not rely only on the index. The index is for discovery.
 
 Recommended retrieval flow:
 
@@ -440,7 +440,7 @@ Use graph expansion for:
 ## Anti-Patterns
 
 - Including every variable in every prompt.
-- Treating `{{ builtin.documents }}` as a full documentation dump.
+- Treating `{{ builtin.nenjo }}` as a full documentation dump.
 - Treating `{{ project.documents }}` as memory.
 - Treating `{{ memories }}` as project documentation.
 - Putting task details in system prompts.
@@ -458,6 +458,6 @@ Before shipping a prompt:
 - Are stable instructions separated from runtime facts?
 - Are project documents and memory clearly distinguished?
 - Are available abilities or agents exposed only when useful?
-- Is builtin knowledge used as a discovery path instead of a dump?
+- Is built-in Nenjo knowledge used as a discovery path instead of a dump?
 - Does the prompt say when to retrieve more evidence?
 - Is the output format appropriate for the runtime mode?

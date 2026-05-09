@@ -136,6 +136,24 @@ impl ManifestMcpContract {
                 let args: DomainDeleteParams = serde_json::from_value(params)?;
                 to_json(backend.delete_domain(args).await?)
             }
+            "list_knowledge_packs" => {
+                if !params.is_null() {
+                    let object = params.as_object().cloned().unwrap_or_default();
+                    if !object.is_empty() {
+                        return Err(anyhow!("list_knowledge_packs does not accept parameters"));
+                    }
+                }
+                to_json(backend.list_knowledge_packs().await?)
+            }
+            "list_knowledge_docs" => to_json(backend.list_knowledge_docs(params).await?),
+            "read_knowledge_doc_manifest" => {
+                to_json(backend.read_knowledge_doc_manifest(params).await?)
+            }
+            "read_knowledge_doc" => to_json(backend.read_knowledge_doc(params).await?),
+            "search_knowledge" => to_json(backend.search_knowledge(params).await?),
+            "search_knowledge_paths" => to_json(backend.search_knowledge_paths(params).await?),
+            "list_knowledge_tree" => to_json(backend.list_knowledge_tree(params).await?),
+            "list_knowledge_neighbors" => to_json(backend.list_knowledge_neighbors(params).await?),
             "list_projects" => {
                 if !params.is_null() {
                     let object = params.as_object().cloned().unwrap_or_default();
@@ -148,21 +166,6 @@ impl ManifestMcpContract {
             "get_project" => {
                 let args: ProjectsGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_project(args).await?)
-            }
-            "list_project_documents" => to_json(backend.list_project_documents(params).await?),
-            "read_project_document_manifest" => {
-                to_json(backend.read_project_document_manifest(params).await?)
-            }
-            "read_project_document" => to_json(backend.read_project_document(params).await?),
-            "search_project_documents" => to_json(backend.search_project_documents(params).await?),
-            "search_project_document_paths" => {
-                to_json(backend.search_project_document_paths(params).await?)
-            }
-            "list_project_document_tree" => {
-                to_json(backend.list_project_document_tree(params).await?)
-            }
-            "list_project_document_neighbors" => {
-                to_json(backend.list_project_document_neighbors(params).await?)
             }
             "create_project" => {
                 let args: ProjectCreateParams = serde_json::from_value(params)?;

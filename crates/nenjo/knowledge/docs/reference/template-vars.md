@@ -10,7 +10,7 @@ This reference is for lookup. For prompt composition patterns, read `nenjo.guide
 
 ## How Values Render
 
-Most singular variables render as concise XML-like blocks or scalar text. Aggregate variables such as `{{ available_agents }}`, `{{ available_abilities }}`, `{{ project.documents }}`, `{{ memories }}`, and `{{ builtin_documents }}` render as structured XML-like context.
+Most singular variables render as concise XML-like blocks or scalar text. Aggregate variables such as `{{ available_agents }}`, `{{ available_abilities }}`, `{{ project.documents }}`, `{{ memories }}`, and `{{ builtin.nenjo }}` render as structured XML-like context.
 
 Prefer aggregate variables when the model needs to scan a collection. Prefer scalar fields when the prompt needs one stable value.
 
@@ -170,34 +170,28 @@ Example rendered shape:
 
 Avoid injecting `{{ project.documents }}` into every prompt by default. Prefer it for knowledge-heavy project work, planning, and documentation-aware tasks.
 
-### Builtin Knowledge
+### Built-In Knowledge
 
-- `{{ builtin_documents }}`
+- `{{ builtin.nenjo }}`
 
-Use builtin knowledge as a discovery hint for Nenjo platform concepts, resource patterns, and built-in documentation. It lists the builtin doc namespace and tells agents which builtin knowledge tools are available.
+Use built-in Nenjo knowledge as a discovery hint for Nenjo platform concepts, resource patterns, and built-in documentation. It lists the built-in Nenjo document namespace and tells agents which generic knowledge tools are available.
 
 Example:
 
 ```jinja
 Nenjo platform knowledge:
-{{ builtin_documents }}
+{{ builtin.nenjo }}
 ```
 
 Rendered shape:
 
 ```xml
-<builtin_documents>
-  <root>builtin://nenjo/</root>
-  <usage>Use list_builtin_doc_tree, search_builtin_doc_paths, read_builtin_doc_manifest, list_builtin_doc_neighbors, and read_builtin_doc...</usage>
-  <docs>
-    <doc>
-      <id>nenjo.guide.agents</id>
-      <path>builtin://nenjo/guide/agents.md</path>
-      <title>Agents</title>
-      <summary>Primary behavioral units...</summary>
-    </doc>
-  </docs>
-</builtin_documents>
+<knowledge_pack source="builtin" name="nenjo" root="builtin://nenjo/">
+  <usage>Use list_knowledge_tree, search_knowledge_paths, read_knowledge_doc_manifest, list_knowledge_neighbors, and read_knowledge_doc with pack="builtin:nenjo"...</usage>
+  <doc id="nenjo.guide.agents" path="builtin://nenjo/guide/agents.md" kind="guide" title="Agents">
+    <summary>Primary behavioral units...</summary>
+  </doc>
+</knowledge_pack>
 ```
 
 Use this as an index, not as the final source of truth. Agents should search, inspect neighbors, and read selected docs when the user asks about Nenjo concepts.
@@ -413,7 +407,7 @@ Use context block variables for durable, reusable operating knowledge. Keep vola
 | `task` | Task template, routine steps, gates | Generic chat prompts |
 | `project` | Project-aware task prompts | Global prompts with no project |
 | `project.documents` | Knowledge-heavy project work | Every prompt by default |
-| `builtin_documents` | Nenjo concept discovery | Treating summaries as full docs |
+| `builtin.nenjo` | Nenjo concept discovery | Treating summaries as full docs |
 | `available_agents` | Delegation and councils | Single-agent workflows |
 | `available_abilities` | Capability selection | Prompts where abilities are unavailable |
 | `available_domains` | Explicit mode switching | Hidden privilege expansion |
@@ -473,13 +467,13 @@ Evidence:
 Return a clear pass or fail decision and explain only the deciding evidence.
 ```
 
-### Builtin Knowledge Discovery
+### Built-In Knowledge Discovery
 
 ```jinja
 Use builtin Nenjo knowledge when the user asks about platform concepts, resource design, or prompt structuring.
 
 Builtin knowledge index:
-{{ builtin_documents }}
+{{ builtin.nenjo }}
 
 User request:
 {{ chat.message }}

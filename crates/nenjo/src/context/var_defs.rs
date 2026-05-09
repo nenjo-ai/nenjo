@@ -124,6 +124,14 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             ],
         },
         TemplateVarGroup {
+            name: "Chat",
+            variables: vec![TemplateVarDef {
+                name: "chat.message",
+                description: "Current user chat message text",
+                group: "Chat",
+            }],
+        },
+        TemplateVarGroup {
             name: "Project",
             variables: vec![
                 TemplateVarDef {
@@ -166,12 +174,15 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     description: "Compact XML index of project knowledge documents with metadata and summaries",
                     group: "Project",
                 },
-                TemplateVarDef {
-                    name: "builtin.documents",
-                    description: "Compact XML listing of embedded Nenjo builtin docs available at builtin://nenjo/",
-                    group: "Project",
-                },
             ],
+        },
+        TemplateVarGroup {
+            name: "Knowledge",
+            variables: vec![TemplateVarDef {
+                name: "builtin.nenjo",
+                description: "Compact XML listing of the built-in Nenjo knowledge pack",
+                group: "Knowledge",
+            }],
         },
         TemplateVarGroup {
             name: "Routine",
@@ -390,4 +401,49 @@ pub fn template_var_defs() -> Vec<TemplateVarDef> {
         .into_iter()
         .flat_map(|g| g.variables)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::template_var_groups;
+
+    #[test]
+    fn builtin_knowledge_has_own_group() {
+        let groups = template_var_groups();
+        let project = groups
+            .iter()
+            .find(|group| group.name == "Project")
+            .expect("project group");
+        let knowledge = groups
+            .iter()
+            .find(|group| group.name == "Knowledge")
+            .expect("knowledge group");
+
+        assert!(
+            !project
+                .variables
+                .iter()
+                .any(|var| var.name == "builtin.nenjo")
+        );
+        assert!(
+            knowledge
+                .variables
+                .iter()
+                .any(|var| var.name == "builtin.nenjo" && var.group == "Knowledge")
+        );
+    }
+
+    #[test]
+    fn chat_message_is_declared() {
+        let chat = template_var_groups()
+            .into_iter()
+            .find(|group| group.name == "Chat")
+            .expect("chat group");
+
+        assert!(
+            chat.variables
+                .iter()
+                .any(|var| var.name == "chat.message" && var.group == "Chat")
+        );
+    }
 }

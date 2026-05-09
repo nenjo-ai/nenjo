@@ -8,6 +8,7 @@ use super::domains::domain_tools;
 use super::models::model_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
+use nenjo::knowledge_tools::knowledge_tools;
 
 /// Return the complete manifest MCP tool registry.
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -15,18 +16,12 @@ pub fn all_tools() -> Vec<ToolSpec> {
     tools.extend(agent_tools());
     tools.extend(ability_tools());
     tools.extend(domain_tools());
+    tools.extend(knowledge_tools());
     tools.extend(project_tools().into_iter().filter(|tool| {
         matches!(
             tool.name.as_str(),
             "list_projects"
                 | "get_project"
-                | "list_project_documents"
-                | "read_project_document_manifest"
-                | "read_project_document"
-                | "search_project_documents"
-                | "search_project_document_paths"
-                | "list_project_document_tree"
-                | "list_project_document_neighbors"
                 | "create_project"
                 | "update_project"
                 | "delete_project"
@@ -165,15 +160,16 @@ mod tests {
                 ("update_domain".into(), ToolCategory::Write),
                 ("update_domain_prompt".into(), ToolCategory::Write),
                 ("delete_domain".into(), ToolCategory::Write),
+                ("list_knowledge_packs".into(), ToolCategory::Read),
+                ("list_knowledge_docs".into(), ToolCategory::Read),
+                ("read_knowledge_doc".into(), ToolCategory::Read),
+                ("read_knowledge_doc_manifest".into(), ToolCategory::Read),
+                ("search_knowledge".into(), ToolCategory::Read),
+                ("search_knowledge_paths".into(), ToolCategory::Read),
+                ("list_knowledge_tree".into(), ToolCategory::Read),
+                ("list_knowledge_neighbors".into(), ToolCategory::Read),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
-                ("list_project_documents".into(), ToolCategory::Read),
-                ("read_project_document_manifest".into(), ToolCategory::Read),
-                ("read_project_document".into(), ToolCategory::Read),
-                ("search_project_documents".into(), ToolCategory::Read),
-                ("search_project_document_paths".into(), ToolCategory::Read),
-                ("list_project_document_tree".into(), ToolCategory::Read),
-                ("list_project_document_neighbors".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),

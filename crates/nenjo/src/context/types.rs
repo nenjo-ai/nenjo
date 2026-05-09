@@ -275,12 +275,16 @@ pub struct DocumentContext {
     pub kind: Option<String>,
     #[serde(rename = "@authority", skip_serializing_if = "Option::is_none")]
     pub authority: Option<String>,
-    #[serde(rename = "@size")]
+    #[serde(rename = "@size", skip_serializing_if = "String::is_empty")]
     pub size: String,
     #[serde(rename = "@status", skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub aliases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub keywords: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }

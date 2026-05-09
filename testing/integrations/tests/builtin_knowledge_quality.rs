@@ -1,4 +1,4 @@
-//! Intent-driven builtin knowledge quality evals using a real LLM provider.
+//! Intent-driven knowledge quality evals using a real LLM provider.
 //!
 //! Requires `OPENROUTER_API_KEY`. Tests are skipped automatically if the key is
 //! not set. Set `NENJO_KG_EVAL_MODEL` to override the default OpenRouter model.
@@ -10,8 +10,9 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use nenjo::builtin_knowledge::{BuiltinDocFilter, BuiltinDocSearchHit, builtin_knowledge_pack};
+use nenjo::builtin_knowledge::builtin_knowledge_pack;
 use nenjo::config::AgentConfig;
+use nenjo::knowledge::{KnowledgeDocFilter, KnowledgeDocSearchHit};
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
 };
@@ -61,7 +62,7 @@ fn eval_model_name() -> String {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "builtin-kg-eval-model".into(),
+        name: "knowledge-eval-model".into(),
         description: None,
         model: eval_model_name(),
         model_provider: "openrouter".into(),
@@ -73,8 +74,8 @@ fn make_model() -> ModelManifest {
 fn make_project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
-        name: "builtin-kg-eval".into(),
-        slug: "builtin-kg-eval".into(),
+        name: "knowledge-eval".into(),
+        slug: "knowledge-eval".into(),
         description: None,
         settings: Value::Null,
     }
@@ -83,8 +84,8 @@ fn make_project() -> ProjectManifest {
 fn make_agent(model_id: Uuid) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
-        name: "builtin-kg-eval-agent".into(),
-        description: Some("Intent-driven builtin knowledge eval agent".into()),
+        name: "knowledge-eval-agent".into(),
+        description: Some("Intent-driven knowledge eval agent".into()),
         prompt_config: PromptConfig {
             system_prompt: INTENT_GRAPH_EXPAND_PROMPT.into(),
             templates: PromptTemplates {
@@ -108,23 +109,23 @@ fn make_agent(model_id: Uuid) -> AgentManifest {
 }
 
 const INTENT_GRAPH_EXPAND_PROMPT: &str = r#"
-You answer questions about Nenjo by using builtin knowledge tools.
+You answer questions about Nenjo by using knowledge tools.
 
 For every user intent:
 1. Classify the intent into likely Nenjo concepts and resource families.
-2. Use search_builtin_doc_paths to find compact seed documents.
-3. Use read_builtin_doc_manifest on the best seed documents.
-4. You MUST call list_builtin_doc_neighbors at least once on a best seed document
+2. Use search_knowledge_paths with pack="builtin:nenjo" to find compact seed documents.
+3. Use read_knowledge_doc_manifest with pack="builtin:nenjo" on the best seed documents.
+4. You MUST call list_knowledge_neighbors with pack="builtin:nenjo" at least once on a best seed document
    before answering. If the neighbors are not useful, say that after inspecting them.
-5. Read the final selected documents with read_builtin_doc before answering.
+5. Read the final selected documents with read_knowledge_doc and pack="builtin:nenjo" before answering.
 6. Answer as an implementation-oriented plan.
 
 Prefer graph expansion when the user asks how concepts relate, what to use
 together, or how to structure agents, routines, memory, scopes, councils,
-domains, abilities, projects, or tasks. Name the builtin documents or concepts
+domains, abilities, projects, or tasks. Name the built-in Nenjo documents or concepts
 you used in a short "Knowledge used:" sentence at the end.
 
-{{builtin_documents}}
+{{ builtin.nenjo }}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ you used in a short "Knowledge used:" sentence at the end.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
-enum BuiltinToolKind {
+enum KnowledgeToolKind {
     SearchPaths,
     ReadDoc,
     ReadManifest,
@@ -163,52 +164,53 @@ impl EvalLog {
     }
 }
 
-struct BuiltinEvalTool {
-    kind: BuiltinToolKind,
+struct KnowledgeEvalTool {
+    kind: KnowledgeToolKind,
     log: EvalLog,
 }
 
-impl BuiltinEvalTool {
-    fn new(kind: BuiltinToolKind, log: EvalLog) -> Self {
+impl KnowledgeEvalTool {
+    fn new(kind: KnowledgeToolKind, log: EvalLog) -> Self {
         Self { kind, log }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for BuiltinEvalTool {
+impl Tool for KnowledgeEvalTool {
     fn name(&self) -> &str {
         match self.kind {
-            BuiltinToolKind::SearchPaths => "search_builtin_doc_paths",
-            BuiltinToolKind::ReadDoc => "read_builtin_doc",
-            BuiltinToolKind::ReadManifest => "read_builtin_doc_manifest",
-            BuiltinToolKind::Neighbors => "list_builtin_doc_neighbors",
-            BuiltinToolKind::ListTree => "list_builtin_doc_tree",
+            KnowledgeToolKind::SearchPaths => "search_knowledge_paths",
+            KnowledgeToolKind::ReadDoc => "read_knowledge_doc",
+            KnowledgeToolKind::ReadManifest => "read_knowledge_doc_manifest",
+            KnowledgeToolKind::Neighbors => "list_knowledge_neighbors",
+            KnowledgeToolKind::ListTree => "list_knowledge_tree",
         }
     }
 
     fn description(&self) -> &str {
         match self.kind {
-            BuiltinToolKind::SearchPaths => {
-                "Search builtin Nenjo docs and return compact metadata without body content."
+            KnowledgeToolKind::SearchPaths => {
+                "Search built-in Nenjo docs and return compact metadata without body content."
             }
-            BuiltinToolKind::ReadDoc => {
-                "Read one full builtin Nenjo doc by id or builtin://nenjo/ path."
+            KnowledgeToolKind::ReadDoc => {
+                "Read one full built-in Nenjo doc by id or builtin://nenjo/ path."
             }
-            BuiltinToolKind::ReadManifest => {
-                "Read one builtin Nenjo doc manifest by id or builtin://nenjo/ path."
+            KnowledgeToolKind::ReadManifest => {
+                "Read one built-in Nenjo doc manifest by id or builtin://nenjo/ path."
             }
-            BuiltinToolKind::Neighbors => {
-                "List graph neighbors for one builtin Nenjo doc by id or path. Each neighbor is returned once with nested edges containing source, target, edge type, and note."
+            KnowledgeToolKind::Neighbors => {
+                "List graph neighbors for one built-in Nenjo doc by id or path. Each neighbor is returned once with nested edges containing source, target, edge type, and note."
             }
-            BuiltinToolKind::ListTree => "List the builtin Nenjo document tree.",
+            KnowledgeToolKind::ListTree => "List the built-in Nenjo document tree.",
         }
     }
 
     fn parameters_schema(&self) -> Value {
         match self.kind {
-            BuiltinToolKind::SearchPaths => json!({
+            KnowledgeToolKind::SearchPaths => json!({
                 "type": "object",
                 "properties": {
+                    "pack": { "type": "string", "enum": ["builtin:nenjo"] },
                     "query": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "path_prefix": { "type": "string" },
@@ -218,31 +220,35 @@ impl Tool for BuiltinEvalTool {
                         "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"]
                     }
                 },
-                "required": ["query"]
+                "required": ["pack", "query"]
             }),
-            BuiltinToolKind::ReadDoc | BuiltinToolKind::ReadManifest => json!({
+            KnowledgeToolKind::ReadDoc | KnowledgeToolKind::ReadManifest => json!({
                 "type": "object",
                 "properties": {
-                    "id_or_path": { "type": "string" }
+                    "pack": { "type": "string", "enum": ["builtin:nenjo"] },
+                    "path": { "type": "string" }
                 },
-                "required": ["id_or_path"]
+                "required": ["pack", "path"]
             }),
-            BuiltinToolKind::Neighbors => json!({
+            KnowledgeToolKind::Neighbors => json!({
                 "type": "object",
                 "properties": {
-                    "id_or_path": { "type": "string" },
+                    "pack": { "type": "string", "enum": ["builtin:nenjo"] },
+                    "path": { "type": "string" },
                     "edge_type": {
                         "type": "string",
                         "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"]
                     }
                 },
-                "required": ["id_or_path"]
+                "required": ["pack", "path"]
             }),
-            BuiltinToolKind::ListTree => json!({
+            KnowledgeToolKind::ListTree => json!({
                 "type": "object",
                 "properties": {
+                    "pack": { "type": "string", "enum": ["builtin:nenjo"] },
                     "prefix": { "type": "string" }
-                }
+                },
+                "required": ["pack"]
             }),
         }
     }
@@ -252,9 +258,10 @@ impl Tool for BuiltinEvalTool {
     }
 
     async fn execute(&self, args: Value) -> Result<ToolResult> {
+        validate_pack_arg(&args)?;
         let pack = builtin_knowledge_pack();
         let output = match self.kind {
-            BuiltinToolKind::SearchPaths => {
+            KnowledgeToolKind::SearchPaths => {
                 let query = args
                     .get("query")
                     .and_then(Value::as_str)
@@ -269,11 +276,11 @@ impl Tool for BuiltinEvalTool {
                 });
                 serde_json::to_value(compact_hits(hits))?
             }
-            BuiltinToolKind::ReadDoc => {
-                let id_or_path = id_or_path_arg(&args)?;
+            KnowledgeToolKind::ReadDoc => {
+                let id_or_path = path_arg(&args)?;
                 let doc = pack
                     .read_doc(id_or_path)
-                    .ok_or_else(|| anyhow!("unknown builtin doc {id_or_path}"))?;
+                    .ok_or_else(|| anyhow!("unknown built-in Nenjo doc {id_or_path}"))?;
                 self.log.record(ToolCallLog {
                     name: self.name().to_string(),
                     args: args.clone(),
@@ -282,11 +289,11 @@ impl Tool for BuiltinEvalTool {
                 });
                 serde_json::to_value(doc)?
             }
-            BuiltinToolKind::ReadManifest => {
-                let id_or_path = id_or_path_arg(&args)?;
+            KnowledgeToolKind::ReadManifest => {
+                let id_or_path = path_arg(&args)?;
                 let manifest = pack
                     .read_manifest(id_or_path)
-                    .ok_or_else(|| anyhow!("unknown builtin doc {id_or_path}"))?;
+                    .ok_or_else(|| anyhow!("unknown built-in Nenjo doc {id_or_path}"))?;
                 self.log.record(ToolCallLog {
                     name: self.name().to_string(),
                     args: args.clone(),
@@ -295,8 +302,8 @@ impl Tool for BuiltinEvalTool {
                 });
                 serde_json::to_value(manifest)?
             }
-            BuiltinToolKind::Neighbors => {
-                let id_or_path = id_or_path_arg(&args)?;
+            KnowledgeToolKind::Neighbors => {
+                let id_or_path = path_arg(&args)?;
                 let edge_type = args
                     .get("edge_type")
                     .cloned()
@@ -316,7 +323,7 @@ impl Tool for BuiltinEvalTool {
                 });
                 serde_json::to_value(neighbors)?
             }
-            BuiltinToolKind::ListTree => {
+            KnowledgeToolKind::ListTree => {
                 let prefix = args.get("prefix").and_then(Value::as_str);
                 let tree = pack.list_tree(prefix);
                 self.log.record(ToolCallLog {
@@ -341,47 +348,53 @@ impl Tool for BuiltinEvalTool {
     }
 }
 
-struct BuiltinEvalToolFactory {
+struct KnowledgeEvalToolFactory {
     log: EvalLog,
 }
 
 #[async_trait::async_trait]
-impl ToolFactory for BuiltinEvalToolFactory {
+impl ToolFactory for KnowledgeEvalToolFactory {
     async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
         vec![
-            Arc::new(BuiltinEvalTool::new(
-                BuiltinToolKind::SearchPaths,
+            Arc::new(KnowledgeEvalTool::new(
+                KnowledgeToolKind::SearchPaths,
                 self.log.clone(),
             )),
-            Arc::new(BuiltinEvalTool::new(
-                BuiltinToolKind::ReadDoc,
+            Arc::new(KnowledgeEvalTool::new(
+                KnowledgeToolKind::ReadDoc,
                 self.log.clone(),
             )),
-            Arc::new(BuiltinEvalTool::new(
-                BuiltinToolKind::ReadManifest,
+            Arc::new(KnowledgeEvalTool::new(
+                KnowledgeToolKind::ReadManifest,
                 self.log.clone(),
             )),
-            Arc::new(BuiltinEvalTool::new(
-                BuiltinToolKind::Neighbors,
+            Arc::new(KnowledgeEvalTool::new(
+                KnowledgeToolKind::Neighbors,
                 self.log.clone(),
             )),
-            Arc::new(BuiltinEvalTool::new(
-                BuiltinToolKind::ListTree,
+            Arc::new(KnowledgeEvalTool::new(
+                KnowledgeToolKind::ListTree,
                 self.log.clone(),
             )),
         ]
     }
 }
 
-fn id_or_path_arg(args: &Value) -> Result<&str> {
-    args.get("id_or_path")
-        .or_else(|| args.get("id"))
-        .or_else(|| args.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing id_or_path"))
+fn validate_pack_arg(args: &Value) -> Result<()> {
+    match args.get("pack").and_then(Value::as_str) {
+        Some("builtin:nenjo") => Ok(()),
+        Some(pack) => Err(anyhow!("unsupported knowledge pack {pack}")),
+        None => Err(anyhow!("missing pack")),
+    }
 }
 
-fn filter_from_args(args: &Value) -> Result<BuiltinDocFilter> {
+fn path_arg(args: &Value) -> Result<&str> {
+    args.get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing path"))
+}
+
+fn filter_from_args(args: &Value) -> Result<KnowledgeDocFilter> {
     let tags = args
         .get("tags")
         .and_then(Value::as_array)
@@ -400,7 +413,7 @@ fn filter_from_args(args: &Value) -> Result<BuiltinDocFilter> {
         .transpose()
         .context("invalid edge_type")?;
 
-    Ok(BuiltinDocFilter {
+    Ok(KnowledgeDocFilter {
         tags,
         path_prefix: args
             .get("path_prefix")
@@ -415,7 +428,7 @@ fn filter_from_args(args: &Value) -> Result<BuiltinDocFilter> {
     })
 }
 
-fn compact_hits(hits: Vec<BuiltinDocSearchHit>) -> Vec<Value> {
+fn compact_hits(hits: Vec<KnowledgeDocSearchHit>) -> Vec<Value> {
     hits.into_iter()
         .take(8)
         .map(|hit| {
@@ -504,7 +517,7 @@ async fn builtin_knowledge_intent_graph_expand_quality() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(OpenRouterFactory { api_key })
-        .with_tool_factory(BuiltinEvalToolFactory { log: log.clone() })
+        .with_tool_factory(KnowledgeEvalToolFactory { log: log.clone() })
         .with_agent_config(AgentConfig {
             max_turns: 8,
             ..Default::default()
@@ -514,7 +527,7 @@ async fn builtin_knowledge_intent_graph_expand_quality() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("builtin-kg-eval-agent")
+        .agent_by_name("knowledge-eval-agent")
         .await
         .unwrap()
         .build()
@@ -565,14 +578,14 @@ async fn builtin_knowledge_intent_graph_expand_quality() {
         }
         if !score.used_search {
             failures.push(format!(
-                "{}: did not use search_builtin_doc_paths; calls={:?}",
+                "{}: did not use search_knowledge_paths; calls={:?}",
                 case.id,
                 call_names(&calls)
             ));
         }
         if case.requires_graph && !score.used_neighbors {
             failures.push(format!(
-                "{}: did not use list_builtin_doc_neighbors; calls={:?}",
+                "{}: did not use list_knowledge_neighbors; calls={:?}",
                 case.id,
                 call_names(&calls)
             ));
@@ -625,9 +638,9 @@ fn score_case(case: &IntentCase, calls: &[ToolCallLog], answer: &str) -> CaseSco
 
     for call in calls {
         match call.name.as_str() {
-            "search_builtin_doc_paths" => used_search = true,
-            "list_builtin_doc_neighbors" => used_neighbors = true,
-            "read_builtin_doc" => used_read_doc = true,
+            "search_knowledge_paths" => used_search = true,
+            "list_knowledge_neighbors" => used_neighbors = true,
+            "read_knowledge_doc" => used_read_doc = true,
             _ => {}
         }
         for doc_id in &call.doc_ids {

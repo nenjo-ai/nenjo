@@ -137,12 +137,6 @@ pub struct ProjectMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `list_project_documents`.
-pub struct ProjectDocumentsListResult {
-    pub project_documents: Vec<ProjectDocumentSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Result for `create_project_document`.
 pub struct ProjectDocumentMutationResult {
     pub project_document: ProjectDocumentSummary,

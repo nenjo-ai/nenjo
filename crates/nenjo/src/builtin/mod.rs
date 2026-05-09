@@ -10,6 +10,6 @@ mod search;
 mod types;
 
 pub use embedded::{
-    BUILTIN_KNOWLEDGE_DISCOVERY, builtin_documents_summary, builtin_knowledge_pack,
+    BUILTIN_KNOWLEDGE_DISCOVERY, builtin_knowledge_pack, builtin_knowledge_summary,
 };
 pub use types::*;

@@ -8,14 +8,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use nenjo::ToolFactory;
-use nenjo::builtin_knowledge::{
-    BuiltinDocAuthority, BuiltinDocEdgeType, BuiltinDocFilter, BuiltinDocKind, BuiltinDocStatus,
-    builtin_knowledge_pack,
-};
 use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::store::ManifestReader;
+use nenjo::{ToolContext, ToolFactory};
 use nenjo_platform::{
     ContentScope, ManifestAccessPolicy, ManifestKind, ManifestMcpBackend, ManifestMcpContract,
     PlatformManifestBackend, PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
@@ -204,25 +200,6 @@ impl HarnessToolFactory {
             Arc::new(GitOperationsTool::new(security.clone())),
             Arc::new(ContentSearchTool::new(security.clone())),
             Arc::new(GlobSearchTool::new(security.clone())),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::ListDocs,
-            )),
-            Arc::new(BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::ReadDoc)),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::SearchDocs,
-            )),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::SearchDocPaths,
-            )),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::ListTree,
-            )),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::ReadManifest,
-            )),
-            Arc::new(BuiltinKnowledgeTool::new(
-                BuiltinKnowledgeToolKind::Neighbors,
-            )),
         ]
     }
 
@@ -231,6 +208,7 @@ impl HarnessToolFactory {
         &self,
         agent: &AgentManifest,
         security: &Arc<SecurityPolicy>,
+        tool_context: ToolContext,
     ) -> Vec<Arc<dyn Tool>> {
         let mut tools = self.base_tools_with(security);
 
@@ -256,8 +234,13 @@ impl HarnessToolFactory {
         let policy = ManifestAccessPolicy::new(agent.platform_scopes.clone());
 
         let manifest_backend = self.manifest_backend.as_ref().map(|backend| {
-            Arc::new(backend.as_ref().clone().with_access_policy(policy.clone()))
-                as Arc<dyn ManifestMcpBackend>
+            Arc::new(
+                backend
+                    .as_ref()
+                    .clone()
+                    .with_access_policy(policy.clone())
+                    .with_current_project_slug(tool_context.project_slug.clone()),
+            ) as Arc<dyn ManifestMcpBackend>
         });
 
         if let Some(backend) = manifest_backend.as_ref() {
@@ -319,284 +302,6 @@ impl HarnessToolFactory {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum BuiltinKnowledgeToolKind {
-    ListDocs,
-    ReadDoc,
-    SearchDocs,
-    SearchDocPaths,
-    ListTree,
-    ReadManifest,
-    Neighbors,
-}
-
-struct BuiltinKnowledgeTool {
-    kind: BuiltinKnowledgeToolKind,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct BuiltinFilterArgs {
-    #[serde(default)]
-    tags: Vec<String>,
-    kind: Option<BuiltinDocKind>,
-    authority: Option<BuiltinDocAuthority>,
-    status: Option<BuiltinDocStatus>,
-    path_prefix: Option<String>,
-    related_to: Option<String>,
-    edge_type: Option<BuiltinDocEdgeType>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuiltinLookupArgs {
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuiltinSearchArgs {
-    query: String,
-    #[serde(flatten)]
-    filter: BuiltinFilterArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuiltinTreeArgs {
-    prefix: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuiltinNeighborArgs {
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-    edge_type: Option<BuiltinDocEdgeType>,
-}
-
-impl BuiltinKnowledgeTool {
-    fn new(kind: BuiltinKnowledgeToolKind) -> Self {
-        Self { kind }
-    }
-}
-
-#[async_trait]
-impl Tool for BuiltinKnowledgeTool {
-    fn name(&self) -> &str {
-        match self.kind {
-            BuiltinKnowledgeToolKind::ListDocs => "list_builtin_docs",
-            BuiltinKnowledgeToolKind::ReadDoc => "read_builtin_doc",
-            BuiltinKnowledgeToolKind::SearchDocs => "search_builtin_docs",
-            BuiltinKnowledgeToolKind::SearchDocPaths => "search_builtin_doc_paths",
-            BuiltinKnowledgeToolKind::ListTree => "list_builtin_doc_tree",
-            BuiltinKnowledgeToolKind::ReadManifest => "read_builtin_doc_manifest",
-            BuiltinKnowledgeToolKind::Neighbors => "list_builtin_doc_neighbors",
-        }
-    }
-
-    fn description(&self) -> &str {
-        match self.kind {
-            BuiltinKnowledgeToolKind::ListDocs => {
-                "List builtin docs as compact metadata only. Use this to browse or filter the builtin knowledge set without loading full document content."
-            }
-            BuiltinKnowledgeToolKind::ReadDoc => {
-                "Read one full builtin doc, including its body content, by id or builtin://nenjo/ path. Use this when you want the actual document text, not just metadata."
-            }
-            BuiltinKnowledgeToolKind::SearchDocs => {
-                "Search builtin docs and return matches with body content. Use this when you want to inspect or quote the matching text, not just identify candidate docs."
-            }
-            BuiltinKnowledgeToolKind::SearchDocPaths => {
-                "Search builtin docs and return compact metadata without body content. Use this for fast discovery or navigation when you only need to know which docs match."
-            }
-            BuiltinKnowledgeToolKind::ListTree => {
-                "List the builtin doc tree under builtin://nenjo/. Use this when you want a filesystem-style view of the builtin knowledge namespace instead of a search result."
-            }
-            BuiltinKnowledgeToolKind::ReadManifest => {
-                "Read one builtin doc's metadata only by id or path. Use this when you need title, tags, path, or other manifest fields but do not need the document body."
-            }
-            BuiltinKnowledgeToolKind::Neighbors => {
-                "List graph neighbors for one builtin doc by id or path. Use this when you want related builtin docs connected by knowledge edges."
-            }
-        }
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        match self.kind {
-            BuiltinKnowledgeToolKind::ReadDoc | BuiltinKnowledgeToolKind::ReadManifest => json!({
-                "type": "object",
-                "properties": {
-                    "id_or_path": {
-                        "type": "string",
-                        "description": "Builtin doc id such as nenjo.guide.routines or path such as builtin://nenjo/guide/routines.md"
-                    }
-                },
-                "required": ["id_or_path"]
-            }),
-            BuiltinKnowledgeToolKind::SearchDocs | BuiltinKnowledgeToolKind::SearchDocPaths => {
-                filter_schema(
-                    Some(json!({
-                        "query": {
-                            "type": "string",
-                            "description": "Search query, alias, keyword, tag, title, or body text"
-                        }
-                    })),
-                    &["query"],
-                )
-            }
-            BuiltinKnowledgeToolKind::ListTree => json!({
-                "type": "object",
-                "properties": {
-                    "prefix": {
-                        "type": "string",
-                        "description": "Optional builtin://nenjo/ path prefix"
-                    }
-                }
-            }),
-            BuiltinKnowledgeToolKind::ListDocs => filter_schema(None, &[]),
-            BuiltinKnowledgeToolKind::Neighbors => json!({
-                "type": "object",
-                "properties": {
-                    "id_or_path": {
-                        "type": "string",
-                        "description": "Builtin doc id or builtin://nenjo/ path"
-                    },
-                    "edge_type": {
-                        "type": "string",
-                        "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"],
-                        "description": "Optional canonical relationship type"
-                    }
-                },
-                "required": ["id_or_path"]
-            }),
-        }
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let pack = builtin_knowledge_pack();
-        let output = match self.kind {
-            BuiltinKnowledgeToolKind::ListDocs => {
-                let args: BuiltinFilterArgs =
-                    serde_json::from_value(args).context("invalid list_builtin_docs args")?;
-                serde_json::to_value(pack.list_docs(args.into_filter()))?
-            }
-            BuiltinKnowledgeToolKind::ReadDoc => {
-                let args: BuiltinLookupArgs =
-                    serde_json::from_value(args).context("invalid read_builtin_doc args")?;
-                serde_json::to_value(pack.read_doc(&args.id_or_path).ok_or_else(|| {
-                    anyhow!(
-                        "unknown builtin doc '{}'; use an id or builtin://nenjo/ path",
-                        args.id_or_path
-                    )
-                })?)?
-            }
-            BuiltinKnowledgeToolKind::SearchDocs => {
-                let args: BuiltinSearchArgs =
-                    serde_json::from_value(args).context("invalid search_builtin_docs args")?;
-                serde_json::to_value(pack.search_docs(&args.query, args.filter.into_filter()))?
-            }
-            BuiltinKnowledgeToolKind::SearchDocPaths => {
-                let args: BuiltinSearchArgs = serde_json::from_value(args)
-                    .context("invalid search_builtin_doc_paths args")?;
-                serde_json::to_value(pack.search_paths(&args.query, args.filter.into_filter()))?
-            }
-            BuiltinKnowledgeToolKind::ListTree => {
-                let args: BuiltinTreeArgs =
-                    serde_json::from_value(args).context("invalid list_builtin_doc_tree args")?;
-                serde_json::to_value(pack.list_tree(args.prefix.as_deref()))?
-            }
-            BuiltinKnowledgeToolKind::ReadManifest => {
-                let args: BuiltinLookupArgs = serde_json::from_value(args)
-                    .context("invalid read_builtin_doc_manifest args")?;
-                serde_json::to_value(pack.read_manifest(&args.id_or_path).ok_or_else(|| {
-                    anyhow!(
-                        "unknown builtin doc '{}'; use an id or builtin://nenjo/ path",
-                        args.id_or_path
-                    )
-                })?)?
-            }
-            BuiltinKnowledgeToolKind::Neighbors => {
-                let args: BuiltinNeighborArgs = serde_json::from_value(args)
-                    .context("invalid list_builtin_doc_neighbors args")?;
-                serde_json::to_value(pack.neighbors(&args.id_or_path, args.edge_type))?
-            }
-        };
-
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string_pretty(&output)?,
-            error: None,
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-}
-
-impl BuiltinFilterArgs {
-    fn into_filter(self) -> BuiltinDocFilter {
-        BuiltinDocFilter {
-            tags: self.tags,
-            kind: self.kind,
-            authority: self.authority,
-            status: self.status,
-            path_prefix: self.path_prefix,
-            related_to: self.related_to,
-            edge_type: self.edge_type,
-        }
-    }
-}
-
-fn filter_schema(
-    extra_properties: Option<serde_json::Value>,
-    required: &[&str],
-) -> serde_json::Value {
-    let mut properties = json!({
-        "tags": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Optional tags that all returned docs must have"
-        },
-        "kind": {
-            "type": "string",
-            "enum": ["guide", "reference", "taxonomy", "domain", "entity", "policy"]
-        },
-        "authority": {
-            "type": "string",
-            "enum": ["canonical", "pattern", "reference", "advisory", "example"]
-        },
-        "status": {
-            "type": "string",
-            "enum": ["stable", "draft", "deprecated"]
-        },
-        "path_prefix": {
-            "type": "string",
-            "description": "Optional builtin://nenjo/ path prefix"
-        },
-        "related_to": {
-            "type": "string",
-            "description": "Optional target doc id that returned docs must relate to"
-        },
-        "edge_type": {
-            "type": "string",
-            "enum": ["part_of", "defines", "governs", "classifies", "references", "depends_on", "extends", "related_to"],
-            "description": "Optional canonical relationship type used with related_to"
-        }
-    });
-
-    if let Some(extra) = extra_properties
-        && let Some(map) = properties.as_object_mut()
-        && let Some(extra_map) = extra.as_object()
-    {
-        for (key, value) in extra_map {
-            map.insert(key.clone(), value.clone());
-        }
-    }
-
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required
-    })
-}
-
 const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent", "get_agent_prompt"];
 const AGENT_WRITE_TOOLS: &[&str] = &[
     "create_agent",
@@ -618,17 +323,17 @@ const DOMAIN_WRITE_TOOLS: &[&str] = &[
     "update_domain_prompt",
     "delete_domain",
 ];
-const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &[
-    "list_projects",
-    "get_project",
-    "list_project_documents",
-    "read_project_document_manifest",
-    "read_project_document",
-    "search_project_documents",
-    "search_project_document_paths",
-    "list_project_document_tree",
-    "list_project_document_neighbors",
+const KNOWLEDGE_READ_TOOLS: &[&str] = &[
+    "list_knowledge_packs",
+    "list_knowledge_docs",
+    "read_knowledge_doc",
+    "read_knowledge_doc_manifest",
+    "search_knowledge",
+    "search_knowledge_paths",
+    "list_knowledge_tree",
+    "list_knowledge_neighbors",
 ];
+const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
 const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_tasks",
     "get_project_task",
@@ -711,6 +416,7 @@ fn add_manifest_tools(
     policy: &ManifestAccessPolicy,
 ) {
     let specs = manifest_tool_specs();
+    add_named_manifest_tools(tools, backend.clone(), &specs, KNOWLEDGE_READ_TOOLS);
     for (resource, read_tools, write_tools) in MANIFEST_TOOL_GROUPS {
         if policy.can_read_resource(*resource) {
             add_named_manifest_tools(tools, backend.clone(), &specs, read_tools);
@@ -1513,7 +1219,8 @@ impl Tool for ManifestContractTool {
 #[async_trait]
 impl ToolFactory for HarnessToolFactory {
     async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
-        self.build_tools(agent, &self.security).await
+        self.build_tools(agent, &self.security, ToolContext::default())
+            .await
     }
 
     async fn create_tools_with_security(
@@ -1521,7 +1228,17 @@ impl ToolFactory for HarnessToolFactory {
         agent: &AgentManifest,
         security: Arc<SecurityPolicy>,
     ) -> Vec<Arc<dyn Tool>> {
-        self.build_tools(agent, &security).await
+        self.build_tools(agent, &security, ToolContext::default())
+            .await
+    }
+
+    async fn create_tools_with_context(
+        &self,
+        agent: &AgentManifest,
+        security: Arc<SecurityPolicy>,
+        context: ToolContext,
+    ) -> Vec<Arc<dyn Tool>> {
+        self.build_tools(agent, &security, context).await
     }
 
     fn workspace_dir(&self) -> std::path::PathBuf {
@@ -1916,14 +1633,10 @@ mod tests {
         assert!(names.iter().any(|name| name == "update_agent"));
         assert!(names.iter().any(|name| name == "list_projects"));
         assert!(names.iter().any(|name| name == "get_project"));
-        assert!(names.iter().any(|name| name == "list_project_documents"));
-        assert!(names.iter().any(|name| name == "read_project_document"));
-        assert!(names.iter().any(|name| name == "search_project_documents"));
-        assert!(
-            names
-                .iter()
-                .any(|name| name == "search_project_document_paths")
-        );
+        assert!(names.iter().any(|name| name == "list_knowledge_packs"));
+        assert!(names.iter().any(|name| name == "read_knowledge_doc"));
+        assert!(names.iter().any(|name| name == "search_knowledge"));
+        assert!(names.iter().any(|name| name == "search_knowledge_paths"));
         assert!(names.iter().any(|name| name == "list_project_tasks"));
         assert!(names.iter().any(|name| name == "get_project_task"));
         assert!(
@@ -1932,14 +1645,14 @@ mod tests {
                 .any(|name| name == "list_project_execution_runs")
         );
         assert!(names.iter().any(|name| name == "get_project_execution_run"));
-        assert!(names.iter().any(|name| name == "list_builtin_docs"));
-        assert!(names.iter().any(|name| name == "read_builtin_doc"));
-        assert!(names.iter().any(|name| name == "search_builtin_docs"));
-        assert!(names.iter().any(|name| name == "search_builtin_doc_paths"));
-        assert!(names.iter().any(|name| name == "list_builtin_doc_tree"));
-        assert!(names.iter().any(|name| name == "read_builtin_doc_manifest"));
+        assert!(!names.iter().any(|name| name == "list_builtin_docs"));
+        assert!(!names.iter().any(|name| name == "read_builtin_doc"));
+        assert!(!names.iter().any(|name| name == "search_builtin_docs"));
+        assert!(!names.iter().any(|name| name == "search_builtin_doc_paths"));
+        assert!(!names.iter().any(|name| name == "list_builtin_doc_tree"));
+        assert!(!names.iter().any(|name| name == "read_builtin_doc_manifest"));
         assert!(
-            names
+            !names
                 .iter()
                 .any(|name| name == "list_builtin_doc_neighbors")
         );
@@ -1949,43 +1662,19 @@ mod tests {
         assert!(!names.iter().any(|name| name == "platform_read"));
         assert!(!names.iter().any(|name| name == "platform_write"));
         assert!(!names.iter().any(|name| name == "platform_graph"));
-    }
 
-    #[tokio::test]
-    async fn builtin_knowledge_tools_read_embedded_docs() {
-        let read_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::ReadDoc);
-        let result = read_tool
-            .execute(json!({"id_or_path": "nenjo.guide.routines"}))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("builtin://nenjo/guide/routines.md"));
-        assert!(result.output.contains("# Routines"));
+        let agent_without_project_scope = AgentManifest {
+            platform_scopes: vec!["agents:read".into()],
+            ..agent
+        };
+        let tools = factory.create_tools(&agent_without_project_scope).await;
+        let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-        let search_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::SearchDocPaths);
-        let result = search_tool
-            .execute(json!({"query": "permission"}))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("nenjo.guide.scopes"));
-        assert!(!result.output.contains("# Platform Scopes"));
-
-        let neighbor_tool = BuiltinKnowledgeTool::new(BuiltinKnowledgeToolKind::Neighbors);
-        let result = neighbor_tool
-            .execute(json!({"id_or_path": "nenjo.guide.routines"}))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("\"edge_type\""));
-        assert!(result.output.contains("\"edges\""));
-        assert!(result.output.contains("\"source\""));
-        assert!(result.output.contains("\"target\""));
-        assert!(
-            result
-                .output
-                .contains("builtin://nenjo/taxonomy/workflow-patterns.md")
-        );
+        assert!(names.iter().any(|name| name == "list_knowledge_packs"));
+        assert!(names.iter().any(|name| name == "read_knowledge_doc"));
+        assert!(names.iter().any(|name| name == "search_knowledge"));
+        assert!(names.iter().any(|name| name == "search_knowledge_paths"));
+        assert!(!names.iter().any(|name| name == "list_projects"));
     }
 
     #[tokio::test]

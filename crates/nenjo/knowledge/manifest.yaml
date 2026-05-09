@@ -257,7 +257,7 @@ docs:
       - template variables
       - "{{ project.documents }}"
       - "{{ available_abilities }}"
-      - "{{ builtin.documents }}"
+      - "{{ builtin.nenjo }}"
       - memory-aware prompts
     related:
       - type: depends_on
@@ -766,7 +766,7 @@ docs:
       - "{{ self }}"
       - "{{ task }}"
       - "{{ project.documents }}"
-      - "{{ builtin.documents }}"
+      - "{{ builtin.nenjo }}"
       - "{{ available_agents }}"
       - "{{ available_abilities }}"
       - "{{ memories }}"

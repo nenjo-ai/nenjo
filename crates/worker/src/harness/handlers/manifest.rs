@@ -26,6 +26,22 @@ struct InlineDocumentMeta {
     project_id: Uuid,
     filename: String,
     path: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    authority: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
     size_bytes: i64,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -91,30 +107,25 @@ pub async fn handle_manifest_changed(
                 let slug = project_workspace_slug(&manifest, pid);
                 let project_dir = ctx.config.workspace_dir.join(&slug);
                 if action == ResourceAction::Deleted {
-                    match crate::harness::doc_sync::remove_manifest_entry(&project_dir, resource_id)
-                    {
-                        Ok(Some(filename)) => {
-                            if let Err(error) =
-                                crate::harness::doc_sync::remove_project_knowledge_entry(
-                                    &project_dir,
-                                    resource_id,
-                                )
-                            {
-                                warn!(%pid, %resource_id, error = %error, "Failed to update local project knowledge manifest");
-                            }
-                            if let Err(error) = crate::harness::doc_sync::delete_document_file(
-                                &project_dir,
-                                &filename,
-                            ) {
-                                warn!(%pid, %resource_id, error = %error, "Failed to delete document file");
-                            }
+                    let existing =
+                        crate::harness::doc_sync::project_knowledge_document_relative_path(
+                            &project_dir,
+                            resource_id,
+                        );
+                    if let Err(error) = crate::harness::doc_sync::remove_project_knowledge_entry(
+                        &project_dir,
+                        resource_id,
+                    ) {
+                        warn!(%pid, %resource_id, error = %error, "Failed to update local project knowledge manifest");
+                    }
+                    if let Some(filename) = existing {
+                        if let Err(error) =
+                            crate::harness::doc_sync::delete_document_file(&project_dir, &filename)
+                        {
+                            warn!(%pid, %resource_id, error = %error, "Failed to delete document file");
                         }
-                        Ok(None) => {
-                            debug!(%pid, %resource_id, "Deleted document was not present in local manifest");
-                        }
-                        Err(error) => {
-                            warn!(%pid, %resource_id, error = %error, "Failed to update local document manifest");
-                        }
+                    } else {
+                        debug!(%pid, %resource_id, "Deleted document was not present in local knowledge manifest");
                     }
                 } else {
                     let metadata = payload
@@ -133,12 +144,14 @@ pub async fn handle_manifest_changed(
                             id: meta.id,
                             filename: meta.filename,
                             path: meta.path,
-                            title: None,
-                            kind: None,
-                            authority: None,
-                            summary: None,
-                            status: None,
-                            tags: Vec::new(),
+                            title: meta.title,
+                            kind: meta.kind,
+                            authority: meta.authority,
+                            summary: meta.summary,
+                            status: meta.status,
+                            tags: meta.tags,
+                            aliases: meta.aliases,
+                            keywords: meta.keywords,
                             content_type: "application/octet-stream".to_string(),
                             size_bytes: meta.size_bytes,
                             updated_at: meta.updated_at.to_rfc3339(),

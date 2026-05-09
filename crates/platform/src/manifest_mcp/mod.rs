@@ -34,8 +34,8 @@ mod types;
 
 pub use backend::{
     AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, ManifestMcpBackend, ModelManifestBackend,
-    ProjectManifestBackend, RoutineManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend, ManifestMcpBackend,
+    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{
@@ -50,9 +50,8 @@ pub use params::{
     DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, ModelCreateParams,
     ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
     ProjectDeleteParams, ProjectDocumentContentUpdateParams, ProjectDocumentCreateParams,
-    ProjectDocumentDeleteParams, ProjectDocumentsListParams, ProjectUpdateParams,
-    ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
-    RoutinesGetParams,
+    ProjectDocumentDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
+    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
 };
 pub use results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -63,9 +62,8 @@ pub use results::{
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
     DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
     ModelGetResult, ModelMutationResult, ModelsListResult, ProjectDocumentContentMutationResult,
-    ProjectDocumentMutationResult, ProjectDocumentsListResult, ProjectGetResult,
-    ProjectMutationResult, ProjectsListResult, RoutineGetResult, RoutineMutationResult,
-    RoutinesListResult,
+    ProjectDocumentMutationResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
+    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
 };
 pub use types::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,

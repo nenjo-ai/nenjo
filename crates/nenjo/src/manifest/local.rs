@@ -119,6 +119,14 @@ impl ManifestReader for LocalManifestStore {
             .find(|item| item.id == id))
     }
 
+    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectManifest>> {
+        let projects = self.load_json::<ProjectManifest>("projects.json");
+        let projects_by_slug = index_projects_by_slug(&projects);
+        Ok(projects_by_slug
+            .get(slug)
+            .map(|index| projects[*index].clone()))
+    }
+
     async fn list_councils(&self) -> Result<Vec<CouncilManifest>> {
         Ok(self.load_manifest().await?.councils)
     }
@@ -283,6 +291,14 @@ fn walk_json_files<T: serde::de::DeserializeOwned>(dir: &Path, items: &mut Vec<T
             }
         }
     }
+}
+
+fn index_projects_by_slug(projects: &[ProjectManifest]) -> std::collections::HashMap<&str, usize> {
+    let mut index = std::collections::HashMap::new();
+    for (position, project) in projects.iter().enumerate() {
+        index.entry(project.slug.as_str()).or_insert(position);
+    }
+    index
 }
 
 fn sync_tree<T: TreeItem>(root: &Path, items: &[T]) -> Result<()> {

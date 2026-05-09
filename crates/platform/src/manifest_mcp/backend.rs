@@ -31,6 +31,27 @@ use super::results::{
 };
 
 #[async_trait]
+/// Backend operations for generic knowledge pack resources.
+pub trait KnowledgeManifestBackend: Send + Sync {
+    /// List locally available knowledge packs.
+    async fn list_knowledge_packs(&self) -> Result<Value>;
+    /// List compact document metadata from one pack.
+    async fn list_knowledge_docs(&self, params: Value) -> Result<Value>;
+    /// Read one document manifest from one pack.
+    async fn read_knowledge_doc_manifest(&self, params: Value) -> Result<Value>;
+    /// Read one full document from one pack.
+    async fn read_knowledge_doc(&self, params: Value) -> Result<Value>;
+    /// Search one pack with document bodies.
+    async fn search_knowledge(&self, params: Value) -> Result<Value>;
+    /// Search one pack using metadata only.
+    async fn search_knowledge_paths(&self, params: Value) -> Result<Value>;
+    /// List one pack's document tree.
+    async fn list_knowledge_tree(&self, params: Value) -> Result<Value>;
+    /// List graph neighbors for one document in one pack.
+    async fn list_knowledge_neighbors(&self, params: Value) -> Result<Value>;
+}
+
+#[async_trait]
 /// Backend operations for agent manifest resources.
 pub trait AgentManifestBackend: Send + Sync {
     /// List visible agents.
@@ -115,8 +136,6 @@ pub trait ProjectManifestBackend: Send + Sync {
     async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult>;
     /// Delete a project.
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult>;
-    /// List project documents for one project.
-    async fn list_project_documents(&self, params: Value) -> Result<Value>;
     /// Create a project document.
     async fn create_project_document(
         &self,
@@ -132,24 +151,6 @@ pub trait ProjectManifestBackend: Send + Sync {
         &self,
         params: ProjectDocumentDeleteParams,
     ) -> Result<DeleteResult>;
-
-    /// Read one project document manifest by id or path for local knowledge-style tooling.
-    async fn read_project_document_manifest(&self, params: Value) -> Result<Value>;
-
-    /// Read one project document body by id or path for local knowledge-style tooling.
-    async fn read_project_document(&self, params: Value) -> Result<Value>;
-
-    /// Search project documents and return matches with content.
-    async fn search_project_documents(&self, params: Value) -> Result<Value>;
-
-    /// Search project documents and return compact path metadata only.
-    async fn search_project_document_paths(&self, params: Value) -> Result<Value>;
-
-    /// List the project document tree.
-    async fn list_project_document_tree(&self, params: Value) -> Result<Value>;
-
-    /// List graph neighbors for one project document.
-    async fn list_project_document_neighbors(&self, params: Value) -> Result<Value>;
 }
 
 #[async_trait]
@@ -255,6 +256,7 @@ pub trait ManifestMcpBackend:
     AgentManifestBackend
     + AbilityManifestBackend
     + DomainManifestBackend
+    + KnowledgeManifestBackend
     + ProjectManifestBackend
     + RoutineManifestBackend
     + ModelManifestBackend
@@ -269,6 +271,7 @@ impl<T> ManifestMcpBackend for T where
     T: AgentManifestBackend
         + AbilityManifestBackend
         + DomainManifestBackend
+        + KnowledgeManifestBackend
         + ProjectManifestBackend
         + RoutineManifestBackend
         + ModelManifestBackend

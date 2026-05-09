@@ -234,60 +234,42 @@ impl AgentInstance {
     }
 }
 
-/// Document manifest entry (mirrors harness doc_sync).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ManifestEntry {
-    filename: String,
-    path: Option<String>,
-    title: Option<String>,
-    kind: Option<String>,
-    authority: Option<String>,
-    summary: Option<String>,
-    status: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    size_bytes: i64,
-}
-
-/// Document manifest (mirrors harness doc_sync).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct DocumentManifest {
-    documents: Vec<ManifestEntry>,
-}
-
-/// Build a compact XML listing of project documents from a manifest file.
+/// Build a compact XML listing of project document metadata from a knowledge manifest file.
 ///
 /// Returns empty string if no manifest exists or no documents are present.
 pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &str) -> String {
     let project_dir = docs_base_dir.join(project_slug);
-    let manifest_path = project_dir.join("manifest.json");
-    let manifest: DocumentManifest = match std::fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-    {
-        Some(m) => m,
-        None => return String::new(),
-    };
+    let manifest_path = project_dir.join("knowledge_manifest.json");
+    let manifest: crate::knowledge::KnowledgePackManifestData =
+        match std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+        {
+            Some(m) => m,
+            None => return String::new(),
+        };
 
-    if manifest.documents.is_empty() {
+    if manifest.docs.is_empty() {
         return String::new();
     }
 
     let ctx = crate::context::ProjectDocumentsContext {
         path: project_slug.to_string(),
         documents: manifest
-            .documents
+            .docs
             .iter()
             .map(|doc| crate::context::DocumentContext {
-                name: doc.filename.clone(),
-                title: doc.title.clone(),
-                path: doc.path.clone(),
-                kind: doc.kind.clone(),
-                authority: doc.authority.clone(),
-                size: format_size(doc.size_bytes),
-                status: doc.status.clone(),
+                name: knowledge_doc_filename(doc),
+                title: Some(doc.title.clone()),
+                path: knowledge_doc_parent_path(doc),
+                kind: Some(doc.kind.as_str().to_string()),
+                authority: Some(doc.authority.as_str().to_string()),
+                size: String::new(),
+                status: Some(doc.status.as_str().to_string()),
                 tags: doc.tags.clone(),
-                summary: doc.summary.clone(),
+                aliases: doc.aliases.clone(),
+                keywords: doc.keywords.clone(),
+                summary: Some(doc.summary.clone()),
             })
             .collect(),
     };
@@ -295,15 +277,31 @@ pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &st
     nenjo_xml::to_xml_pretty(&ctx, 2)
 }
 
-/// Format bytes into a human-readable size string.
-fn format_size(bytes: i64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{}KB", bytes / 1024)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
+fn knowledge_doc_relative_path(doc: &crate::knowledge::KnowledgeDocManifest) -> String {
+    doc.virtual_path
+        .strip_prefix("project://")
+        .and_then(|rest| rest.split_once('/').map(|(_, path)| path.to_string()))
+        .unwrap_or_else(|| {
+            doc.source_path
+                .strip_prefix("docs/")
+                .unwrap_or(doc.source_path.as_str())
+                .to_string()
+        })
+}
+
+fn knowledge_doc_filename(doc: &crate::knowledge::KnowledgeDocManifest) -> String {
+    knowledge_doc_relative_path(doc)
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("document.md")
+        .to_string()
+}
+
+fn knowledge_doc_parent_path(doc: &crate::knowledge::KnowledgeDocManifest) -> Option<String> {
+    knowledge_doc_relative_path(doc)
+        .rsplit_once('/')
+        .map(|(path, _)| path.to_string())
 }
 
 #[cfg(test)]
@@ -311,10 +309,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(512), "512B");
-        assert_eq!(format_size(2048), "2KB");
-        assert_eq!(format_size(1_500_000), "1.4MB");
+    fn document_listing_reads_synced_knowledge_manifest_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("demo");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("knowledge_manifest.json"),
+            r#"{
+              "pack_id": "project-demo",
+              "pack_version": "1",
+              "schema_version": 1,
+              "root_uri": "project://11111111-1111-1111-1111-111111111111/",
+              "docs": [
+                {
+                  "id": "demo.nenjo",
+                  "virtual_path": "project://11111111-1111-1111-1111-111111111111/domain/nenjo.md",
+                  "source_path": "docs/domain/nenjo.md",
+                  "title": "Nenjo",
+                  "kind": "domain",
+                  "authority": "canonical",
+                  "summary": "Nenjo domain overview",
+                  "status": "stable",
+                  "tags": ["domain:nenjo"],
+                  "aliases": ["nenjo overview"],
+                  "keywords": ["workflow", "agent"],
+                  "related": []
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let listing = build_document_listing(dir.path(), "demo");
+
+        assert!(listing.contains("<project_documents"));
+        assert!(listing.contains("path=\"demo\""));
+        assert!(listing.contains("name=\"nenjo.md\""));
+        assert!(listing.contains("path=\"domain\""));
+        assert!(listing.contains("<aliases>"));
+        assert!(listing.contains("<keywords>"));
+        assert!(listing.contains("Nenjo domain overview"));
     }
 
     // Agent prompt building tests live in harness (they need AgentBuilder

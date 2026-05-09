@@ -24,6 +24,8 @@ pub mod builtin_knowledge;
 pub mod client;
 pub mod config;
 pub mod context;
+pub mod knowledge;
+pub mod knowledge_tools;
 pub mod manifest;
 pub mod memory;
 pub mod provider;
@@ -40,7 +42,8 @@ pub use manifest::{
     store::{ManifestReader, ManifestWriter},
 };
 pub use provider::{
-    ModelProviderFactory, Provider, ProviderBuilder, ProviderError, RoutineRunner, ToolFactory,
+    ModelProviderFactory, Provider, ProviderBuilder, ProviderError, RoutineRunner, ToolContext,
+    ToolFactory,
 };
 
 // Re-export the Tool trait for custom tool implementations.

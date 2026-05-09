@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::generated::BUILTIN_DOCS;
 use super::types::*;
 
-pub const BUILTIN_KNOWLEDGE_DISCOVERY: &str = "Builtin Nenjo knowledge is available at builtin://nenjo/. Use list_builtin_doc_tree, search_builtin_doc_paths, read_builtin_doc_manifest, list_builtin_doc_neighbors, and read_builtin_doc to inspect it when platform concepts or built-in patterns are relevant.";
+pub const BUILTIN_KNOWLEDGE_DISCOVERY: &str = "Nenjo knowledge is available as the built-in Nenjo knowledge pack. Use list_knowledge_tree, search_knowledge_paths, read_knowledge_doc_manifest, list_knowledge_neighbors, and read_knowledge_doc with pack=\"builtin:nenjo\" when platform concepts or built-in patterns are relevant.";
 
 const MANIFEST_YAML: &str = include_str!("../../knowledge/manifest.yaml");
 
@@ -37,9 +37,11 @@ pub fn builtin_knowledge_pack() -> &'static BuiltinKnowledgePack {
     })
 }
 
-pub fn builtin_documents_summary() -> String {
+pub fn builtin_knowledge_summary() -> String {
     let pack = builtin_knowledge_pack();
-    let ctx = BuiltinDocumentsSummaryContext {
+    let ctx = BuiltinKnowledgeSummaryContext {
+        source: "builtin",
+        name: "nenjo",
         root: "builtin://nenjo/",
         usage: BUILTIN_KNOWLEDGE_DISCOVERY,
         docs: pack
@@ -60,8 +62,12 @@ pub fn builtin_documents_summary() -> String {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename = "builtin_documents")]
-struct BuiltinDocumentsSummaryContext<'a> {
+#[serde(rename = "knowledge_pack")]
+struct BuiltinKnowledgeSummaryContext<'a> {
+    #[serde(rename = "@source")]
+    source: &'a str,
+    #[serde(rename = "@name")]
+    name: &'a str,
     #[serde(rename = "@root")]
     root: &'a str,
     usage: &'a str,
@@ -80,19 +86,6 @@ struct BuiltinDocumentSummaryContext<'a> {
     kind: &'a str,
     title: &'a str,
     summary: &'a str,
-}
-
-impl BuiltinDocKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            BuiltinDocKind::Guide => "guide",
-            BuiltinDocKind::Reference => "reference",
-            BuiltinDocKind::Taxonomy => "taxonomy",
-            BuiltinDocKind::Domain => "domain",
-            BuiltinDocKind::Entity => "entity",
-            BuiltinDocKind::Policy => "policy",
-        }
-    }
 }
 
 fn content_hash(manifest_docs: &[BuiltinDocManifest]) -> String {

@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use crate::builtin_knowledge::builtin_documents_summary;
+use crate::builtin_knowledge::{builtin_knowledge_pack, builtin_knowledge_summary};
 use crate::context::{MemoryProfileContext, TaskContext};
+use crate::knowledge_tools::knowledge_document_metadata_vars;
 
 use super::types::{
     AbilityContext, AgentContext, AvailableAbilitiesContext, AvailableAgentsContext,
@@ -254,7 +255,12 @@ impl RenderContextVars {
         if !self.documents_xml.is_empty() {
             vars.insert("project.documents".to_string(), self.documents_xml.clone());
         }
-        vars.insert("builtin.documents".to_string(), builtin_documents_summary());
+        let builtin_knowledge = builtin_knowledge_summary();
+        vars.insert("builtin.nenjo".to_string(), builtin_knowledge);
+        vars.extend(knowledge_document_metadata_vars(
+            "builtin.nenjo",
+            builtin_knowledge_pack(),
+        ));
 
         // Merge context blocks
         vars.extend(self.context_blocks.clone());
@@ -288,5 +294,69 @@ mod tests {
         let vars = ctx.to_vars();
 
         assert_eq!(vars.get("project.id"), Some(&project_id.to_string()));
+    }
+
+    #[test]
+    fn builtin_document_selector_vars_render_targeted_metadata() {
+        let vars = RenderContextVars::default().to_vars();
+        let agents = vars
+            .get("builtin.nenjo.guide.agents")
+            .expect("agents builtin doc selector");
+        let domain = vars
+            .get("builtin.nenjo.domain.nenjo")
+            .expect("nenjo domain builtin doc selector");
+
+        assert!(agents.contains("<knowledge_doc"));
+        assert!(agents.contains("path=\"builtin://nenjo/guide/agents.md\""));
+        assert!(agents.contains("title=\"Agents\""));
+        assert!(agents.contains("<summary>"));
+        assert!(!agents.contains("\"virtual_path\""));
+        assert!(!agents.contains(" id=\""));
+        assert!(!agents.contains("source_path="));
+        assert!(!agents.contains("# Agents"));
+        assert!(domain.contains("<knowledge_doc"));
+        assert!(domain.contains("path=\"builtin://nenjo/domain/nenjo.md\""));
+        assert!(domain.contains("title=\"Nenjo\""));
+        assert!(domain.contains("<keywords>"));
+        assert!(domain.contains("workflows"));
+        assert!(!domain.contains("\"virtual_path\""));
+        assert!(!domain.contains(" id=\""));
+        assert!(!domain.contains("source_path="));
+        assert!(!domain.contains("# Nenjo"));
+        let summary = vars
+            .get("builtin.nenjo")
+            .expect("builtin nenjo knowledge summary");
+        assert!(summary.contains("<knowledge_pack"));
+        assert!(summary.contains("source=\"builtin\""));
+        assert!(summary.contains("name=\"nenjo\""));
+        assert!(!vars.contains_key("builtin_documents"));
+        assert!(!vars.contains_key("builtin.documents.domain.nenjo"));
+    }
+
+    #[test]
+    fn builtin_document_path_selector_renders_in_templates() {
+        let vars = RenderContextVars::default().to_vars();
+        let rendered =
+            nenjo_xml::template::render_template("{{ builtin.nenjo.domain.nenjo }}", &vars);
+
+        assert!(rendered.contains("<knowledge_doc"));
+        assert!(rendered.contains("path=\"builtin://nenjo/domain/nenjo.md\""));
+        assert!(rendered.contains("title=\"Nenjo\""));
+        assert!(!rendered.contains("\"virtual_path\""));
+        assert!(!rendered.contains("# Nenjo"));
+
+        let rendered = nenjo_xml::template::render_template(
+            "{{ builtin.nenjo.domain.nenjo_platform }}",
+            &vars,
+        );
+        assert!(rendered.contains("<knowledge_doc"));
+        assert!(rendered.contains("path=\"builtin://nenjo/domain/platform.md\""));
+        assert!(!rendered.contains("\"virtual_path\""));
+
+        let rendered =
+            nenjo_xml::template::render_template("{{ builtin.nenjo.domain.nenjo_sdk }}", &vars);
+        assert!(rendered.contains("<knowledge_doc"));
+        assert!(rendered.contains("path=\"builtin://nenjo/domain/sdk.md\""));
+        assert!(!rendered.contains("\"virtual_path\""));
     }
 }

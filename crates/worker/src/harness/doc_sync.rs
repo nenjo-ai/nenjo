@@ -1,11 +1,15 @@
 //! Document sync — download project documents to the local workspace.
 //!
 //! At bootstrap, fetches document metadata for each project via the v1 API,
-//! diffs against a local `_manifest.json`, and downloads new/changed docs.
+//! diffs against the local project `knowledge_manifest.json`, and downloads new/changed docs.
 //! Deleted docs are removed locally. Network errors are soft-fail (logged);
 //! filesystem errors are hard-fail.
 
 use anyhow::{Context, Result};
+use nenjo::knowledge::{
+    KnowledgeDocAuthority, KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind,
+    KnowledgeDocManifest, KnowledgeDocStatus, KnowledgePackManifest,
+};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,34 +20,6 @@ use uuid::Uuid;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use crate::harness::api_client::{DocumentSyncEdge, DocumentSyncMeta, NenjoClient};
-
-// ---------------------------------------------------------------------------
-// Manifest
-// ---------------------------------------------------------------------------
-
-/// On-disk manifest tracking which documents have been synced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentManifest {
-    pub project_id: Uuid,
-    pub synced_at: String,
-    pub documents: Vec<ManifestEntry>,
-}
-
-/// A single document entry in the manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    pub id: Uuid,
-    pub filename: String,
-    pub path: Option<String>,
-    pub title: Option<String>,
-    pub kind: Option<String>,
-    pub authority: Option<String>,
-    pub summary: Option<String>,
-    pub status: Option<String>,
-    pub tags: Vec<String>,
-    pub size_bytes: i64,
-    pub updated_at: String,
-}
 
 // ---------------------------------------------------------------------------
 // Diff
@@ -66,13 +42,6 @@ pub struct FileRename {
     pub to: String,
 }
 
-fn manifest_entry_relative_path(entry: &ManifestEntry) -> String {
-    match entry.path.as_deref().map(|path| path.trim_matches('/')) {
-        Some(path) if !path.is_empty() => format!("{path}/{}", entry.filename),
-        _ => entry.filename.clone(),
-    }
-}
-
 fn document_relative_path(doc: &DocumentSyncMeta) -> String {
     match doc.path.as_deref().map(|path| path.trim_matches('/')) {
         Some(path) if !path.is_empty() => format!("{path}/{}", doc.filename),
@@ -80,12 +49,32 @@ fn document_relative_path(doc: &DocumentSyncMeta) -> String {
     }
 }
 
+fn knowledge_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
+    doc.source_path
+        .strip_prefix("docs/")
+        .unwrap_or(&doc.source_path)
+        .trim_matches('/')
+        .to_string()
+}
+
+fn knowledge_doc_id(doc: &KnowledgeDocManifest) -> Option<Uuid> {
+    Uuid::parse_str(&doc.id).ok()
+}
+
 /// Compare remote document list against a local manifest.
 ///
 /// A document is considered changed if its `updated_at` timestamp differs.
-pub fn compute_diff(manifest: Option<&DocumentManifest>, remote: &[DocumentSyncMeta]) -> SyncDiff {
-    let local_map: HashMap<Uuid, &ManifestEntry> = manifest
-        .map(|m| m.documents.iter().map(|e| (e.id, e)).collect())
+pub fn compute_diff(
+    manifest: Option<&ProjectKnowledgePackManifest>,
+    remote: &[DocumentSyncMeta],
+) -> SyncDiff {
+    let local_map: HashMap<Uuid, &KnowledgeDocManifest> = manifest
+        .map(|m| {
+            m.docs
+                .iter()
+                .filter_map(|doc| knowledge_doc_id(doc).map(|id| (id, doc)))
+                .collect()
+        })
         .unwrap_or_default();
 
     let remote_ids: std::collections::HashSet<Uuid> = remote.iter().map(|d| d.id).collect();
@@ -107,7 +96,7 @@ pub fn compute_diff(manifest: Option<&DocumentManifest>, remote: &[DocumentSyncM
             local_map
                 .get(&doc.id)
                 .filter(|entry| {
-                    manifest_entry_relative_path(entry) != document_relative_path(doc)
+                    knowledge_doc_relative_path(entry) != document_relative_path(doc)
                         && entry.updated_at != doc.updated_at
                 })
                 .map(|_| doc.id)
@@ -118,7 +107,7 @@ pub fn compute_diff(manifest: Option<&DocumentManifest>, remote: &[DocumentSyncM
         .iter()
         .filter_map(|doc| {
             let entry = local_map.get(&doc.id)?;
-            let from = manifest_entry_relative_path(entry);
+            let from = knowledge_doc_relative_path(entry);
             let to = document_relative_path(doc);
             if from == to || rename_download_ids.contains(&doc.id) {
                 return None;
@@ -129,10 +118,13 @@ pub fn compute_diff(manifest: Option<&DocumentManifest>, remote: &[DocumentSyncM
 
     let to_delete: Vec<String> = manifest
         .map(|m| {
-            m.documents
+            m.docs
                 .iter()
-                .filter(|e| !remote_ids.contains(&e.id) || rename_download_ids.contains(&e.id))
-                .map(manifest_entry_relative_path)
+                .filter_map(|entry| {
+                    let id = knowledge_doc_id(entry)?;
+                    (!remote_ids.contains(&id) || rename_download_ids.contains(&id))
+                        .then(|| knowledge_doc_relative_path(entry))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -148,80 +140,145 @@ pub fn compute_diff(manifest: Option<&DocumentManifest>, remote: &[DocumentSyncM
 // Manifest I/O
 // ---------------------------------------------------------------------------
 
-const MANIFEST_FILENAME: &str = "_manifest.json";
-// Local-first project document tools consume this cache artifact instead of calling the
-// platform for every read/search operation.
 const KNOWLEDGE_MANIFEST_FILENAME: &str = "knowledge_manifest.json";
 
+/// Local project knowledge manifest stored as `knowledge_manifest.json`.
+///
+/// This is the single source of truth for project document sync state and
+/// knowledge metadata. Do not add a second project document manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectKnowledgeManifest {
+pub struct ProjectKnowledgePackManifest {
     pub pack_id: String,
     pub pack_version: String,
     pub schema_version: u32,
     pub root_uri: String,
     pub synced_at: String,
-    pub docs: Vec<ProjectKnowledgeDocManifest>,
+    pub docs: Vec<KnowledgeDocManifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectKnowledgeDocManifest {
-    pub id: String,
-    pub virtual_path: String,
-    pub source_path: String,
-    pub title: String,
-    pub summary: String,
-    pub description: Option<String>,
-    pub kind: String,
-    pub authority: String,
-    pub status: String,
-    pub tags: Vec<String>,
-    pub aliases: Vec<String>,
-    pub keywords: Vec<String>,
-    pub related: Vec<ProjectKnowledgeDocEdge>,
+impl KnowledgePackManifest for ProjectKnowledgePackManifest {
+    fn pack_id(&self) -> &str {
+        &self.pack_id
+    }
+
+    fn pack_version(&self) -> &str {
+        &self.pack_version
+    }
+
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    fn root_uri(&self) -> &str {
+        &self.root_uri
+    }
+
+    fn content_hash(&self) -> &str {
+        ""
+    }
+
+    fn docs(&self) -> &[KnowledgeDocManifest] {
+        &self.docs
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectKnowledgeDocEdge {
-    #[serde(rename = "type", alias = "edge_type")]
-    pub edge_type: String,
-    pub target: String,
-    pub description: Option<String>,
+impl ProjectKnowledgePackManifest {
+    fn new(project_id: Uuid) -> Self {
+        Self {
+            pack_id: format!("project-{project_id}"),
+            pack_version: "1".to_string(),
+            schema_version: 1,
+            root_uri: format!("project://{project_id}/"),
+            synced_at: chrono::Utc::now().to_rfc3339(),
+            docs: Vec::new(),
+        }
+    }
+
+    fn touch(&mut self) {
+        self.synced_at = chrono::Utc::now().to_rfc3339();
+    }
+
+    fn remove_document(&mut self, document_id: Uuid) -> bool {
+        let doc_id = document_id.to_string();
+        let removed_virtual_paths: std::collections::HashSet<String> = self
+            .docs
+            .iter()
+            .filter(|doc| doc.id == doc_id)
+            .map(|doc| doc.virtual_path.clone())
+            .collect();
+        let original_len = self.docs.len();
+        self.docs.retain(|doc| doc.id != doc_id);
+        if self.docs.len() == original_len {
+            return false;
+        }
+        for doc in &mut self.docs {
+            doc.related
+                .retain(|edge| !removed_virtual_paths.contains(&edge.target));
+        }
+        self.touch();
+        true
+    }
+
+    fn doc_by_id(&self, document_id: Uuid) -> Option<&KnowledgeDocManifest> {
+        let doc_id = document_id.to_string();
+        self.docs.iter().find(|doc| doc.id == doc_id)
+    }
+
+    fn upsert_from_sync_meta(
+        &mut self,
+        project_id: Uuid,
+        metadata: &DocumentSyncMeta,
+        edges: &[DocumentSyncEdge],
+    ) {
+        let virtual_path = project_doc_virtual_path(project_id, metadata);
+        let next = project_knowledge_doc(project_id, metadata, edges, |target_id| {
+            self.docs
+                .iter()
+                .find(|doc| doc.id == target_id.to_string())
+                .map(|doc| doc.virtual_path.clone())
+        });
+        if let Some(pos) = self.docs.iter().position(|doc| doc.id == next.id) {
+            self.docs[pos] = next;
+        } else {
+            self.docs.push(next);
+        }
+        for doc in &mut self.docs {
+            doc.related.retain(|edge| edge.target != virtual_path);
+        }
+        for edge in edges {
+            if edge.target_document_id == metadata.id
+                && let Some(source) = self
+                    .docs
+                    .iter_mut()
+                    .find(|doc| doc.id == edge.source_document_id.to_string())
+            {
+                let target = virtual_path.clone();
+                if !source.related.iter().any(|existing| {
+                    existing.edge_type.as_str() == edge.edge_type && existing.target == target
+                }) {
+                    source.related.push(KnowledgeDocEdge {
+                        edge_type: parse_doc_edge_type(&edge.edge_type),
+                        target,
+                        description: edge.note.clone(),
+                    });
+                }
+            }
+        }
+        self.docs
+            .sort_by(|left, right| left.virtual_path.cmp(&right.virtual_path));
+        self.touch();
+    }
 }
 
-/// Load the manifest from `project_dir/_manifest.json`, returning `None` if
-/// the file doesn't exist or can't be parsed.
-pub fn load_manifest(project_dir: &Path) -> Option<DocumentManifest> {
-    let path = project_dir.join(MANIFEST_FILENAME);
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-pub fn load_project_knowledge_manifest(project_dir: &Path) -> Option<ProjectKnowledgeManifest> {
+pub fn load_project_knowledge_manifest(project_dir: &Path) -> Option<ProjectKnowledgePackManifest> {
     let path = project_dir.join(KNOWLEDGE_MANIFEST_FILENAME);
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-/// Write the manifest atomically (tmp + rename).
-fn write_manifest(project_dir: &Path, manifest: &DocumentManifest) -> Result<()> {
-    let target = project_dir.join(MANIFEST_FILENAME);
-    let tmp = project_dir.join(format!(".{MANIFEST_FILENAME}.tmp"));
-
-    let json =
-        serde_json::to_string_pretty(manifest).context("Failed to serialize document manifest")?;
-
-    std::fs::write(&tmp, json.as_bytes())
-        .with_context(|| format!("Failed to write {}", tmp.display()))?;
-
-    std::fs::rename(&tmp, &target)
-        .with_context(|| format!("Failed to rename {} → {}", tmp.display(), target.display()))?;
-
-    Ok(())
-}
-
 fn write_project_knowledge_manifest(
     project_dir: &Path,
-    manifest: &ProjectKnowledgeManifest,
+    manifest: &ProjectKnowledgePackManifest,
 ) -> Result<()> {
     let target = project_dir.join(KNOWLEDGE_MANIFEST_FILENAME);
     let tmp = project_dir.join(format!(".{KNOWLEDGE_MANIFEST_FILENAME}.tmp"));
@@ -307,7 +364,7 @@ pub async fn sync_project(
         }
     }
 
-    let manifest = load_manifest(project_dir);
+    let manifest = load_project_knowledge_manifest(project_dir);
     let diff = compute_diff(manifest.as_ref(), &remote_docs);
 
     if diff.to_download.is_empty() && diff.to_delete.is_empty() && diff.to_rename.is_empty() {
@@ -373,34 +430,14 @@ pub async fn sync_project(
         }
     }
 
-    // Write updated manifest — only include docs that were successfully synced
-    let now = chrono::Utc::now().to_rfc3339();
-    let new_manifest = DocumentManifest {
-        project_id,
-        synced_at: now,
-        documents: remote_docs
-            .iter()
-            .filter(|d| !failed_ids.contains(&d.id))
-            .map(|d| ManifestEntry {
-                id: d.id,
-                filename: d.filename.clone(),
-                path: d.path.clone(),
-                title: d.title.clone(),
-                kind: d.kind.clone(),
-                authority: d.authority.clone(),
-                summary: d.summary.clone(),
-                status: d.status.clone(),
-                tags: d.tags.clone(),
-                size_bytes: d.size_bytes,
-                updated_at: d.updated_at.clone(),
-            })
-            .collect(),
-    };
-
-    write_manifest(project_dir, &new_manifest)?;
+    let synced_docs = remote_docs
+        .iter()
+        .filter(|doc| !failed_ids.contains(&doc.id))
+        .cloned()
+        .collect::<Vec<_>>();
     write_project_knowledge_manifest(
         project_dir,
-        &build_project_knowledge_manifest(project_id, &remote_docs, &edges_by_doc),
+        &build_project_knowledge_manifest(project_id, &synced_docs, &edges_by_doc),
     )?;
 
     Ok(())
@@ -430,9 +467,27 @@ pub fn write_document_content(
 
     std::fs::write(&tmp, content.as_bytes())
         .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    remove_empty_directory_target(&target)?;
     std::fs::rename(&tmp, &target)
         .with_context(|| format!("Failed to rename {} → {}", tmp.display(), target.display()))?;
     Ok(())
+}
+
+fn remove_empty_directory_target(target: &Path) -> Result<()> {
+    if !target.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries = std::fs::read_dir(target)
+        .with_context(|| format!("Failed to inspect target directory {}", target.display()))?;
+    if entries.next().is_some() {
+        anyhow::bail!(
+            "Cannot replace non-empty directory {} with document file",
+            target.display()
+        );
+    }
+    std::fs::remove_dir(target)
+        .with_context(|| format!("Failed to remove stale directory {}", target.display()))
 }
 
 pub fn delete_document_file(project_dir: &Path, relative_path: &str) -> Result<()> {
@@ -460,6 +515,7 @@ pub fn rename_document_file(project_dir: &Path, from: &str, to: &str) -> Result<
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create docs dir: {}", parent.display()))?;
     }
+    remove_empty_directory_target(&to_path)?;
     std::fs::rename(&from_path, &to_path).with_context(|| {
         format!(
             "Failed to rename {} → {}",
@@ -491,78 +547,25 @@ fn reconcile_document_file_location(project_dir: &Path, from: &str, to: &str) ->
     rename_document_file(project_dir, from, to)
 }
 
-fn upsert_manifest_entry(project_dir: &Path, project_id: Uuid, entry: ManifestEntry) -> Result<()> {
-    let mut manifest = load_manifest(project_dir).unwrap_or(DocumentManifest {
-        project_id,
-        synced_at: chrono::Utc::now().to_rfc3339(),
-        documents: Vec::new(),
-    });
-    manifest.project_id = project_id;
-    manifest.synced_at = chrono::Utc::now().to_rfc3339();
-    if let Some(pos) = manifest.documents.iter().position(|doc| doc.id == entry.id) {
-        manifest.documents[pos] = entry;
-    } else {
-        manifest.documents.push(entry);
-    }
-    write_manifest(project_dir, &manifest)
-}
-
-pub fn upsert_document_metadata(
-    project_dir: &Path,
-    project_id: Uuid,
-    metadata: &DocumentSyncMeta,
-) -> Result<()> {
-    let entry = ManifestEntry {
-        id: metadata.id,
-        filename: metadata.filename.clone(),
-        path: metadata.path.clone(),
-        title: metadata.title.clone(),
-        kind: metadata.kind.clone(),
-        authority: metadata.authority.clone(),
-        summary: metadata.summary.clone(),
-        status: metadata.status.clone(),
-        tags: metadata.tags.clone(),
-        size_bytes: metadata.size_bytes,
-        updated_at: metadata.updated_at.clone(),
-    };
-    upsert_manifest_entry(project_dir, project_id, entry)
-}
-
-pub fn remove_manifest_entry(project_dir: &Path, document_id: Uuid) -> Result<Option<String>> {
-    let Some(mut manifest) = load_manifest(project_dir) else {
-        return Ok(None);
-    };
-    let Some(pos) = manifest
-        .documents
-        .iter()
-        .position(|doc| doc.id == document_id)
-    else {
-        return Ok(None);
-    };
-    let relative_path = manifest_entry_relative_path(&manifest.documents[pos]);
-    manifest.documents.remove(pos);
-    manifest.synced_at = chrono::Utc::now().to_rfc3339();
-    write_manifest(project_dir, &manifest)?;
-    Ok(Some(relative_path))
-}
-
 pub fn remove_project_knowledge_entry(project_dir: &Path, document_id: Uuid) -> Result<()> {
     let Some(mut manifest) = load_project_knowledge_manifest(project_dir) else {
         return Ok(());
     };
-    let doc_id = document_id.to_string();
-    let removed_virtual_paths: std::collections::HashSet<String> = manifest
-        .docs
-        .iter()
-        .filter(|doc| doc.id == doc_id)
-        .map(|doc| doc.virtual_path.clone())
-        .collect();
-    manifest.docs.retain(|doc| doc.id != doc_id);
-    for doc in &mut manifest.docs {
-        doc.related
-            .retain(|edge| !removed_virtual_paths.contains(&edge.target));
+    if manifest.remove_document(document_id) {
+        write_project_knowledge_manifest(project_dir, &manifest)?;
     }
-    write_project_knowledge_manifest(project_dir, &manifest)
+    Ok(())
+}
+
+pub fn project_knowledge_document_relative_path(
+    project_dir: &Path,
+    document_id: Uuid,
+) -> Option<String> {
+    load_project_knowledge_manifest(project_dir).and_then(|manifest| {
+        manifest
+            .doc_by_id(document_id)
+            .map(knowledge_doc_relative_path)
+    })
 }
 
 pub async fn sync_document(
@@ -599,20 +602,8 @@ pub async fn sync_document(
         .await
         .unwrap_or_default();
 
-    let entry = ManifestEntry {
-        id: document_id,
-        filename: resolved_meta.filename.clone(),
-        path: resolved_meta.path.clone(),
-        title: resolved_meta.title.clone(),
-        kind: resolved_meta.kind.clone(),
-        authority: resolved_meta.authority.clone(),
-        summary: resolved_meta.summary.clone(),
-        status: resolved_meta.status.clone(),
-        tags: resolved_meta.tags.clone(),
-        size_bytes: resolved_meta.size_bytes.max(response.size_bytes),
-        updated_at: resolved_meta.updated_at.clone(),
-    };
-    upsert_manifest_entry(project_dir, project_id, entry)?;
+    let mut resolved_meta = resolved_meta;
+    resolved_meta.size_bytes = resolved_meta.size_bytes.max(response.size_bytes);
     upsert_project_knowledge_entry(project_dir, project_id, &resolved_meta, &edges)?;
     Ok(())
 }
@@ -641,15 +632,7 @@ pub async fn sync_document_metadata(
         .await
         .unwrap_or_default();
 
-    if let Some(existing) = load_manifest(project_dir)
-        .and_then(|manifest| {
-            manifest
-                .documents
-                .into_iter()
-                .find(|entry| entry.id == document_id)
-        })
-        .map(|entry| manifest_entry_relative_path(&entry))
-    {
+    if let Some(existing) = project_knowledge_document_relative_path(project_dir, document_id) {
         reconcile_document_file_location(
             project_dir,
             &existing,
@@ -657,7 +640,6 @@ pub async fn sync_document_metadata(
         )?;
     }
 
-    upsert_document_metadata(project_dir, project_id, &resolved_meta)?;
     upsert_project_knowledge_entry(project_dir, project_id, &resolved_meta, &edges)?;
     Ok(())
 }
@@ -670,47 +652,7 @@ fn upsert_project_knowledge_entry(
 ) -> Result<()> {
     let mut manifest = load_project_knowledge_manifest(project_dir)
         .unwrap_or_else(|| empty_knowledge_manifest(project_id));
-    let virtual_path = project_doc_virtual_path(project_id, metadata);
-    let next = project_knowledge_doc(project_id, metadata, edges, |target_id| {
-        manifest
-            .docs
-            .iter()
-            .find(|doc| doc.id == target_id.to_string())
-            .map(|doc| doc.virtual_path.clone())
-    });
-    if let Some(pos) = manifest.docs.iter().position(|doc| doc.id == next.id) {
-        manifest.docs[pos] = next;
-    } else {
-        manifest.docs.push(next);
-    }
-    for doc in &mut manifest.docs {
-        doc.related.retain(|edge| edge.target != virtual_path);
-    }
-    for edge in edges {
-        if edge.target_document_id == metadata.id
-            && let Some(source) = manifest
-                .docs
-                .iter_mut()
-                .find(|doc| doc.id == edge.source_document_id.to_string())
-        {
-            let target = virtual_path.clone();
-            if !source
-                .related
-                .iter()
-                .any(|existing| existing.edge_type == edge.edge_type && existing.target == target)
-            {
-                source.related.push(ProjectKnowledgeDocEdge {
-                    edge_type: edge.edge_type.clone(),
-                    target,
-                    description: edge.note.clone(),
-                });
-            }
-        }
-    }
-    manifest
-        .docs
-        .sort_by(|left, right| left.virtual_path.cmp(&right.virtual_path));
-    manifest.synced_at = chrono::Utc::now().to_rfc3339();
+    manifest.upsert_from_sync_meta(project_id, metadata, edges);
     write_project_knowledge_manifest(project_dir, &manifest)
 }
 
@@ -718,7 +660,7 @@ fn build_project_knowledge_manifest(
     project_id: Uuid,
     docs: &[DocumentSyncMeta],
     edges_by_doc: &HashMap<Uuid, Vec<DocumentSyncEdge>>,
-) -> ProjectKnowledgeManifest {
+) -> ProjectKnowledgePackManifest {
     let virtual_paths_by_id: HashMap<Uuid, String> = docs
         .iter()
         .map(|doc| (doc.id, project_doc_virtual_path(project_id, doc)))
@@ -733,7 +675,7 @@ fn build_project_knowledge_manifest(
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.virtual_path.cmp(&right.virtual_path));
-    ProjectKnowledgeManifest {
+    ProjectKnowledgePackManifest {
         pack_id: format!("project-{project_id}"),
         pack_version: "1".to_string(),
         schema_version: 1,
@@ -743,15 +685,8 @@ fn build_project_knowledge_manifest(
     }
 }
 
-fn empty_knowledge_manifest(project_id: Uuid) -> ProjectKnowledgeManifest {
-    ProjectKnowledgeManifest {
-        pack_id: format!("project-{project_id}"),
-        pack_version: "1".to_string(),
-        schema_version: 1,
-        root_uri: format!("project://{project_id}/"),
-        synced_at: chrono::Utc::now().to_rfc3339(),
-        docs: Vec::new(),
-    }
+fn empty_knowledge_manifest(project_id: Uuid) -> ProjectKnowledgePackManifest {
+    ProjectKnowledgePackManifest::new(project_id)
 }
 
 fn project_knowledge_doc(
@@ -759,9 +694,9 @@ fn project_knowledge_doc(
     doc: &DocumentSyncMeta,
     edges: &[DocumentSyncEdge],
     resolve_target: impl Fn(Uuid) -> Option<String>,
-) -> ProjectKnowledgeDocManifest {
+) -> KnowledgeDocManifest {
     let relative_path = project_doc_relative_path(doc);
-    ProjectKnowledgeDocManifest {
+    KnowledgeDocManifest {
         id: doc.id.to_string(),
         virtual_path: project_doc_virtual_path(project_id, doc),
         source_path: format!("docs/{relative_path}"),
@@ -771,26 +706,25 @@ fn project_knowledge_doc(
             .clone()
             .unwrap_or_else(|| format!("Project document {relative_path}")),
         description: None,
-        kind: doc.kind.clone().unwrap_or_else(|| "reference".to_string()),
-        authority: doc
-            .authority
-            .clone()
-            .unwrap_or_else(|| "reference".to_string()),
-        status: doc.status.clone().unwrap_or_else(|| "stable".to_string()),
+        kind: parse_doc_kind(doc.kind.as_deref()),
+        authority: parse_doc_authority(doc.authority.as_deref()),
+        status: parse_doc_status(doc.status.as_deref()),
         tags: doc.tags.clone(),
-        aliases: vec![doc.filename.clone(), relative_path.clone()],
-        keywords: doc.tags.clone(),
+        aliases: doc.aliases.clone(),
+        keywords: doc.keywords.clone(),
         related: edges
             .iter()
             .filter(|edge| edge.source_document_id == doc.id)
             .filter_map(|edge| {
-                resolve_target(edge.target_document_id).map(|target| ProjectKnowledgeDocEdge {
-                    edge_type: edge.edge_type.clone(),
+                resolve_target(edge.target_document_id).map(|target| KnowledgeDocEdge {
+                    edge_type: parse_doc_edge_type(&edge.edge_type),
                     target,
                     description: edge.note.clone(),
                 })
             })
             .collect(),
+        size_bytes: doc.size_bytes,
+        updated_at: doc.updated_at.clone(),
     }
 }
 
@@ -806,6 +740,51 @@ fn project_doc_relative_path(doc: &DocumentSyncMeta) -> String {
         doc.filename.clone()
     } else {
         format!("{path}/{}", doc.filename)
+    }
+}
+
+fn parse_doc_kind(value: Option<&str>) -> KnowledgeDocKind {
+    match value.unwrap_or("reference").trim() {
+        "guide" => KnowledgeDocKind::Guide,
+        "taxonomy" => KnowledgeDocKind::Taxonomy,
+        "domain" => KnowledgeDocKind::Domain,
+        "entity" => KnowledgeDocKind::Entity,
+        "policy" => KnowledgeDocKind::Policy,
+        _ => KnowledgeDocKind::Reference,
+    }
+}
+
+fn parse_doc_authority(value: Option<&str>) -> KnowledgeDocAuthority {
+    match value.unwrap_or("reference").trim() {
+        "canonical" => KnowledgeDocAuthority::Canonical,
+        "supporting" => KnowledgeDocAuthority::Supporting,
+        "pattern" => KnowledgeDocAuthority::Pattern,
+        "advisory" => KnowledgeDocAuthority::Advisory,
+        "example" => KnowledgeDocAuthority::Example,
+        "draft" => KnowledgeDocAuthority::Draft,
+        "deprecated" => KnowledgeDocAuthority::Deprecated,
+        _ => KnowledgeDocAuthority::Reference,
+    }
+}
+
+fn parse_doc_status(value: Option<&str>) -> KnowledgeDocStatus {
+    match value.unwrap_or("stable").trim() {
+        "draft" => KnowledgeDocStatus::Draft,
+        "deprecated" => KnowledgeDocStatus::Deprecated,
+        _ => KnowledgeDocStatus::Stable,
+    }
+}
+
+fn parse_doc_edge_type(value: &str) -> KnowledgeDocEdgeType {
+    match value.trim() {
+        "part_of" => KnowledgeDocEdgeType::PartOf,
+        "defines" => KnowledgeDocEdgeType::Defines,
+        "governs" => KnowledgeDocEdgeType::Governs,
+        "classifies" => KnowledgeDocEdgeType::Classifies,
+        "depends_on" => KnowledgeDocEdgeType::DependsOn,
+        "extends" => KnowledgeDocEdgeType::Extends,
+        "related_to" => KnowledgeDocEdgeType::RelatedTo,
+        _ => KnowledgeDocEdgeType::References,
     }
 }
 
@@ -853,26 +832,16 @@ mod tests {
             summary: None,
             status: None,
             tags: Vec::new(),
+            aliases: Vec::new(),
+            keywords: Vec::new(),
             content_type: "text/markdown".into(),
             size_bytes: size,
             updated_at: updated.into(),
         }
     }
 
-    fn entry(id: u128, filename: &str, updated: &str, size: i64) -> ManifestEntry {
-        ManifestEntry {
-            id: Uuid::from_u128(id),
-            filename: filename.into(),
-            path: None,
-            title: None,
-            kind: None,
-            authority: None,
-            summary: None,
-            status: None,
-            tags: Vec::new(),
-            size_bytes: size,
-            updated_at: updated.into(),
-        }
+    fn manifest(docs: Vec<DocumentSyncMeta>) -> ProjectKnowledgePackManifest {
+        build_project_knowledge_manifest(Uuid::nil(), &docs, &Default::default())
     }
 
     #[test]
@@ -889,11 +858,7 @@ mod tests {
 
     #[test]
     fn diff_unchanged_skips() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "arch.md", "2026-01-01", 100)],
-        };
+        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01", 100)]);
         let remote = vec![meta(1, "arch.md", "2026-01-01", 100)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
@@ -903,11 +868,7 @@ mod tests {
 
     #[test]
     fn diff_updated_downloads() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "arch.md", "2026-01-01", 100)],
-        };
+        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01", 100)]);
         let remote = vec![meta(1, "arch.md", "2026-02-01", 150)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
@@ -917,14 +878,10 @@ mod tests {
 
     #[test]
     fn diff_deleted_remotely() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![
-                entry(1, "arch.md", "2026-01-01", 100),
-                entry(2, "old.md", "2026-01-01", 50),
-            ],
-        };
+        let manifest = manifest(vec![
+            meta(1, "arch.md", "2026-01-01", 100),
+            meta(2, "old.md", "2026-01-01", 50),
+        ]);
         let remote = vec![meta(1, "arch.md", "2026-01-01", 100)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
@@ -934,11 +891,7 @@ mod tests {
 
     #[test]
     fn diff_new_and_deleted() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "old.md", "2026-01-01", 100)],
-        };
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
         let remote = vec![meta(2, "new.md", "2026-02-01", 200)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
@@ -949,11 +902,7 @@ mod tests {
 
     #[test]
     fn diff_renamed_file_without_content_change_renames_only() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "old.md", "2026-01-01", 100)],
-        };
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
         let remote = vec![meta(1, "new.md", "2026-01-01", 100)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
@@ -969,11 +918,7 @@ mod tests {
 
     #[test]
     fn diff_renamed_and_updated_file_redownloads_and_deletes_old_name() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "old.md", "2026-01-01", 100)],
-        };
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
         let remote = vec![meta(1, "new.md", "2026-02-01", 150)];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
@@ -982,39 +927,97 @@ mod tests {
     }
 
     #[test]
-    fn manifest_roundtrip() {
-        let manifest = DocumentManifest {
-            project_id: Uuid::nil(),
-            synced_at: "2026-01-01T00:00:00Z".into(),
-            documents: vec![entry(1, "arch.md", "2026-01-01", 100)],
-        };
-        let json = serde_json::to_string(&manifest).unwrap();
-        let parsed: DocumentManifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.project_id, Uuid::nil());
-        assert_eq!(parsed.documents.len(), 1);
-        assert_eq!(parsed.documents[0].filename, "arch.md");
+    fn write_document_content_replaces_empty_stale_directory_target() {
+        let dir = tempdir().unwrap();
+        let stale_dir = dir.path().join("docs/domain/random.md");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+
+        write_document_content(dir.path(), "domain/random.md", "content").unwrap();
+
+        let target = dir.path().join("docs/domain/random.md");
+        assert!(target.is_file());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "content");
     }
 
     #[test]
-    fn load_manifest_missing_file() {
+    fn write_document_content_rejects_non_empty_stale_directory_target() {
         let dir = tempdir().unwrap();
-        assert!(load_manifest(dir.path()).is_none());
+        let stale_dir = dir.path().join("docs/domain/random.md");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("nested.md"), "nested").unwrap();
+
+        let error = write_document_content(dir.path(), "domain/random.md", "content")
+            .expect_err("non-empty directory target should not be replaced");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot replace non-empty directory")
+        );
     }
 
     #[test]
-    fn write_and_load_manifest() {
+    fn rename_document_file_replaces_empty_stale_directory_target() {
         let dir = tempdir().unwrap();
+        let docs_dir = dir.path().join("docs/domain");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("random.tmp"), "content").unwrap();
+        std::fs::create_dir_all(docs_dir.join("random.md")).unwrap();
 
-        let manifest = DocumentManifest {
-            project_id: Uuid::from_u128(42),
-            synced_at: "2026-02-22T12:00:00Z".into(),
-            documents: vec![entry(1, "test.md", "2026-02-22", 512)],
-        };
+        rename_document_file(dir.path(), "domain/random.tmp", "domain/random.md").unwrap();
 
-        write_manifest(dir.path(), &manifest).unwrap();
-        let loaded = load_manifest(dir.path()).unwrap();
-        assert_eq!(loaded.project_id, Uuid::from_u128(42));
-        assert_eq!(loaded.documents[0].filename, "test.md");
+        let target = docs_dir.join("random.md");
+        assert!(target.is_file());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "content");
+    }
+
+    #[test]
+    fn project_knowledge_manifest_does_not_derive_aliases() {
+        let project_id = Uuid::from_u128(7);
+        let mut doc = meta(1, "random.md", "2026-02-22", 512);
+        doc.path = Some("domain/path".into());
+        doc.title = Some("Random".into());
+        doc.summary = Some("Just a test document".into());
+        doc.aliases = vec!["Random concept".into()];
+        doc.keywords = vec!["randomness".into()];
+
+        let manifest = build_project_knowledge_manifest(project_id, &[doc], &Default::default());
+
+        assert_eq!(manifest.docs.len(), 1);
+        assert_eq!(manifest.docs[0].aliases, ["Random concept"]);
+        assert_eq!(manifest.docs[0].keywords, ["randomness"]);
+        assert_eq!(manifest.docs[0].summary, "Just a test document");
+        assert_eq!(
+            manifest.docs[0].virtual_path,
+            format!("project://{project_id}/domain/path/random.md")
+        );
+    }
+
+    #[test]
+    fn project_document_metadata_persists_to_knowledge_manifest() {
+        let dir = tempdir().unwrap();
+        let project_id = Uuid::from_u128(7);
+        let mut doc = meta(1, "random.md", "2026-02-22", 512);
+        doc.path = Some("domain".into());
+        doc.title = Some("Random".into());
+        doc.kind = Some("guide".into());
+        doc.authority = Some("draft".into());
+        doc.summary = Some("Just a test document".into());
+        doc.status = Some("draft".into());
+        doc.tags = vec!["project".into()];
+        doc.aliases = vec!["Random concept".into()];
+        doc.keywords = vec!["randomness".into()];
+
+        upsert_project_knowledge_entry(dir.path(), project_id, &doc, &[]).unwrap();
+
+        let knowledge = load_project_knowledge_manifest(dir.path()).unwrap();
+        assert_eq!(knowledge.docs.len(), 1);
+        assert_eq!(knowledge.docs[0].title, "Random");
+        assert_eq!(knowledge.docs[0].summary, "Just a test document");
+        assert_eq!(knowledge.docs[0].aliases, ["Random concept"]);
+        assert_eq!(knowledge.docs[0].keywords, ["randomness"]);
+        assert_eq!(knowledge.docs[0].size_bytes, 512);
+        assert_eq!(knowledge.docs[0].updated_at, "2026-02-22");
     }
 
     #[test]

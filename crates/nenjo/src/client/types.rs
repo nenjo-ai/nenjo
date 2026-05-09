@@ -33,6 +33,10 @@ pub struct DocumentSyncMeta {
     pub status: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     pub content_type: String,
     pub size_bytes: i64,
     pub updated_at: String,

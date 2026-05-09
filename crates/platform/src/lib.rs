@@ -12,6 +12,7 @@
 pub mod backend;
 /// Thin HTTP client for the platform manifest API.
 pub mod client;
+mod knowledge_backend;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
 /// Shared manifest resource and encrypted-content classification.
@@ -20,6 +21,7 @@ pub mod manifest_contract;
 pub mod manifest_mcp;
 /// Access-policy helpers for filtering manifest resources by platform scopes.
 pub mod policy;
+mod project_knowledge;
 mod prompt_merge;
 /// REST tool specs shared by worker-side REST-backed tooling.
 pub mod rest;
@@ -56,18 +58,18 @@ pub use manifest_mcp::{
     DomainManifestGetResult, DomainManifestMutationResult, DomainManifestUpdateParams,
     DomainMutationResult, DomainPromptDocument, DomainPromptGetParams, DomainPromptGetResult,
     DomainPromptMutationResult, DomainPromptUpdateParams, DomainSummary, DomainUpdateDocument,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, ManifestMcpBackend,
-    ManifestMcpContract, ModelCreateDocument, ModelCreateParams, ModelDeleteParams, ModelDocument,
-    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelSummary, ModelUpdateDocument,
-    ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectCreateDocument,
-    ProjectCreateParams, ProjectDeleteParams, ProjectDocument, ProjectDocumentContentDocument,
-    ProjectDocumentContentMutationResult, ProjectDocumentContentUpdateParams,
-    ProjectDocumentCreateDocument, ProjectDocumentCreateParams, ProjectDocumentDeleteParams,
-    ProjectDocumentMutationResult, ProjectDocumentSummary, ProjectDocumentsListParams,
-    ProjectDocumentsListResult, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
-    ProjectSummary, ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams,
-    ProjectsListResult, RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams,
-    RoutineDocument, RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeManifestBackend,
+    ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument, ModelCreateParams,
+    ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
+    ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams, ModelsListResult,
+    ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams, ProjectDocument,
+    ProjectDocumentContentDocument, ProjectDocumentContentMutationResult,
+    ProjectDocumentContentUpdateParams, ProjectDocumentCreateDocument, ProjectDocumentCreateParams,
+    ProjectDocumentDeleteParams, ProjectDocumentMutationResult, ProjectDocumentSummary,
+    ProjectGetResult, ProjectManifestBackend, ProjectMutationResult, ProjectSummary,
+    ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams, RoutineDocument,
+    RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
     RoutineMutationResult, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
     RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
 };

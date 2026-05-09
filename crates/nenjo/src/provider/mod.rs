@@ -71,6 +71,19 @@ pub trait ToolFactory: Send + Sync {
         self.create_tools(agent).await
     }
 
+    /// Create tools with execution context such as the active project.
+    ///
+    /// Default implementation delegates to `create_tools_with_security`.
+    async fn create_tools_with_context(
+        &self,
+        agent: &AgentManifest,
+        security: Arc<nenjo_tools::security::SecurityPolicy>,
+        context: ToolContext,
+    ) -> Vec<Arc<dyn Tool>> {
+        let _ = context;
+        self.create_tools_with_security(agent, security).await
+    }
+
     /// The base workspace directory used by this factory's security policy.
     ///
     /// Used by the agent builder to set the correct `SecurityPolicy.workspace_dir`
@@ -79,6 +92,13 @@ pub trait ToolFactory: Send + Sync {
     fn workspace_dir(&self) -> std::path::PathBuf {
         nenjo_tools::security::SecurityPolicy::default().workspace_dir
     }
+}
+
+/// Runtime context available while constructing an agent's tools.
+#[derive(Debug, Clone, Default)]
+pub struct ToolContext {
+    /// Slug for the active project, when the agent is running in a project.
+    pub project_slug: Option<String>,
 }
 
 /// A no-op tool factory that returns an empty tool set.
@@ -118,6 +138,7 @@ pub(crate) struct ManifestIndex {
     models_by_id: HashMap<Uuid, usize>,
     routines_by_id: HashMap<Uuid, usize>,
     projects_by_id: HashMap<Uuid, usize>,
+    projects_by_slug: HashMap<String, usize>,
     abilities_by_id: HashMap<Uuid, usize>,
     domains_by_id: HashMap<Uuid, usize>,
     mcp_servers_by_id: HashMap<Uuid, usize>,
@@ -131,6 +152,12 @@ impl ManifestIndex {
             models_by_id: index_by_id(manifest.models.iter().map(|model| model.id)),
             routines_by_id: index_by_id(manifest.routines.iter().map(|routine| routine.id)),
             projects_by_id: index_by_id(manifest.projects.iter().map(|project| project.id)),
+            projects_by_slug: index_by_name(
+                manifest
+                    .projects
+                    .iter()
+                    .map(|project| project.slug.as_str()),
+            ),
             abilities_by_id: index_by_id(manifest.abilities.iter().map(|ability| ability.id)),
             domains_by_id: index_by_id(manifest.domains.iter().map(|domain| domain.id)),
             mcp_servers_by_id: index_by_id(manifest.mcp_servers.iter().map(|server| server.id)),
@@ -165,6 +192,12 @@ impl ManifestIndex {
     fn project_by_id(&self, id: Uuid) -> Option<&ProjectManifest> {
         self.projects_by_id
             .get(&id)
+            .map(|index| &self.manifest.projects[*index])
+    }
+
+    fn project_by_slug(&self, slug: &str) -> Option<&ProjectManifest> {
+        self.projects_by_slug
+            .get(slug)
             .map(|index| &self.manifest.projects[*index])
     }
 
@@ -339,6 +372,11 @@ impl Provider {
         self.inner.manifest.project_by_id(id)
     }
 
+    /// Look up a project manifest by slug from the indexed bootstrap manifest.
+    pub fn project_by_slug(&self, slug: &str) -> Option<&ProjectManifest> {
+        self.inner.manifest.project_by_slug(slug)
+    }
+
     // -----------------------------------------------------------------------
     // Routine execution
     // -----------------------------------------------------------------------
@@ -490,7 +528,7 @@ impl Provider {
             platform_scopes: agent.platform_scopes.clone(),
             active_domain: None,
             append_active_domain_addon: true,
-            docs_base_dir: None,
+            docs_base_dir: Some(self.inner.services.tool_factory.workspace_dir()),
             render_ctx_extra: RenderContextVars::default(),
         }
     }
@@ -659,6 +697,19 @@ mod tests {
         }
     }
 
+    struct WorkspaceToolFactory(std::path::PathBuf);
+
+    #[async_trait::async_trait]
+    impl ToolFactory for WorkspaceToolFactory {
+        async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+            Vec::new()
+        }
+
+        fn workspace_dir(&self) -> std::path::PathBuf {
+            self.0.clone()
+        }
+    }
+
     struct StaticLoader(Manifest);
 
     #[async_trait::async_trait]
@@ -723,6 +774,69 @@ mod tests {
         assert!(provider.agent_by_name(&name).await.is_ok());
         assert!(provider.agent_by_id(id).await.is_ok());
         assert!(provider.agent_by_name("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn project_context_renders_synced_project_knowledge_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_dir = temp.path().join("workspace");
+        let project = test_manifest().projects[0].clone();
+        let project_dir = workspace_dir.join(&project.slug);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("knowledge_manifest.json"),
+            format!(
+                r#"{{
+                  "pack_id": "project-{project_id}",
+                  "pack_version": "1",
+                  "schema_version": 1,
+                  "root_uri": "project://{project_id}/",
+                  "synced_at": "2026-01-01T00:00:00Z",
+                  "docs": [
+                    {{
+                      "id": "overview",
+                      "virtual_path": "project://{project_id}/domain/overview.md",
+                      "source_path": "docs/domain/overview.md",
+                      "title": "Overview",
+                      "summary": "Project overview metadata",
+                      "description": null,
+                      "kind": "domain",
+                      "authority": "canonical",
+                      "status": "stable",
+                      "tags": ["domain:project"],
+                      "aliases": ["overview"],
+                      "keywords": ["project"],
+                      "related": []
+                    }}
+                  ]
+                }}"#,
+                project_id = project.id
+            ),
+        )
+        .unwrap();
+
+        let provider = Provider::builder()
+            .with_manifest(test_manifest())
+            .with_model_factory(MockFactory)
+            .with_tool_factory(WorkspaceToolFactory(workspace_dir))
+            .build()
+            .await
+            .unwrap();
+
+        let runner = provider
+            .agent_by_name("agent")
+            .await
+            .unwrap()
+            .with_project_context(&project)
+            .build()
+            .await
+            .unwrap();
+
+        let documents_xml = &runner.instance().documents_xml;
+        assert!(documents_xml.contains("<project_documents"));
+        assert!(documents_xml.contains("name=\"overview.md\""));
+        assert!(documents_xml.contains("path=\"domain\""));
+        assert!(documents_xml.contains("Project overview metadata"));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
 use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest, PromptConfig};
 use crate::memory::Memory;
 use crate::memory::types::MemoryScope;
-use crate::provider::Provider;
+use crate::provider::{Provider, ToolContext};
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams {
@@ -141,6 +141,7 @@ impl AgentBuilder {
             extra.git = git.clone();
         }
         extra.project = ctx;
+        self.prompt_context.current_project = project.clone();
         self
     }
 
@@ -205,14 +206,25 @@ impl AgentBuilder {
         }
         let security = Arc::new(policy);
 
-        // When work_dir is set, rebuild tools with the scoped security policy
-        // so file, shell, and git tools operate in the correct directory.
-        if self.work_dir.is_some()
-            && let Some(ref provider) = self.delegation_provider
-        {
+        if let Some(ref provider) = self.delegation_provider {
+            let slug = if self.prompt_context.render_ctx_extra.project.slug.is_empty() {
+                &self.prompt_context.current_project.slug
+            } else {
+                &self.prompt_context.render_ctx_extra.project.slug
+            };
             self.tools = provider
                 .tool_factory()
-                .create_tools_with_security(&self.agent, security.clone())
+                .create_tools_with_context(
+                    &self.agent,
+                    security.clone(),
+                    ToolContext {
+                        project_slug: if slug.is_empty() {
+                            None
+                        } else {
+                            Some(slug.clone())
+                        },
+                    },
+                )
                 .await;
         }
         self.tools.extend(self.extra_tools);
