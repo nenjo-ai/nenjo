@@ -389,11 +389,7 @@ async fn execute_agent_step(
     // Resolve project context from manifest so agent prompts can reference
     // {{ project.name }}, {{ project.description }}, etc.
     if !state.input.project_id.is_nil()
-        && let Some(project) = provider
-            .manifest()
-            .projects
-            .iter()
-            .find(|p| p.id == state.input.project_id)
+        && let Some(project) = provider.project_by_id(state.input.project_id)
     {
         builder = builder.with_project_context(project);
     }

@@ -363,14 +363,15 @@ async fn build_ability_instance(
         }
     }
 
-    let mut tools = if let (Some(agent), Some(tool_factory)) = (
+    let mut tools = if let (Some(agent), Some(provider)) = (
         caller.source_manifest.as_ref(),
-        caller.tool_factory.as_ref(),
+        caller.sdk_provider.as_ref(),
     ) {
         let mut scoped_agent = agent.clone();
         scoped_agent.platform_scopes = merged_scopes.clone();
         scoped_agent.mcp_server_ids = merged_mcp_server_ids.clone();
-        tool_factory
+        provider
+            .tool_factory()
             .create_tools_with_security(&scoped_agent, caller.security.clone())
             .await
     } else {
@@ -434,7 +435,7 @@ async fn build_ability_instance(
             scoped_agent.mcp_server_ids = merged_mcp_server_ids;
             scoped_agent
         }),
-        tool_factory: caller.tool_factory.clone(),
+        sdk_provider: caller.sdk_provider.clone(),
         memory_vars: caller.memory_vars.clone(),
         resource_vars: caller.resource_vars.clone(),
         documents_xml: caller.documents_xml.clone(),
@@ -448,9 +449,10 @@ mod tests {
     use crate::config::AgentConfig;
     use crate::context::{ContextRenderer, types::RenderContextBlock};
     use crate::manifest::{
-        AbilityPromptConfig, AgentManifest, DomainManifest, DomainPromptConfig, PromptConfig,
+        AbilityPromptConfig, AgentManifest, DomainManifest, DomainPromptConfig, Manifest,
+        PromptConfig,
     };
-    use crate::provider::ToolFactory;
+    use crate::provider::{ModelProviderFactory, Provider, ToolFactory};
     use crate::types::ActiveDomain;
     use anyhow::Result;
     use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider};
@@ -480,6 +482,14 @@ mod tests {
 
         fn supports_developer_role(&self, _model: &str) -> bool {
             true
+        }
+    }
+
+    struct TestModelFactory;
+
+    impl ModelProviderFactory for TestModelFactory {
+        fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+            Ok(Arc::new(NoopProvider))
         }
     }
 
@@ -553,6 +563,16 @@ mod tests {
             }
             tools
         }
+    }
+
+    fn test_sdk_provider() -> Provider {
+        Provider::new_inner(
+            Arc::new(Manifest::default()),
+            Box::new(TestModelFactory),
+            Box::new(TestToolFactory),
+            None,
+            AgentConfig::default(),
+        )
     }
 
     fn test_instance_with_active_domain() -> AgentInstance {
@@ -632,7 +652,7 @@ mod tests {
                 prompt_locked: false,
                 heartbeat: None,
             }),
-            tool_factory: Some(Arc::new(TestToolFactory)),
+            sdk_provider: Some(test_sdk_provider()),
             memory_vars: Default::default(),
             resource_vars: Default::default(),
             documents_xml: String::new(),

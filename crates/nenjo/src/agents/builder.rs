@@ -14,11 +14,10 @@ use super::runner::AgentRunner;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
-use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig};
+use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest, PromptConfig};
 use crate::memory::Memory;
 use crate::memory::types::MemoryScope;
-use crate::provider::{ModelProviderFactory, ToolFactory};
-use crate::routines::LambdaRunner;
+use crate::provider::Provider;
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams {
@@ -50,10 +49,7 @@ pub struct AgentBuilder {
     memory: Option<Arc<dyn Memory>>,
     memory_scope_override: Option<MemoryScope>,
     // For DelegateToTool construction — set by Provider::build_agent().
-    manifest: Option<Arc<Manifest>>,
-    model_factory: Option<Arc<dyn ModelProviderFactory>>,
-    tool_factory: Option<Arc<dyn ToolFactory>>,
-    lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    delegation_provider: Option<Provider>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
@@ -76,10 +72,7 @@ impl AgentBuilder {
             memory_vars: HashMap::new(),
             memory: None,
             memory_scope_override: None,
-            manifest: None,
-            model_factory: None,
-            tool_factory: None,
-            lambda_runner: None,
+            delegation_provider: None,
             child_delegation_ctx: None,
             work_dir: None,
         }
@@ -175,21 +168,12 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the Provider's factory Arcs for delegation support.
+    /// Set the Provider handle for delegation support.
     ///
     /// Called by `Provider::build_agent()` so that the runner can construct
     /// `DelegateToTool` with the ability to look up other agents.
-    pub(crate) fn with_delegation_support(
-        mut self,
-        manifest: Arc<Manifest>,
-        model_factory: Arc<dyn ModelProviderFactory>,
-        tool_factory: Arc<dyn ToolFactory>,
-        lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    ) -> Self {
-        self.manifest = Some(manifest);
-        self.model_factory = Some(model_factory);
-        self.tool_factory = Some(tool_factory);
-        self.lambda_runner = lambda_runner;
+    pub(crate) fn with_delegation_support(mut self, provider: Provider) -> Self {
+        self.delegation_provider = Some(provider);
         self
     }
 
@@ -207,8 +191,10 @@ impl AgentBuilder {
 
     /// Build the [`AgentRunner`].
     pub async fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
-        let mut policy = match &self.tool_factory {
-            Some(tf) => SecurityPolicy::with_workspace_dir(tf.workspace_dir()),
+        let mut policy = match &self.delegation_provider {
+            Some(provider) => {
+                SecurityPolicy::with_workspace_dir(provider.tool_factory().workspace_dir())
+            }
             None => SecurityPolicy::default(),
         };
         if let Some(dir) = &self.work_dir {
@@ -222,9 +208,10 @@ impl AgentBuilder {
         // When work_dir is set, rebuild tools with the scoped security policy
         // so file, shell, and git tools operate in the correct directory.
         if self.work_dir.is_some()
-            && let Some(ref tf) = self.tool_factory
+            && let Some(ref provider) = self.delegation_provider
         {
-            self.tools = tf
+            self.tools = provider
+                .tool_factory()
                 .create_tools_with_security(&self.agent, security.clone())
                 .await;
         }
@@ -259,18 +246,14 @@ impl AgentBuilder {
             None
         };
 
-        let delegation_support = match (self.manifest, self.model_factory, self.tool_factory) {
-            (Some(m), Some(mf), Some(tf)) => Some(super::runner::DelegationSupport {
-                manifest: m,
-                model_factory: mf,
-                tool_factory: tf,
-                memory: self.memory.clone(),
-                agent_config: self.agent_config.clone(),
-                lambda_runner: self.lambda_runner,
-                delegation_ctx: self.child_delegation_ctx,
-            }),
-            _ => None,
-        };
+        let sdk_provider = self.delegation_provider.clone();
+        let delegation_support =
+            self.delegation_provider
+                .map(|provider| super::runner::DelegationSupport {
+                    provider,
+                    max_delegation_depth: self.agent_config.max_delegation_depth,
+                    delegation_ctx: self.child_delegation_ctx,
+                });
 
         let instance = AgentInstance {
             name: self.agent.name.clone(),
@@ -287,9 +270,7 @@ impl AgentBuilder {
             agent_config: self.agent_config,
             context_renderer: self.context_renderer,
             source_manifest: Some(self.agent),
-            tool_factory: delegation_support
-                .as_ref()
-                .map(|ds| ds.tool_factory.clone()),
+            sdk_provider,
             memory_vars: self.memory_vars,
             resource_vars: HashMap::new(),
             documents_xml: String::new(),

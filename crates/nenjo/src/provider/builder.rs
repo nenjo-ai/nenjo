@@ -8,7 +8,6 @@ use super::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use crate::config::AgentConfig;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use crate::routines::LambdaRunner;
 
 /// Builder for creating a [`Provider`].
 ///
@@ -38,11 +37,10 @@ use crate::routines::LambdaRunner;
 pub struct ProviderBuilder {
     manifest: Option<Manifest>,
     loaders: Vec<Arc<dyn ManifestLoader>>,
-    model_factory: Option<Arc<dyn ModelProviderFactory>>,
-    tool_factory: Option<Arc<dyn ToolFactory>>,
+    model_factory: Option<Box<dyn ModelProviderFactory>>,
+    tool_factory: Option<Box<dyn ToolFactory>>,
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
-    lambda_runner: Option<Arc<dyn LambdaRunner>>,
 }
 
 impl ProviderBuilder {
@@ -54,7 +52,6 @@ impl ProviderBuilder {
             tool_factory: None,
             memory: None,
             agent_config: AgentConfig::default(),
-            lambda_runner: None,
         }
     }
 
@@ -86,7 +83,7 @@ impl ProviderBuilder {
 
     /// Set the LLM model factory (required).
     pub fn with_model_factory(mut self, factory: impl ModelProviderFactory + 'static) -> Self {
-        self.model_factory = Some(Arc::new(factory));
+        self.model_factory = Some(Box::new(factory));
         self
     }
 
@@ -94,7 +91,7 @@ impl ProviderBuilder {
     ///
     /// Defaults to [`NoopToolFactory`] if not set.
     pub fn with_tool_factory(mut self, factory: impl ToolFactory + 'static) -> Self {
-        self.tool_factory = Some(Arc::new(factory));
+        self.tool_factory = Some(Box::new(factory));
         self
     }
 
@@ -116,15 +113,6 @@ impl ProviderBuilder {
         self
     }
 
-    /// Set the lambda runner for executing deterministic script steps in routines.
-    ///
-    /// Without a lambda runner, lambda and cron-lambda steps will fail with a
-    /// descriptive error.
-    pub fn with_lambda_runner(mut self, runner: impl LambdaRunner + 'static) -> Self {
-        self.lambda_runner = Some(Arc::new(runner));
-        self
-    }
-
     /// Build the Provider by loading and merging all manifest sources.
     ///
     /// Requires at least one of [`with_manifest`](Self::with_manifest) or
@@ -141,7 +129,7 @@ impl ProviderBuilder {
 
         let tool_factory = self
             .tool_factory
-            .unwrap_or_else(|| Arc::new(NoopToolFactory));
+            .unwrap_or_else(|| Box::new(NoopToolFactory));
 
         // Start from the provided manifest (if any), then merge loaders on top.
         let mut manifest = self.manifest.unwrap_or_default();
@@ -152,14 +140,13 @@ impl ProviderBuilder {
 
         let manifest = Arc::new(manifest);
 
-        Ok(Provider {
+        Ok(Provider::new_inner(
             manifest,
             model_factory,
             tool_factory,
-            memory: self.memory,
-            agent_config: self.agent_config,
-            lambda_runner: self.lambda_runner,
-        })
+            self.memory,
+            self.agent_config,
+        ))
     }
 }
 

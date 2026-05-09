@@ -1,8 +1,8 @@
 //! Routine execution — DAG-based execution pipelines.
 //!
 //! Routines are directed acyclic graphs of steps connected by conditional edges.
-//! Each step can be an agent task, gate evaluation, lambda script, council
-//! delegation, or terminal node.
+//! Each step can be an agent task, gate evaluation, council delegation, or
+//! terminal node.
 //!
 //! ```ignore
 //! use nenjo::types::{TaskType, Task};
@@ -23,7 +23,6 @@ pub mod council;
 pub mod cron;
 pub mod executor;
 pub mod gate;
-pub mod traits;
 pub mod types;
 
 use anyhow::Result;
@@ -37,8 +36,6 @@ use crate::memory::MemoryScope;
 
 use crate::agents::runner::types::TurnEvent;
 
-// Re-export key types at module level.
-pub use traits::{LambdaOutput, LambdaRunner};
 pub use types::{
     CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics,
     SessionBinding, StepMetrics, StepResult, StepType,

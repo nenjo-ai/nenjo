@@ -59,6 +59,4 @@ pub use nenjo_xml as xml;
 pub use client::{ApiClientError, NenjoClient};
 
 // Re-export routine types.
-pub use routines::{
-    LambdaOutput, LambdaRunner, RoutineEvent, RoutineExecutionHandle, RoutineInput, StepResult,
-};
+pub use routines::{RoutineEvent, RoutineExecutionHandle, RoutineInput, StepResult};

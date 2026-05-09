@@ -17,11 +17,9 @@ use super::delegation::DelegateToTool;
 use super::instance::{AgentInstance, build_document_listing};
 use anyhow::Context;
 
-use crate::config::AgentConfig;
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, Memory, MemoryScope};
-use crate::provider::{ModelProviderFactory, ToolFactory};
-use crate::routines::LambdaRunner;
+use crate::provider::Provider;
 use crate::types::{ActiveDomain, DelegationContext, TaskType};
 use types::{TurnEvent, TurnOutput};
 
@@ -84,16 +82,12 @@ impl ExecutionHandle {
     }
 }
 
-/// Factory Arcs needed to construct DelegateToTool in the runner.
+/// Provider handle needed to construct DelegateToTool in the runner.
 ///
 /// Passed from AgentBuilder when the Provider sets up delegation support.
 pub struct DelegationSupport {
-    pub manifest: Arc<Manifest>,
-    pub model_factory: Arc<dyn ModelProviderFactory>,
-    pub tool_factory: Arc<dyn ToolFactory>,
-    pub memory: Option<Arc<dyn Memory>>,
-    pub agent_config: AgentConfig,
-    pub lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    pub provider: Provider,
+    pub max_delegation_depth: u32,
     /// Pre-built delegation context from a parent delegation. When set,
     /// the runner uses this instead of creating a fresh one — this is how
     /// depth decrements across nested delegations.
@@ -127,7 +121,7 @@ impl AgentRunner {
 
         // Extract manifest before delegation is consumed so domain_expansion can
         // pass it to sub-runners.
-        let manifest = delegation.as_ref().map(|ds| ds.manifest.clone());
+        let manifest = delegation.as_ref().map(|ds| ds.provider.manifest_arc());
 
         // If the agent has abilities, register one tool per assigned ability
         // resolved from the canonical manifest.
@@ -156,17 +150,12 @@ impl AgentRunner {
             // Use pre-built context from parent delegation, or create fresh.
             let ctx = ds
                 .delegation_ctx
-                .unwrap_or_else(|| DelegationContext::new(ds.agent_config.max_delegation_depth));
+                .unwrap_or_else(|| DelegationContext::new(ds.max_delegation_depth));
 
             // Only inject if there's remaining depth and other agents exist.
             if other_agents && ctx.max_depth > ctx.current_depth {
                 let delegate_tool = DelegateToTool::new(super::delegation::DelegateToToolParams {
-                    manifest: ds.manifest,
-                    model_factory: ds.model_factory,
-                    tool_factory: ds.tool_factory,
-                    memory: ds.memory,
-                    agent_config: ds.agent_config,
-                    lambda_runner: ds.lambda_runner,
+                    provider: ds.provider,
                     caller_agent_id: instance.agent_id.unwrap_or_else(Uuid::nil),
                     delegation_ctx: ctx,
                 });

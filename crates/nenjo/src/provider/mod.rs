@@ -6,6 +6,7 @@
 pub mod builder;
 pub mod error;
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,11 +21,10 @@ use nenjo_tools::Tool;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
+use crate::context::ContextRenderer;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
-use crate::routines::{
-    self, LambdaRunner, RoutineEvent, RoutineExecutionHandle, types::StepResult,
-};
+use crate::routines::{self, RoutineEvent, RoutineExecutionHandle, types::StepResult};
 use crate::types::RenderContextVars;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -102,12 +102,140 @@ impl ToolFactory for NoopToolFactory {
 /// [`agent_by_name`](Self::agent_by_name) to create agent runners.
 #[derive(Clone)]
 pub struct Provider {
+    inner: Arc<ProviderInner>,
+}
+
+pub(crate) struct ProviderInner {
+    manifest: ManifestIndex,
+    context_renderer: ContextRenderer,
+    services: Arc<ProviderServices>,
+}
+
+pub(crate) struct ManifestIndex {
     manifest: Arc<Manifest>,
-    model_factory: Arc<dyn ModelProviderFactory>,
-    tool_factory: Arc<dyn ToolFactory>,
+    agents_by_id: HashMap<Uuid, usize>,
+    agents_by_name: HashMap<String, usize>,
+    models_by_id: HashMap<Uuid, usize>,
+    routines_by_id: HashMap<Uuid, usize>,
+    projects_by_id: HashMap<Uuid, usize>,
+    abilities_by_id: HashMap<Uuid, usize>,
+    domains_by_id: HashMap<Uuid, usize>,
+    mcp_servers_by_id: HashMap<Uuid, usize>,
+}
+
+impl ManifestIndex {
+    fn new(manifest: Arc<Manifest>) -> Self {
+        Self {
+            agents_by_id: index_by_id(manifest.agents.iter().map(|agent| agent.id)),
+            agents_by_name: index_by_name(manifest.agents.iter().map(|agent| agent.name.as_str())),
+            models_by_id: index_by_id(manifest.models.iter().map(|model| model.id)),
+            routines_by_id: index_by_id(manifest.routines.iter().map(|routine| routine.id)),
+            projects_by_id: index_by_id(manifest.projects.iter().map(|project| project.id)),
+            abilities_by_id: index_by_id(manifest.abilities.iter().map(|ability| ability.id)),
+            domains_by_id: index_by_id(manifest.domains.iter().map(|domain| domain.id)),
+            mcp_servers_by_id: index_by_id(manifest.mcp_servers.iter().map(|server| server.id)),
+            manifest,
+        }
+    }
+
+    fn agent_by_id(&self, id: Uuid) -> Option<&AgentManifest> {
+        self.agents_by_id
+            .get(&id)
+            .map(|index| &self.manifest.agents[*index])
+    }
+
+    fn agent_by_name(&self, name: &str) -> Option<&AgentManifest> {
+        self.agents_by_name
+            .get(name)
+            .map(|index| &self.manifest.agents[*index])
+    }
+
+    fn model_by_id(&self, id: Uuid) -> Option<&ModelManifest> {
+        self.models_by_id
+            .get(&id)
+            .map(|index| &self.manifest.models[*index])
+    }
+
+    fn routine_by_id(&self, id: Uuid) -> Option<&crate::manifest::RoutineManifest> {
+        self.routines_by_id
+            .get(&id)
+            .map(|index| &self.manifest.routines[*index])
+    }
+
+    fn project_by_id(&self, id: Uuid) -> Option<&ProjectManifest> {
+        self.projects_by_id
+            .get(&id)
+            .map(|index| &self.manifest.projects[*index])
+    }
+
+    fn abilities_by_ids(&self, ids: &[Uuid]) -> Vec<crate::manifest::AbilityManifest> {
+        let mut seen = HashSet::with_capacity(ids.len());
+        ids.iter()
+            .filter_map(|id| {
+                if !seen.insert(*id) {
+                    return None;
+                }
+                self.abilities_by_id
+                    .get(id)
+                    .map(|index| self.manifest.abilities[*index].clone())
+            })
+            .collect()
+    }
+
+    fn domains_by_ids(&self, ids: &[Uuid]) -> Vec<crate::manifest::DomainManifest> {
+        let mut seen = HashSet::with_capacity(ids.len());
+        ids.iter()
+            .filter_map(|id| {
+                if !seen.insert(*id) {
+                    return None;
+                }
+                self.domains_by_id
+                    .get(id)
+                    .map(|index| self.manifest.domains[*index].clone())
+            })
+            .collect()
+    }
+
+    fn mcp_server_info_by_ids(&self, ids: &[Uuid]) -> Vec<(String, String)> {
+        let mut seen = HashSet::with_capacity(ids.len());
+        ids.iter()
+            .filter_map(|id| {
+                if !seen.insert(*id) {
+                    return None;
+                }
+                self.mcp_servers_by_id.get(id).map(|index| {
+                    let server = &self.manifest.mcp_servers[*index];
+                    (
+                        server.display_name.clone(),
+                        server.description.clone().unwrap_or_default(),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn index_by_id(ids: impl Iterator<Item = Uuid>) -> HashMap<Uuid, usize> {
+    let mut index = HashMap::new();
+    for (position, id) in ids.enumerate() {
+        index.entry(id).or_insert(position);
+    }
+    index
+}
+
+fn index_by_name<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<String, usize> {
+    let mut index = HashMap::new();
+    for (position, name) in names.enumerate() {
+        index.entry(name.to_string()).or_insert(position);
+    }
+    index
+}
+
+pub(crate) struct ProviderServices {
+    model_factory: Box<dyn ModelProviderFactory>,
+    tool_factory: Box<dyn ToolFactory>,
     memory: Option<Arc<dyn Memory>>,
     agent_config: AgentConfig,
-    lambda_runner: Option<Arc<dyn LambdaRunner>>,
 }
 
 impl Provider {
@@ -116,32 +244,45 @@ impl Provider {
         ProviderBuilder::new()
     }
 
-    /// Create a Provider from raw Arc fields (used internally by DelegateToTool).
-    pub(crate) fn from_manifest_raw(
+    pub(crate) fn new_inner(
         manifest: Arc<Manifest>,
-        model_factory: Arc<dyn ModelProviderFactory>,
-        tool_factory: Arc<dyn ToolFactory>,
+        model_factory: Box<dyn ModelProviderFactory>,
+        tool_factory: Box<dyn ToolFactory>,
         memory: Option<Arc<dyn Memory>>,
         agent_config: AgentConfig,
-        lambda_runner: Option<Arc<dyn LambdaRunner>>,
     ) -> Self {
-        Self {
-            manifest,
+        let services = Arc::new(ProviderServices {
             model_factory,
             tool_factory,
             memory,
             agent_config,
-            lambda_runner,
+        });
+        Self::from_services(manifest, services)
+    }
+
+    fn from_services(manifest: Arc<Manifest>, services: Arc<ProviderServices>) -> Self {
+        let render_blocks: Vec<_> = manifest
+            .context_blocks
+            .iter()
+            .map(prompts::render_context_block)
+            .collect();
+        let context_renderer = ContextRenderer::from_blocks(&render_blocks);
+
+        Self {
+            inner: Arc::new(ProviderInner {
+                manifest: ManifestIndex::new(manifest),
+                context_renderer,
+                services,
+            }),
         }
     }
 
     /// Get an agent builder by agent ID.
     pub async fn agent_by_id(&self, id: Uuid) -> Result<AgentBuilder, ProviderError> {
         let agent = self
+            .inner
             .manifest
-            .agents
-            .iter()
-            .find(|a| a.id == id)
+            .agent_by_id(id)
             .ok_or_else(|| ProviderError::AgentNotFound(id.to_string()))?;
 
         self.build_agent(agent).await
@@ -150,10 +291,9 @@ impl Provider {
     /// Get an agent builder by agent name.
     pub async fn agent_by_name(&self, name: &str) -> Result<AgentBuilder, ProviderError> {
         let agent = self
+            .inner
             .manifest
-            .agents
-            .iter()
-            .find(|a| a.name == name)
+            .agent_by_name(name)
             .ok_or_else(|| ProviderError::AgentNotFound(name.to_string()))?;
 
         self.build_agent(agent).await
@@ -161,46 +301,42 @@ impl Provider {
 
     /// Access the bootstrap manifest.
     pub fn manifest(&self) -> &Manifest {
-        &self.manifest
+        &self.inner.manifest.manifest
     }
 
     /// Get a clone of the manifest Arc (for mutation + rebuild).
     pub fn manifest_arc(&self) -> Arc<Manifest> {
-        self.manifest.clone()
+        self.inner.manifest.manifest.clone()
     }
 
     /// Create a new Provider with the given manifest but same factories/memory/config.
     ///
     /// Used by the harness to hot-swap bootstrap data without rebuilding factories.
     pub fn with_manifest(&self, manifest: Manifest) -> Self {
-        Self {
-            manifest: Arc::new(manifest),
-            model_factory: self.model_factory.clone(),
-            tool_factory: self.tool_factory.clone(),
-            memory: self.memory.clone(),
-            agent_config: self.agent_config.clone(),
-            lambda_runner: self.lambda_runner.clone(),
-        }
+        Self::from_services(Arc::new(manifest), self.inner.services.clone())
     }
 
     /// Access the memory backend, if configured.
     pub fn memory(&self) -> Option<&Arc<dyn Memory>> {
-        self.memory.as_ref()
+        self.inner.services.memory.as_ref()
     }
 
     /// Access the agent config.
     pub fn agent_config(&self) -> &AgentConfig {
-        &self.agent_config
+        &self.inner.services.agent_config
     }
 
     /// Access the tool factory.
-    pub fn tool_factory(&self) -> &Arc<dyn ToolFactory> {
-        &self.tool_factory
+    pub fn tool_factory(&self) -> &dyn ToolFactory {
+        &*self.inner.services.tool_factory
     }
 
-    /// Access the lambda runner, if configured.
-    pub fn lambda_runner(&self) -> Option<&Arc<dyn LambdaRunner>> {
-        self.lambda_runner.as_ref()
+    pub(crate) fn agent_manifest_by_name(&self, name: &str) -> Option<&AgentManifest> {
+        self.inner.manifest.agent_by_name(name)
+    }
+
+    pub(crate) fn project_by_id(&self, id: Uuid) -> Option<&ProjectManifest> {
+        self.inner.manifest.project_by_id(id)
     }
 
     // -----------------------------------------------------------------------
@@ -216,10 +352,9 @@ impl Provider {
     /// ```
     pub fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner, ProviderError> {
         let routine = self
+            .inner
             .manifest
-            .routines
-            .iter()
-            .find(|r| r.id == routine_id)
+            .routine_by_id(routine_id)
             .ok_or_else(|| ProviderError::RoutineNotFound(routine_id.to_string()))?
             .clone();
 
@@ -238,6 +373,8 @@ impl Provider {
         let model = self.resolve_model(agent)?;
 
         let provider = self
+            .inner
+            .services
             .model_factory
             .create_with_base_url(&model.model_provider, model.base_url.as_deref())
             .map_err(|e| {
@@ -247,7 +384,7 @@ impl Provider {
                 )))
             })?;
 
-        let tools = self.tool_factory.create_tools(agent).await;
+        let tools = self.inner.services.tool_factory.create_tools(agent).await;
         if tracing::enabled!(tracing::Level::TRACE) {
             let tool_names = tools
                 .iter()
@@ -275,16 +412,8 @@ impl Provider {
             "Loaded typed prompt_config"
         );
 
-        let agent_config = self.agent_config.clone();
+        let agent_config = self.inner.services.agent_config.clone();
         let prompt_context = self.build_prompt_context(agent);
-
-        let render_blocks: Vec<_> = self
-            .manifest
-            .context_blocks
-            .iter()
-            .map(prompts::render_context_block)
-            .collect();
-        let context_renderer = crate::context::ContextRenderer::from_blocks(&render_blocks);
 
         let mut builder = AgentBuilder::new(super::agents::builder::AgentBuilderParams {
             agent: agent.clone(),
@@ -294,20 +423,15 @@ impl Provider {
             prompt_config,
             prompt_context,
             agent_config,
-            context_renderer,
+            context_renderer: self.inner.context_renderer.clone(),
         });
 
-        if let Some(ref mem) = self.memory {
+        if let Some(ref mem) = self.inner.services.memory {
             builder = builder.with_memory(mem.clone());
         }
 
         // Enable delegation support so the runner can inject DelegateToTool.
-        builder = builder.with_delegation_support(
-            self.manifest.clone(),
-            self.model_factory.clone(),
-            self.tool_factory.clone(),
-            self.lambda_runner.clone(),
-        );
+        builder = builder.with_delegation_support(self.clone());
 
         Ok(builder)
     }
@@ -317,10 +441,9 @@ impl Provider {
             ProviderError::ModelNotFound(format!("agent '{}' has no model assigned", agent.name))
         })?;
 
-        self.manifest
-            .models
-            .iter()
-            .find(|m| m.id == model_id)
+        self.inner
+            .manifest
+            .model_by_id(model_id)
             .cloned()
             .ok_or_else(|| {
                 ProviderError::ModelNotFound(format!(
@@ -331,53 +454,35 @@ impl Provider {
     }
 
     fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext {
-        let abilities: Vec<_> = self
-            .manifest
-            .abilities
-            .iter()
-            .filter(|a| agent.ability_ids.contains(&a.id))
-            .cloned()
-            .collect();
+        let abilities: Vec<_> = self.inner.manifest.abilities_by_ids(&agent.ability_ids);
 
-        let domains: Vec<_> = self
-            .manifest
-            .domains
-            .iter()
-            .filter(|d| agent.domain_ids.contains(&d.id))
-            .cloned()
-            .collect();
+        let domains: Vec<_> = self.inner.manifest.domains_by_ids(&agent.domain_ids);
 
         let mcp_server_info: Vec<(String, String)> = self
+            .inner
             .manifest
-            .mcp_servers
-            .iter()
-            .filter(|s| agent.mcp_server_ids.contains(&s.id))
-            .map(|s| {
-                (
-                    s.display_name.clone(),
-                    s.description.clone().unwrap_or_default(),
-                )
-            })
-            .collect();
+            .mcp_server_info_by_ids(&agent.mcp_server_ids);
 
-        let current_project =
-            self.manifest
-                .projects
-                .first()
-                .cloned()
-                .unwrap_or_else(|| ProjectManifest {
-                    id: Uuid::nil(),
-                    name: String::new(),
-                    slug: String::new(),
-                    description: None,
-                    settings: serde_json::Value::Null,
-                });
+        let current_project = self
+            .inner
+            .manifest
+            .manifest
+            .projects
+            .first()
+            .cloned()
+            .unwrap_or_else(|| ProjectManifest {
+                id: Uuid::nil(),
+                name: String::new(),
+                slug: String::new(),
+                description: None,
+                settings: serde_json::Value::Null,
+            });
 
         PromptContext {
             agent_name: agent.name.clone(),
             agent_description: agent.description.clone().unwrap_or_default(),
-            available_agents: self.manifest.agents.clone(),
-            available_routines: self.manifest.routines.clone(),
+            available_agents: self.inner.manifest.manifest.agents.clone(),
+            available_routines: self.inner.manifest.manifest.routines.clone(),
             current_project,
             available_abilities: abilities,
             available_domains: domains,
@@ -809,9 +914,12 @@ mod tests {
             Some(updated_agent_id)
         );
         assert_eq!(
-            original_runner.provider.manifest.agents[0].name,
+            original_runner.provider.manifest().agents[0].name,
             "agent-old"
         );
-        assert_eq!(updated_runner.provider.manifest.agents[0].name, "agent-new");
+        assert_eq!(
+            updated_runner.provider.manifest().agents[0].name,
+            "agent-new"
+        );
     }
 }

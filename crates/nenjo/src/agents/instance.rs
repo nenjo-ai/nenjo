@@ -13,7 +13,7 @@ use nenjo_tools::{Tool, ToolSpec};
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::manifest::{AgentManifest, PromptConfig};
-use crate::provider::ToolFactory;
+use crate::provider::Provider;
 use crate::types::{RenderContextExt, RenderContextVars, TaskType};
 
 /// The system and developer prompts ready for the turn loop.
@@ -55,7 +55,7 @@ pub struct AgentInstance {
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
     pub source_manifest: Option<AgentManifest>,
-    pub tool_factory: Option<Arc<dyn ToolFactory>>,
+    pub sdk_provider: Option<Provider>,
     pub memory_vars: HashMap<String, String>,
     pub resource_vars: HashMap<String, String>,
     pub documents_xml: String,
