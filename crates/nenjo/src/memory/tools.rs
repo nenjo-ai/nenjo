@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
+use crate::tools::{Tool, ToolCategory, ToolResult};
 use anyhow::Result;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 use super::Memory;
 use super::types::{MemoryCategory, MemoryScope};

@@ -11,8 +11,8 @@ use nenjo::manifest::{
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Mocks

@@ -12,7 +12,7 @@
 //! | Direction | Worker local subject | PLATFORM subject | Rust type |
 //! |-----------|---------------------|------------------|-----------|
 //! | Backend → Harness | `work_requests.<capability>` | `work_requests.<user_id>.<capability>` | [`Command`] |
-//! | Harness → Backend | `responses` | `responses.<user_id>` | [`Response`] |
+//! | Harness → Backend | `responses` / `responses.<user_id>` | `responses.<user_id>` | [`Response`] |
 //!
 //! ## Wire format
 //!

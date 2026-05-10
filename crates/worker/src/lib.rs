@@ -9,14 +9,29 @@
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
+pub mod assembly;
+pub mod bootstrap;
+pub mod config;
 pub mod crypto;
-pub mod harness;
+pub mod event_loop;
+pub mod execution_trace;
+pub mod external_mcp;
+pub mod handlers;
+pub mod local_documents;
+pub mod providers;
+pub mod runtime;
+pub mod security;
+pub mod sessions;
+pub mod tools;
+
+pub use nenjo::client as api_client;
 
 use std::time::Duration;
 
+use crate::config::Config;
 use crate::crypto::{EnrollmentStatus, WorkerAuthProvider};
-use crate::harness::Harness;
-use crate::harness::config::Config;
+use crate::event_loop::WorkerEventLoopContext;
+use crate::runtime::WorkerRuntime;
 use anyhow::Result;
 use clap::Args;
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
@@ -186,11 +201,11 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(
         config.state_dir.join("crypto"),
     )?);
-    let harness = Harness::new(config.clone(), auth_provider.clone()).await?;
+    let harness = WorkerRuntime::new(config.clone(), auth_provider.clone()).await?;
 
     // The api_key_id is the stable worker identifier used for presence tracking.
-    let auth = crate::harness::manifest::load_cached_bootstrap_auth(&config.manifests_dir)
-        .ok_or_else(|| {
+    let auth =
+        crate::bootstrap::load_cached_bootstrap_auth(&config.manifests_dir).ok_or_else(|| {
             anyhow::anyhow!(
                 "Backend did not return bootstrap auth. Ensure bootstrap is up to date."
             )
@@ -219,13 +234,13 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         }
     }
 
-    let user_id = auth.user_id;
+    let ack_actor_user_id = auth.user_id;
     let org_id = auth.org_id;
     wait_for_enrollment_approval(
         harness.api().as_ref(),
         auth_provider.as_ref(),
         api_key_id,
-        user_id,
+        ack_actor_user_id,
         build_harness_metadata(config),
         shutdown,
     )
@@ -242,7 +257,12 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))?;
 
     let codec = SecureEnvelopeCodec::new(
-        EnrollmentBackedKeyProvider::new(auth_provider, harness.api(), api_key_id, user_id),
+        EnrollmentBackedKeyProvider::new(
+            auth_provider,
+            harness.api(),
+            api_key_id,
+            ack_actor_user_id,
+        ),
         org_id,
     );
 
@@ -269,7 +289,9 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     });
 
     // Run the event loop — blocks until the bus stream ends or shutdown.
-    let result = harness.run(secure_bus, user_id).await;
+    let result = harness
+        .run(secure_bus, WorkerEventLoopContext { org_id })
+        .await;
 
     link.abort();
 
@@ -292,7 +314,7 @@ struct ResolvedNatsConnection {
 }
 
 fn resolve_nats_connection(config: &Config) -> ResolvedNatsConnection {
-    let cached = crate::harness::manifest::load_cached_nats_config(&config.manifests_dir);
+    let cached = crate::bootstrap::load_cached_nats_config(&config.manifests_dir);
     let stream_name = cached
         .as_ref()
         .map(|nats| nats.stream.name.trim())
@@ -349,12 +371,12 @@ async fn wait_for_enrollment_approval(
     api: &nenjo::client::NenjoClient,
     auth_provider: &WorkerAuthProvider,
     api_key_id: uuid::Uuid,
-    bootstrap_user_id: uuid::Uuid,
+    ack_actor_user_id: uuid::Uuid,
     metadata: Option<serde_json::Value>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
     auth_provider
-        .sync_worker_enrollment(api, api_key_id, bootstrap_user_id, metadata.clone())
+        .sync_worker_enrollment(api, api_key_id, ack_actor_user_id, metadata.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize worker enrollment: {error}"))?;
 
@@ -380,7 +402,6 @@ async fn wait_for_enrollment_approval(
         match api.fetch_worker_enrollment_status(api_key_id).await {
             Ok(Some(status)) => match status.state {
                 nenjo::client::WorkerEnrollmentState::Active => {
-                    let _ = bootstrap_user_id;
                     auth_provider.apply_backend_enrollment(&status).await?;
                     info!(%api_key_id, "Worker enrollment approved");
                     return Ok(());

@@ -47,10 +47,22 @@ pub fn broadcast_requests_subject_all() -> String {
     "broadcast_requests.>".to_string()
 }
 
-/// Local NATS subject for sending responses back to the backend.
-/// `responses`
-pub fn responses_subject(user_id: Uuid) -> String {
-    format!("responses.{user_id}")
+/// Local NATS subject for sending worker/system responses back to the backend.
+/// `responses.<org_id>`
+pub fn responses_subject(org_id: Uuid) -> String {
+    response_org_subject(org_id)
+}
+
+/// Local NATS subject for sending actor-scoped responses back to the backend.
+/// `responses.<org_id>.<user_id>`
+pub fn response_user_subject(org_id: Uuid, user_id: Uuid) -> String {
+    format!("responses.{org_id}.{user_id}")
+}
+
+/// Local NATS subject for sending org-scoped system responses back to the backend.
+/// `responses.<org_id>`
+pub fn response_org_subject(org_id: Uuid) -> String {
+    format!("responses.{org_id}")
 }
 
 /// Local NATS subject for sending realtime chat events back to the backend.
@@ -60,13 +72,13 @@ pub fn chat_stream_subject(session_id: Uuid) -> String {
 }
 
 /// Resolve the local subject for a response.
-pub fn response_subject(user_id: Uuid, response: &Response) -> String {
+pub fn response_subject(org_id: Uuid, user_id: Uuid, response: &Response) -> String {
     match response {
         Response::AgentResponse {
             session_id: Some(session_id),
             ..
         } => chat_stream_subject(*session_id),
-        _ => responses_subject(user_id),
+        _ => response_user_subject(org_id, user_id),
     }
 }
 
@@ -116,8 +128,18 @@ mod tests {
 
     #[test]
     fn responses_subject_format() {
-        let id = Uuid::nil();
-        assert_eq!(responses_subject(id), format!("responses.{id}"));
+        let org_id = Uuid::nil();
+        assert_eq!(responses_subject(org_id), format!("responses.{org_id}"));
+    }
+
+    #[test]
+    fn response_user_subject_format() {
+        let org_id = Uuid::nil();
+        let user_id = Uuid::from_u128(1);
+        assert_eq!(
+            response_user_subject(org_id, user_id),
+            format!("responses.{org_id}.{user_id}")
+        );
     }
 
     #[test]

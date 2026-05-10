@@ -17,6 +17,7 @@ use crate::{
 };
 
 /// Secure-envelope codec that encrypts and decrypts content-bearing command and response payloads.
+#[derive(Clone)]
 pub struct SecureEnvelopeCodec {
     key_provider: Arc<dyn EnvelopeKeyProvider>,
     org_id: Uuid,
@@ -31,6 +32,11 @@ impl SecureEnvelopeCodec {
             key_provider: Arc::new(key_provider),
             org_id,
         }
+    }
+
+    /// Decode a single encrypted payload using the scope encoded in the payload.
+    pub async fn decode_payload_text(&self, payload: &EncryptedPayload) -> Result<String> {
+        self.decrypt_enc_payload(payload.account_id, payload).await
     }
 
     async fn decrypt_user_payload(
@@ -324,6 +330,13 @@ impl SecureEnvelopeCodec {
 }
 
 #[async_trait]
+impl nenjo::client::PayloadDecoder for SecureEnvelopeCodec {
+    async fn decode_text(&self, payload: &EncryptedPayload) -> Result<String> {
+        self.decode_payload_text(payload).await
+    }
+}
+
+#[async_trait]
 impl EnvelopeCodec for SecureEnvelopeCodec {
     async fn encode_command(&self, command: Command) -> CodecResult<Command> {
         Ok(Some(command))
@@ -406,6 +419,47 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     encrypted_payload: None,
                 },
             ))),
+            Command::ManifestChanged {
+                resource_type,
+                resource_id,
+                action,
+                project_id,
+                payload,
+                encrypted_payload: Some(encrypted_payload),
+            } => {
+                let object_type = encrypted_payload.object_type.clone();
+                let decrypted = match self
+                    .decrypt_enc_payload(actor_user_id, &encrypted_payload)
+                    .await
+                {
+                    Ok(plaintext) => serde_json::from_str::<Value>(&plaintext)
+                        .unwrap_or(Value::String(plaintext)),
+                    Err(error) => {
+                        return Ok(DecodeCommandResult::ClientError(DecodingError {
+                            code: "encrypted_manifest_decode_failed",
+                            message: error.to_string(),
+                            session_id: None,
+                            project_id,
+                            agent_id: None,
+                        }));
+                    }
+                };
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::ManifestChanged {
+                        resource_type,
+                        resource_id,
+                        action,
+                        project_id,
+                        payload: Some(serde_json::json!({
+                            "__nenjo_decrypted_manifest_payload": true,
+                            "object_type": object_type,
+                            "inline_payload": payload,
+                            "decrypted_payload": decrypted,
+                        })),
+                        encrypted_payload: None,
+                    },
+                )))
+            }
             Command::WorkerAccountKeyUpdated { wrapped_ack } => Ok(DecodeCommandResult::Command(
                 Box::new(Command::WorkerAccountKeyUpdated { wrapped_ack }),
             )),

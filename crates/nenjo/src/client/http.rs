@@ -1,6 +1,10 @@
 //! HTTP client implementation.
 
+use std::sync::Arc;
+
 use super::types::ActiveAgentHeartbeatState;
+use async_trait::async_trait;
+use nenjo_events::EncryptedPayload;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -12,14 +16,34 @@ use crate::manifest::*;
 /// Result alias for client operations.
 pub type Result<T> = std::result::Result<T, ApiClientError>;
 
+/// Optional encrypted payload decoder used to normalize platform fetch responses.
+///
+/// The client owns HTTP and response shaping, but not key storage. Worker or
+/// embedded runtimes can provide a decoder backed by secure-envelope, KMS, or
+/// another crypto provider.
+#[async_trait]
+pub trait PayloadDecoder: Send + Sync {
+    async fn decode_text(&self, payload: &EncryptedPayload) -> anyhow::Result<String>;
+}
+
 /// Typed HTTP client for the Nenjo backend.
 ///
 /// Every request automatically includes the `X-API-Key` header.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NenjoClient {
     http: Client,
     base_url: String,
     api_key: String,
+    payload_decoder: Option<Arc<dyn PayloadDecoder>>,
+}
+
+impl std::fmt::Debug for NenjoClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NenjoClient")
+            .field("base_url", &self.base_url)
+            .field("payload_decoder", &self.payload_decoder.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl NenjoClient {
@@ -34,6 +58,7 @@ impl NenjoClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            payload_decoder: None,
         }
     }
 
@@ -47,7 +72,24 @@ impl NenjoClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            payload_decoder: None,
         }
+    }
+
+    /// Return a clone of this client that decodes encrypted platform payloads
+    /// in fetch responses when possible.
+    pub fn with_payload_decoder<D>(mut self, decoder: D) -> Self
+    where
+        D: PayloadDecoder + 'static,
+    {
+        self.payload_decoder = Some(Arc::new(decoder));
+        self
+    }
+
+    /// Return a clone of this client using a shared encrypted payload decoder.
+    pub fn with_shared_payload_decoder(mut self, decoder: Arc<dyn PayloadDecoder>) -> Self {
+        self.payload_decoder = Some(decoder);
+        self
     }
 
     /// Return the base URL this client targets.
@@ -203,8 +245,12 @@ impl NenjoClient {
         &self,
         id: Uuid,
     ) -> Result<Option<ContextBlockContentResponse>> {
-        self.fetch_resource(&format!("/api/v1/context-blocks/{id}/content"))
-            .await
+        let content = self
+            .fetch_resource::<ContextBlockContentResponse>(&format!(
+                "/api/v1/context-blocks/{id}/content"
+            ))
+            .await?;
+        self.decode_context_block_content(content).await
     }
 
     pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
@@ -221,11 +267,13 @@ impl NenjoClient {
         let resp = self.get(&url).await?;
 
         match resp.status() {
-            StatusCode::OK => resp
-                .json::<AgentPromptConfigResponse>()
-                .await
-                .map(Some)
-                .map_err(ApiClientError::Http),
+            StatusCode::OK => {
+                let response = resp
+                    .json::<AgentPromptConfigResponse>()
+                    .await
+                    .map_err(ApiClientError::Http)?;
+                self.decode_agent_prompt_config(Some(response)).await
+            }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(self.api_error(status, resp).await),
         }
@@ -272,6 +320,7 @@ impl NenjoClient {
         match resp.status() {
             StatusCode::OK => {
                 let content = resp.json().await.map_err(ApiClientError::Http)?;
+                let content = self.decode_document_content(content).await?;
                 debug!(project_id = %project_id, doc_id = %doc_id, "Fetched document content");
                 Ok(content)
             }
@@ -373,6 +422,79 @@ impl NenjoClient {
             code: "unknown".into(),
             message: body,
         }
+    }
+
+    async fn decode_agent_prompt_config(
+        &self,
+        response: Option<AgentPromptConfigResponse>,
+    ) -> Result<Option<AgentPromptConfigResponse>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(decoder) = self.payload_decoder.as_ref() else {
+            return Ok(Some(response));
+        };
+
+        let plaintext = decoder.decode_text(payload).await.map_err(|error| {
+            ApiClientError::Parse(format!("Failed to decrypt agent prompt: {error}"))
+        })?;
+        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!("Failed to parse decrypted agent prompt: {error}"))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_context_block_content(
+        &self,
+        response: Option<ContextBlockContentResponse>,
+    ) -> Result<Option<ContextBlockContentResponse>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(decoder) = self.payload_decoder.as_ref() else {
+            return Ok(Some(response));
+        };
+
+        let plaintext = decoder.decode_text(payload).await.map_err(|error| {
+            ApiClientError::Parse(format!("Failed to decrypt context block content: {error}"))
+        })?;
+        response.template = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!(
+                "Failed to parse decrypted context block content: {error}"
+            ))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_document_content(
+        &self,
+        mut content: DocumentSyncContent,
+    ) -> Result<DocumentSyncContent> {
+        let Some(payload) = content.encrypted_payload.as_ref() else {
+            return Ok(content);
+        };
+        let Some(decoder) = self.payload_decoder.as_ref() else {
+            return Ok(content);
+        };
+
+        let plaintext = decoder.decode_text(payload).await.map_err(|error| {
+            ApiClientError::Parse(format!("Failed to decrypt document content: {error}"))
+        })?;
+        content.content = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!(
+                "Failed to parse decrypted document content: {error}"
+            ))
+        })?);
+        content.encrypted_payload = None;
+        Ok(content)
     }
 }
 

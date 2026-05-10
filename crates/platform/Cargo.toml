@@ -12,6 +12,7 @@ nenjo = { workspace = true }
 nenjo-events = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

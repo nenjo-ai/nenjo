@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
+use crate::tools::{Tool, ToolCategory, ToolResult};
 use anyhow::{Result, bail};
 use nenjo_models::ChatMessage;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 use tokio::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;

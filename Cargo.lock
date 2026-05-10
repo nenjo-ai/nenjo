@@ -1803,7 +1803,6 @@ dependencies = [
  "futures-util",
  "nenjo-events",
  "nenjo-models",
- "nenjo-tools",
  "nenjo-xml",
  "regex",
  "reqwest",
@@ -1887,6 +1886,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-harness"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "nenjo",
+ "nenjo-events",
+ "nenjo-models",
+ "nenjo-platform",
+ "nenjo-sessions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nenjo-integration-tests"
 version = "0.11.0"
 dependencies = [
@@ -1894,7 +1916,6 @@ dependencies = [
  "async-trait",
  "nenjo",
  "nenjo-models",
- "nenjo-tools",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1911,7 +1932,6 @@ dependencies = [
  "base64",
  "chrono",
  "directories",
- "nenjo-tools",
  "reqwest",
  "serde",
  "serde_json",
@@ -1926,6 +1946,7 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "nenjo",
  "nenjo-events",
  "reqwest",
@@ -1945,6 +1966,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "nenjo",
  "nenjo-crypto-auth",
  "nenjo-eventbus",
  "nenjo-events",
@@ -1961,33 +1983,11 @@ name = "nenjo-sessions"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
  "uuid",
-]
-
-[[package]]
-name = "nenjo-tools"
-version = "0.11.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "futures-util",
- "glob",
- "nanohtml2text",
- "parking_lot",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "urlencoding",
- "which",
 ]
 
 [[package]]
@@ -2009,6 +2009,7 @@ dependencies = [
  "directories",
  "dotenvy",
  "ed25519-dalek",
+ "futures-util",
  "glob",
  "hkdf",
  "nanohtml2text",
@@ -2016,11 +2017,11 @@ dependencies = [
  "nenjo-crypto-auth",
  "nenjo-eventbus",
  "nenjo-events",
+ "nenjo-harness",
  "nenjo-models",
  "nenjo-platform",
  "nenjo-secure-envelope",
  "nenjo-sessions",
- "nenjo-tools",
  "nenjo-xml",
  "parking_lot",
  "rand_core 0.6.4",

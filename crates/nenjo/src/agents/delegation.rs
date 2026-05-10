@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
+use crate::tools::{Tool, ToolCategory, ToolResult};
 
 use super::runner::turn_loop;
 use super::runner::types::TurnEvent;

@@ -15,9 +15,9 @@ use nenjo::manifest::{
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Shared mocks / helpers

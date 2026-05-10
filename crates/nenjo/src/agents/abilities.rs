@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
+use crate::tools::{Tool, ToolCategory, ToolResult};
 
 use super::instance::AgentInstance;
 use super::runner::turn_loop;
@@ -453,11 +453,10 @@ mod tests {
         PromptConfig,
     };
     use crate::provider::{ModelProviderFactory, Provider, ToolFactory};
+    use crate::tools::{ToolCategory, ToolResult, ToolSecurity};
     use crate::types::ActiveDomain;
     use anyhow::Result;
     use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider};
-    use nenjo_tools::security::SecurityPolicy;
-    use nenjo_tools::{ToolCategory, ToolResult};
 
     struct NoopProvider;
 
@@ -533,14 +532,14 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolFactory for TestToolFactory {
         async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
-            self.create_tools_with_security(agent, Arc::new(SecurityPolicy::default()))
+            self.create_tools_with_security(agent, Arc::new(ToolSecurity::default()))
                 .await
         }
 
         async fn create_tools_with_security(
             &self,
             agent: &AgentManifest,
-            _security: Arc<SecurityPolicy>,
+            _security: Arc<ToolSecurity>,
         ) -> Vec<Arc<dyn Tool>> {
             let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestTool { name: "shell" })];
             if agent
@@ -630,7 +629,7 @@ mod tests {
             },
             provider: Arc::new(NoopProvider),
             tools: vec![],
-            security: Arc::new(SecurityPolicy::default()),
+            security: Arc::new(ToolSecurity::default()),
             agent_config: AgentConfig::default(),
             context_renderer: ContextRenderer::from_blocks(&[]),
             source_manifest: Some(AgentManifest {

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::tools::ToolResult;
 use nenjo_models::ChatMessage;
-use nenjo_tools::ToolResult;
 use tokio::sync::Notify;
 
 /// A single tool call with its name and arguments.

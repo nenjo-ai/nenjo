@@ -13,7 +13,6 @@ categories = ["api-bindings", "asynchronous"]
 [dependencies]
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
-nenjo-tools = { workspace = true }
 nenjo-xml = { workspace = true }
 chrono = { workspace = true }
 cron = { workspace = true }

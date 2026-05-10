@@ -14,14 +14,13 @@ use regex::Regex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
-use nenjo_models::{ChatMessage, ChatRequest};
-use nenjo_tools::{Tool, ToolCategory};
-
 use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
 use crate::agents::instance::AgentInstance;
+use crate::tools::{Tool, ToolCategory, ToolResult};
+use nenjo_models::{ChatMessage, ChatRequest};
 
 fn dedupe_tool_calls(tool_calls: Vec<nenjo_models::ToolCall>) -> Vec<nenjo_models::ToolCall> {
     let mut seen = HashSet::new();
@@ -392,7 +391,7 @@ pub async fn run(
                         },
                     );
 
-                    let tool_results: Vec<(&nenjo_models::ToolCall, nenjo_tools::ToolResult)> =
+                    let tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
                         if run_parallel {
                             let message_snapshot = messages.clone();
                             let futs = response.tool_calls.iter().map(|tc| {
@@ -621,7 +620,7 @@ async fn execute_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &nenjo_models::ToolCall,
     current_messages: &[ChatMessage],
-) -> nenjo_tools::ToolResult {
+) -> ToolResult {
     info!(
         agent = agent_name,
         tool = %tool_call.name,
@@ -634,7 +633,7 @@ async fn execute_tool(
     let tool = match tool_for_call(tools, tool_call) {
         Some(t) => t,
         None => {
-            return nenjo_tools::ToolResult {
+            return ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Unknown tool: {}", tool_call.name)),
@@ -646,7 +645,7 @@ async fn execute_tool(
     let args: serde_json::Value = match serde_json::from_str(&tool_call.arguments) {
         Ok(v) => v,
         Err(e) => {
-            return nenjo_tools::ToolResult {
+            return ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Failed to parse tool arguments: {e}")),
@@ -658,7 +657,7 @@ async fn execute_tool(
     let execute = async {
         match tool.execute(args).await {
             Ok(result) => result,
-            Err(e) => nenjo_tools::ToolResult {
+            Err(e) => ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Tool execution error: {e}")),

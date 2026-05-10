@@ -1,7 +1,55 @@
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+
+/// Classifies a tool's side-effect profile for filtering and model guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategory {
+    /// Pure read/search with no persistent side effects.
+    Read,
+    /// Mutates files, state, or external systems.
+    #[default]
+    Write,
+    /// Both read and write sub-operations.
+    ReadWrite,
+}
+
+impl ToolCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Read => "READ",
+            Self::Write => "WRITE",
+            Self::ReadWrite => "READ/WRITE",
+        }
+    }
+
+    pub fn guidance(self) -> &'static str {
+        match self {
+            Self::Read => "Inspects or verifies state without persistent side effects.",
+            Self::Write => {
+                "Mutates persistent state. Use sparingly and avoid repeated calls in one turn."
+            }
+            Self::ReadWrite => {
+                "Can read and mutate state. Use carefully and avoid repeated calls in one turn."
+            }
+        }
+    }
+
+    pub fn is_write_like(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
+/// Full specification of a tool for LLM registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub category: ToolCategory,
+}
 
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

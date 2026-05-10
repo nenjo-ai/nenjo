@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/crypto-auth",
+    "crates/harness",
     "crates/nenjo",
     "crates/platform",
     "crates/secure-envelope",
@@ -9,7 +10,6 @@ members = [
     "crates/sessions",
     "crates/events",
     "crates/eventbus",
-    "crates/tools",
     "crates/models",
     "crates/xml",
     "bin",
@@ -29,9 +29,9 @@ nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.11.0" }
 nenjo-platform = { path = "crates/platform", version = "0.11.0" }
 nenjo-xml = { path = "crates/xml", version = "0.11.0" }
 nenjo-models = { path = "crates/models", version = "0.11.0" }
-nenjo-tools = { path = "crates/tools", version = "0.11.0" }
 nenjo-events = { path = "crates/events", version = "0.11.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.11.0" }
+nenjo-harness = { path = "crates/harness", version = "0.11.0" }
 nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.11.0" }
 nenjo-sessions = { path = "crates/sessions", version = "0.11.0" }
 nenjo-worker = { path = "crates/worker" }

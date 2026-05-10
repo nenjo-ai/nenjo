@@ -3,9 +3,9 @@
 //!
 //! Supports native tool calling (Ollama ≥ 0.3.0).
 
+use crate::ToolSpec;
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn tool_spec_conversion() {
-        let tools = vec![nenjo_tools::ToolSpec {
+        let tools = vec![ToolSpec {
             name: "read_file".to_string(),
             description: "Read a file".to_string(),
             parameters: serde_json::json!({

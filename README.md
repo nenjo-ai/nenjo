@@ -18,7 +18,6 @@ curl -fsSL https://nenjo.ai/install | bash
 |-------|-------------|
 | [`nenjo`](crates/nenjo) | Core SDK: provider builder, agent turn loop, memory, manifests, abilities, domains, councils, and routines |
 | [`nenjo-models`](crates/models) | LLM provider trait and implementations for OpenAI, Anthropic, Gemini, OpenRouter, Ollama, and OpenAI-compatible APIs |
-| [`nenjo-tools`](crates/tools) | Tool trait, tool specs, and built-in tools for shell, file, git, search, web, and memory operations |
 | [`nenjo-xml`](crates/xml) | XML serialization and MiniJinja template rendering for structured prompt context |
 | [`nenjo-events`](crates/events) | Typed command, response, stream, resource, and capability contracts for worker-to-platform messaging |
 | [`nenjo-eventbus`](crates/eventbus) | Transport-agnostic event bus with NATS JetStream support |
@@ -36,11 +35,11 @@ Nenjo is split so the SDK can be embedded without pulling in the platform worker
 
 | Layer | Crates | Owns |
 |-------|--------|------|
-| Core SDK | `nenjo`, `nenjo-models`, `nenjo-tools`, `nenjo-xml` | Agent execution, prompts, tools, models, memory, manifests |
+| Core SDK | `nenjo`, `nenjo-models`, `nenjo-xml` | Agent execution, prompts, tool API, models, memory, manifests |
 | Platform contracts | `nenjo-events`, `nenjo-sessions` | Transport-neutral wire and session types |
 | Platform transport | `nenjo-eventbus`, `nenjo-secure-envelope`, `nenjo-crypto-auth` | Event delivery, secure envelopes, worker enrollment and keys |
 | Manifest bridge | `nenjo-platform` | Platform REST/MCP manifest operations and local/platform synchronization |
-| Worker and CLI | `nenjo-worker`, `nenjo-cli` | Runtime composition, event handlers, provider/tool factories, `nenjo run` |
+| Worker and CLI | `nenjo-worker`, `nenjo-cli` | Runtime composition, event handlers, provider/tool factories, concrete runtime tools, `nenjo run` |
 
 ## CLI Worker
 

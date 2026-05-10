@@ -16,7 +16,6 @@ pub use builder::ProviderBuilder;
 pub use error::ProviderError;
 
 use nenjo_models::ModelProvider;
-use nenjo_tools::Tool;
 
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
@@ -25,6 +24,7 @@ use crate::context::ContextRenderer;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
 use crate::routines::{self, RoutineEvent, RoutineExecutionHandle, types::StepResult};
+use crate::tools::{Tool, ToolSecurity};
 use crate::types::RenderContextVars;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -66,7 +66,7 @@ pub trait ToolFactory: Send + Sync {
     async fn create_tools_with_security(
         &self,
         agent: &AgentManifest,
-        _security: Arc<nenjo_tools::security::SecurityPolicy>,
+        _security: Arc<ToolSecurity>,
     ) -> Vec<Arc<dyn Tool>> {
         self.create_tools(agent).await
     }
@@ -77,7 +77,7 @@ pub trait ToolFactory: Send + Sync {
     async fn create_tools_with_context(
         &self,
         agent: &AgentManifest,
-        security: Arc<nenjo_tools::security::SecurityPolicy>,
+        security: Arc<ToolSecurity>,
         context: ToolContext,
     ) -> Vec<Arc<dyn Tool>> {
         let _ = context;
@@ -90,7 +90,7 @@ pub trait ToolFactory: Send + Sync {
     /// so template variables like `{{ project.working_dir }}` resolve correctly
     /// even when no git worktree is set.
     fn workspace_dir(&self) -> std::path::PathBuf {
-        nenjo_tools::security::SecurityPolicy::default().workspace_dir
+        ToolSecurity::default().workspace_dir
     }
 }
 

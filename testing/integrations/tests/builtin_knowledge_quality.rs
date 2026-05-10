@@ -17,9 +17,9 @@ use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
 };
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Provider and manifest helpers

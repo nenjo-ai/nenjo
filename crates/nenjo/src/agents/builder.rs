@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nenjo_models::ModelProvider;
-use nenjo_tools::Tool;
-use nenjo_tools::security::SecurityPolicy;
 
 use super::instance::AgentInstance;
 use super::prompts::PromptContext;
@@ -18,6 +16,7 @@ use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest, PromptConfi
 use crate::memory::Memory;
 use crate::memory::types::MemoryScope;
 use crate::provider::{Provider, ToolContext};
+use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams {
@@ -194,15 +193,15 @@ impl AgentBuilder {
     pub async fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
         let mut policy = match &self.delegation_provider {
             Some(provider) => {
-                SecurityPolicy::with_workspace_dir(provider.tool_factory().workspace_dir())
+                ToolSecurity::with_workspace_dir(provider.tool_factory().workspace_dir())
             }
-            None => SecurityPolicy::default(),
+            None => ToolSecurity::default(),
         };
         if let Some(dir) = &self.work_dir {
             policy.workspace_dir = dir.clone();
             // Agents running in a worktree are autonomous task executions —
             // allow all operations including git push and PR creation.
-            policy.autonomy = nenjo_tools::security::AutonomyLevel::Full;
+            policy.autonomy = ToolAutonomy::Full;
         }
         let security = Arc::new(policy);
 

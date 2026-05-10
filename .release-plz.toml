@@ -15,7 +15,6 @@ changelog_path = "CHANGELOG.md"
 changelog_include = [
     "nenjo-xml",
     "nenjo-models",
-    "nenjo-tools",
     "nenjo-events",
     "nenjo-eventbus",
     "nenjo-worker",

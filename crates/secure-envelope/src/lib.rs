@@ -140,6 +140,7 @@ impl<T: Transport> SecureEnvelopeBus<T> {
     /// Encode and send a response envelope on behalf of the given actor.
     pub async fn send_response_for(
         &self,
+        org_id: Uuid,
         actor_user_id: Uuid,
         response: Response,
     ) -> Result<(), EventBusError> {
@@ -157,7 +158,34 @@ impl<T: Transport> SecureEnvelopeBus<T> {
 
         let payload = serde_json::to_value(&response)?;
         let envelope = Envelope::new(actor_user_id, payload);
-        let subject = nenjo_events::response_subject(actor_user_id, &response);
+        let subject = nenjo_events::response_subject(org_id, actor_user_id, &response);
+        self.raw.send_envelope(&subject, &envelope).await
+    }
+
+    /// Encode and send a worker-level system response routed by org.
+    ///
+    /// This is intended for cleartext responses such as worker presence updates.
+    /// Actor-encrypted responses should use [`Self::send_response_for`].
+    pub async fn send_system_response(
+        &self,
+        org_id: Uuid,
+        response: Response,
+    ) -> Result<(), EventBusError> {
+        let response_label = response.to_string();
+        let ctx = CodecContext::for_actor(org_id);
+        let Some(response) = self
+            .codec
+            .encode_response(&ctx, response)
+            .await
+            .map_err(|error| EventBusError::Codec(error.to_string()))?
+        else {
+            trace!(response = %response_label, "system response dropped by secure envelope codec");
+            return Ok(());
+        };
+
+        let payload = serde_json::to_value(&response)?;
+        let envelope = Envelope::new(org_id, payload);
+        let subject = nenjo_events::responses_subject(org_id);
         self.raw.send_envelope(&subject, &envelope).await
     }
 

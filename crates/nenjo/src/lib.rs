@@ -30,6 +30,7 @@ pub mod manifest;
 pub mod memory;
 pub mod provider;
 pub mod routines;
+pub mod tools;
 pub mod types;
 
 // Re-export key types at the crate root.
@@ -46,8 +47,8 @@ pub use provider::{
     ToolFactory,
 };
 
-// Re-export the Tool trait for custom tool implementations.
-pub use nenjo_tools::{Tool, ToolCategory, ToolResult, ToolSpec};
+// Re-export the Tool API for custom tool implementations.
+pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolResult, ToolSecurity, ToolSpec};
 
 // Re-export Provider for convenience.
 pub use nenjo_models::ModelProvider;

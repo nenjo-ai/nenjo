@@ -1,9 +1,9 @@
 //! OpenRouter aggregator provider. Authenticates via Bearer token, routes to
 //! multiple upstream models with provider-order pinning.
 
+use crate::ToolSpec;
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
 use reqwest::Client;
 use reqwest::header::ACCEPT_ENCODING;
 use serde::{Deserialize, Serialize};

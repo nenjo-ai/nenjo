@@ -22,7 +22,7 @@ pub mod traits;
 // Re-export core types at crate root.
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
-    ToolCall, ToolResultMessage, one_shot,
+    ToolCall, ToolCategory, ToolResultMessage, ToolSpec, one_shot,
 };
 
 // Re-export provider implementations.

@@ -7,13 +7,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use nenjo_models::ModelProvider;
-use nenjo_tools::security::SecurityPolicy;
-use nenjo_tools::{Tool, ToolSpec};
 
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::manifest::{AgentManifest, PromptConfig};
 use crate::provider::Provider;
+use crate::tools::{Tool, ToolSecurity, ToolSpec};
 use crate::types::{RenderContextExt, RenderContextVars, TaskType};
 
 /// The system and developer prompts ready for the turn loop.
@@ -51,7 +50,7 @@ pub struct AgentInstance {
     pub prompt_context: PromptContext,
     pub provider: Arc<dyn ModelProvider>,
     pub tools: Vec<Arc<dyn Tool>>,
-    pub security: Arc<SecurityPolicy>,
+    pub security: Arc<ToolSecurity>,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
     pub source_manifest: Option<AgentManifest>,

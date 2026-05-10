@@ -8,5 +8,5 @@ mod http;
 mod types;
 
 pub use error::ApiClientError;
-pub use http::NenjoClient;
+pub use http::{NenjoClient, PayloadDecoder};
 pub use types::*;

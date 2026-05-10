@@ -2,9 +2,9 @@
 //! Most LLM APIs follow the same `/v1/chat/completions` format.
 //! This module provides a single implementation that works for all of them.
 
+use crate::ToolSpec;
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::warn;

@@ -27,7 +27,6 @@ path = "tests/builtin_knowledge_quality.rs"
 [dependencies]
 nenjo = { workspace = true }
 nenjo-models = { workspace = true }
-nenjo-tools = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
