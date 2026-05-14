@@ -1,13 +1,12 @@
 //! Routine execution — DAG-based execution pipelines.
 //!
 //! Routines are directed acyclic graphs of steps connected by conditional edges.
-//! Each step can be an agent task, gate evaluation, lambda script, council
-//! delegation, or terminal node.
+//! Each step can be an agent task, gate evaluation, council delegation, or
+//! terminal node.
 //!
 //! ```ignore
-//! use nenjo::types::{TaskType, Task};
-//!
 //! // One-shot task execution
+//! let task = nenjo::TaskInput::new(project_id, task_id, "Fix auth", "Repair the login flow");
 //! let result = provider.routine_by_id(routine_id)?.run(task).await?;
 //!
 //! // Streaming execution with events
@@ -21,32 +20,62 @@
 
 pub mod council;
 pub mod cron;
+pub mod event;
 pub mod executor;
 pub mod gate;
-pub mod traits;
+pub mod runner;
 pub mod types;
 
-use anyhow::Result;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
-
 use crate::AgentBuilder;
+use crate::manifest::RoutineStepManifest;
 use crate::memory::MemoryScope;
+use crate::provider::ProviderRuntime;
 
-use crate::agents::runner::types::TurnEvent;
-
-// Re-export key types at module level.
-pub use traits::{LambdaOutput, LambdaRunner};
+pub use event::RoutineEvent;
+pub use runner::{RoutineExecutionHandle, RoutineRunner};
 pub use types::{
     CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics,
     SessionBinding, StepMetrics, StepResult, StepType,
 };
 
-pub(crate) fn apply_session_binding_memory_scope(
-    builder: AgentBuilder,
+pub(crate) fn with_agent_step_tools<P>(builder: AgentBuilder<P>) -> AgentBuilder<P>
+where
+    P: ProviderRuntime,
+{
+    builder.with_tool(gate::PassVerdictTool::new())
+}
+
+const DEFAULT_ROUTINE_STEP_MAX_TURNS: usize = 50;
+
+pub(crate) fn with_routine_step_max_turns<P>(
+    builder: AgentBuilder<P>,
+    step: &RoutineStepManifest,
+) -> AgentBuilder<P>
+where
+    P: ProviderRuntime,
+{
+    let configured = step
+        .config
+        .get("max_turns")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+        })
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ROUTINE_STEP_MAX_TURNS);
+
+    builder.with_max_turns(configured)
+}
+
+pub(crate) fn apply_session_binding_memory_scope<P>(
+    builder: AgentBuilder<P>,
     binding: Option<&SessionBinding>,
-) -> AgentBuilder {
+) -> AgentBuilder<P>
+where
+    P: ProviderRuntime,
+{
     let Some(binding) = binding else {
         return builder;
     };
@@ -57,91 +86,4 @@ pub(crate) fn apply_session_binding_memory_scope(
         return builder;
     };
     builder.with_memory_scope(scope)
-}
-
-/// Events emitted during routine execution.
-#[derive(Debug, Clone)]
-pub enum RoutineEvent {
-    /// A step is about to execute.
-    StepStarted {
-        step_id: Uuid,
-        step_name: String,
-        step_type: String,
-        agent_id: Option<Uuid>,
-    },
-    /// A turn-loop event from an agent or gate step (tool calls, etc.).
-    AgentEvent { step_id: Uuid, event: TurnEvent },
-    /// A step completed successfully.
-    StepCompleted {
-        step_id: Uuid,
-        result: StepResult,
-        duration_ms: u64,
-    },
-    /// A step failed.
-    StepFailed {
-        step_id: Uuid,
-        error: String,
-        duration_ms: u64,
-    },
-    /// The entire routine finished.
-    Done { result: StepResult },
-    /// A cron cycle is starting.
-    CronCycleStarted { cycle: u32 },
-    /// A cron cycle completed with a result.
-    CronCycleCompleted {
-        cycle: u32,
-        result: StepResult,
-        /// Total input tokens across all steps in this cycle.
-        total_input_tokens: u64,
-        /// Total output tokens across all steps in this cycle.
-        total_output_tokens: u64,
-    },
-}
-
-/// Handle to a running routine execution.
-///
-/// Provides a stream of [`RoutineEvent`]s as the routine progresses, plus
-/// access to the final [`StepResult`] when done. Cron routines can be
-/// cancelled via [`cancel()`](Self::cancel).
-pub struct RoutineExecutionHandle {
-    events_rx: mpsc::UnboundedReceiver<RoutineEvent>,
-    join: tokio::task::JoinHandle<Result<StepResult>>,
-    cancel: CancellationToken,
-}
-
-impl RoutineExecutionHandle {
-    pub(crate) fn new(
-        events_rx: mpsc::UnboundedReceiver<RoutineEvent>,
-        join: tokio::task::JoinHandle<Result<StepResult>>,
-        cancel: CancellationToken,
-    ) -> Self {
-        Self {
-            events_rx,
-            join,
-            cancel,
-        }
-    }
-
-    /// Cancel the running routine. For cron routines, this stops the poll loop
-    /// between cycles. For one-shot routines, this stops between DAG steps.
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Receive the next event. Returns `None` when the routine finishes.
-    pub async fn recv(&mut self) -> Option<RoutineEvent> {
-        self.events_rx.recv().await
-    }
-
-    /// Get a mutable reference to the underlying event receiver.
-    pub fn events(&mut self) -> &mut mpsc::UnboundedReceiver<RoutineEvent> {
-        &mut self.events_rx
-    }
-
-    /// Wait for the final result.
-    pub async fn output(self) -> Result<StepResult> {
-        self.join
-            .await
-            .map_err(|e| anyhow::anyhow!("routine execution task panicked: {e}"))?
-    }
 }

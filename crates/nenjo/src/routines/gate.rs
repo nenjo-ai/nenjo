@@ -7,16 +7,17 @@
 
 use std::sync::Arc;
 
+use crate::tools::{Tool, ToolCategory, ToolResult};
 use anyhow::{Result, bail};
 use nenjo_models::ChatMessage;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 use tokio::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
 use super::RoutineEvent;
 use crate::agents::runner::{AgentRunner, types::TurnOutput};
-use crate::types::TaskType;
+use crate::input::{AgentRun, ChatInput};
+use crate::provider::ProviderRuntime;
 
 /// Tool name constant used for injection and extraction.
 pub const PASS_VERDICT_TOOL_NAME: &str = "pass_verdict";
@@ -55,7 +56,7 @@ impl Tool for PassVerdictTool {
         "Submit the required final verdict for this routine execution. You MUST call this tool exactly once \
          as your final action after you have completed the work. Use verdict \"pass\" when the step output \
          should allow execution to continue, or \"fail\" when the step should fail or route down a failure path. \
-         Always include concise reasoning that explains the decision."
+         Include output with the final response text for the completed work, and concise reasoning that explains the decision."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -72,6 +73,10 @@ impl Tool for PassVerdictTool {
                     "type": "string",
                     "minLength": 1,
                     "description": "Short explanation of why the completed work should pass or fail."
+                },
+                "output": {
+                    "type": "string",
+                    "description": "Generic final response text from the agent for this routine step."
                 }
             },
             "required": ["verdict", "reasoning"]
@@ -92,10 +97,16 @@ impl Tool for PassVerdictTool {
             .and_then(|v| v.as_str())
             .unwrap_or("pass");
         let reasoning = args.get("reasoning").and_then(|v| v.as_str()).unwrap_or("");
+        let output = args.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let output_suffix = if output.is_empty() {
+            String::new()
+        } else {
+            format!(" Output: {output}")
+        };
 
         Ok(ToolResult {
             success: true,
-            output: format!("Pass verdict recorded: {verdict}. {reasoning}"),
+            output: format!("Pass verdict recorded: {verdict}. {reasoning}{output_suffix}"),
             error: None,
         })
     }
@@ -153,11 +164,22 @@ pub fn extract_pass_verdict(messages: &[ChatMessage]) -> Option<bool> {
 pub struct PassVerdict {
     pub passed: bool,
     pub reasoning: Option<String>,
+    pub output: Option<String>,
 }
 
 /// Extract the reasoning string from a `pass_verdict` tool call in the
 /// conversation messages. Returns `None` if the tool was never called.
 pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
+    extract_pass_verdict_string_field(messages, "reasoning")
+}
+
+/// Extract the generic final output string from a `pass_verdict` tool call in
+/// the conversation messages. Returns `None` if omitted or empty.
+pub fn extract_pass_output(messages: &[ChatMessage]) -> Option<String> {
+    extract_pass_verdict_string_field(messages, "output")
+}
+
+fn extract_pass_verdict_string_field(messages: &[ChatMessage], field: &str) -> Option<String> {
     for msg in messages.iter().rev() {
         if msg.role != "assistant" {
             continue;
@@ -176,10 +198,10 @@ pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
             let args_str = tc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
             let args: serde_json::Value =
                 serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
-            if let Some(reasoning) = args.get("reasoning").and_then(|v| v.as_str())
-                && !reasoning.is_empty()
+            if let Some(value) = args.get(field).and_then(|v| v.as_str())
+                && !value.is_empty()
             {
-                return Some(reasoning.to_string());
+                return Some(value.to_string());
             }
         }
     }
@@ -193,10 +215,47 @@ pub fn extract_pass_reasoning(messages: &[ChatMessage]) -> Option<String> {
 pub fn resolve_pass_verdict(messages: &[ChatMessage]) -> Result<PassVerdict> {
     if let Some(passed) = extract_pass_verdict(messages) {
         let reasoning = extract_pass_reasoning(messages);
-        return Ok(PassVerdict { passed, reasoning });
+        let output = extract_pass_output(messages);
+        return Ok(PassVerdict {
+            passed,
+            reasoning,
+            output,
+        });
     }
 
     bail!("Agent did not call required pass_verdict tool")
+}
+
+pub fn pass_verdict_display_output(verdict: &PassVerdict, fallback: &str) -> String {
+    verdict
+        .output
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| displayable_fallback(fallback))
+        .or_else(|| {
+            verdict
+                .reasoning
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("")
+        .to_string()
+}
+
+fn displayable_fallback(fallback: &str) -> Option<&str> {
+    if fallback.trim().is_empty() {
+        return None;
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(fallback) else {
+        return Some(fallback);
+    };
+    let content = value.get("content").and_then(|content| content.as_str());
+    match content {
+        Some(content) if content.trim().is_empty() => None,
+        Some(_) => Some(fallback),
+        None => Some(fallback),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,26 +292,38 @@ fn chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         .collect()
 }
 
-async fn stream_turn_output(
-    runner: &AgentRunner,
-    task: TaskType,
+async fn stream_turn_output<P>(
+    runner: &AgentRunner<P>,
+    task: AgentRun,
     step_id: Uuid,
+    step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<TurnOutput> {
-    let mut handle = runner.task_stream(task).await?;
+) -> Result<TurnOutput>
+where
+    P: ProviderRuntime,
+{
+    let mut handle = runner.run_stream(task).await?;
     while let Some(event) = handle.recv().await {
-        let _ = events_tx.send(RoutineEvent::AgentEvent { step_id, event });
+        let _ = events_tx.send(RoutineEvent::AgentEvent {
+            step_id,
+            step_run_id,
+            event,
+        });
     }
     handle.output().await
 }
 
-pub async fn execute_with_pass_verdict(
-    runner: &AgentRunner,
-    task: TaskType,
+pub async fn execute_with_pass_verdict<P>(
+    runner: &AgentRunner<P>,
+    task: AgentRun,
     project_id: Uuid,
     step_id: Uuid,
+    step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<TurnOutput> {
+) -> Result<TurnOutput>
+where
+    P: ProviderRuntime,
+{
     let mut attempts = 0usize;
     let mut pending_task = task;
     let mut total_input_tokens = 0u64;
@@ -260,7 +331,8 @@ pub async fn execute_with_pass_verdict(
     let mut total_tool_calls = 0u32;
 
     loop {
-        let output = stream_turn_output(runner, pending_task, step_id, events_tx).await?;
+        let output =
+            stream_turn_output(runner, pending_task, step_id, step_run_id, events_tx).await?;
         total_input_tokens += output.input_tokens;
         total_output_tokens += output.output_tokens;
         total_tool_calls += output.tool_calls;
@@ -288,11 +360,11 @@ pub async fn execute_with_pass_verdict(
             "Agent omitted pass_verdict tool call, retrying with explicit instruction"
         );
 
-        pending_task = TaskType::Chat {
-            user_message: verdict_retry_prompt(&output.text),
+        pending_task = AgentRun::chat(ChatInput {
+            message: verdict_retry_prompt(&output.text),
             history: chat_history(&output.messages),
-            project_id,
-        };
+            project_id: Some(project_id),
+        });
     }
 }
 
@@ -315,6 +387,13 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!("verdict")));
         assert!(required.contains(&serde_json::json!("reasoning")));
+    }
+
+    #[test]
+    fn tool_schema_accepts_output_field() {
+        let tool = PassVerdictTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["output"]["type"], "string");
     }
 
     #[test]
@@ -409,6 +488,18 @@ mod tests {
         assert_eq!(extract_pass_reasoning(&[msg]), None);
     }
 
+    #[test]
+    fn extract_output_from_tool_call() {
+        let msg = make_tool_call_message(
+            "pass_verdict",
+            r#"{"verdict": "pass", "reasoning": "Complete", "output": "Final answer text"}"#,
+        );
+        assert_eq!(
+            extract_pass_output(&[msg]),
+            Some("Final answer text".to_string())
+        );
+    }
+
     // -- resolve_pass_verdict --
 
     #[test]
@@ -418,6 +509,33 @@ mod tests {
         let v = resolve_pass_verdict(&[msg]).unwrap();
         assert!(!v.passed);
         assert_eq!(v.reasoning.as_deref(), Some("Bad"));
+        assert_eq!(v.output, None);
+    }
+
+    #[test]
+    fn resolve_includes_output_when_present() {
+        let msg = make_tool_call_message(
+            "pass_verdict",
+            r#"{"verdict": "pass", "reasoning": "Done", "output": "Here is the final result."}"#,
+        );
+        let v = resolve_pass_verdict(&[msg]).unwrap();
+        assert!(v.passed);
+        assert_eq!(v.reasoning.as_deref(), Some("Done"));
+        assert_eq!(v.output.as_deref(), Some("Here is the final result."));
+    }
+
+    #[test]
+    fn display_output_prefers_reasoning_over_fallback_when_output_missing() {
+        let verdict = PassVerdict {
+            passed: true,
+            reasoning: Some("Verified acceptance criteria".to_string()),
+            output: None,
+        };
+
+        assert_eq!(
+            pass_verdict_display_output(&verdict, r#"{"content":"","tool_calls":[]}"#),
+            "Verified acceptance criteria"
+        );
     }
 
     #[test]

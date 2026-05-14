@@ -160,16 +160,16 @@ async fn provider_with_memory_adds_tools() {
         "should have forget_memory"
     );
     assert!(
-        names.contains(&"save_resource"),
-        "should have save_resource"
+        names.contains(&"save_artifact"),
+        "should have save_artifact"
     );
     assert!(
-        names.contains(&"read_resource"),
-        "should have read_resource"
+        names.contains(&"read_artifact"),
+        "should have read_artifact"
     );
     assert!(
-        names.contains(&"delete_resource"),
-        "should have delete_resource"
+        names.contains(&"delete_artifact"),
+        "should have delete_artifact"
     );
 }
 
@@ -350,7 +350,7 @@ async fn memory_vars_empty_when_no_facts() {
 }
 
 #[tokio::test]
-async fn resource_vars_injected() {
+async fn artifact_vars_injected() {
     let dir = tempfile::tempdir().unwrap();
     let ws_dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
@@ -359,8 +359,8 @@ async fn resource_vars_injected() {
     use nenjo::memory::Memory;
 
     memory
-        .save_resource(
-            &scope.resources_project,
+        .save_artifact(
+            &scope.artifacts_project,
             "auth-prd.md",
             "Auth PRD",
             "architect",
@@ -369,8 +369,8 @@ async fn resource_vars_injected() {
         .await
         .unwrap();
     memory
-        .save_resource(
-            &scope.resources_global,
+        .save_artifact(
+            &scope.artifacts_global,
             "standards.md",
             "Coding standards",
             "system",
@@ -379,21 +379,21 @@ async fn resource_vars_injected() {
         .await
         .unwrap();
 
-    let vars = nenjo::memory::build_resource_vars(memory.as_ref(), &scope)
+    let vars = nenjo::memory::build_artifact_vars(memory.as_ref(), &scope)
         .await
         .unwrap();
 
-    assert!(vars.contains_key("resources"), "should have resources key");
+    assert!(vars.contains_key("artifacts"), "should have artifacts key");
     assert!(
-        vars.contains_key("resources.project"),
+        vars.contains_key("artifacts.project"),
         "should have project key"
     );
     assert!(
-        vars.contains_key("resources.workspace"),
+        vars.contains_key("artifacts.workspace"),
         "should have workspace key"
     );
 
-    let full = &vars["resources"];
+    let full = &vars["artifacts"];
     assert!(full.contains("auth-prd.md"));
     assert!(full.contains("standards.md"));
     assert!(full.contains("architect"));
@@ -510,7 +510,7 @@ async fn scope_shared_visible_across_agents() {
 }
 
 #[tokio::test]
-async fn scope_resources_shared_across_agents() {
+async fn scope_artifacts_shared_across_agents() {
     let dir = tempfile::tempdir().unwrap();
     let ws_dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
@@ -520,10 +520,10 @@ async fn scope_resources_shared_across_agents() {
     let scope_architect = MemoryScope::new("architect", Some("webapp"));
     let scope_coder = MemoryScope::new("coder", Some("webapp"));
 
-    // Architect saves a project resource
+    // Architect saves a project artifact
     memory
-        .save_resource(
-            &scope_architect.resources_project,
+        .save_artifact(
+            &scope_architect.artifacts_project,
             "design.md",
             "System design",
             "architect",
@@ -532,16 +532,16 @@ async fn scope_resources_shared_across_agents() {
         .await
         .unwrap();
 
-    // Coder can see it (same project resources path)
-    let vars = nenjo::memory::build_resource_vars(memory.as_ref(), &scope_coder)
+    // Coder can see it (same project artifacts path)
+    let vars = nenjo::memory::build_artifact_vars(memory.as_ref(), &scope_coder)
         .await
         .unwrap();
-    assert!(vars["resources.project"].contains("design.md"));
-    assert!(vars["resources.project"].contains("architect"));
+    assert!(vars["artifacts.project"].contains("design.md"));
+    assert!(vars["artifacts.project"].contains("architect"));
 
     // Coder can read the full content
     let content = memory
-        .read_resource(&scope_coder.resources_project, "design.md")
+        .read_artifact(&scope_coder.artifacts_project, "design.md")
         .await
         .unwrap()
         .unwrap();
@@ -549,7 +549,7 @@ async fn scope_resources_shared_across_agents() {
 }
 
 #[tokio::test]
-async fn scope_resources_global_visible_to_all() {
+async fn scope_artifacts_global_visible_to_all() {
     let dir = tempfile::tempdir().unwrap();
     let ws_dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
@@ -560,10 +560,10 @@ async fn scope_resources_global_visible_to_all() {
     let scope_b = MemoryScope::new("agent-b", Some("project-y"));
     let scope_sys = MemoryScope::new("system-agent", None);
 
-    // Agent A saves a global resource
+    // Agent A saves a global artifact
     memory
-        .save_resource(
-            &scope_a.resources_global,
+        .save_artifact(
+            &scope_a.artifacts_global,
             "guide.md",
             "Onboarding guide",
             "agent-a",
@@ -575,10 +575,10 @@ async fn scope_resources_global_visible_to_all() {
     // All agents see it regardless of project
     for scope in [&scope_a, &scope_b, &scope_sys] {
         let entries = memory
-            .list_resources(&scope.resources_global)
+            .list_artifacts(&scope.artifacts_global)
             .await
             .unwrap();
-        assert_eq!(entries.len(), 1, "global resource should be visible");
+        assert_eq!(entries.len(), 1, "global artifact should be visible");
         assert_eq!(entries[0].filename, "guide.md");
     }
 }
@@ -825,8 +825,8 @@ async fn domain_expansion_preserves_memory() {
         "domain runner should have save_memory"
     );
     assert!(
-        names.contains(&"save_resource"),
-        "domain runner should have save_resource"
+        names.contains(&"save_artifact"),
+        "domain runner should have save_artifact"
     );
 }
 

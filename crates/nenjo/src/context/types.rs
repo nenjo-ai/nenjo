@@ -214,13 +214,13 @@ pub struct MemoriesContext {
 }
 
 // ---------------------------------------------------------------------------
-// Resources (document index injected into prompts)
+// Artifacts (document index injected into prompts)
 // ---------------------------------------------------------------------------
 
-/// A single resource entry in the prompt index.
+/// A single artifact entry in the prompt index.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename = "resource")]
-pub struct ResourceContext {
+#[serde(rename = "artifact")]
+pub struct ArtifactContext {
     #[serde(rename = "@name")]
     pub name: String,
     #[serde(rename = "@description")]
@@ -231,30 +231,30 @@ pub struct ResourceContext {
     pub size: String,
 }
 
-/// Project-scoped resources.
+/// Project-scoped artifacts.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename = "project")]
-pub struct ResourcesProjectContext {
-    #[serde(rename = "resource")]
-    pub resources: Vec<ResourceContext>,
+pub struct ArtifactsProjectContext {
+    #[serde(rename = "artifact")]
+    pub artifacts: Vec<ArtifactContext>,
 }
 
-/// Workspace-global resources.
+/// Workspace-global artifacts.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename = "workspace")]
-pub struct ResourcesWorkspaceContext {
-    #[serde(rename = "resource")]
-    pub resources: Vec<ResourceContext>,
+pub struct ArtifactsWorkspaceContext {
+    #[serde(rename = "artifact")]
+    pub artifacts: Vec<ArtifactContext>,
 }
 
-/// All resources combined.
+/// All artifacts combined.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename = "resources")]
-pub struct ResourcesContext {
+#[serde(rename = "artifacts")]
+pub struct ArtifactsContext {
     #[serde(rename = "project", skip_serializing_if = "Option::is_none")]
-    pub project: Option<ResourcesProjectContext>,
+    pub project: Option<ArtifactsProjectContext>,
     #[serde(rename = "workspace", skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<ResourcesWorkspaceContext>,
+    pub workspace: Option<ArtifactsWorkspaceContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,12 +275,16 @@ pub struct DocumentContext {
     pub kind: Option<String>,
     #[serde(rename = "@authority", skip_serializing_if = "Option::is_none")]
     pub authority: Option<String>,
-    #[serde(rename = "@size")]
+    #[serde(rename = "@size", skip_serializing_if = "String::is_empty")]
     pub size: String,
     #[serde(rename = "@status", skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub aliases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub keywords: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
@@ -433,6 +437,8 @@ pub struct ProjectContext {
     pub description: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub working_dir: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub context: String,
     /// Custom key-value metadata from project settings, serialized as XML.
     /// Skipped from XML serialization because it contains raw XML that would
     /// be double-escaped. Accessed via `{{ project.metadata }}` as a flat var.
@@ -472,6 +478,12 @@ impl ProjectContext {
             name: project.name.clone(),
             slug: project.slug.clone(),
             description: project.description.clone().unwrap_or_default(),
+            context: project
+                .settings
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             metadata: nenjo_xml::types::metadata_json_to_xml(&project.settings),
             working_dir: String::new(),
             git,
@@ -695,6 +707,7 @@ mod tests {
             slug: "myapp".into(),
             description: "A cool app".into(),
             working_dir: "/home/user/myapp".into(),
+            context: "Use postgres".into(),
             metadata: String::new(),
             git: Some(GitContext {
                 repo_url: String::new(),
@@ -707,6 +720,7 @@ mod tests {
         assert!(xml.contains("id=\"proj-1\""));
         assert!(xml.contains("name=\"MyApp\""));
         assert!(xml.contains("<description>A cool app</description>"));
+        assert!(xml.contains("<context>Use postgres</context>"));
         assert!(xml.contains("<git"));
         assert!(xml.contains("current_branch=\"main\""));
     }

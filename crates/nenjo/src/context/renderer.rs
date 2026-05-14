@@ -4,6 +4,7 @@
 //! bodies in memory and renders them directly.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Renders context blocks from templates with template variables.
 ///
@@ -14,13 +15,13 @@ use std::collections::HashMap;
 /// (e.g. `"nenjo.available_agents"`) to rendered strings.
 #[derive(Clone)]
 pub struct ContextRenderer {
-    blocks: Vec<super::types::RenderContextBlock>,
+    blocks: Arc<[super::types::RenderContextBlock]>,
 }
 
 impl ContextRenderer {
     pub fn from_blocks(blocks: &[super::types::RenderContextBlock]) -> Self {
         Self {
-            blocks: blocks.to_vec(),
+            blocks: Arc::from(blocks.to_vec().into_boxed_slice()),
         }
     }
 
@@ -35,7 +36,7 @@ impl ContextRenderer {
     /// Render all context blocks and return a map of dotted key → rendered string.
     pub fn render_all(&self, vars: &HashMap<String, String>) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let rendered = nenjo_xml::template::render_template(&block.template, vars);
             if !rendered.is_empty() {
                 let key = Self::dotted_key(&block.path, &block.name);

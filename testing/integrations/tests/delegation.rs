@@ -39,11 +39,11 @@ fn get_api_key() -> Option<String> {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "claude-haiku".into(),
+        name: "openrouter-nemotron".into(),
         description: None,
-        model: "anthropic/claude-3-haiku".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
         model_provider: "openrouter".into(),
-        temperature: Some(0.0),
+        temperature: Some(0.7),
         base_url: None,
     }
 }

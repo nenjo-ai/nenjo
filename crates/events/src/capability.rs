@@ -10,11 +10,17 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityLane {
+    Work,
+    Broadcast,
+}
+
 /// A capability that a worker can handle.
 ///
 /// Each capability maps to a set of [`Command`](crate::Command) variants.
-/// Workers subscribe to `requests.<capability>` for each capability they
-/// support (local subject within their per-user NATS account).
+/// Workers subscribe to queue, targeted, and broadcast local subjects for the
+/// capabilities they support inside their org NATS account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -43,6 +49,11 @@ impl Capability {
         Capability::Ping,
     ];
 
+    pub const WORK_LANE: &[Capability] = &[Capability::Chat, Capability::Task, Capability::Cron];
+
+    pub const BROADCAST_LANE: &[Capability] =
+        &[Capability::Manifest, Capability::Repo, Capability::Ping];
+
     /// The NATS subject segment for this capability.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -55,20 +66,42 @@ impl Capability {
         }
     }
 
-    /// Map a command `type` tag (e.g. `"chat.message"`) to its capability.
-    ///
-    /// Returns `None` for unrecognized command types.
-    pub fn from_command_type(type_tag: &str) -> Option<Capability> {
-        let prefix = type_tag.split('.').next()?;
-        match prefix {
-            "chat" => Some(Capability::Chat),
-            "task" | "execution" => Some(Capability::Task),
-            "cron" => Some(Capability::Cron),
-            "manifest" => Some(Capability::Manifest),
-            "repo" => Some(Capability::Repo),
-            "worker" => Some(Capability::Ping),
-            _ => None,
+    /// The NATS command lane used for this capability.
+    pub fn lane(&self) -> CapabilityLane {
+        match self {
+            Capability::Chat | Capability::Task | Capability::Cron => CapabilityLane::Work,
+            Capability::Manifest | Capability::Repo | Capability::Ping => CapabilityLane::Broadcast,
         }
+    }
+
+    pub fn is_work_lane(&self) -> bool {
+        self.lane() == CapabilityLane::Work
+    }
+
+    pub fn is_broadcast_lane(&self) -> bool {
+        self.lane() == CapabilityLane::Broadcast
+    }
+
+    /// Normalize capability subscriptions for a worker.
+    ///
+    /// Empty means all capabilities. Ping is always included so the backend can
+    /// health-check every worker regardless of its configured work lane.
+    pub fn effective_worker_subscriptions(capabilities: &[Capability]) -> Vec<Capability> {
+        let mut capabilities = if capabilities.is_empty() {
+            Capability::ALL.to_vec()
+        } else {
+            capabilities.to_vec()
+        };
+
+        if !capabilities.contains(&Capability::Ping) {
+            capabilities.push(Capability::Ping);
+        }
+
+        Capability::ALL
+            .iter()
+            .copied()
+            .filter(|capability| capabilities.contains(capability))
+            .collect()
     }
 }
 
@@ -117,52 +150,42 @@ mod tests {
     }
 
     #[test]
-    fn from_command_type_mapping() {
-        assert_eq!(
-            Capability::from_command_type("chat.message"),
-            Some(Capability::Chat)
-        );
-        assert_eq!(
-            Capability::from_command_type("chat.domain_enter"),
-            Some(Capability::Chat)
-        );
-        assert_eq!(
-            Capability::from_command_type("chat.cancel"),
-            Some(Capability::Chat)
-        );
-        assert_eq!(
-            Capability::from_command_type("task.execute"),
-            Some(Capability::Task)
-        );
-        assert_eq!(
-            Capability::from_command_type("execution.cancel"),
-            Some(Capability::Task)
-        );
-        assert_eq!(
-            Capability::from_command_type("execution.pause"),
-            Some(Capability::Task)
-        );
-        assert_eq!(
-            Capability::from_command_type("cron.enable"),
-            Some(Capability::Cron)
-        );
-        assert_eq!(
-            Capability::from_command_type("cron.trigger"),
-            Some(Capability::Cron)
-        );
-        assert_eq!(
-            Capability::from_command_type("manifest.changed"),
-            Some(Capability::Manifest)
-        );
-        assert_eq!(
-            Capability::from_command_type("repo.sync"),
-            Some(Capability::Repo)
-        );
-        assert_eq!(Capability::from_command_type("unknown.thing"), None);
+    fn from_str_error() {
+        assert!("bogus".parse::<Capability>().is_err());
     }
 
     #[test]
-    fn from_str_error() {
-        assert!("bogus".parse::<Capability>().is_err());
+    fn lane_split_is_disjoint() {
+        assert_eq!(Capability::Chat.lane(), CapabilityLane::Work);
+        assert_eq!(Capability::Task.lane(), CapabilityLane::Work);
+        assert_eq!(Capability::Cron.lane(), CapabilityLane::Work);
+        assert_eq!(Capability::Manifest.lane(), CapabilityLane::Broadcast);
+        assert_eq!(Capability::Repo.lane(), CapabilityLane::Broadcast);
+        assert_eq!(Capability::Ping.lane(), CapabilityLane::Broadcast);
+
+        assert_eq!(
+            Capability::WORK_LANE
+                .iter()
+                .chain(Capability::BROADCAST_LANE.iter())
+                .copied()
+                .collect::<Vec<_>>(),
+            Capability::ALL
+        );
+    }
+
+    #[test]
+    fn effective_worker_subscriptions_empty_means_all() {
+        assert_eq!(
+            Capability::effective_worker_subscriptions(&[]),
+            Capability::ALL.to_vec()
+        );
+    }
+
+    #[test]
+    fn effective_worker_subscriptions_adds_ping() {
+        assert_eq!(
+            Capability::effective_worker_subscriptions(&[Capability::Chat]),
+            vec![Capability::Chat, Capability::Ping]
+        );
     }
 }

@@ -13,7 +13,16 @@ use nenjo::{
         RoutineTrigger,
     },
 };
+use nenjo_knowledge::tools::{
+    KnowledgeDocReadResult, KnowledgeListArgs, KnowledgeNeighborArgs, KnowledgePackSummary,
+    KnowledgeReadArgs, KnowledgeRegistry, KnowledgeSearchArgs, KnowledgeTreeArgs, knowledge_filter,
+    knowledge_manifest_result, knowledge_search_result, parse_knowledge_enum,
+};
+use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 
+use crate::knowledge_backend::{
+    builtin_pack, is_default_library_pack_selector, is_nenjo_pack_selector, unknown_pack,
+};
 use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
     AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
@@ -32,42 +41,22 @@ use crate::manifest_mcp::{
     DeleteResult, DomainDeleteParams, DomainDocument, DomainGetResult, DomainManifestBackend,
     DomainManifestDocument, DomainManifestGetParams, DomainManifestGetResult,
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, ModelDeleteParams, ModelDocument,
-    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
-    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectDocumentContentMutationResult,
-    ProjectDocumentContentUpdateParams, ProjectDocumentMutationResult, ProjectGetResult,
-    ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
-    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
-    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
-    RoutinesGetParams, RoutinesListResult,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeManifestBackend,
+    ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
+    ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectDeleteParams, ProjectDocument,
+    ProjectDocumentContentMutationResult, ProjectDocumentContentUpdateParams,
+    ProjectDocumentMutationResult, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
+    ProjectSummary, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
+    RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams, RoutinesGetParams,
+    RoutinesListResult,
 };
+use crate::prompt_merge::merge_prompt_config;
 use crate::{
     AbilityCreateParams, AgentUpdateParams, ContextBlockCreateParams, CouncilCreateParams,
     DomainCreateParams, ModelCreateParams, ProjectCreateParams, ProjectDocumentCreateParams,
     ProjectDocumentDeleteParams, RoutineCreateParams,
 };
-
-fn merge_json_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
-    match (target, patch) {
-        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
-            for (key, value) in patch {
-                match target.get_mut(&key) {
-                    Some(existing) => merge_json_patch(existing, value),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
-            }
-        }
-        (target, patch) => *target = patch,
-    }
-}
-
-fn merge_prompt_config(current: &PromptConfig, patch: serde_json::Value) -> Result<PromptConfig> {
-    let mut value = serde_json::to_value(current)?;
-    merge_json_patch(&mut value, patch);
-    Ok(serde_json::from_value(value)?)
-}
 
 fn graph_input_to_manifest_parts(
     routine_id: uuid::Uuid,
@@ -145,6 +134,142 @@ impl<R, W> LocalManifestMcpBackend<R, W> {
     /// Create a backend from separate manifest reader and writer implementations.
     pub fn new(reader: Arc<R>, writer: Arc<W>) -> Self {
         Self { reader, writer }
+    }
+}
+
+#[async_trait]
+impl<R, W> KnowledgeRegistry for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
+        Ok(vec![KnowledgePackSummary::new(
+            "builtin:nenjo",
+            builtin_pack().manifest(),
+        )])
+    }
+
+    async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
+        local_knowledge_pack(selector).map(|pack| Arc::new(pack) as Arc<dyn KnowledgePack>)
+    }
+}
+
+#[async_trait]
+impl<R, W> KnowledgeManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_knowledge_packs(&self) -> Result<serde_json::Value> {
+        serde_json::to_value(KnowledgeRegistry::list_packs(self).await?).map_err(Into::into)
+    }
+
+    async fn list_knowledge_docs(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeListArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.list_docs(filter)
+                .into_iter()
+                .map(|doc| knowledge_manifest_result(&args.pack, doc))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn read_knowledge_doc_manifest(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: KnowledgeReadArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let manifest = pack.read_manifest(&args.path).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(knowledge_manifest_result(&args.pack, manifest)).map_err(Into::into)
+    }
+
+    async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeReadArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let doc = pack.read_doc(&args.path).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(KnowledgeDocReadResult {
+            manifest: knowledge_manifest_result(&args.pack, &doc.manifest),
+            content: doc.content,
+        })
+        .map_err(Into::into)
+    }
+
+    async fn search_knowledge(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeSearchArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.search_docs(&args.query, filter)
+                .into_iter()
+                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn search_knowledge_paths(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeSearchArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.search_paths(&args.query, filter)
+                .into_iter()
+                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn list_knowledge_tree(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeTreeArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        serde_json::to_value(pack.list_tree(args.prefix.as_deref())).map_err(Into::into)
+    }
+
+    async fn list_knowledge_neighbors(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: KnowledgeNeighborArgs =
+            serde_json::from_value(params).map_err(anyhow::Error::from)?;
+        let pack = local_knowledge_pack(&args.pack)?;
+        let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
+        serde_json::to_value(pack.neighbors(&args.path, edge_type)).map_err(Into::into)
+    }
+}
+
+fn local_knowledge_pack(selector: &str) -> Result<crate::knowledge_backend::ResolvedKnowledgePack> {
+    if is_nenjo_pack_selector(selector) {
+        Ok(builtin_pack())
+    } else if is_default_library_pack_selector(selector) {
+        Err(anyhow::anyhow!(
+            "knowledge pack 'workspace' requires a default library pack; use workspace:<slug> in the worker harness"
+        ))
+    } else {
+        Err(unknown_pack(selector))
     }
 }
 
@@ -619,78 +744,18 @@ where
         })
     }
 
-    async fn list_project_documents(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project documents are not available in the local manifest backend"
-        ))
-    }
-
-    async fn read_project_document_manifest(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document manifests are not available in the local manifest backend"
-        ))
-    }
-
-    async fn read_project_document(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document content is not available in the local manifest backend"
-        ))
-    }
-
-    async fn search_project_documents(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document search is not available in the local manifest backend"
-        ))
-    }
-
-    async fn search_project_document_paths(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document path search is not available in the local manifest backend"
-        ))
-    }
-
-    async fn list_project_document_tree(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document tree is not available in the local manifest backend"
-        ))
-    }
-
-    async fn list_project_document_neighbors(
-        &self,
-        _params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        Err(anyhow!(
-            "project document neighbors are not available in the local manifest backend"
-        ))
-    }
-
     async fn create_project_document(
         &self,
         _params: ProjectDocumentCreateParams,
     ) -> Result<ProjectDocumentMutationResult> {
-        bail!("project document tools require the platform backend")
+        bail!("library knowledge item tools require the platform backend")
     }
 
     async fn update_project_document_content(
         &self,
         _params: ProjectDocumentContentUpdateParams,
     ) -> Result<ProjectDocumentContentMutationResult> {
-        bail!("project document tools require the platform backend")
+        bail!("library knowledge item tools require the platform backend")
     }
 
     async fn delete_project_document(

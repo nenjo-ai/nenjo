@@ -172,7 +172,6 @@ pub struct SessionTranscriptEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainState {
     pub domain_command: String,
-    pub turn_number: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,6 +7,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::input::{RoutineRun, RoutineRunKind, TaskInput};
+
 /// Outcome of a routine step execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StepResult {
@@ -165,6 +167,70 @@ impl RoutineInput {
         self.session_binding = Some(binding);
         self
     }
+
+    pub(crate) fn from_routine_run(run: RoutineRun) -> Self {
+        match run.kind {
+            RoutineRunKind::Task(task) => {
+                let location = run.execution.project_location;
+                let mut input = RoutineInput::from_task_input(task)
+                    .with_git(location.and_then(|location| location.git))
+                    .with_execution_run_id_opt(run.execution.execution_run_id);
+                if let Some(binding) = run.execution.session_binding {
+                    input = input.with_session_binding(binding);
+                }
+                input
+            }
+            RoutineRunKind::Cron(cron) => {
+                let location = run.execution.project_location;
+                let mut input = match cron.task {
+                    Some(task) => RoutineInput::from_task_input(task),
+                    None => RoutineInput::new(
+                        cron.project_id.unwrap_or_else(Uuid::nil),
+                        "Cron",
+                        "Cron-triggered routine",
+                    ),
+                }
+                .with_git(location.and_then(|location| location.git))
+                .with_cron_trigger()
+                .with_execution_run_id_opt(run.execution.execution_run_id);
+                if let Some(binding) = run.execution.session_binding {
+                    input = input.with_session_binding(binding);
+                }
+                input
+            }
+        }
+    }
+
+    fn from_task_input(task: TaskInput) -> Self {
+        let mut input = RoutineInput::new(task.project_id, task.title, task.description)
+            .with_tags(task.tags)
+            .with_acceptance_criteria(task.acceptance_criteria)
+            .with_task_id(task.task_id);
+        if let Some(slug) = task.slug {
+            input = input.with_slug(slug);
+        }
+        if let Some(status) = task.status {
+            input = input.with_status(status);
+        }
+        if let Some(priority) = task.priority {
+            input = input.with_priority(priority);
+        }
+        if let Some(task_type) = task.task_type {
+            input = input.with_task_type(task_type);
+        }
+        if let Some(complexity) = task.complexity {
+            input = input.with_complexity(complexity);
+        }
+        if let Some(source) = task.source {
+            input = input.with_source(source);
+        }
+        input
+    }
+
+    fn with_execution_run_id_opt(mut self, id: Option<Uuid>) -> Self {
+        self.execution_run_id = id;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,63 +268,6 @@ impl RoutineState {
             step_metadata: None,
             metrics: RoutineMetrics::new(),
         }
-    }
-}
-
-/// Build a `RoutineInput` from a `TaskType`.
-///
-/// Extracts project_id, title, description, etc. from the task's fields.
-pub fn routine_input_from_task(task: &crate::types::TaskType) -> RoutineInput {
-    match task {
-        crate::types::TaskType::Task(t) => {
-            RoutineInput::new(t.project_id, &t.title, &t.description)
-                .with_task_id(t.task_id)
-                .with_tags(t.tags.clone())
-                .with_source(&t.source)
-                .with_status(&t.status)
-                .with_priority(&t.priority)
-                .with_task_type(&t.task_type)
-                .with_slug(&t.slug)
-                .with_complexity(&t.complexity)
-                .with_acceptance_criteria(t.acceptance_criteria.clone())
-                .with_git(t.git.clone())
-        }
-        crate::types::TaskType::Cron {
-            task: Some(t),
-            project_id,
-            ..
-        } => RoutineInput::new(*project_id, &t.title, &t.description)
-            .with_task_id(t.task_id)
-            .with_tags(t.tags.clone())
-            .with_source(&t.source)
-            .with_acceptance_criteria(t.acceptance_criteria.clone())
-            .with_git(t.git.clone())
-            .with_cron_trigger(),
-        crate::types::TaskType::Cron {
-            task: None,
-            project_id,
-            ..
-        } => RoutineInput::new(*project_id, "Cron", "Cron-triggered routine").with_cron_trigger(),
-        crate::types::TaskType::Heartbeat { project_id, .. } => RoutineInput::new(
-            project_id.unwrap_or(Uuid::nil()),
-            "Heartbeat",
-            "Scheduled agent heartbeat",
-        ),
-        crate::types::TaskType::Chat {
-            project_id,
-            user_message,
-            ..
-        } => RoutineInput::new(*project_id, "Chat", user_message),
-        crate::types::TaskType::Gate {
-            project_id,
-            criteria,
-            ..
-        } => RoutineInput::new(*project_id, "Gate", criteria),
-        crate::types::TaskType::CouncilSubtask {
-            project_id,
-            subtask_description,
-            ..
-        } => RoutineInput::new(*project_id, "Subtask", subtask_description),
     }
 }
 
@@ -659,73 +668,6 @@ mod tests {
     fn cron_config_missing_both() {
         let config = serde_json::json!({});
         assert!(CronStepConfig::from_config(&config, None, None).is_err());
-    }
-
-    #[test]
-    fn routine_input_from_task_propagates_git_context() {
-        let git = crate::types::GitContext {
-            branch: "agent/abc123/fix-auth".to_string(),
-            target_branch: "main".to_string(),
-            work_dir: "/tmp/worktrees/fix-auth/abc123".to_string(),
-            repo_url: "https://github.com/org/repo.git".to_string(),
-        };
-        let task = crate::types::TaskType::Task(crate::types::Task {
-            task_id: Uuid::new_v4(),
-            title: "Fix auth".to_string(),
-            description: "Fix authentication".to_string(),
-            acceptance_criteria: None,
-            tags: vec![],
-            source: "task".to_string(),
-            project_id: Uuid::new_v4(),
-            status: String::new(),
-            priority: String::new(),
-            task_type: String::new(),
-            slug: "fix-auth".to_string(),
-            complexity: String::new(),
-            git: Some(git),
-        });
-        let input = routine_input_from_task(&task);
-        let git_ctx = input.git.expect("git context should be propagated");
-        assert_eq!(git_ctx.branch, "agent/abc123/fix-auth");
-        assert_eq!(git_ctx.target_branch, "main");
-        assert_eq!(git_ctx.work_dir, "/tmp/worktrees/fix-auth/abc123");
-        assert_eq!(git_ctx.repo_url, "https://github.com/org/repo.git");
-    }
-
-    #[test]
-    fn routine_input_from_cron_task_propagates_git_context() {
-        let git = crate::types::GitContext {
-            branch: "agent/def456/cron-task".to_string(),
-            target_branch: "main".to_string(),
-            work_dir: "/tmp/worktrees/cron-task/def456".to_string(),
-            repo_url: "https://github.com/org/repo.git".to_string(),
-        };
-        let task = crate::types::TaskType::Cron {
-            task: Some(crate::types::Task {
-                task_id: Uuid::new_v4(),
-                title: "Cron task".to_string(),
-                description: "Cron description".to_string(),
-                acceptance_criteria: None,
-                tags: vec![],
-                source: "cron".to_string(),
-                project_id: Uuid::new_v4(),
-                status: String::new(),
-                priority: String::new(),
-                task_type: String::new(),
-                slug: "cron-task".to_string(),
-                complexity: String::new(),
-                git: Some(git),
-            }),
-            project_id: Uuid::new_v4(),
-            schedule: CronSchedule::Interval(Duration::from_secs(60)),
-            start_at: None,
-            timeout: Duration::from_secs(300),
-        };
-        let input = routine_input_from_task(&task);
-        let git_ctx = input
-            .git
-            .expect("git context should be propagated for cron tasks");
-        assert_eq!(git_ctx.branch, "agent/def456/cron-task");
     }
 
     #[test]

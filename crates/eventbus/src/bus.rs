@@ -1,18 +1,51 @@
 //! Raw event bus built on top of a [`Transport`].
 
+use std::sync::Arc;
+
 use nenjo_events::Envelope;
 use tokio::sync::mpsc;
 
 use crate::error::EventBusError;
-use crate::transport::{Message, Transport};
+use crate::transport::{Message, Subscription, Transport};
 
 /// Raw event bus for sending and receiving transport envelopes.
 ///
 /// Built via [`EventBusBuilder`]. The bus owns its transport and manages
 /// the subscription lifecycle.
 pub struct EventBus<T: Transport> {
-    transport: T,
+    transport: Arc<T>,
     rx: mpsc::Receiver<Message>,
+}
+
+/// Cloneable outbound handle for publishing raw envelopes.
+pub struct EventBusPublisher<T: Transport> {
+    transport: Arc<T>,
+}
+
+impl<T: Transport> Clone for EventBusPublisher<T> {
+    fn clone(&self) -> Self {
+        Self {
+            transport: Arc::clone(&self.transport),
+        }
+    }
+}
+
+impl<T: Transport> std::fmt::Debug for EventBusPublisher<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventBusPublisher").finish_non_exhaustive()
+    }
+}
+
+impl<T: Transport> EventBusPublisher<T> {
+    /// Send a raw envelope to a subject.
+    pub async fn send_envelope(
+        &self,
+        subject: &str,
+        envelope: &Envelope,
+    ) -> Result<(), EventBusError> {
+        let bytes = serde_json::to_vec(envelope)?;
+        self.transport.publish(subject, &bytes).await
+    }
 }
 
 impl<T: Transport> std::fmt::Debug for EventBus<T> {
@@ -30,6 +63,13 @@ impl<T: Transport> EventBus<T> {
     /// Access the underlying transport.
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+
+    /// Create a cloneable outbound publisher handle.
+    pub fn publisher(&self) -> EventBusPublisher<T> {
+        EventBusPublisher {
+            transport: Arc::clone(&self.transport),
+        }
     }
 
     /// Send a raw envelope to a subject.
@@ -69,7 +109,7 @@ impl<T: Transport> EventBus<T> {
 pub struct ReceivedEnvelope {
     /// The deserialized transport envelope.
     pub envelope: Envelope,
-    msg: Message,
+    pub msg: Message,
 }
 
 impl std::fmt::Debug for ReceivedEnvelope {
@@ -92,14 +132,13 @@ impl ReceivedEnvelope {
 /// Requires a [`Transport`] before building.
 pub struct EventBusBuilder<T: Transport> {
     transport: Option<T>,
-    /// Which subject to subscribe to. Defaults to `requests.*`.
-    subscribe_subject: Option<String>,
+    subscription: Subscription,
 }
 
 impl<T: Transport> std::fmt::Debug for EventBusBuilder<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventBusBuilder")
-            .field("subscribe_subject", &self.subscribe_subject)
+            .field("subscription", &self.subscription)
             .finish_non_exhaustive()
     }
 }
@@ -108,7 +147,7 @@ impl<T: Transport> EventBusBuilder<T> {
     fn new() -> Self {
         Self {
             transport: None,
-            subscribe_subject: None,
+            subscription: Subscription::Subject(nenjo_events::requests_subject_all()),
         }
     }
 
@@ -118,11 +157,9 @@ impl<T: Transport> EventBusBuilder<T> {
         self
     }
 
-    /// Override the subject to subscribe to.
-    ///
-    /// By default, the bus subscribes to `requests.*`.
-    pub fn subscribe_subject(mut self, subject: impl Into<String>) -> Self {
-        self.subscribe_subject = Some(subject.into());
+    /// Set the transport subscription.
+    pub fn subscription(mut self, subscription: Subscription) -> Self {
+        self.subscription = subscription;
         self
     }
 
@@ -135,12 +172,11 @@ impl<T: Transport> EventBusBuilder<T> {
             .transport
             .ok_or_else(|| EventBusError::Builder("transport is required".into()))?;
 
-        let subject = self
-            .subscribe_subject
-            .unwrap_or_else(nenjo_events::requests_subject_all);
+        let rx = transport.subscribe(self.subscription).await?;
 
-        let rx = transport.subscribe(&subject).await?;
-
-        Ok(EventBus { transport, rx })
+        Ok(EventBus {
+            transport: Arc::new(transport),
+            rx,
+        })
     }
 }

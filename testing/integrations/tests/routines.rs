@@ -8,12 +8,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
+use nenjo::TaskInput;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
-use nenjo::types::{Task, TaskType};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -37,11 +37,11 @@ fn get_api_key() -> Option<String> {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "claude-haiku".into(),
+        name: "openrouter-nemotron".into(),
         description: None,
-        model: "anthropic/claude-3-haiku".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
         model_provider: "openrouter".into(),
-        temperature: Some(0.0),
+        temperature: Some(0.7),
         base_url: None,
     }
 }
@@ -85,22 +85,14 @@ fn make_agent(model_id: Uuid) -> AgentManifest {
     }
 }
 
-fn make_task(project_id: Uuid) -> TaskType {
-    TaskType::Task(Task {
-        task_id: Uuid::new_v4(),
-        title: "Routine integration smoke test".into(),
-        description: "Reply with a short sentence that includes the marker ROUTINE_OK.".into(),
-        acceptance_criteria: None,
-        tags: vec![],
-        source: "integration-test".into(),
+fn make_task(project_id: Uuid) -> TaskInput {
+    TaskInput::new(
         project_id,
-        status: String::new(),
-        priority: String::new(),
-        task_type: String::new(),
-        slug: String::new(),
-        complexity: String::new(),
-        git: None,
-    })
+        Uuid::new_v4(),
+        "Routine integration smoke test",
+        "Reply with a short sentence that includes the marker ROUTINE_OK.",
+    )
+    .source("integration-test")
 }
 
 #[tokio::test]

@@ -2,26 +2,42 @@
 //!
 //! Agent worker for the Nenjo platform.
 //!
-//! Boots the harness, composes the raw event bus with the secure-envelope layer,
+//! Boots the worker runtime, composes the raw event bus with the secure-envelope layer,
 //! and runs the agent event loop. This is the implementation behind `nenjo run`.
 //!
 //! The worker is resilient to backend and NATS outages: startup and the event
 //! loop are wrapped in a retry loop with exponential backoff so the worker
 //! automatically recovers when services come back online.
 
+pub mod assembly;
+pub mod bootstrap;
+pub mod config;
 pub mod crypto;
-pub mod harness;
+pub mod event_loop;
+pub mod external_mcp;
+pub mod handlers;
+pub mod local_documents;
+pub mod providers;
+pub mod runtime;
+pub mod security;
+pub mod sessions;
+pub mod tools;
+
+pub use nenjo::client as api_client;
 
 use std::time::Duration;
 
+use crate::api_client::NenjoClient;
+use crate::assembly::{WorkerAssembly, WorkerCryptoContext};
+use crate::config::Config;
 use crate::crypto::{EnrollmentStatus, WorkerAuthProvider};
-use crate::harness::Harness;
-use crate::harness::config::Config;
+use crate::event_loop::WorkerEventLoopContext;
+use crate::runtime::WorkerRuntime;
 use anyhow::Result;
 use clap::Args;
-use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
-use nenjo_eventbus::EventBus;
-use nenjo_secure_envelope::{SecureEnvelopeBus, SecureEnvelopeCodec};
+use nenjo_eventbus::{EventBus, Subscription};
+use nenjo_events::Capability;
+use nenjo_secure_envelope::SecureEnvelopeBus;
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +52,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Poll interval while waiting for a worker enrollment to be approved.
 const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-const DEFAULT_NATS_STREAM_NAME: &str = "AGENT_REQUESTS";
+const DEFAULT_NATS_STREAM_NAME: &str = "AGENT_WORK_REQUESTS";
 
 /// CLI arguments for `nenjo run`.
 #[derive(Args, Debug, Default)]
@@ -45,7 +61,7 @@ pub struct RunArgs {
     #[arg(long, env = "NATS_URL")]
     pub nats_url: Option<String>,
 
-    /// Backend API URL (e.g. https://api.nenjo.ai, only override for development reasons)
+    /// Backend API URL (e.g. <https://api.nenjo.ai>, only override for development reasons)
     #[arg(long, env = "NENJO_API_URL")]
     pub backend_url: Option<String>,
 
@@ -66,16 +82,16 @@ pub struct RunArgs {
     #[arg(long, env = "NENJO_DIR")]
     pub nenjo_dir: Option<String>,
 
-    /// Optional harness display name shown in the platform UI.
+    /// Optional worker display name shown in the platform UI.
     #[arg(long, env = "NENJO_HARNESS_NAME")]
     pub harness_name: Option<String>,
 
-    /// Optional harness labels shown in the platform UI.
+    /// Optional worker labels shown in the platform UI.
     #[arg(long, env = "NENJO_HARNESS_LABELS", value_delimiter = ',')]
     pub harness_labels: Option<Vec<String>>,
 }
 
-/// Initialize tracing, load config, boot harness, connect NATS, and run.
+/// Initialize tracing, load config, boot the worker, connect NATS, and run.
 pub async fn run(args: RunArgs) -> Result<()> {
     info!("Starting Nenjo worker...");
 
@@ -138,7 +154,7 @@ pub async fn run_with_config(config: Config) -> Result<()> {
         shutdown_for_signal.cancel();
     });
 
-    // Retry loop: (re-)creates the harness + NATS transport on each iteration.
+    // Retry loop: (re-)creates the worker runtime + NATS transport on each iteration.
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
@@ -182,25 +198,32 @@ pub async fn run_with_config(config: Config) -> Result<()> {
 /// Returns `Ok(())` when the shutdown token is cancelled (graceful stop).
 /// Returns `Err` on any transient failure so the caller can retry.
 async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
-    // Create harness — runs bootstrap, builds Provider, connects MCP servers
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(
         config.state_dir.join("crypto"),
     )?);
-    let harness = Harness::new(config.clone(), auth_provider.clone()).await?;
+    let bootstrap_api = NenjoClient::new(config.backend_api_url(), &config.api_key);
+
+    crate::bootstrap::sync(
+        &bootstrap_api,
+        &config.manifests_dir,
+        &config.workspace_dir,
+        &config.state_dir,
+    )
+    .await?;
 
     // The api_key_id is the stable worker identifier used for presence tracking.
-    let auth = crate::harness::manifest::load_cached_bootstrap_auth(&config.manifests_dir)
-        .ok_or_else(|| {
+    let auth =
+        crate::bootstrap::load_cached_bootstrap_auth(&config.manifests_dir).ok_or_else(|| {
             anyhow::anyhow!(
                 "Backend did not return bootstrap auth. Ensure bootstrap is up to date."
             )
         })?;
-    let api_key_id = auth.api_key_id.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Backend did not return auth.api_key_id in manifest. \
-             Ensure the backend is updated and the API key is valid."
-        )
-    })?;
+    let crypto = WorkerCryptoContext::from_bootstrap_auth(
+        &auth,
+        auth_provider.clone(),
+        bootstrap_api.clone(),
+    )?;
+    let api_key_id = crypto.api_key_id;
     debug!(%api_key_id, "Using API key ID as stable worker identifier");
 
     let identity = auth_provider.identity();
@@ -219,17 +242,22 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         }
     }
 
-    let user_id = auth.user_id;
-    let org_id = auth.org_id;
+    let ack_actor_user_id = crypto.actor_user_id;
+    let org_id = crypto.org_id;
+    let capabilities = effective_worker_capabilities(&auth.capabilities, &config.capabilities);
     wait_for_enrollment_approval(
-        harness.api().as_ref(),
+        &bootstrap_api,
         auth_provider.as_ref(),
         api_key_id,
-        user_id,
+        ack_actor_user_id,
         build_harness_metadata(config),
         shutdown,
     )
     .await?;
+
+    let api = crypto.configure_api_client(bootstrap_api);
+    let assembly = WorkerAssembly::from_bootstrapped(config, auth_provider, api).await?;
+    let runtime = WorkerRuntime::from_assembly(assembly, config.clone()).await?;
 
     let nats = resolve_nats_connection(config);
     let transport = nenjo_eventbus::nats::NatsTransport::builder()
@@ -241,17 +269,16 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))?;
 
-    let codec = SecureEnvelopeCodec::new(
-        EnrollmentBackedKeyProvider::new(auth_provider, harness.api(), api_key_id, user_id),
-        org_id,
-    );
-
     let bus = EventBus::builder()
         .transport(transport)
+        .subscription(Subscription::worker_commands(
+            api_key_id,
+            capabilities.clone(),
+        ))
         .build()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
-    let secure_bus = SecureEnvelopeBus::new(bus, codec);
+    let secure_bus = SecureEnvelopeBus::new(bus, crypto.codec.clone());
 
     info!(
         nats_urls = ?nats.urls,
@@ -260,16 +287,24 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         "Eventbus transport connected"
     );
 
-    // Wire up the harness's own shutdown to the global one.
-    let harness_shutdown = harness.shutdown_token();
+    // Wire up the runtime's own shutdown to the global one.
+    let runtime_shutdown = runtime.shutdown_token();
     let global_shutdown = shutdown.clone();
     let link = tokio::spawn(async move {
         global_shutdown.cancelled().await;
-        harness_shutdown.cancel();
+        runtime_shutdown.cancel();
     });
 
     // Run the event loop — blocks until the bus stream ends or shutdown.
-    let result = harness.run(secure_bus, user_id).await;
+    let result = runtime
+        .run(
+            secure_bus,
+            WorkerEventLoopContext {
+                org_id,
+                capabilities,
+            },
+        )
+        .await;
 
     link.abort();
 
@@ -284,6 +319,29 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     }
 }
 
+fn effective_worker_capabilities(
+    api_key_capabilities: &[Capability],
+    configured_capabilities: &[Capability],
+) -> Vec<Capability> {
+    let capabilities = if api_key_capabilities.is_empty() {
+        if configured_capabilities.is_empty() {
+            Capability::ALL.to_vec()
+        } else {
+            configured_capabilities.to_vec()
+        }
+    } else if configured_capabilities.is_empty() {
+        api_key_capabilities.to_vec()
+    } else {
+        configured_capabilities
+            .iter()
+            .copied()
+            .filter(|capability| api_key_capabilities.contains(capability))
+            .collect()
+    };
+
+    Capability::effective_worker_subscriptions(&capabilities)
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedNatsConnection {
     urls: Vec<String>,
@@ -292,11 +350,18 @@ struct ResolvedNatsConnection {
 }
 
 fn resolve_nats_connection(config: &Config) -> ResolvedNatsConnection {
-    let cached = crate::harness::manifest::load_cached_nats_config(&config.manifests_dir);
+    let cached = crate::bootstrap::load_cached_nats_config(&config.manifests_dir);
     let stream_name = cached
         .as_ref()
         .map(|nats| nats.stream.name.trim())
         .filter(|name| !name.is_empty())
+        .map(|name| {
+            if name == "AGENT_REQUESTS" {
+                DEFAULT_NATS_STREAM_NAME
+            } else {
+                name
+            }
+        })
         .unwrap_or(DEFAULT_NATS_STREAM_NAME)
         .to_string();
 
@@ -342,12 +407,12 @@ async fn wait_for_enrollment_approval(
     api: &nenjo::client::NenjoClient,
     auth_provider: &WorkerAuthProvider,
     api_key_id: uuid::Uuid,
-    bootstrap_user_id: uuid::Uuid,
+    ack_actor_user_id: uuid::Uuid,
     metadata: Option<serde_json::Value>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
     auth_provider
-        .sync_worker_enrollment(api, api_key_id, bootstrap_user_id, metadata.clone())
+        .sync_worker_enrollment(api, api_key_id, ack_actor_user_id, metadata.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize worker enrollment: {error}"))?;
 
@@ -373,7 +438,6 @@ async fn wait_for_enrollment_approval(
         match api.fetch_worker_enrollment_status(api_key_id).await {
             Ok(Some(status)) => match status.state {
                 nenjo::client::WorkerEnrollmentState::Active => {
-                    let _ = bootstrap_user_id;
                     auth_provider.apply_backend_enrollment(&status).await?;
                     info!(%api_key_id, "Worker enrollment approved");
                     return Ok(());
@@ -477,7 +541,7 @@ mod tests {
                 "enabled": true,
                 "urls": ["tls://nats-a.example.com:4222", "tls://nats-b.example.com:4222"],
                 "auth": { "method": "api_key_token" },
-                "stream": { "name": "AGENT_REQUESTS" }
+                "stream": { "name": "AGENT_WORK_REQUESTS" }
             })
             .to_string(),
         )
@@ -491,7 +555,7 @@ mod tests {
         assert_eq!(nats.source, "bootstrap");
         assert_eq!(nats.urls.len(), 2);
         assert_eq!(nats.urls[0], "tls://nats-a.example.com:4222");
-        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
+        assert_eq!(nats.stream_name, "AGENT_WORK_REQUESTS");
     }
 
     #[test]
@@ -505,7 +569,7 @@ mod tests {
                 "enabled": true,
                 "urls": ["tls://nats-a.example.com:4222"],
                 "auth": { "method": "api_key_token" },
-                "stream": { "name": "AGENT_REQUESTS" }
+                "stream": { "name": "AGENT_WORK_REQUESTS" }
             })
             .to_string(),
         )
@@ -519,6 +583,6 @@ mod tests {
 
         assert_eq!(nats.source, "config");
         assert_eq!(nats.urls, vec!["tls://override.example.com:4222"]);
-        assert_eq!(nats.stream_name, "AGENT_REQUESTS");
+        assert_eq!(nats.stream_name, "AGENT_WORK_REQUESTS");
     }
 }

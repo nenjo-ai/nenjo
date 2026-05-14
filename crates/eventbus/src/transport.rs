@@ -1,13 +1,42 @@
 //! Transport trait — the abstraction point for pluggable message delivery.
 
 use crate::EventBusError;
+use nenjo_events::Capability;
+
+#[derive(Debug, Clone)]
+pub enum Subscription {
+    Subject(String),
+    WorkerCommands {
+        worker_id: uuid::Uuid,
+        capabilities: Vec<Capability>,
+    },
+}
+
+impl Subscription {
+    pub fn worker_commands(worker_id: uuid::Uuid, capabilities: Vec<Capability>) -> Self {
+        Self::WorkerCommands {
+            worker_id,
+            capabilities,
+        }
+    }
+}
 
 /// A message received from the transport layer.
 pub struct Message {
     /// Raw payload bytes (UTF-8 JSON).
     pub payload: Vec<u8>,
+    /// Transport-specific delivery source, useful for diagnosing duplicate deliveries.
+    pub source: Option<MessageSource>,
     /// Opaque handle for acknowledging the message.
     ack_fn: Box<dyn AckHandle>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSource {
+    pub stream: Option<String>,
+    pub consumer: Option<String>,
+    pub filter_subject: Option<String>,
+    pub subject: Option<String>,
 }
 
 impl Message {
@@ -18,8 +47,14 @@ impl Message {
     pub fn new(payload: Vec<u8>, ack_fn: impl AckHandle + 'static) -> Self {
         Self {
             payload,
+            source: None,
             ack_fn: Box::new(ack_fn),
         }
+    }
+
+    pub fn with_source(mut self, source: MessageSource) -> Self {
+        self.source = Some(source);
+        self
     }
 
     /// Acknowledge successful processing of this message.
@@ -51,11 +86,10 @@ impl std::fmt::Debug for Message {
 ///
 /// Implementors should make `ack()` idempotent — calling it twice should
 /// not error.
+#[async_trait::async_trait]
 pub trait AckHandle: Send + Sync {
     /// Acknowledge the message.
-    fn ack(
-        self: Box<Self>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventBusError>> + Send>>;
+    async fn ack(self: Box<Self>) -> Result<(), EventBusError>;
 }
 
 /// No-op ack handle for transports that don't require acknowledgment.
@@ -63,12 +97,10 @@ pub trait AckHandle: Send + Sync {
 /// Useful for in-memory or fire-and-forget transports where redelivery is not a concern.
 pub struct NoOpAck;
 
+#[async_trait::async_trait]
 impl AckHandle for NoOpAck {
-    fn ack(
-        self: Box<Self>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventBusError>> + Send>>
-    {
-        Box::pin(async { Ok(()) })
+    async fn ack(self: Box<Self>) -> Result<(), EventBusError> {
+        Ok(())
     }
 }
 
@@ -84,29 +116,33 @@ impl AckHandle for NoOpAck {
 /// [`subscribe`](Self::subscribe) to spawn a background task that feeds
 /// incoming messages into the returned channel. Wrap each incoming message
 /// with [`Message::new`] and a suitable [`AckHandle`] (or [`NoOpAck`]).
+#[async_trait::async_trait]
 pub trait Transport: Send + Sync + 'static {
     /// Publish a message to the given subject.
-    fn publish(
-        &self,
-        subject: &str,
-        payload: &[u8],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventBusError>> + Send + '_>>;
+    async fn publish(&self, subject: &str, payload: &[u8]) -> Result<(), EventBusError>;
 
     /// Subscribe to a subject and return a receiver for incoming messages.
     ///
     /// The returned receiver yields [`Message`] values that must be
     /// acknowledged after processing.
-    fn subscribe(
+    async fn subscribe(
+        &self,
+        subscription: Subscription,
+    ) -> Result<tokio::sync::mpsc::Receiver<Message>, EventBusError> {
+        match subscription {
+            Subscription::Subject(subject) => self.subscribe_subject(&subject).await,
+            Subscription::WorkerCommands { .. } => {
+                self.subscribe_subject(&nenjo_events::requests_subject_all())
+                    .await
+            }
+        }
+    }
+
+    /// Subscribe to one broker subject.
+    async fn subscribe_subject(
         &self,
         subject: &str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<tokio::sync::mpsc::Receiver<Message>, EventBusError>,
-                > + Send
-                + '_,
-        >,
-    >;
+    ) -> Result<tokio::sync::mpsc::Receiver<Message>, EventBusError>;
 
     /// The unique instance ID for this worker process.
     ///

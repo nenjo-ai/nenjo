@@ -11,8 +11,8 @@ use nenjo::manifest::{
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -330,11 +330,11 @@ async fn instance_builds_prompts() {
         .await
         .unwrap();
 
-    let task = nenjo::types::TaskType::Chat {
-        user_message: "Hello!".into(),
+    let task = nenjo::AgentRun::chat(nenjo::ChatInput {
+        message: "Hello!".into(),
         history: vec![],
-        project_id: Uuid::nil(),
-    };
+        project_id: None,
+    });
 
     let prompts = runner.instance().build_prompts(&task);
 
@@ -635,7 +635,7 @@ async fn domain_expansion_preserves_tool_set() {
     assert!(
         domain_runner
             .instance()
-            .prompt_context
+            .prompt_context()
             .active_domain
             .as_ref()
             .and_then(|domain| domain
@@ -691,7 +691,7 @@ async fn domain_expansion_preserves_existing_abilities() {
 
     let ability_names: Vec<&str> = domain_runner
         .instance()
-        .prompt_context
+        .prompt_context()
         .available_abilities
         .iter()
         .map(|a| a.name.as_str())
@@ -738,7 +738,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     assert_eq!(
         domain_runner
             .instance()
-            .prompt_context
+            .prompt_context()
             .active_domain
             .as_ref()
             .and_then(|domain| domain
@@ -751,7 +751,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
 
     let ability_names: Vec<&str> = domain_runner
         .instance()
-        .prompt_context
+        .prompt_context()
         .available_abilities
         .iter()
         .map(|a| a.name.as_str())
@@ -792,7 +792,7 @@ async fn domain_expansion_preserves_existing_ability_without_duplication() {
 
     let ability_count = domain_runner
         .instance()
-        .prompt_context
+        .prompt_context()
         .available_abilities
         .iter()
         .filter(|a| a.name == "writer")
@@ -840,7 +840,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
     assert!(
         domain_runner
             .instance()
-            .prompt_context
+            .prompt_context()
             .platform_scopes
             .iter()
             .any(|scope| scope == "projects:write")
@@ -848,7 +848,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
 
     let ability_names: Vec<&str> = domain_runner
         .instance()
-        .prompt_context
+        .prompt_context()
         .available_abilities
         .iter()
         .map(|a| a.name.as_str())
@@ -911,7 +911,7 @@ async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
     let domain_runner = runner.domain_expansion("github").await.unwrap();
     let mcp_names: Vec<&str> = domain_runner
         .instance()
-        .prompt_context
+        .prompt_context()
         .mcp_server_info
         .iter()
         .map(|entry| entry.0.as_str())

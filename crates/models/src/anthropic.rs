@@ -1,8 +1,8 @@
 //! Anthropic Claude provider. Authenticates via `x-api-key` header.
 
+use crate::ToolSpec;
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn convert_tools_sanitizes_names() {
-        let tools = vec![nenjo_tools::ToolSpec {
+        let tools = vec![ToolSpec {
             name: "app.nenjo.platform/tasks".into(),
             description: "Manage tasks".into(),
             parameters: serde_json::json!({}),

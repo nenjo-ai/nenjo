@@ -137,19 +137,13 @@ pub struct ProjectMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `list_project_documents`.
-pub struct ProjectDocumentsListResult {
-    pub project_documents: Vec<ProjectDocumentSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `create_project_document`.
+/// Result for creating a library knowledge item.
 pub struct ProjectDocumentMutationResult {
     pub project_document: ProjectDocumentSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_project_document_content`.
+/// Result for updating library knowledge item content.
 pub struct ProjectDocumentContentMutationResult {
     pub project_document: ProjectDocumentSummary,
 }

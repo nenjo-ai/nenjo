@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use crate::builtin_knowledge::builtin_documents_summary;
 use crate::context::{MemoryProfileContext, TaskContext};
 
 use super::types::{
@@ -43,11 +42,11 @@ pub struct RenderContextVars {
     // Pre-computed memory vars (memories, memories.core, etc.)
     pub memory_vars: HashMap<String, String>,
 
-    // Pre-computed resource vars (resources, resources.project, resources.workspace)
-    pub resource_vars: HashMap<String, String>,
+    // Pre-computed artifact vars (artifacts, artifacts.project, artifacts.workspace)
+    pub artifact_vars: HashMap<String, String>,
 
-    // Pre-computed documents XML for project.documents
-    pub documents_xml: String,
+    // Pre-computed knowledge vars keyed by template path.
+    pub knowledge_vars: HashMap<String, String>,
 
     // Context blocks (pre-rendered, keyed by dotted path)
     pub context_blocks: HashMap<String, String>,
@@ -146,6 +145,11 @@ impl RenderContextVars {
         } else {
             self._self.id.to_string()
         };
+        let project_id = if self.project.id == uuid::Uuid::nil().to_string() {
+            String::new()
+        } else {
+            self.project.id.clone()
+        };
         let routine_id = if self.routine.id.is_nil() {
             String::new()
         } else {
@@ -190,10 +194,11 @@ impl RenderContextVars {
             ),
             // Project — singular XML + fields
             ("project", project_xml.as_str()),
-            ("project.id", &self.project.id),
+            ("project.id", project_id.as_str()),
             ("project.name", &self.project.name),
             ("project.slug", &self.project.slug),
             ("project.description", &self.project.description),
+            ("project.context", &self.project.context),
             ("project.metadata", &self.project.metadata),
             ("project.working_dir", &self.project.working_dir),
             // Routine — singular XML + fields
@@ -242,18 +247,42 @@ impl RenderContextVars {
         // Memory vars (memories, memories.core, etc.)
         vars.extend(self.memory_vars.clone());
 
-        // Resource vars (resources, resources.project, resources.workspace)
-        vars.extend(self.resource_vars.clone());
+        // Artifact vars (artifacts, artifacts.project, artifacts.workspace)
+        vars.extend(self.artifact_vars.clone());
 
-        // Documents
-        if !self.documents_xml.is_empty() {
-            vars.insert("project.documents".to_string(), self.documents_xml.clone());
-        }
-        vars.insert("builtin.documents".to_string(), builtin_documents_summary());
+        vars.extend(self.knowledge_vars.clone());
 
         // Merge context blocks
         vars.extend(self.context_blocks.clone());
 
         vars
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::RenderContextVars;
+
+    #[test]
+    fn nil_project_id_is_not_rendered() {
+        let mut ctx = RenderContextVars::default();
+        ctx.project.id = Uuid::nil().to_string();
+
+        let vars = ctx.to_vars();
+
+        assert_eq!(vars.get("project.id"), None);
+    }
+
+    #[test]
+    fn non_nil_project_id_is_rendered() {
+        let mut ctx = RenderContextVars::default();
+        let project_id = Uuid::new_v4();
+        ctx.project.id = project_id.to_string();
+
+        let vars = ctx.to_vars();
+
+        assert_eq!(vars.get("project.id"), Some(&project_id.to_string()));
     }
 }

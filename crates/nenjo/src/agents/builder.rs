@@ -4,29 +4,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nenjo_models::ModelProvider;
-use nenjo_tools::Tool;
-use nenjo_tools::security::SecurityPolicy;
-
-use super::instance::AgentInstance;
+use super::instance::{AgentInstance, AgentModel, AgentPromptState, AgentRuntime};
 use super::prompts::PromptContext;
 use super::runner::AgentRunner;
+use crate::agents::error::AgentError;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
-use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig};
-use crate::memory::Memory;
+use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest};
 use crate::memory::types::MemoryScope;
-use crate::provider::{ModelProviderFactory, ToolFactory};
-use crate::routines::LambdaRunner;
+use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
+use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
 
 /// Required parameters for constructing an [`AgentBuilder`].
-pub(crate) struct AgentBuilderParams {
+pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
     pub agent: AgentManifest,
     pub model: ModelManifest,
-    pub provider: Arc<dyn ModelProvider>,
+    pub model_provider: Arc<P::Model<'static>>,
     pub tools: Vec<Arc<dyn Tool>>,
-    pub prompt_config: PromptConfig,
     pub prompt_context: PromptContext,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
@@ -36,63 +31,114 @@ pub(crate) struct AgentBuilderParams {
 ///
 /// Pre-filled by [`Provider`](crate::provider::Provider) with
 /// manifest data. Callers can override individual fields before building.
-pub struct AgentBuilder {
-    agent: AgentManifest,
-    model: ModelManifest,
-    provider: Arc<dyn ModelProvider>,
+pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
+    agent: Option<AgentManifest>,
+    model: Option<ModelManifest>,
+    model_provider: Option<Arc<P::Model<'static>>>,
     tools: Vec<Arc<dyn Tool>>,
-    prompt_config: PromptConfig,
-    prompt_context: PromptContext,
+    prompt_context: Option<PromptContext>,
     agent_config: AgentConfig,
     context_renderer: ContextRenderer,
     memory_vars: HashMap<String, String>,
-    memory: Option<Arc<dyn Memory>>,
+    memory: Option<Arc<P::Memory<'static>>>,
     memory_scope_override: Option<MemoryScope>,
-    // For DelegateToTool construction — set by Provider::build_agent().
-    manifest: Option<Arc<Manifest>>,
-    model_factory: Option<Arc<dyn ModelProviderFactory>>,
-    tool_factory: Option<Arc<dyn ToolFactory>>,
-    lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    pending_project_context: Option<ProjectManifest>,
+    pending_routine_context: Option<RoutineContext>,
+    pending_step_context: Option<RoutineStepContext>,
+    // For DelegateToTool construction, set when a provider creates the builder.
+    provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
     work_dir: Option<PathBuf>,
 }
 
-impl AgentBuilder {
+impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Create a new builder with required fields (called by Provider).
-    pub(crate) fn new(params: AgentBuilderParams) -> Self {
+    pub(crate) fn new(params: AgentBuilderParams<P>) -> Self {
         Self {
-            agent: params.agent,
-            model: params.model,
-            provider: params.provider,
+            agent: Some(params.agent),
+            model: Some(params.model),
+            model_provider: Some(params.model_provider),
             tools: params.tools,
-            prompt_config: params.prompt_config,
-            prompt_context: params.prompt_context,
+            prompt_context: Some(params.prompt_context),
             agent_config: params.agent_config,
             context_renderer: params.context_renderer,
             memory_vars: HashMap::new(),
             memory: None,
             memory_scope_override: None,
-            manifest: None,
-            model_factory: None,
-            tool_factory: None,
-            lambda_runner: None,
+            pending_project_context: None,
+            pending_routine_context: None,
+            pending_step_context: None,
+            provider_runtime: None,
             child_delegation_ctx: None,
             work_dir: None,
         }
     }
 
+    /// Create a blank builder backed by a Provider.
+    pub(crate) fn blank(
+        provider: P,
+        agent_config: AgentConfig,
+        context_renderer: ContextRenderer,
+    ) -> Self {
+        Self {
+            agent: None,
+            model: None,
+            model_provider: None,
+            tools: Vec::new(),
+            prompt_context: None,
+            agent_config,
+            context_renderer,
+            memory_vars: HashMap::new(),
+            memory: None,
+            memory_scope_override: None,
+            pending_project_context: None,
+            pending_routine_context: None,
+            pending_step_context: None,
+            provider_runtime: Some(provider),
+            child_delegation_ctx: None,
+            work_dir: None,
+        }
+    }
+
+    /// Set the agent manifest for this builder.
+    pub fn with_agent_manifest(mut self, agent: AgentManifest) -> Self {
+        self.prompt_context = self
+            .provider_runtime
+            .as_ref()
+            .map(|provider| provider.build_prompt_context(&agent));
+        self.agent = Some(agent);
+        self
+    }
+
+    /// Set the model manifest for this builder.
+    pub fn with_model_manifest(mut self, model: ModelManifest) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Set both the model manifest and the concrete model provider to use.
+    pub fn with_model_provider(
+        mut self,
+        model: ModelManifest,
+        provider: Arc<P::Model<'static>>,
+    ) -> Self {
+        self.model = Some(model);
+        self.model_provider = Some(provider);
+        self
+    }
+
     /// Set memory backend for this agent.
     ///
     /// When set, the runner will:
-    /// 1. Load memories and resources and inject them into prompts
-    /// 2. Include memory and resource tools automatically
+    /// 1. Load memories and artifacts and inject them into prompts
+    /// 2. Include memory and artifact tools automatically
     ///
     /// The memory scope is derived from the agent name and project context
     /// at `build()` time, so call `with_project_context()` before `build()`
     /// to get project-scoped memories.
-    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+    pub fn with_memory(mut self, memory: Arc<P::Memory<'static>>) -> Self {
         self.memory = Some(memory);
         self
     }
@@ -127,33 +173,33 @@ impl AgentBuilder {
         self
     }
 
+    /// Override only the maximum number of LLM/tool-call turns.
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.agent_config.max_turns = max_turns;
+        self
+    }
+
     /// Inject project context so the agent's prompts can reference
     /// `{{ project.name }}`, `{{ project.description }}`, etc.
     ///
     /// Resolves git context from project settings if the repo is synced.
     /// `working_dir` is derived from `workspace_dir/slug` in `build_prompts()`.
     pub fn with_project_context(mut self, project: &ProjectManifest) -> Self {
-        let ctx = ProjectContext::from_manifest(project);
-        let extra = &mut self.prompt_context.render_ctx_extra;
-        // Resolve git at the top level for backward compat with from_task() merge logic.
-        if let Some(ref git) = ctx.git {
-            extra.git = git.clone();
-        }
-        extra.project = ctx;
+        self.pending_project_context = Some(project.clone());
         self
     }
 
     /// Inject routine context so the agent's prompts can reference
     /// `{{ routine.name }}`, `{{ routine.id }}`, `{{ routine.execution_id }}`.
     pub fn with_routine_context(mut self, ctx: RoutineContext) -> Self {
-        self.prompt_context.render_ctx_extra.routine = ctx;
+        self.pending_routine_context = Some(ctx);
         self
     }
 
     /// Inject step context so the agent's prompts can reference
     /// `{{ routine.step.name }}`, `{{ routine.step.type }}`, `{{ routine.step.metadata }}`.
     pub fn with_step_context(mut self, ctx: RoutineStepContext) -> Self {
-        self.prompt_context.render_ctx_extra.routine.step = ctx;
+        self.pending_step_context = Some(ctx);
         self
     }
 
@@ -167,21 +213,12 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the Provider's factory Arcs for delegation support.
+    /// Set the Provider handle for delegation support.
     ///
-    /// Called by `Provider::build_agent()` so that the runner can construct
-    /// `DelegateToTool` with the ability to look up other agents.
-    pub(crate) fn with_delegation_support(
-        mut self,
-        manifest: Arc<Manifest>,
-        model_factory: Arc<dyn ModelProviderFactory>,
-        tool_factory: Arc<dyn ToolFactory>,
-        lambda_runner: Option<Arc<dyn LambdaRunner>>,
-    ) -> Self {
-        self.manifest = Some(manifest);
-        self.model_factory = Some(model_factory);
-        self.tool_factory = Some(tool_factory);
-        self.lambda_runner = lambda_runner;
+    /// Attach the provider runtime so the runner can construct `DelegateToTool`
+    /// with the ability to look up other agents.
+    pub(crate) fn with_delegation_support(mut self, provider: P) -> Self {
+        self.provider_runtime = Some(provider);
         self
     }
 
@@ -198,94 +235,141 @@ impl AgentBuilder {
     }
 
     /// Build the [`AgentRunner`].
-    pub async fn build(mut self) -> Result<AgentRunner, super::error::AgentError> {
-        let mut policy = match &self.tool_factory {
-            Some(tf) => SecurityPolicy::with_workspace_dir(tf.workspace_dir()),
-            None => SecurityPolicy::default(),
+    pub async fn build(mut self) -> Result<AgentRunner<P>, super::error::AgentError> {
+        let agent = self.agent.take().ok_or(AgentError::MissingAgentManifest)?;
+        let model = self.model.take().ok_or(AgentError::MissingModelManifest)?;
+        let model_provider = match self.model_provider.take() {
+            Some(provider) => provider,
+            None => {
+                let provider = self
+                    .provider_runtime
+                    .as_ref()
+                    .ok_or(AgentError::MissingModelProvider)?;
+                provider.create_model_provider(&model).await?
+            }
+        };
+        let mut prompt_context = match self.prompt_context.take() {
+            Some(prompt_context) => prompt_context,
+            None => {
+                let provider = self
+                    .provider_runtime
+                    .as_ref()
+                    .ok_or(AgentError::MissingAgentManifest)?;
+                provider.build_prompt_context(&agent)
+            }
+        };
+        if let Some(project) = self.pending_project_context.take() {
+            let ctx = ProjectContext::from_manifest(&project);
+            let extra = &mut prompt_context.render_ctx_extra;
+            // Resolve git at the top level for prompt context defaults.
+            if let Some(ref git) = ctx.git {
+                extra.git = git.clone();
+            }
+            extra.project = ctx;
+            prompt_context.current_project = project;
+        }
+        if let Some(ctx) = self.pending_routine_context.take() {
+            prompt_context.render_ctx_extra.routine = ctx;
+        }
+        if let Some(ctx) = self.pending_step_context.take() {
+            prompt_context.render_ctx_extra.routine.step = ctx;
+        }
+
+        let mut policy = match &self.provider_runtime {
+            Some(provider) => {
+                ToolSecurity::with_workspace_dir(provider.tool_factory().workspace_dir())
+            }
+            None => ToolSecurity::default(),
         };
         if let Some(dir) = &self.work_dir {
             policy.workspace_dir = dir.clone();
             // Agents running in a worktree are autonomous task executions —
             // allow all operations including git push and PR creation.
-            policy.autonomy = nenjo_tools::security::AutonomyLevel::Full;
+            policy.autonomy = ToolAutonomy::Full;
         }
         let security = Arc::new(policy);
 
-        // When work_dir is set, rebuild tools with the scoped security policy
-        // so file, shell, and git tools operate in the correct directory.
-        if self.work_dir.is_some()
-            && let Some(ref tf) = self.tool_factory
-        {
-            self.tools = tf
-                .create_tools_with_security(&self.agent, security.clone())
+        if let Some(ref provider) = self.provider_runtime {
+            let project_slug = active_project_slug(&prompt_context);
+            let mut provider_tools = provider
+                .tool_factory()
+                .create_tools_with_context(
+                    &agent,
+                    security.clone(),
+                    ToolContext {
+                        project_slug: project_slug.map(str::to_string),
+                    },
+                )
                 .await;
+            provider_tools.extend(provider.create_knowledge_tools());
+            provider_tools.extend(self.tools);
+            self.tools = provider_tools;
         }
 
         // Build memory scope and inject tools. This is the single place
-        // where memory/resource tools are added — scope is derived from the
+        // where memory/artifact tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
         let memory_scope = if let Some(ref mem) = self.memory {
             let scope = if let Some(scope) = self.memory_scope_override.clone() {
                 scope
             } else {
-                let slug = if self.prompt_context.render_ctx_extra.project.slug.is_empty() {
-                    &self.prompt_context.current_project.slug
-                } else {
-                    &self.prompt_context.render_ctx_extra.project.slug
-                };
-                let project_slug = if slug.is_empty() {
-                    None
-                } else {
-                    Some(slug.as_str())
-                };
-                MemoryScope::new(&self.agent.name, project_slug)
+                MemoryScope::new(&agent.name, active_project_slug(&prompt_context))
             };
             self.tools.extend(crate::memory::tools::memory_tools(
                 mem.clone(),
                 scope.clone(),
-                &self.agent.name,
+                &agent.name,
             ));
             Some(scope)
         } else {
             None
         };
 
-        let delegation_support = match (self.manifest, self.model_factory, self.tool_factory) {
-            (Some(m), Some(mf), Some(tf)) => Some(super::runner::DelegationSupport {
-                manifest: m,
-                model_factory: mf,
-                tool_factory: tf,
-                memory: self.memory.clone(),
-                agent_config: self.agent_config.clone(),
-                lambda_runner: self.lambda_runner,
-                delegation_ctx: self.child_delegation_ctx,
-            }),
-            _ => None,
-        };
+        let provider_runtime = self.provider_runtime.clone();
+        let delegation_support =
+            self.provider_runtime
+                .map(|provider| super::runner::DelegationSupport {
+                    provider,
+                    max_delegation_depth: self.agent_config.max_delegation_depth,
+                    delegation_ctx: self.child_delegation_ctx,
+                });
 
         let instance = AgentInstance {
-            name: self.agent.name.clone(),
-            description: self.agent.description.clone().unwrap_or_default(),
-            agent_id: Some(self.agent.id),
-            model: self.model.model.clone(),
-            model_id: self.model.id,
-            temperature: self.model.temperature.unwrap_or(0.7),
-            prompt_config: self.prompt_config,
-            prompt_context: self.prompt_context,
-            provider: self.provider,
-            tools: self.tools,
-            security,
-            agent_config: self.agent_config,
-            context_renderer: self.context_renderer,
-            source_manifest: Some(self.agent),
-            tool_factory: delegation_support
-                .as_ref()
-                .map(|ds| ds.tool_factory.clone()),
-            memory_vars: self.memory_vars,
-            resource_vars: HashMap::new(),
-            documents_xml: String::new(),
+            manifest: agent,
+            model: AgentModel {
+                model_name: model.model.clone(),
+                id: model.id,
+                temperature: model.temperature.unwrap_or(0.7),
+                model_provider,
+            },
+            prompt: AgentPromptState {
+                context: prompt_context,
+                renderer: self.context_renderer,
+                memory_vars: self.memory_vars,
+                artifact_vars: HashMap::new(),
+            },
+            runtime: AgentRuntime {
+                tools: self.tools,
+                security,
+                config: self.agent_config,
+                provider_runtime,
+            },
         };
 
-        AgentRunner::new(instance, self.memory, memory_scope, delegation_support)
+        AgentRunner::new(instance, self.memory, memory_scope, delegation_support).await
+    }
+}
+
+fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
+    let slug = if prompt_context.render_ctx_extra.project.slug.is_empty() {
+        &prompt_context.current_project.slug
+    } else {
+        &prompt_context.render_ctx_extra.project.slug
+    };
+
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.as_str())
     }
 }

@@ -1,6 +1,7 @@
 //! Integration tests for routine execution via Provider.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -14,7 +15,8 @@ use nenjo::manifest::{
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::routines::RoutineEvent;
-use nenjo::types::{Task, TaskType};
+use nenjo::routines::gate::PassVerdictTool;
+use nenjo::{CronInput, ProjectLocation, RoutineRun, TaskInput};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -142,26 +144,76 @@ impl ModelProviderFactory for SequentialResponseMockFactory {
     }
 }
 
+struct RecordingToolsMockLlm {
+    response: ChatResponse,
+    seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for RecordingToolsMockLlm {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        self.seen_tools
+            .lock()
+            .unwrap()
+            .push(request.tools.map(tool_names).unwrap_or_default());
+        Ok(self.response.clone())
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct RecordingToolsMockFactory {
+    response: ChatResponse,
+    seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl RecordingToolsMockFactory {
+    fn new(response: ChatResponse) -> Self {
+        Self {
+            response,
+            seen_tools: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn seen_tools(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
+        self.seen_tools.clone()
+    }
+}
+
+impl ModelProviderFactory for RecordingToolsMockFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(RecordingToolsMockLlm {
+            response: self.response.clone(),
+            seen_tools: self.seen_tools.clone(),
+        }))
+    }
+}
+
+fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
+    tools.iter().map(|tool| tool.name.clone()).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn test_task(project_id: Uuid, title: &str, desc: &str) -> TaskType {
-    TaskType::Task(Task {
-        task_id: Uuid::nil(),
-        title: title.into(),
-        description: desc.into(),
-        acceptance_criteria: None,
-        tags: vec![],
-        source: "test".into(),
-        project_id,
-        status: String::new(),
-        priority: String::new(),
-        task_type: String::new(),
-        slug: String::new(),
-        complexity: String::new(),
-        git: None,
-    })
+fn test_task(project_id: Uuid, title: &str, desc: &str) -> TaskInput {
+    TaskInput::new(project_id, Uuid::nil(), title, desc).source("test")
 }
 
 fn model(id: Uuid) -> ModelManifest {
@@ -293,6 +345,88 @@ async fn single_agent_step() {
     assert_eq!(result.output, "Implementation complete.");
     assert_eq!(result.input_tokens, 10);
     assert_eq!(result.output_tokens, 5);
+}
+
+#[tokio::test]
+async fn routine_agent_request_includes_pass_verdict_tool() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "tool-check-routine".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            id: step_id,
+            routine_id,
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council_id: None,
+            agent_id: Some(agent_id),
+            config: serde_json::json!({}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![ProjectManifest {
+            id: project_id,
+            ..project()
+        }],
+        routines: vec![routine],
+        ..Default::default()
+    };
+    let factory = RecordingToolsMockFactory::new(verdict_response(
+        "Implementation complete.",
+        "pass",
+        "Implementation is complete",
+    ));
+    let seen_tools = factory.seen_tools();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let task = RoutineRun::task(test_task(
+        project_id,
+        "Add auth",
+        "Implement JWT authentication",
+    ))
+    .project_location(ProjectLocation::from_git(nenjo::types::GitContext {
+        branch: "agent/test".into(),
+        target_branch: "main".into(),
+        work_dir: work_dir.path().to_string_lossy().to_string(),
+        repo_url: "https://github.com/nenjo-ai/dashboard.git".into(),
+    }));
+
+    provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(task)
+        .await
+        .unwrap();
+
+    let seen_tools = seen_tools.lock().unwrap();
+    assert!(
+        seen_tools
+            .first()
+            .is_some_and(|tools| tools.iter().any(|name| name == "pass_verdict")),
+        "pass_verdict should be sent in the routine model request. Tool requests: {:?}",
+        *seen_tools
+    );
 }
 
 /// If an agent omits pass_verdict, the runtime should route back with an
@@ -441,7 +575,8 @@ async fn stream_events_single_step() {
                 assert!(result.passed);
                 saw_step_completed = true;
             }
-            RoutineEvent::Done { result } => {
+            RoutineEvent::Done { task_id, result } => {
+                assert_eq!(task_id, Some(Uuid::nil()));
                 assert_eq!(result.output, "Streamed output.");
                 saw_done = true;
             }
@@ -766,6 +901,233 @@ async fn gate_step_pass() {
 
     // Terminal step returns the last result
     assert!(result.passed);
+}
+
+#[tokio::test]
+async fn gate_always_edge_is_invalid() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step1_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let terminal_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "invalid-gate-routing".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: step1_id,
+                routine_id,
+                name: "analyze_and_develop".into(),
+                step_type: RoutineStepType::Agent,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: gate_id,
+                routine_id,
+                name: "verify".into(),
+                step_type: RoutineStepType::Gate,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                id: terminal_id,
+                routine_id,
+                name: "complete".into(),
+                step_type: RoutineStepType::Terminal,
+                council_id: None,
+                agent_id: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: step1_id,
+                target_step_id: gate_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: terminal_id,
+                condition: RoutineEdgeCondition::Always,
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            verdict_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let task = test_task(Uuid::new_v4(), "Task", "Build feature");
+    let err = provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(task)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("must route with on_pass/on_fail"));
+}
+
+#[tokio::test]
+async fn gate_on_fail_routes_back_before_completion() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step1_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let terminal_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "retry-gated-routine".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: step1_id,
+                routine_id,
+                name: "analyze_and_develop".into(),
+                step_type: RoutineStepType::Agent,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: gate_id,
+                routine_id,
+                name: "verify".into(),
+                step_type: RoutineStepType::Gate,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                id: terminal_id,
+                routine_id,
+                name: "complete".into(),
+                step_type: RoutineStepType::Terminal,
+                council_id: None,
+                agent_id: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: step1_id,
+                target_step_id: gate_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: step1_id,
+                condition: RoutineEdgeCondition::OnFail,
+            },
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: terminal_id,
+                condition: RoutineEdgeCondition::OnPass,
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            verdict_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+            verdict_response(
+                "Implementation revised.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Looks good.", "pass", "Criteria were satisfied"),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let task = test_task(Uuid::new_v4(), "Task", "Build feature");
+    let mut handle = provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run_stream(task)
+        .await
+        .unwrap();
+
+    let mut analyze_starts = 0;
+    let mut verify_starts = 0;
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            match step_name.as_str() {
+                "analyze_and_develop" => analyze_starts += 1,
+                "verify" => verify_starts += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let result = handle.output().await.unwrap();
+
+    assert!(result.passed);
+    assert_eq!(analyze_starts, 2);
+    assert_eq!(verify_starts, 2);
 }
 
 /// Routine not found → error.
@@ -1276,13 +1638,13 @@ async fn cron_execution() {
         .await
         .unwrap();
 
-    let task = TaskType::Cron {
+    let task = RoutineRun::cron(CronInput {
         task: None,
-        project_id,
+        project_id: Some(project_id),
         schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
         start_at: None,
         timeout: Duration::from_secs(5),
-    };
+    });
 
     let mut handle = provider
         .routine_by_id(routine_id)
@@ -1358,13 +1720,13 @@ async fn cron_cancellation() {
         .await
         .unwrap();
 
-    let task = TaskType::Cron {
+    let task = RoutineRun::cron(CronInput {
         task: None,
-        project_id,
+        project_id: Some(project_id),
         schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
         start_at: None,
         timeout: Duration::from_secs(30),
-    };
+    });
 
     let mut handle = provider
         .routine_by_id(routine_id)
@@ -1479,5 +1841,46 @@ async fn delegation_not_injected_for_single_agent() {
     assert!(
         !tool_names.contains(&"delegate_to"),
         "delegate_to should NOT be injected for a single agent"
+    );
+}
+
+#[tokio::test]
+async fn worktree_scoped_agent_keeps_extra_runtime_tools() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "worker", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory::new("irrelevant"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let runner = provider
+        .agent_by_name("worker")
+        .await
+        .unwrap()
+        .with_tool(PassVerdictTool::new())
+        .with_work_dir(work_dir.path())
+        .build()
+        .await
+        .unwrap();
+
+    let specs = runner.instance().tool_specs();
+    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(
+        tool_names.contains(&"pass_verdict"),
+        "pass_verdict should survive worktree tool rebuild. Tools: {:?}",
+        tool_names
     );
 }

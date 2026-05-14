@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::manifest::RoutineManifest;
-use crate::provider::Provider;
+use crate::provider::ProviderRuntime;
 use crate::routines::RoutineEvent;
 use crate::routines::types::{CronSchedule, RoutineState, StepResult};
 
@@ -22,12 +22,15 @@ pub(crate) struct CronExecutionConfig<'a> {
 
 /// Execute a routine on a repeating schedule until a completion signal
 /// is received, the timeout expires, or the execution is cancelled.
-pub(crate) async fn execute_routine_cron(
-    provider: &Provider,
+pub(crate) async fn execute_routine_cron<P>(
+    provider: &P,
     routine: &RoutineManifest,
     state: &mut RoutineState,
     config: CronExecutionConfig<'_>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let CronExecutionConfig {
         events_tx,
         cancel,

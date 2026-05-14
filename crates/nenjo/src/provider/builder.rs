@@ -2,13 +2,18 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Result, bail};
 
-use super::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
+use super::{
+    ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory, ToolFactory,
+    TypedModelProviderFactory,
+};
 use crate::config::AgentConfig;
+use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use crate::routines::LambdaRunner;
+use nenjo_knowledge::KnowledgePack;
+use nenjo_knowledge::tools::KnowledgePackEntry;
 
 /// Builder for creating a [`Provider`].
 ///
@@ -35,29 +40,82 @@ use crate::routines::LambdaRunner;
 ///     .build()
 ///     .await?;
 /// ```
-pub struct ProviderBuilder {
+pub struct ProviderBuilder<
+    Loaders = (),
+    ModelFactory = MissingModelProviderFactory,
+    ToolFactoryImpl = NoopToolFactory,
+    Mem = NoMemory,
+> {
     manifest: Option<Manifest>,
-    loaders: Vec<Arc<dyn ManifestLoader>>,
-    model_factory: Option<Arc<dyn ModelProviderFactory>>,
-    tool_factory: Option<Arc<dyn ToolFactory>>,
-    memory: Option<Arc<dyn Memory>>,
+    loaders: Loaders,
+    model_factory: ModelFactory,
+    tool_factory: ToolFactoryImpl,
+    memory: Option<Mem>,
     agent_config: AgentConfig,
-    lambda_runner: Option<Arc<dyn LambdaRunner>>,
+    render_ctx_extra: RenderContextVars,
+    knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry,
 }
 
-impl ProviderBuilder {
+/// Marker used until `.with_model_factory(...)` is called.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct MissingModelProviderFactory;
+
+impl ModelProviderFactory for MissingModelProviderFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn nenjo_models::ModelProvider>> {
+        bail!("model_factory is required — use .with_model_factory(factory)")
+    }
+}
+
+/// Uninhabited marker used until `.with_memory(...)` is called.
+#[doc(hidden)]
+pub enum NoMemory {}
+
+#[async_trait::async_trait]
+#[doc(hidden)]
+pub trait ManifestLoaders {
+    async fn load_into(&self, manifest: &mut Manifest) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ManifestLoaders for () {
+    async fn load_into(&self, _manifest: &mut Manifest) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<Previous, Loader> ManifestLoaders for (Previous, Loader)
+where
+    Previous: ManifestLoaders + Send + Sync,
+    Loader: ManifestLoader + Send + Sync,
+{
+    async fn load_into(&self, manifest: &mut Manifest) -> Result<()> {
+        self.0.load_into(manifest).await?;
+        manifest.merge(self.1.load().await?);
+        Ok(())
+    }
+}
+
+impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory> {
+    /// Create an empty provider builder.
     pub fn new() -> Self {
         Self {
             manifest: None,
-            loaders: Vec::new(),
-            model_factory: None,
-            tool_factory: None,
+            loaders: (),
+            model_factory: MissingModelProviderFactory,
+            tool_factory: NoopToolFactory,
             memory: None,
             agent_config: AgentConfig::default(),
-            lambda_runner: None,
+            render_ctx_extra: RenderContextVars::default(),
+            knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry::new(),
         }
     }
+}
 
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+{
     /// Provide a pre-built manifest directly.
     ///
     /// Loaders added via [`with_loader`](Self::with_loader) are merged on top,
@@ -79,32 +137,93 @@ impl ProviderBuilder {
     /// ```ignore
     /// builder.with_loader(NenjoClient::new(url, api_key))
     /// ```
-    pub fn with_loader(mut self, loader: impl ManifestLoader + 'static) -> Self {
-        self.loaders.push(Arc::new(loader));
-        self
+    pub fn with_loader<Loader>(
+        self,
+        loader: Loader,
+    ) -> ProviderBuilder<(Loaders, Loader), ModelFactory, ToolFactoryImpl, Mem>
+    where
+        Loader: ManifestLoader + 'static,
+    {
+        ProviderBuilder {
+            manifest: self.manifest,
+            loaders: (self.loaders, loader),
+            model_factory: self.model_factory,
+            tool_factory: self.tool_factory,
+            memory: self.memory,
+            agent_config: self.agent_config,
+            render_ctx_extra: self.render_ctx_extra,
+            knowledge_registry: self.knowledge_registry,
+        }
     }
 
-    /// Set the LLM model factory (required).
-    pub fn with_model_factory(mut self, factory: impl ModelProviderFactory + 'static) -> Self {
-        self.model_factory = Some(Arc::new(factory));
-        self
+    /// Set the LLM model factory.
+    ///
+    /// Manifest-backed agent resolution requires a model factory. Blank
+    /// agents created with [`Provider::new_agent`](crate::provider::Provider::new_agent)
+    /// may instead provide a concrete model provider through
+    /// [`AgentBuilder::with_model_provider`](crate::agents::AgentBuilder::with_model_provider).
+    pub fn with_model_factory<Factory>(
+        self,
+        factory: Factory,
+    ) -> ProviderBuilder<Loaders, Factory, ToolFactoryImpl, Mem>
+    where
+        Factory: TypedModelProviderFactory + 'static,
+    {
+        ProviderBuilder {
+            manifest: self.manifest,
+            loaders: self.loaders,
+            model_factory: factory,
+            tool_factory: self.tool_factory,
+            memory: self.memory,
+            agent_config: self.agent_config,
+            render_ctx_extra: self.render_ctx_extra,
+            knowledge_registry: self.knowledge_registry,
+        }
     }
 
     /// Set the tool factory.
     ///
     /// Defaults to [`NoopToolFactory`] if not set.
-    pub fn with_tool_factory(mut self, factory: impl ToolFactory + 'static) -> Self {
-        self.tool_factory = Some(Arc::new(factory));
-        self
+    pub fn with_tool_factory<Factory>(
+        self,
+        factory: Factory,
+    ) -> ProviderBuilder<Loaders, ModelFactory, Factory, Mem>
+    where
+        Factory: ToolFactory + 'static,
+    {
+        ProviderBuilder {
+            manifest: self.manifest,
+            loaders: self.loaders,
+            model_factory: self.model_factory,
+            tool_factory: factory,
+            memory: self.memory,
+            agent_config: self.agent_config,
+            render_ctx_extra: self.render_ctx_extra,
+            knowledge_registry: self.knowledge_registry,
+        }
     }
 
     /// Set the memory backend.
     ///
     /// When set, agents automatically get memory tools (store, recall, forget)
     /// and memory summaries are injected into prompts.
-    pub fn with_memory(mut self, memory: impl Memory + 'static) -> Self {
-        self.memory = Some(Arc::new(memory));
-        self
+    pub fn with_memory<MemoryImpl>(
+        self,
+        memory: MemoryImpl,
+    ) -> ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, MemoryImpl>
+    where
+        MemoryImpl: Memory + 'static,
+    {
+        ProviderBuilder {
+            manifest: self.manifest,
+            loaders: self.loaders,
+            model_factory: self.model_factory,
+            tool_factory: self.tool_factory,
+            memory: Some(memory),
+            agent_config: self.agent_config,
+            render_ctx_extra: self.render_ctx_extra,
+            knowledge_registry: self.knowledge_registry,
+        }
     }
 
     /// Set the agent configuration applied to all agents.
@@ -116,54 +235,118 @@ impl ProviderBuilder {
         self
     }
 
-    /// Set the lambda runner for executing deterministic script steps in routines.
-    ///
-    /// Without a lambda runner, lambda and cron-lambda steps will fail with a
-    /// descriptive error.
-    pub fn with_lambda_runner(mut self, runner: impl LambdaRunner + 'static) -> Self {
-        self.lambda_runner = Some(Arc::new(runner));
+    /// Set provider-level prompt context vars injected into every agent.
+    pub fn with_render_context_vars(mut self, vars: RenderContextVars) -> Self {
+        self.render_ctx_extra = vars;
         self
     }
 
-    /// Build the Provider by loading and merging all manifest sources.
+    /// Register a knowledge pack with this provider.
     ///
-    /// Requires at least one of [`with_manifest`](Self::with_manifest) or
-    /// [`with_loader`](Self::with_loader) to be called.
-    pub async fn build(self) -> Result<Provider> {
-        anyhow::ensure!(
-            self.manifest.is_some() || !self.loaders.is_empty(),
-            "at least one manifest source is required — use .with_manifest() or .with_loader()"
-        );
+    /// Registered packs automatically contribute reusable knowledge tools and
+    /// prompt metadata variables for all agents built by the provider.
+    pub fn with_knowledge_pack(
+        mut self,
+        selector: impl Into<String>,
+        pack: impl KnowledgePack + 'static,
+    ) -> Self {
+        self.add_knowledge_pack(KnowledgePackEntry::new(selector, pack));
+        self
+    }
 
-        let model_factory = self
-            .model_factory
-            .context("model_factory is required — use .with_model_factory(factory)")?;
-
-        let tool_factory = self
-            .tool_factory
-            .unwrap_or_else(|| Arc::new(NoopToolFactory));
-
-        // Start from the provided manifest (if any), then merge loaders on top.
-        let mut manifest = self.manifest.unwrap_or_default();
-        for loader in &self.loaders {
-            let partial = loader.load().await?;
-            manifest.merge(partial);
+    /// Register multiple knowledge packs with this provider.
+    ///
+    /// Use [`KnowledgePackEntry`] when the collection contains different
+    /// concrete pack types.
+    pub fn with_knowledge_packs<I, E>(mut self, packs: I) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<KnowledgePackEntry>,
+    {
+        for pack in packs {
+            self.add_knowledge_pack(pack.into());
         }
+        self
+    }
 
-        let manifest = Arc::new(manifest);
-
-        Ok(Provider {
-            manifest,
-            model_factory,
-            tool_factory,
-            memory: self.memory,
-            agent_config: self.agent_config,
-            lambda_runner: self.lambda_runner,
-        })
+    fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
+        self.render_ctx_extra.knowledge_vars.extend(
+            nenjo_knowledge::tools::knowledge_pack_prompt_vars(
+                entry.selector(),
+                entry.pack().as_ref(),
+            ),
+        );
+        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
     }
 }
 
-impl Default for ProviderBuilder {
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+where
+    Loaders: ManifestLoaders + Send + Sync,
+    ModelFactory: TypedModelProviderFactory + 'static,
+    ToolFactoryImpl: ToolFactory + 'static,
+    Mem: ProviderMemory + 'static,
+{
+    /// Build the Provider by loading and merging all manifest sources.
+    ///
+    /// If no manifest source is configured, the Provider is built with an
+    /// empty manifest. If no model factory is configured, manifest-backed agent
+    /// resolution will fail unless the agent builder receives an explicit model
+    /// provider.
+    pub async fn build(self) -> Result<Provider<ModelFactory, ToolFactoryImpl, Mem>> {
+        let model_factory = self.model_factory;
+
+        // Start from the provided manifest (if any), then merge loaders on top.
+        let mut manifest = self.manifest.unwrap_or_default();
+        self.loaders.load_into(&mut manifest).await?;
+
+        let manifest = Arc::new(manifest);
+
+        Ok(Provider::new_inner(
+            manifest,
+            Arc::new(model_factory),
+            Arc::new(self.tool_factory),
+            self.memory.map(Arc::new),
+            self.agent_config,
+            self.render_ctx_extra,
+            self.knowledge_registry,
+        ))
+    }
+}
+
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+where
+    Loaders: ManifestLoaders + Send + Sync,
+    ModelFactory: ModelProviderFactory + 'static,
+    ToolFactoryImpl: ToolFactory + 'static,
+    Mem: Memory + 'static,
+{
+    /// Build a Provider using the compatibility-erased model factory path.
+    ///
+    /// Use [`build`](Self::build) to preserve the concrete model
+    /// factory type through [`Provider`].
+    pub async fn build_erased(self) -> Result<ErasedProvider> {
+        let model_factory = self.model_factory;
+
+        let mut manifest = self.manifest.unwrap_or_default();
+        self.loaders.load_into(&mut manifest).await?;
+
+        Ok(Provider::new_inner(
+            Arc::new(manifest),
+            Arc::new(model_factory) as Arc<dyn ModelProviderFactory>,
+            Arc::new(self.tool_factory) as Arc<dyn ToolFactory>,
+            self.memory
+                .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
+            self.agent_config,
+            self.render_ctx_extra,
+            self.knowledge_registry,
+        ))
+    }
+}
+
+impl Default for ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory> {
     fn default() -> Self {
         Self::new()
     }

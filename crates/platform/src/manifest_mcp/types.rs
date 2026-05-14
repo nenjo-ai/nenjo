@@ -448,7 +448,7 @@ pub struct ProjectSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Project document including settings.
+/// Project manifest resource including settings.
 pub struct ProjectDocument {
     #[serde(flatten)]
     pub summary: ProjectSummary,
@@ -477,7 +477,7 @@ pub struct ProjectUpdateDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Project document metadata returned by project document routes.
+/// Library knowledge item metadata returned by legacy library item routes.
 pub struct ProjectDocumentSummary {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -488,7 +488,7 @@ pub struct ProjectDocumentSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Project document including inline content.
+/// Library knowledge item including inline content.
 pub struct ProjectDocumentContentDocument {
     #[serde(flatten)]
     pub document: ProjectDocumentSummary,
@@ -497,7 +497,7 @@ pub struct ProjectDocumentContentDocument {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating a project document.
+/// Request body for creating a library knowledge item.
 pub struct ProjectDocumentCreateDocument {
     pub project_id: Uuid,
     pub filename: String,

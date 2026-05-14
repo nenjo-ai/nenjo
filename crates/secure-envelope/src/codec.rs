@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
     Command, EncryptedPayload, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
-    ToolCall,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -18,6 +17,7 @@ use crate::{
 };
 
 /// Secure-envelope codec that encrypts and decrypts content-bearing command and response payloads.
+#[derive(Clone)]
 pub struct SecureEnvelopeCodec {
     key_provider: Arc<dyn EnvelopeKeyProvider>,
     org_id: Uuid,
@@ -32,6 +32,11 @@ impl SecureEnvelopeCodec {
             key_provider: Arc::new(key_provider),
             org_id,
         }
+    }
+
+    /// Decode a single encrypted payload using the scope encoded in the payload.
+    pub async fn decode_payload_text(&self, payload: &EncryptedPayload) -> Result<String> {
+        self.decrypt_enc_payload(payload.account_id, payload).await
     }
 
     async fn decrypt_user_payload(
@@ -185,13 +190,7 @@ impl SecureEnvelopeCodec {
                 payload,
                 ..
             } => Ok(Some(StreamEvent::ToolCalls {
-                tool_calls: tool_calls
-                    .into_iter()
-                    .map(|call| ToolCall {
-                        tool_name: call.tool_name,
-                        tool_args: "{}".to_string(),
-                    })
-                    .collect(),
+                tool_calls,
                 agent_name,
                 parent_tool_name,
                 payload: None,
@@ -331,6 +330,15 @@ impl SecureEnvelopeCodec {
 }
 
 #[async_trait]
+impl nenjo::client::PayloadCodec for SecureEnvelopeCodec {
+    async fn decode_text(&self, payload: &EncryptedPayload) -> Result<Option<String>> {
+        Ok(Some(
+            SecureEnvelopeCodec::decode_payload_text(self, payload).await?,
+        ))
+    }
+}
+
+#[async_trait]
 impl EnvelopeCodec for SecureEnvelopeCodec {
     async fn encode_command(&self, command: Command) -> CodecResult<Command> {
         Ok(Some(command))
@@ -413,6 +421,47 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     encrypted_payload: None,
                 },
             ))),
+            Command::ManifestChanged {
+                resource_type,
+                resource_id,
+                action,
+                project_id,
+                payload,
+                encrypted_payload: Some(encrypted_payload),
+            } => {
+                let object_type = encrypted_payload.object_type.clone();
+                let decrypted = match self
+                    .decrypt_enc_payload(actor_user_id, &encrypted_payload)
+                    .await
+                {
+                    Ok(plaintext) => serde_json::from_str::<Value>(&plaintext)
+                        .unwrap_or(Value::String(plaintext)),
+                    Err(error) => {
+                        return Ok(DecodeCommandResult::ClientError(DecodingError {
+                            code: "encrypted_manifest_decode_failed",
+                            message: error.to_string(),
+                            session_id: None,
+                            project_id,
+                            agent_id: None,
+                        }));
+                    }
+                };
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::ManifestChanged {
+                        resource_type,
+                        resource_id,
+                        action,
+                        project_id,
+                        payload: Some(serde_json::json!({
+                            "__nenjo_decrypted_manifest_payload": true,
+                            "object_type": object_type,
+                            "inline_payload": payload,
+                            "decrypted_payload": decrypted,
+                        })),
+                        encrypted_payload: None,
+                    },
+                )))
+            }
             Command::WorkerAccountKeyUpdated { wrapped_ack } => Ok(DecodeCommandResult::Command(
                 Box::new(Command::WorkerAccountKeyUpdated { wrapped_ack }),
             )),
@@ -545,7 +594,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
-    use nenjo_events::Command;
+    use nenjo_events::{Command, Response, StreamEvent, ToolCall};
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
@@ -689,6 +738,59 @@ mod tests {
                 other => panic!("unexpected decoded command payload: {other:?}"),
             },
             other => panic!("unexpected decoded command result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_args_remain_inline_when_response_is_encoded() {
+        let actor_user_id = Uuid::new_v4();
+        let actor_key = ContentKey::from_bytes([7_u8; 32]);
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider
+            .insert_user_key(actor_user_id, actor_key.clone())
+            .await;
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let ctx = CodecContext::for_actor(actor_user_id);
+
+        let encoded = codec
+            .encode_response(
+                &ctx,
+                Response::AgentResponse {
+                    session_id: None,
+                    payload: StreamEvent::ToolCalls {
+                        tool_calls: vec![ToolCall {
+                            tool_name: "glob_search".into(),
+                            tool_args: r#"{"pattern":"*.md","path":"."}"#.into(),
+                        }],
+                        agent_name: "coder".into(),
+                        parent_tool_name: None,
+                        payload: Some(serde_json::json!({ "text_preview": "searching" })),
+                        encrypted_payload: None,
+                    },
+                },
+            )
+            .await
+            .expect("encode should succeed")
+            .expect("response should be retained");
+
+        match encoded {
+            Response::AgentResponse {
+                payload:
+                    StreamEvent::ToolCalls {
+                        tool_calls,
+                        payload,
+                        encrypted_payload,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(tool_calls[0].tool_args, r#"{"pattern":"*.md","path":"."}"#);
+                assert!(payload.is_none());
+                assert!(encrypted_payload.is_some());
+            }
+            other => panic!("unexpected encoded response: {other:?}"),
         }
     }
 }

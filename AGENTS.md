@@ -9,8 +9,9 @@ Rust monorepo with a core SDK, platform worker runtime, transport contracts, and
 | Crate | Description |
 |-------|-------------|
 | `nenjo` | Core SDK: provider builder, agent turn loop, memory, manifests, abilities, domains, councils, routines |
+| `nenjo-tool-api` | Shared tool traits, specs, categories, calls, results, and SDK-level tool security inputs |
+| `nenjo-knowledge` | Knowledge pack primitives, reusable knowledge tools, and optional embedded Nenjo documentation |
 | `nenjo-models` | LLM provider trait and implementations (OpenAI, Anthropic, Gemini, OpenRouter, Ollama, OpenAI-compatible APIs) |
-| `nenjo-tools` | Tool trait, tool specs, and built-in tools (shell, file, git, search, web, memory) |
 | `nenjo-xml` | XML serialization and MiniJinja template rendering for structured prompt context |
 | `nenjo-events` | Typed command, response, stream, resource, and capability contracts for worker-to-platform messaging |
 | `nenjo-eventbus` | Transport-agnostic event bus with NATS JetStream support |
@@ -18,6 +19,7 @@ Rust monorepo with a core SDK, platform worker runtime, transport contracts, and
 | `nenjo-crypto-auth` | Worker enrollment, wrapped key state, and secure-envelope key provider primitives |
 | `nenjo-platform` | Platform-backed manifest contracts, REST client, MCP tool contract, local backend, access policy helpers |
 | `nenjo-sessions` | Shared session contracts for runtime, worker, and future session services |
+| `nenjo-harness` | Platform command handlers, active execution/session registries, event bridging, and trace/session runtime hooks around a provider |
 | `nenjo-worker` | Platform worker implementation behind `nenjo run` |
 | `nenjo-cli` | CLI package in `bin/` that builds the `nenjo` binary |
 | `nenjo-integration-tests` | Provider-backed integration tests in `testing/integrations/` |
@@ -30,22 +32,25 @@ Keep ownership clear. Do not solve boundary issues by adding broad cross-crate d
 
 | Layer | Crates | Boundary |
 |-------|--------|----------|
-| Core SDK | `nenjo`, `nenjo-models`, `nenjo-tools`, `nenjo-xml` | Embeddable agent runtime. Should not depend on platform worker/runtime crates. |
+| Core SDK | `nenjo`, `nenjo-tool-api`, `nenjo-knowledge`, `nenjo-models`, `nenjo-xml` | Embeddable agent runtime, shared tool contracts, knowledge packs, models, and prompt rendering. Should not depend on platform worker/runtime crates. |
 | Platform contracts | `nenjo-events`, `nenjo-sessions` | Transport- and storage-neutral event/session types and traits. |
 | Platform transport/security | `nenjo-eventbus`, `nenjo-secure-envelope`, `nenjo-crypto-auth` | Event delivery, secure envelopes, enrollment, and key access. |
 | Manifest bridge | `nenjo-platform` | Platform REST/MCP manifest operations, local/platform synchronization, access-policy checks. |
-| Worker runtime | `nenjo-worker` | Harness composition, event-loop wiring, handlers, runtime factories, worker-specific session implementations. |
+| Harness | `nenjo-harness` | Platform command handlers around a provider, active execution registries, domain sessions, event bridging, trace/session runtime hooks. |
+| Worker runtime | `nenjo-worker` | Process lifecycle, config/bootstrap, event-loop wiring, provider/tool factories, concrete tools, local stores, worker-specific session implementations. |
 | CLI | `nenjo-cli` in `bin/` | Argument parsing and process entrypoint; delegates runtime work to `nenjo-worker`. |
 
 ### Placement Rules
 
 - Core agent behavior, manifests, prompt context, memory, and runner APIs belong in `crates/nenjo`.
-- New LLM integrations belong in `crates/models`; worker factory wiring belongs in `crates/worker/src/harness/providers/`.
-- Tool trait or reusable built-in tool changes belong in `crates/tools`; worker-specific tool assembly belongs in `crates/worker/src/harness/tools.rs`.
+- New LLM integrations belong in `crates/models`; worker factory wiring belongs in `crates/worker/src/providers/`.
+- Shared tool trait/API changes belong in `crates/tool-api`; SDK re-exports and core tool integration belong in `crates/nenjo`; concrete runtime tools and worker-specific tool assembly belong in `crates/worker/src/tools/`.
+- Knowledge pack contracts and reusable knowledge tools belong in `crates/knowledge`; project knowledge sync and platform-backed document metadata belong in `crates/platform` and worker sync code.
 - Event shape changes start in `crates/events`. Transport behavior belongs in `crates/eventbus`.
 - Encrypted event wrapping and payload helpers belong in `crates/secure-envelope`; enrollment and key-provider state belongs in `crates/crypto-auth`.
 - Platform REST routes, manifest MCP tool specs, bootstrap/write-through DTOs, and manifest access policy belong in `crates/platform`.
-- Shared session traits and DTOs belong in `crates/sessions`; concrete worker implementations belong in `crates/worker/src/harness/session/`.
+- Platform command handling around a provider belongs in `crates/harness`; process lifecycle and event-loop wiring belong in `crates/worker`.
+- Shared session traits and DTOs belong in `crates/sessions`; concrete worker implementations belong in `crates/worker/src/sessions/`.
 - CLI flag parsing belongs in `bin/src/main.rs` or worker-owned `RunArgs`; runtime behavior belongs in `crates/worker`.
 
 ---
@@ -132,7 +137,7 @@ use uuid::Uuid;
 
 // Internal crates
 use nenjo_models::ModelProvider;
-use nenjo_tools::Tool;
+use nenjo::Tool;
 
 // Local modules
 use crate::agents::builder::AgentBuilder;
@@ -248,7 +253,11 @@ let provider = Provider::builder()
     .build()
     .await?;
 
-let runner = provider.agent_by_name("coder")?.build();
+let runner = provider
+    .agent_by_name("coder")
+    .await?
+    .build()
+    .await?;
 let output = runner.chat("task").await?;
 ```
 
@@ -266,14 +275,20 @@ The core LLM loop in `agents/runner/turn_loop.rs` handles:
 - `Memory` trait defines the interface
 - `MarkdownMemory` is the file-based backend
 - Three-tier scoping: project, core, shared
-- Memory tools auto-added when memory is configured
+- Artifact storage is separate from memory facts and uses project/workspace artifact scopes
+- Memory and artifact tools auto-added when memory is configured
 
 ### Context Blocks
 
-User-customizable prompt sections. All context blocks use `{{template_var}}` templates:
+User-customizable prompt sections. Context blocks are manifest resources with a
+path-like name and MiniJinja template content. They render through the same
+template variable system as prompts.
 
-- `memory`, `memory_profile`, `agents`, `routines`, `skills`, `abilities`
-- `domains`, `project`, `task`, `gate`, `cron`, `MCP`
+Common variables include `{{ self }}`, `{{ chat.message }}`, `{{ task }}`,
+`{{ project }}`, `{{ project.documents }}`, `{{ builtin.nenjo }}`,
+`{{ available_agents }}`, `{{ available_abilities }}`,
+`{{ available_domains }}`, `{{ memories }}`, `{{ artifacts }}`,
+`{{ routine }}`, `{{ gate.criteria }}`, and `{{ global.timestamp }}`.
 
 ### Platform Worker Flow
 
@@ -282,7 +297,8 @@ User-customizable prompt sections. All context blocks use `{{template_var}}` tem
 - `nenjo-eventbus` for raw event transport
 - `nenjo-secure-envelope` and `nenjo-crypto-auth` for encrypted event/content handling
 - `nenjo-platform` for manifest bootstrap, REST-backed project APIs, and manifest MCP operations
-- `nenjo-sessions` traits with worker-local session store/coordinator/content implementations
+- `nenjo-sessions` traits with worker-local session store/coordinator/trace implementations
+- `nenjo-harness` handlers for chat, task, cron, heartbeat, manifest, repo, crypto, domain, and session commands
 - `nenjo` provider/runner APIs for actual agent execution
 
 ---
@@ -297,7 +313,9 @@ User-customizable prompt sections. All context blocks use `{{template_var}}` tem
 | `crates/nenjo/src/manifest.rs` | Manifest types and loader traits |
 | `crates/nenjo/src/memory/mod.rs` | Memory trait and backends |
 | `crates/models/src/lib.rs` | Model provider trait and provider exports |
-| `crates/tools/src/lib.rs` | Tool trait/types and built-in tool exports |
+| `crates/tool-api/src/lib.rs` | Shared tool trait/types used by SDK, providers, and runtimes |
+| `crates/knowledge/src/lib.rs` | Knowledge pack contracts and search/read graph APIs |
+| `crates/knowledge/manifest.yaml` | Built-in Nenjo knowledge pack metadata |
 | `crates/events/src/capability.rs` | Capability enum for multi-worker routing |
 | `crates/eventbus/src/lib.rs` | Event bus abstraction and transport traits |
 | `crates/eventbus/src/nats.rs` | NATS JetStream transport implementation |
@@ -307,10 +325,14 @@ User-customizable prompt sections. All context blocks use `{{template_var}}` tem
 | `crates/platform/src/client.rs` | Platform REST client |
 | `crates/platform/src/manifest_mcp/` | Manifest MCP tool specs, params, results, and backend traits |
 | `crates/sessions/src/lib.rs` | Shared session contracts |
+| `crates/harness/src/lib.rs` | Platform harness around an assembled provider |
+| `crates/harness/src/handlers/` | Platform command handlers |
 | `crates/worker/src/lib.rs` | Worker runtime entry exports |
-| `crates/worker/src/harness/handlers/` | Platform event handlers |
-| `crates/worker/src/harness/providers/` | Worker model provider registry/factory |
-| `crates/worker/src/harness/tools.rs` | Worker tool assembly |
+| `crates/worker/src/event_loop.rs` | Worker event loop and transport dispatch |
+| `crates/worker/src/handlers/` | Worker-level event handlers and forwarding |
+| `crates/worker/src/providers/` | Worker model provider registry/factory |
+| `crates/worker/src/tools/` | Worker concrete runtime tools and tool assembly |
+| `crates/worker/src/sessions/` | Worker-local session stores and runtime implementation |
 | `bin/src/main.rs` | CLI entrypoint for the `nenjo` binary |
 
 ---
@@ -321,21 +343,21 @@ User-customizable prompt sections. All context blocks use `{{template_var}}` tem
 
 1. Implement the `ModelProvider` trait in `crates/models/src/`.
 2. Export the provider from `crates/models/src/lib.rs`.
-3. Add worker factory wiring in `crates/worker/src/harness/providers/`.
+3. Add worker factory wiring in `crates/worker/src/providers/`.
 4. Add focused unit tests in `crates/models` and worker wiring tests when practical.
 
 ### Adding a Built-in Tool
 
-1. Implement the reusable `Tool` behavior in `crates/tools/src/`.
-2. Export it from `crates/tools/src/lib.rs`.
-3. Add worker-specific assembly or gating in `crates/worker/src/harness/tools.rs`.
+1. Add or update `crates/tool-api` only when the shared trait or types need to change.
+2. Implement concrete runtime tool behavior in `crates/worker/src/tools/`.
+3. Add worker-specific assembly or gating in `crates/worker/src/tools/mod.rs`.
 4. Keep platform REST-backed tool specs in `crates/platform/src/rest/` when the tool is a platform API wrapper.
 
 ### Adding a Platform Event
 
 1. Add or update typed event contracts in `crates/events`.
 2. Update transport or envelope behavior only if the wire handling changes.
-3. Add worker handling in `crates/worker/src/harness/handlers/`.
+3. Add worker handling in `crates/worker/src/handlers/`.
 4. Keep SDK execution changes in `crates/nenjo` if the event ultimately invokes agent behavior.
 
 ### Adding a Platform Manifest Operation
@@ -347,7 +369,7 @@ User-customizable prompt sections. All context blocks use `{{template_var}}` tem
 
 ### Adding a Context Block
 
-1. Add the field to `PromptContext` in `crates/nenjo/src/agents/prompts.rs`.
-2. Add `{{context_block_name}}` to the appropriate prompt config/template.
-3. Populate the field in `Provider::build_prompt_context()`.
-4. Update platform manifest docs or DTOs only if the context block has a platform-managed manifest surface.
+1. Add or update the `ContextBlockManifest` in the manifest source or platform resource.
+2. Use the block's path-like name, for example `{{ coding.git_worktree }}`, in the relevant prompt/template.
+3. Update `PromptContext` or `RenderContextVars` only when a new runtime variable is required.
+4. Update platform DTOs/MCP operations only when the context block resource shape or platform-managed behavior changes.

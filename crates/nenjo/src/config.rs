@@ -9,10 +9,8 @@ pub struct AgentConfig {
     #[serde(default = "default_context_compaction_trigger_percent")]
     pub context_compaction_trigger_percent: u8,
     pub parallel_tools: bool,
-    #[serde(default)]
-    pub execution_traces: bool,
-    #[serde(default = "default_agent_max_tool_iterations")]
-    pub max_tool_iterations: usize,
+    #[serde(default = "default_agent_max_turns")]
+    pub max_turns: usize,
     #[serde(default = "default_agent_max_history_messages")]
     pub max_history_messages: usize,
     #[serde(default = "default_agent_tool_dispatcher")]
@@ -29,8 +27,8 @@ fn default_context_compaction_trigger_percent() -> u8 {
     60
 }
 
-fn default_agent_max_tool_iterations() -> usize {
-    100
+fn default_agent_max_turns() -> usize {
+    50
 }
 
 fn default_agent_max_history_messages() -> usize {
@@ -46,8 +44,7 @@ impl Default for AgentConfig {
         Self {
             compact_context: false,
             context_compaction_trigger_percent: default_context_compaction_trigger_percent(),
-            execution_traces: false,
-            max_tool_iterations: default_agent_max_tool_iterations(),
+            max_turns: default_agent_max_turns(),
             max_history_messages: default_agent_max_history_messages(),
             parallel_tools: true,
             tool_dispatcher: default_agent_tool_dispatcher(),

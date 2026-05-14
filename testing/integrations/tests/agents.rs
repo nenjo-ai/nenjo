@@ -15,9 +15,9 @@ use nenjo::manifest::{
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Shared mocks / helpers
@@ -91,11 +91,11 @@ fn get_api_key() -> Option<String> {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "claude-haiku".into(),
+        name: "openrouter-nemotron".into(),
         description: None,
-        model: "anthropic/claude-3-haiku".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
         model_provider: "openrouter".into(),
-        temperature: Some(0.0),
+        temperature: Some(0.7),
         base_url: None,
     }
 }
@@ -443,8 +443,30 @@ async fn assigned_ability_tool_with_real_llm() {
         "agent should have called ability tool, got: {}",
         output.tool_calls
     );
-    // The review should mention the bug (subtraction instead of addition)
-    let text_lower = output.text.to_lowercase();
+    let ability_tool_args = output
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant" && message.content.contains("tool_calls"))
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        ability_tool_args.contains("a - b") || ability_tool_args.contains("fn add"),
+        "caller should pass relevant code to the ability tool, got: {}",
+        ability_tool_args
+    );
+
+    // The review should mention the bug (subtraction instead of addition).
+    // Check both the final parent response and the delegated ability result.
+    let tool_result_text = output
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let review_text = format!("{}\n{}", output.text, tool_result_text);
+    let text_lower = review_text.to_lowercase();
     assert!(
         text_lower.contains("bug")
             || text_lower.contains("subtract")
@@ -452,7 +474,7 @@ async fn assigned_ability_tool_with_real_llm() {
             || text_lower.contains("a - b")
             || text_lower.contains("error"),
         "review should catch the bug (a - b instead of a + b), got: {}",
-        output.text
+        review_text
     );
 }
 
@@ -524,7 +546,7 @@ async fn domain_expansion_with_real_llm() {
         .expect("should activate prd domain");
 
     // Verify the domain is active on the instance
-    let active = &prd_runner.instance().prompt_context.active_domain;
+    let active = &prd_runner.instance().prompt_context().active_domain;
     assert!(active.is_some(), "should have active domain");
     assert_eq!(active.as_ref().unwrap().domain_name, "prd");
 

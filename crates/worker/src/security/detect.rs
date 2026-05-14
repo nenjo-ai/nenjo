@@ -1,0 +1,118 @@
+//! Auto-detection of available security features
+
+use crate::config::{SandboxBackend, SecurityConfig};
+use crate::security::traits::Sandbox;
+use std::sync::Arc;
+
+/// Create a sandbox based on auto-detection or explicit config
+pub fn create_sandbox(config: &SecurityConfig) -> Arc<dyn Sandbox> {
+    let backend = &config.sandbox.backend;
+
+    // If explicitly disabled, return noop
+    if matches!(backend, SandboxBackend::None) || config.sandbox.enabled == Some(false) {
+        return Arc::new(super::traits::NoopSandbox);
+    }
+
+    // If specific backend requested, try that
+    match backend {
+        SandboxBackend::Landlock => {
+            tracing::warn!(
+                "Landlock requested but no Landlock backend is compiled, falling back to application-layer"
+            );
+            Arc::new(super::traits::NoopSandbox)
+        }
+        SandboxBackend::Firejail => {
+            #[cfg(target_os = "linux")]
+            {
+                if let Ok(sandbox) = super::firejail::FirejailSandbox::new() {
+                    return Arc::new(sandbox);
+                }
+            }
+            tracing::warn!(
+                "Firejail requested but not available, falling back to application-layer"
+            );
+            Arc::new(super::traits::NoopSandbox)
+        }
+        SandboxBackend::Bubblewrap => {
+            tracing::warn!(
+                "Bubblewrap requested but no Bubblewrap backend is compiled, falling back to application-layer"
+            );
+            Arc::new(super::traits::NoopSandbox)
+        }
+        SandboxBackend::Docker => {
+            if let Ok(sandbox) = super::docker::DockerSandbox::new() {
+                return Arc::new(sandbox);
+            }
+            tracing::warn!("Docker requested but not available, falling back to application-layer");
+            Arc::new(super::traits::NoopSandbox)
+        }
+        SandboxBackend::Auto | SandboxBackend::None => {
+            // Auto-detect best available
+            detect_best_sandbox()
+        }
+    }
+}
+
+/// Auto-detect the best available sandbox
+fn detect_best_sandbox() -> Arc<dyn Sandbox> {
+    #[cfg(target_os = "linux")]
+    {
+        // Try Firejail first on Linux (user-space tool).
+        if let Ok(sandbox) = super::firejail::FirejailSandbox::probe() {
+            tracing::info!("Firejail sandbox enabled");
+            return Arc::new(sandbox);
+        }
+    }
+
+    // Docker is heavy but works everywhere if docker is installed
+    if let Ok(sandbox) = super::docker::DockerSandbox::probe() {
+        tracing::info!("Docker sandbox enabled");
+        return Arc::new(sandbox);
+    }
+
+    // Fallback: application-layer security only
+    tracing::info!("No sandbox backend available, using application-layer security");
+    Arc::new(super::traits::NoopSandbox)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SandboxConfig, SecurityConfig};
+
+    #[test]
+    fn detect_best_sandbox_returns_something() {
+        let sandbox = detect_best_sandbox();
+        // Should always return at least NoopSandbox
+        assert!(sandbox.is_available());
+    }
+
+    #[test]
+    fn explicit_none_returns_noop() {
+        let config = SecurityConfig {
+            sandbox: SandboxConfig {
+                enabled: Some(false),
+                backend: SandboxBackend::None,
+                firejail_args: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let sandbox = create_sandbox(&config);
+        assert_eq!(sandbox.name(), "none");
+    }
+
+    #[test]
+    fn auto_mode_detects_something() {
+        let config = SecurityConfig {
+            sandbox: SandboxConfig {
+                enabled: None, // Auto-detect
+                backend: SandboxBackend::Auto,
+                firejail_args: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let sandbox = create_sandbox(&config);
+        // Should return some sandbox (at least NoopSandbox)
+        assert!(sandbox.is_available());
+    }
+}

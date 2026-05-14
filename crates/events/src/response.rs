@@ -313,8 +313,7 @@ impl std::fmt::Display for Response {
 // Stream events (real-time agent execution)
 // ---------------------------------------------------------------------------
 
-/// Events streamed during agent execution, delivered to the frontend in
-/// real time via WebSocket.
+/// Events streamed during agent execution and bridged to clients by the platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum StreamEvent {
