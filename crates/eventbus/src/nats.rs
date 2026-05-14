@@ -9,19 +9,22 @@
 use std::time::Duration;
 
 use async_nats::jetstream::{self, consumer::pull, stream};
+use nenjo_events::{
+    BROADCAST_REQUESTS_STREAM_NAME, BROADCAST_REQUESTS_STREAM_SUBJECTS, Capability,
+    REQUESTS_STREAM_NAME, REQUESTS_STREAM_SUBJECTS, broadcast_requests_subject, requests_subject,
+    worker_requests_subject,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::error::EventBusError;
-use crate::transport::{AckHandle, Message, Transport};
+use crate::transport::{AckHandle, Message, MessageSource, Transport};
 
 // ---------------------------------------------------------------------------
 // Configuration defaults
 // ---------------------------------------------------------------------------
 
 const DEFAULT_URL: &str = "nats://localhost:4222";
-const DEFAULT_STREAM_NAME: &str = "AGENT_REQUESTS";
-const DEFAULT_STREAM_SUBJECTS: &[&str] = &["requests.>"];
 const DEFAULT_MAX_AGE_SECS: u64 = 86_400; // 24 hours
 const DEFAULT_MAX_DELIVER: i64 = 3;
 const DEFAULT_ACK_WAIT_SECS: u64 = 10;
@@ -38,163 +41,271 @@ const DEFAULT_MESSAGE_BUFFER: usize = 256;
 pub struct NatsTransport {
     jetstream: jetstream::Context,
     stream_name: String,
+    broadcast_stream_name: Option<String>,
     max_deliver: i64,
     ack_wait: Duration,
     message_buffer: usize,
     worker_id: uuid::Uuid,
 }
 
+#[async_trait::async_trait]
 impl Transport for NatsTransport {
     fn worker_id(&self) -> uuid::Uuid {
         self.worker_id
     }
 
-    fn publish(
-        &self,
-        subject: &str,
-        payload: &[u8],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventBusError>> + Send + '_>>
-    {
+    async fn publish(&self, subject: &str, payload: &[u8]) -> Result<(), EventBusError> {
         let subject = subject.to_string();
         let payload = bytes::Bytes::from(payload.to_vec());
-        Box::pin(async move {
-            let ack_future = self
-                .jetstream
-                .publish(subject, payload)
-                .await
-                .map_err(|e| EventBusError::Transport(format!("publish failed: {e}")))?;
+        let ack_future = self
+            .jetstream
+            .publish(subject, payload)
+            .await
+            .map_err(|e| EventBusError::Transport(format!("publish failed: {e}")))?;
 
-            ack_future
-                .await
-                .map_err(|e| EventBusError::Transport(format!("publish ack failed: {e}")))?;
+        ack_future
+            .await
+            .map_err(|e| EventBusError::Transport(format!("publish ack failed: {e}")))?;
 
-            Ok(())
-        })
+        Ok(())
     }
 
-    fn subscribe(
+    async fn subscribe(
+        &self,
+        subscription: crate::Subscription,
+    ) -> Result<mpsc::Receiver<Message>, EventBusError> {
+        match subscription {
+            crate::Subscription::Subject(subject) => self.subscribe_subject(&subject).await,
+            crate::Subscription::WorkerCommands {
+                worker_id,
+                capabilities,
+            } => {
+                self.subscribe_worker_commands(worker_id, capabilities)
+                    .await
+            }
+        }
+    }
+
+    async fn subscribe_subject(
         &self,
         subject: &str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<mpsc::Receiver<Message>, EventBusError>>
-                + Send
-                + '_,
-        >,
-    > {
+    ) -> Result<mpsc::Receiver<Message>, EventBusError> {
         let subject = subject.to_string();
         let stream_name = self.stream_name.clone();
         let max_deliver = self.max_deliver;
         let ack_wait = self.ack_wait;
         let buffer = self.message_buffer;
-        Box::pin(async move {
-            // Consumer naming convention (per-user account subjects):
-            //   worker-requests  (shared by all workers in this user's account —
-            //                     NATS round-robins messages between active
-            //                     pull subscribers on a WorkQueue stream)
-            //   worker-responses (for response consumers)
-            //
-            // Since each user has their own NATS account, the consumer name
-            // doesn't need user_id — the account provides the namespace.
-            let consumer_name = if subject.starts_with("requests.") {
-                "worker-requests".to_string()
-            } else {
-                subject.replace('.', "-")
-            };
+        let jetstream = self.jetstream.clone();
 
-            let stream = self
-                .jetstream
-                .get_stream(&stream_name)
-                .await
-                .map_err(|e| EventBusError::Transport(format!("get stream failed: {e}")))?;
+        let (tx, rx) = mpsc::channel(buffer);
+        let work_queue_consumer = subject.replace('.', "-");
+        spawn_consumer(ConsumerSpawnSpec {
+            jetstream,
+            stream_name,
+            subject,
+            consumer_name: work_queue_consumer,
+            max_deliver,
+            ack_wait,
+            tx,
+        })
+        .await?;
 
-            let consumer_config = pull::Config {
-                durable_name: Some(consumer_name.clone()),
-                filter_subject: subject.clone(),
-                max_deliver,
-                ack_wait,
-                ..Default::default()
-            };
+        Ok(rx)
+    }
+}
 
-            let consumer = stream
-                .get_or_create_consumer(&consumer_name, consumer_config.clone())
-                .await
-                .map_err(|e| {
-                    EventBusError::Transport(format!(
-                        "create consumer '{consumer_name}' failed: {e}"
-                    ))
-                })?;
+impl NatsTransport {
+    async fn subscribe_worker_commands(
+        &self,
+        worker_id: uuid::Uuid,
+        capabilities: Vec<Capability>,
+    ) -> Result<mpsc::Receiver<Message>, EventBusError> {
+        let capabilities = Capability::effective_worker_subscriptions(&capabilities);
+        let (tx, rx) = mpsc::channel(self.message_buffer);
 
-            let mut messages = consumer
-                .messages()
-                .await
-                .map_err(|e| EventBusError::Transport(format!("start consumer failed: {e}")))?;
+        for capability in capabilities
+            .iter()
+            .copied()
+            .filter(Capability::is_work_lane)
+        {
+            let subject = requests_subject(capability);
+            spawn_consumer(ConsumerSpawnSpec {
+                jetstream: self.jetstream.clone(),
+                stream_name: self.stream_name.clone(),
+                subject,
+                consumer_name: format!("work-requests-{capability}"),
+                max_deliver: self.max_deliver,
+                ack_wait: self.ack_wait,
+                tx: tx.clone(),
+            })
+            .await?;
+        }
 
-            let (tx, rx) = mpsc::channel(buffer);
+        for capability in capabilities.iter().copied() {
+            let subject = worker_requests_subject(worker_id, capability);
+            spawn_consumer(ConsumerSpawnSpec {
+                jetstream: self.jetstream.clone(),
+                stream_name: self.stream_name.clone(),
+                subject,
+                consumer_name: format!("worker-requests-{worker_id}-{capability}"),
+                max_deliver: self.max_deliver,
+                ack_wait: self.ack_wait,
+                tx: tx.clone(),
+            })
+            .await?;
+        }
 
-            tokio::spawn(async move {
-                use futures_util::StreamExt;
+        let Some(broadcast_stream_name) = self.broadcast_stream_name.clone() else {
+            return Ok(rx);
+        };
 
-                loop {
-                    while let Some(msg_result) = messages.next().await {
-                        match msg_result {
-                            Ok(msg) => {
-                                let payload = msg.payload.to_vec();
-                                let ack_handle = NatsAckHandle(Some(msg));
-                                let message = Message::new(payload, ack_handle);
-                                if tx.send(message).await.is_err() {
-                                    debug!("subscriber channel closed, stopping consumer");
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "error receiving NATS message");
-                            }
+        for capability in capabilities
+            .iter()
+            .copied()
+            .filter(Capability::is_broadcast_lane)
+        {
+            let subject = broadcast_requests_subject(capability);
+            spawn_consumer(ConsumerSpawnSpec {
+                jetstream: self.jetstream.clone(),
+                stream_name: broadcast_stream_name.clone(),
+                subject,
+                consumer_name: format!("broadcast-requests-{worker_id}-{capability}"),
+                max_deliver: self.max_deliver,
+                ack_wait: self.ack_wait,
+                tx: tx.clone(),
+            })
+            .await?;
+        }
+
+        Ok(rx)
+    }
+}
+
+struct ConsumerSpawnSpec {
+    jetstream: jetstream::Context,
+    stream_name: String,
+    subject: String,
+    consumer_name: String,
+    max_deliver: i64,
+    ack_wait: Duration,
+    tx: mpsc::Sender<Message>,
+}
+
+async fn spawn_consumer(spec: ConsumerSpawnSpec) -> Result<(), EventBusError> {
+    let ConsumerSpawnSpec {
+        jetstream,
+        stream_name,
+        subject,
+        consumer_name,
+        max_deliver,
+        ack_wait,
+        tx,
+    } = spec;
+
+    let consumer_config = pull::Config {
+        durable_name: Some(consumer_name.clone()),
+        filter_subject: subject.clone(),
+        max_deliver,
+        ack_wait,
+        ..Default::default()
+    };
+
+    let stream = jetstream
+        .get_stream(&stream_name)
+        .await
+        .map_err(|e| EventBusError::Transport(format!("get stream failed: {e}")))?;
+
+    let consumer = stream
+        .get_or_create_consumer(&consumer_name, consumer_config.clone())
+        .await
+        .map_err(|e| {
+            EventBusError::Transport(format!("create consumer '{consumer_name}' failed: {e}"))
+        })?;
+
+    let mut messages = consumer
+        .messages()
+        .await
+        .map_err(|e| EventBusError::Transport(format!("start consumer failed: {e}")))?;
+
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+
+        loop {
+            while let Some(msg_result) = messages.next().await {
+                match msg_result {
+                    Ok(msg) => {
+                        let delivered_subject = msg.message.subject.to_string();
+                        let payload = msg.payload.to_vec();
+                        let ack_handle = NatsAckHandle(Some(msg));
+                        let message =
+                            Message::new(payload, ack_handle).with_source(MessageSource {
+                                stream: Some(stream_name.clone()),
+                                consumer: Some(consumer_name.clone()),
+                                filter_subject: Some(subject.clone()),
+                                subject: Some(delivered_subject),
+                            });
+                        if tx.send(message).await.is_err() {
+                            debug!("subscriber channel closed, stopping consumer");
+                            return;
                         }
                     }
-
-                    // Consumer stream ended — attempt to reconnect with backoff.
-                    warn!(subject = %subject, "NATS consumer stream ended, attempting to reconnect");
-
-                    let mut delay = Duration::from_secs(1);
-                    let max_delay = Duration::from_secs(30);
-
-                    loop {
-                        tokio::time::sleep(delay).await;
-
-                        // Re-fetch the consumer and restart its message stream.
-                        let reconnected = async {
-                            let c = stream
-                                .get_or_create_consumer(&consumer_name, consumer_config.clone())
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            c.messages().await.map_err(|e| e.to_string())
-                        }
-                        .await;
-
-                        match reconnected {
-                            Ok(new_messages) => {
-                                info!(subject = %subject, "NATS consumer reconnected");
-                                messages = new_messages;
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    retry_in = ?delay,
-                                    subject = %subject,
-                                    "Failed to reconnect NATS consumer, retrying"
-                                );
-                                delay = std::cmp::min(delay.saturating_mul(2), max_delay);
-                            }
-                        }
+                    Err(e) => {
+                        warn!(error = %e, "error receiving NATS message");
                     }
                 }
-            });
+            }
 
-            Ok(rx)
-        })
-    }
+            warn!(
+                stream = %stream_name,
+                subject = %subject,
+                "NATS consumer stream ended, attempting to reconnect"
+            );
+
+            let mut delay = Duration::from_secs(1);
+            let max_delay = Duration::from_secs(30);
+
+            loop {
+                tokio::time::sleep(delay).await;
+
+                let reconnected = async {
+                    let stream = jetstream
+                        .get_stream(&stream_name)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let c = stream
+                        .get_or_create_consumer(&consumer_name, consumer_config.clone())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    c.messages().await.map_err(|e| e.to_string())
+                }
+                .await;
+
+                match reconnected {
+                    Ok(new_messages) => {
+                        info!(
+                            stream = %stream_name,
+                            subject = %subject,
+                            "NATS consumer reconnected"
+                        );
+                        messages = new_messages;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            retry_in = ?delay,
+                            stream = %stream_name,
+                            subject = %subject,
+                            "Failed to reconnect NATS consumer, retrying"
+                        );
+                        delay = std::cmp::min(delay.saturating_mul(2), max_delay);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -203,19 +314,15 @@ impl Transport for NatsTransport {
 
 struct NatsAckHandle(Option<jetstream::Message>);
 
+#[async_trait::async_trait]
 impl AckHandle for NatsAckHandle {
-    fn ack(
-        mut self: Box<Self>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EventBusError>> + Send>>
-    {
-        Box::pin(async move {
-            if let Some(msg) = self.0.take() {
-                msg.ack()
-                    .await
-                    .map_err(|e| EventBusError::Transport(format!("ack failed: {e}")))?;
-            }
-            Ok(())
-        })
+    async fn ack(mut self: Box<Self>) -> Result<(), EventBusError> {
+        if let Some(msg) = self.0.take() {
+            msg.ack()
+                .await
+                .map_err(|e| EventBusError::Transport(format!("ack failed: {e}")))?;
+        }
+        Ok(())
     }
 }
 
@@ -229,7 +336,7 @@ impl AckHandle for NatsAckHandle {
 ///
 /// ```ignore
 /// let transport = NatsTransport::builder()
-///     .url("tls://nats.example.com:4222")
+///     .urls(vec!["tls://nats.example.com:4222".to_string()])
 ///     .token("my-api-key")
 ///     .build()
 ///     .await?;
@@ -239,6 +346,8 @@ pub struct NatsTransportBuilder {
     token: Option<String>,
     stream_name: String,
     stream_subjects: Vec<String>,
+    broadcast_stream_name: Option<String>,
+    broadcast_stream_subjects: Vec<String>,
     max_age: Duration,
     max_deliver: i64,
     ack_wait: Duration,
@@ -252,8 +361,13 @@ impl NatsTransport {
         NatsTransportBuilder {
             urls: vec![DEFAULT_URL.to_string()],
             token: None,
-            stream_name: DEFAULT_STREAM_NAME.to_string(),
-            stream_subjects: DEFAULT_STREAM_SUBJECTS
+            stream_name: REQUESTS_STREAM_NAME.to_string(),
+            stream_subjects: REQUESTS_STREAM_SUBJECTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            broadcast_stream_name: Some(BROADCAST_REQUESTS_STREAM_NAME.to_string()),
+            broadcast_stream_subjects: BROADCAST_REQUESTS_STREAM_SUBJECTS
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -284,15 +398,27 @@ impl NatsTransportBuilder {
         self
     }
 
-    /// Override the JetStream stream name (default: `AGENT_REQUESTS`).
+    /// Override the JetStream stream name (default: `AGENT_WORK_REQUESTS`).
     pub fn stream_name(mut self, name: impl Into<String>) -> Self {
         self.stream_name = name.into();
         self
     }
 
-    /// Override the JetStream stream subjects (default: `["requests.>"]`).
+    /// Override the JetStream stream subjects (default: `["work_requests.*", "worker_requests.*.*"]`).
     pub fn stream_subjects(mut self, subjects: Vec<String>) -> Self {
         self.stream_subjects = subjects;
+        self
+    }
+
+    /// Override the broadcast JetStream stream name.
+    pub fn broadcast_stream_name(mut self, name: impl Into<String>) -> Self {
+        self.broadcast_stream_name = Some(name.into());
+        self
+    }
+
+    /// Disable the broadcast request stream subscription.
+    pub fn disable_broadcast_stream(mut self) -> Self {
+        self.broadcast_stream_name = None;
         self
     }
 
@@ -329,7 +455,7 @@ impl NatsTransportBuilder {
         self
     }
 
-    /// Connect to NATS and create/verify the JetStream stream.
+    /// Connect to NATS and create/verify the JetStream streams.
     pub async fn build(self) -> Result<NatsTransport, EventBusError> {
         if self.urls.is_empty() {
             return Err(EventBusError::Builder(
@@ -388,7 +514,7 @@ impl NatsTransportBuilder {
 
         let jetstream = jetstream::new(client);
 
-        // Ensure the stream exists.
+        // Ensure the work-queue stream exists in the connected account.
         let stream_config = stream::Config {
             name: self.stream_name.clone(),
             subjects: self.stream_subjects,
@@ -398,21 +524,70 @@ impl NatsTransportBuilder {
             ..Default::default()
         };
 
-        jetstream
-            .get_or_create_stream(stream_config)
-            .await
-            .map_err(|e| EventBusError::Transport(format!("stream setup failed: {e}")))?;
+        ensure_stream_available(&jetstream, stream_config, "stream").await?;
 
         debug!(stream = %self.stream_name, "JetStream stream ready");
+
+        if let Some(ref broadcast_stream_name) = self.broadcast_stream_name {
+            let broadcast_stream_config = stream::Config {
+                name: broadcast_stream_name.clone(),
+                subjects: self.broadcast_stream_subjects.clone(),
+                retention: stream::RetentionPolicy::Interest,
+                max_age: self.max_age,
+                storage: stream::StorageType::Memory,
+                ..Default::default()
+            };
+
+            ensure_stream_available(&jetstream, broadcast_stream_config, "broadcast stream")
+                .await?;
+
+            debug!(stream = %broadcast_stream_name, "Broadcast JetStream stream ready");
+        }
 
         Ok(NatsTransport {
             jetstream,
             stream_name: self.stream_name,
+            broadcast_stream_name: self.broadcast_stream_name,
             max_deliver: self.max_deliver,
             ack_wait: self.ack_wait,
             message_buffer: self.message_buffer,
             worker_id: self.worker_id,
         })
+    }
+}
+
+async fn ensure_stream_available(
+    jetstream: &jetstream::Context,
+    stream_config: stream::Config,
+    label: &str,
+) -> Result<(), EventBusError> {
+    let stream_name = stream_config.name.clone();
+    if jetstream.get_stream(&stream_name).await.is_ok() {
+        return Ok(());
+    }
+
+    match jetstream.create_stream(stream_config).await {
+        Ok(_) => Ok(()),
+        Err(create_error) => {
+            let create_error = create_error.to_string();
+            if create_error.contains("stream name already in use")
+                || create_error.contains("stream already exists")
+            {
+                jetstream
+                    .get_stream(&stream_name)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| {
+                        EventBusError::Transport(format!(
+                            "{label} setup raced with existing stream '{stream_name}': {e}"
+                        ))
+                    })
+            } else {
+                Err(EventBusError::Transport(format!(
+                    "{label} setup failed: {create_error}"
+                )))
+            }
+        }
     }
 }
 
@@ -424,7 +599,7 @@ mod tests {
     fn builder_defaults() {
         let builder = NatsTransport::builder();
         assert_eq!(builder.urls, vec!["nats://localhost:4222"]);
-        assert_eq!(builder.stream_name, "AGENT_REQUESTS");
+        assert_eq!(builder.stream_name, "AGENT_WORK_REQUESTS");
         assert_eq!(builder.max_deliver, 3);
         assert_ne!(builder.worker_id, uuid::Uuid::nil());
     }

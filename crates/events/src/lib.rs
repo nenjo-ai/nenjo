@@ -11,8 +11,8 @@
 //!
 //! | Direction | Worker local subject | PLATFORM subject | Rust type |
 //! |-----------|---------------------|------------------|-----------|
-//! | Backend → Harness | `requests.<capability>` | `requests.<user_id>.<capability>` | [`Command`] |
-//! | Harness → Backend | `responses` | `responses.<user_id>` | [`Response`] |
+//! | Backend → Harness | `work_requests.<capability>` / `worker_requests.<worker_id>.<capability>` / `broadcast_requests.<capability>` | `work_requests.<org_id>.<capability>` / `worker_requests.<org_id>.<worker_id>.<capability>` / `broadcast_requests.<org_id>.<capability>` | [`Command`] |
+//! | Harness → Backend | `responses.<org_id>.<user_id>` / `streams.chat.<session_id>` | `responses.<org_id>.<user_id>` / `streams.chat.<session_id>` | [`Response`] |
 //!
 //! ## Wire format
 //!

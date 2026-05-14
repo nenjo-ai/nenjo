@@ -1,4 +1,4 @@
-//! Memory types: categories, facts, resources, scopes.
+//! Memory types: categories, facts, artifacts, scopes.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,43 +17,43 @@ pub struct MemoryCategory {
     pub updated_at: String,
 }
 
-/// A resource entry in the manifest.
+/// An artifact entry in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceEntry {
+pub struct ArtifactEntry {
     pub filename: String,
     pub description: String,
     pub created_by: String,
     pub size_bytes: i64,
 }
 
-/// 3-tier namespace scoping for memory isolation + resource paths.
+/// 3-tier namespace scoping for memory isolation + artifact paths.
 ///
-/// Memory and resource namespace scoping.
+/// Memory and artifact namespace scoping.
 ///
 /// When a project is provided:
 /// - **project**: per-agent, per-project → `agent_{name}_project_{slug}`
 /// - **core**: cross-project agent expertise → `agent_{name}_core`
 /// - **shared**: visible to all agents in the project → `project_{slug}`
-/// - **resources_project**: project-scoped → `{slug}/resources`
-/// - **resources_global**: workspace-global → `resources`
+/// - **artifacts_project**: project-scoped → `{slug}/artifacts`
+/// - **artifacts_global**: workspace-global → `artifacts`
 ///
 /// When no project (system agents):
 /// - All memory scopes collapse to `agent_{name}_core`
-/// - Resources collapse to global `resources`
+/// - Artifacts collapse to global `artifacts`
 #[derive(Debug, Clone)]
 pub struct MemoryScope {
     pub project: String,
     pub core: String,
     pub shared: String,
-    pub resources_project: String,
-    pub resources_global: String,
+    pub artifacts_project: String,
+    pub artifacts_global: String,
 }
 
 impl MemoryScope {
     /// Build a scope from agent name and optional project slug.
     ///
     /// When `project_slug` is `None`, all memory scopes collapse to
-    /// `agent_{name}_core` and resources to global only.
+    /// `agent_{name}_core` and artifacts to global only.
     pub fn new(agent_name: &str, project_slug: Option<&str>) -> Self {
         let name = sanitize_name(agent_name);
         let core = format!("agent_{name}_core");
@@ -65,16 +65,16 @@ impl MemoryScope {
                     project: format!("agent_{name}_project_{slug}"),
                     core: core.clone(),
                     shared: format!("project_{slug}"),
-                    resources_project: format!("{slug}/resources"),
-                    resources_global: "resources".to_string(),
+                    artifacts_project: format!("{slug}/artifacts"),
+                    artifacts_global: "artifacts".to_string(),
                 }
             }
             _ => Self {
                 project: core.clone(),
                 core,
                 shared: "shared".to_string(),
-                resources_project: "resources".to_string(),
-                resources_global: "resources".to_string(),
+                artifacts_project: "artifacts".to_string(),
+                artifacts_global: "artifacts".to_string(),
             },
         }
     }
@@ -93,8 +93,8 @@ impl MemoryScope {
                 project: ns.to_string(),
                 core: format!("{agent_prefix}_core"),
                 shared: format!("project_{slug}"),
-                resources_project: format!("{slug}/resources"),
-                resources_global: "resources".to_string(),
+                artifacts_project: format!("{slug}/artifacts"),
+                artifacts_global: "artifacts".to_string(),
             });
         }
 
@@ -103,8 +103,8 @@ impl MemoryScope {
                 project: ns.to_string(),
                 core: ns.to_string(),
                 shared: "shared".to_string(),
-                resources_project: "resources".to_string(),
-                resources_global: "resources".to_string(),
+                artifacts_project: "artifacts".to_string(),
+                artifacts_global: "artifacts".to_string(),
             });
         }
 
@@ -120,11 +120,11 @@ impl MemoryScope {
         }
     }
 
-    /// Resolve a resource scope name ("project", "workspace") to a namespace string.
-    pub fn resolve_resource(&self, scope: &str) -> &str {
+    /// Resolve an artifact scope name ("project", "workspace") to a namespace string.
+    pub fn resolve_artifact(&self, scope: &str) -> &str {
         match scope {
-            "workspace" => &self.resources_global,
-            _ => &self.resources_project,
+            "workspace" => &self.artifacts_global,
+            _ => &self.artifacts_project,
         }
     }
 
@@ -153,10 +153,10 @@ mod tests {
         assert_eq!(scope.project, "agent_researcher_project_docs");
         assert_eq!(scope.core, "agent_researcher_core");
         assert_eq!(scope.shared, "project_docs");
-        assert_eq!(scope.resources_project, "docs/resources");
-        assert_eq!(scope.resources_global, "resources");
-        assert_eq!(scope.resolve_resource("project"), "docs/resources");
-        assert_eq!(scope.resolve_resource("workspace"), "resources");
+        assert_eq!(scope.artifacts_project, "docs/artifacts");
+        assert_eq!(scope.artifacts_global, "artifacts");
+        assert_eq!(scope.resolve_artifact("project"), "docs/artifacts");
+        assert_eq!(scope.resolve_artifact("workspace"), "artifacts");
     }
 
     #[test]
@@ -166,10 +166,10 @@ mod tests {
         assert_eq!(scope.project, "agent_ops_core");
         assert_eq!(scope.core, "agent_ops_core");
         assert_eq!(scope.shared, "shared");
-        assert_eq!(scope.resources_project, "resources");
-        assert_eq!(scope.resources_global, "resources");
-        assert_eq!(scope.resolve_resource("project"), "resources");
-        assert_eq!(scope.resolve_resource("workspace"), "resources");
+        assert_eq!(scope.artifacts_project, "artifacts");
+        assert_eq!(scope.artifacts_global, "artifacts");
+        assert_eq!(scope.resolve_artifact("project"), "artifacts");
+        assert_eq!(scope.resolve_artifact("workspace"), "artifacts");
     }
 
     #[test]

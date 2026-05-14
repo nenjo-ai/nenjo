@@ -20,9 +20,10 @@ pub mod router;
 pub mod traits;
 
 // Re-export core types at crate root.
+pub use nenjo_tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
-    ToolCall, ToolResultMessage, one_shot,
+    ToolCall, ToolCategory, ToolResultMessage, ToolSpec, one_shot,
 };
 
 // Re-export provider implementations.
@@ -34,6 +35,95 @@ pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
 pub use reliable::ReliableProvider;
 pub use router::RouterProvider;
+
+use std::sync::Arc;
+
+use anyhow::Result;
+
+/// Maps a model provider name (for example, `"openai"` or `"anthropic"`) to
+/// an LLM provider implementation.
+///
+/// Implementations are responsible for API key resolution and any runtime
+/// configuration needed to construct concrete [`ModelProvider`] instances.
+pub trait ModelProviderFactory: Send + Sync {
+    fn create(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>>;
+
+    /// Create a provider with an optional base URL override.
+    ///
+    /// Used for self-hosted or OpenAI-compatible providers where the caller
+    /// configures a custom endpoint. The default implementation ignores the
+    /// URL and delegates to [`create`](Self::create).
+    fn create_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<dyn ModelProvider>> {
+        let _ = base_url;
+        self.create(provider_name)
+    }
+}
+
+impl<T> ModelProviderFactory for Arc<T>
+where
+    T: ModelProviderFactory + ?Sized,
+{
+    fn create(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        self.as_ref().create(provider_name)
+    }
+
+    fn create_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<dyn ModelProvider>> {
+        self.as_ref().create_with_base_url(provider_name, base_url)
+    }
+}
+
+/// Typed variant of [`ModelProviderFactory`] using a generic associated model
+/// provider type.
+///
+/// The lifetime parameter leaves room for factories that return providers
+/// borrowing factory-owned shared state, while today's blanket implementation
+/// preserves the existing `Arc<dyn ModelProvider>` behavior.
+pub trait TypedModelProviderFactory: Send + Sync {
+    type Provider<'a>: ModelProvider + Send + Sync + ?Sized + 'a
+    where
+        Self: 'a;
+
+    fn create_typed(&self, provider_name: &str) -> Result<Arc<Self::Provider<'static>>>;
+
+    fn create_typed_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<Self::Provider<'static>>> {
+        let _ = base_url;
+        self.create_typed(provider_name)
+    }
+}
+
+impl<T> TypedModelProviderFactory for T
+where
+    T: ModelProviderFactory + ?Sized + 'static,
+{
+    type Provider<'a>
+        = dyn ModelProvider + 'static
+    where
+        Self: 'a;
+
+    fn create_typed(&self, provider_name: &str) -> Result<Arc<Self::Provider<'static>>> {
+        self.create(provider_name)
+    }
+
+    fn create_typed_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<Self::Provider<'static>>> {
+        self.create_with_base_url(provider_name, base_url)
+    }
+}
 
 // ── Thinking/reasoning helpers ───────────────────────────────────
 
@@ -59,39 +149,6 @@ pub fn strip_thinking(text: &str) -> String {
     }
     result.push_str(remaining);
     result.trim().to_string()
-}
-
-// ── Tool name helpers ───────────────────────────────────────────
-
-/// Sanitize a tool function name to match the strict OpenAI pattern `^[a-zA-Z0-9_-]+$`.
-///
-/// Used by OpenAI, DeepSeek, and other strict providers. Replaces dots, slashes,
-/// and any other disallowed characters with `_`.
-pub fn sanitize_tool_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Light sanitization for lenient providers (Ollama) — only replaces characters
-/// that break JSON-RPC or URL parsing (slashes, spaces, etc.) while preserving
-/// dots used in MCP namespaced tool names.
-pub fn sanitize_tool_name_lenient(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 // ── Error helpers ───────────────────────────────────────────────
@@ -198,26 +255,5 @@ mod tests {
     fn strip_thinking_only_thinking() {
         let input = "<think>All reasoning, no output</think>";
         assert_eq!(strip_thinking(input), "");
-    }
-
-    #[test]
-    fn sanitize_tool_name_replaces_dots_and_slashes() {
-        assert_eq!(
-            sanitize_tool_name("app.nenjo.platform/tasks"),
-            "app_nenjo_platform_tasks"
-        );
-    }
-
-    #[test]
-    fn sanitize_tool_name_preserves_valid_chars() {
-        assert_eq!(sanitize_tool_name("my-tool_v2"), "my-tool_v2");
-    }
-
-    #[test]
-    fn sanitize_tool_name_lenient_preserves_dots() {
-        assert_eq!(
-            sanitize_tool_name_lenient("app.nenjo.platform/tasks"),
-            "app.nenjo.platform_tasks"
-        );
     }
 }

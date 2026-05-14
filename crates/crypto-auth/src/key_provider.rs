@@ -42,13 +42,13 @@ impl EnrollmentBackedKeyProvider {
     /// platform API client for on-demand refresh.
     pub fn new(
         auth_provider: impl Into<Arc<WorkerAuthProvider>>,
-        api: Arc<NenjoClient>,
+        api: impl Into<Arc<NenjoClient>>,
         api_key_id: Uuid,
         bootstrap_user_id: Uuid,
     ) -> Self {
         Self {
             auth_provider: auth_provider.into(),
-            api,
+            api: api.into(),
             api_key_id,
             bootstrap_user_id,
         }

@@ -1,0 +1,22 @@
+[package]
+name = "nenjo-knowledge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Knowledge pack primitives and embedded Nenjo knowledge"
+readme = "README.md"
+
+[features]
+default = []
+nenjo = ["dep:serde_yaml"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+nenjo-xml = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true, optional = true }
+nenjo-tool-api = { workspace = true }

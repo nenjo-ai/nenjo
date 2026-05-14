@@ -359,7 +359,7 @@ async fn delegate_to_tool_executes() {
     // Find the delegate_to tool and call it directly
     let delegate_tool = runner
         .instance()
-        .tools
+        .tools()
         .iter()
         .find(|t| t.name() == "delegate_to")
         .expect("delegate_to should be present");
@@ -408,7 +408,7 @@ async fn delegate_to_unknown_agent() {
 
     let delegate_tool = runner
         .instance()
-        .tools
+        .tools()
         .iter()
         .find(|t| t.name() == "delegate_to")
         .unwrap();
@@ -461,7 +461,7 @@ async fn delegate_to_empty_agent_name() {
 
     let delegate_tool = runner
         .instance()
-        .tools
+        .tools()
         .iter()
         .find(|t| t.name() == "delegate_to")
         .unwrap();

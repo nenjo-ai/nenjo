@@ -17,14 +17,17 @@ pub(crate) fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(|m| m.content.len() / 4).sum()
 }
 
-pub(crate) async fn compact_messages_with_summary(
-    provider: &dyn ModelProvider,
+pub(crate) async fn compact_messages_with_summary<P>(
+    provider: &P,
     model: &str,
     temperature: f64,
     messages: &mut Vec<ChatMessage>,
     max_tokens: usize,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
-) -> Result<()> {
+) -> Result<()>
+where
+    P: ModelProvider + ?Sized,
+{
     let messages_before = messages.len();
 
     compact_messages_without_drop(messages, max_tokens);
@@ -57,12 +60,10 @@ pub(crate) async fn compact_messages_with_summary(
         drop_oldest_messages(messages, max_tokens);
     }
 
-    if summarized {
-        let _ = events_tx.map(|tx| {
-            tx.send(TurnEvent::MessageCompacted {
-                messages_before,
-                messages_after: messages.len(),
-            })
+    if summarized && let Some(tx) = events_tx {
+        let _ = tx.send(TurnEvent::MessageCompacted {
+            messages_before,
+            messages_after: messages.len(),
         });
     }
 
@@ -278,12 +279,15 @@ fn is_summary_message(message: &ChatMessage) -> bool {
             .starts_with(HISTORY_SUMMARY_MARKER)
 }
 
-async fn summarize_message_span(
-    provider: &dyn ModelProvider,
+async fn summarize_message_span<P>(
+    provider: &P,
     model: &str,
     temperature: f64,
     candidate: &[ChatMessage],
-) -> Result<Option<ChatMessage>> {
+) -> Result<Option<ChatMessage>>
+where
+    P: ModelProvider + ?Sized,
+{
     if candidate.is_empty() {
         return Ok(None);
     }

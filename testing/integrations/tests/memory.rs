@@ -1,4 +1,4 @@
-//! E2E tests for memory and resource tools with a real LLM.
+//! E2E tests for memory and artifact tools with a real LLM.
 //!
 //! Requires `OPENROUTER_API_KEY` environment variable.
 //! Tests are skipped automatically if the key is not set.
@@ -40,11 +40,11 @@ fn get_api_key() -> Option<String> {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "claude-haiku".into(),
+        name: "openrouter-nemotron".into(),
         description: None,
-        model: "anthropic/claude-3-haiku".into(),
+        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
         model_provider: "openrouter".into(),
-        temperature: Some(0.0),
+        temperature: Some(0.7),
         base_url: None,
     }
 }
@@ -169,10 +169,10 @@ async fn memory_store_writes_to_correct_scope() {
     );
 }
 
-/// Agent saves a resource via save_resource, verify the file and manifest
+/// Agent saves an artifact via save_artifact, verify the file and manifest
 /// land in the workspace dir.
 #[tokio::test]
-async fn save_resource_writes_to_workspace() {
+async fn save_artifact_writes_to_workspace() {
     let api_key = match get_api_key() {
         Some(key) => key,
         None => {
@@ -197,7 +197,7 @@ async fn save_resource_writes_to_workspace() {
         "architect",
         model.id,
         "You are a helpful assistant.\n\
-         When the user asks you to create a document, use save_resource with scope 'project'.\n\
+         When the user asks you to create a document, use save_artifact with scope 'project'.\n\
          Always respond concisely.",
     );
 
@@ -227,7 +227,7 @@ async fn save_resource_writes_to_workspace() {
         .unwrap();
 
     let output = runner
-        .chat("Create a resource called 'auth-design.md' with description 'Auth design doc' and content '# Auth Design\nUse OAuth2 with PKCE flow.'")
+        .chat("Create an artifact called 'auth-design.md' with description 'Auth design doc' and content '# Auth Design\nUse OAuth2 with PKCE flow.'")
         .await
         .expect("chat should succeed");
 
@@ -236,27 +236,27 @@ async fn save_resource_writes_to_workspace() {
 
     assert!(
         output.tool_calls >= 1,
-        "agent should have called save_resource, got: {}",
+        "agent should have called save_artifact, got: {}",
         output.tool_calls
     );
 
-    // Verify resource landed in workspace dir under project
-    let resource_dir = ws_dir.path().join("webapp/resources");
+    // Verify artifact landed in workspace dir under project
+    let resource_dir = ws_dir.path().join("webapp/artifacts");
     assert!(
         resource_dir.exists(),
-        "resource dir should exist at {:?}",
+        "artifact dir should exist at {:?}",
         resource_dir
     );
 
     let manifest_path = resource_dir.join("manifest.json");
     assert!(
         manifest_path.exists(),
-        "manifest.json should exist in resource dir"
+        "manifest.json should exist in artifact dir"
     );
 
-    // Resource should NOT be in memory dir
+    // Artifact should NOT be in memory dir
     assert!(
         !mem_dir.path().join("webapp").exists(),
-        "resources should NOT be in memory dir"
+        "artifacts should NOT be in memory dir"
     );
 }

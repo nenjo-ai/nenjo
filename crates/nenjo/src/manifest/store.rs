@@ -33,6 +33,14 @@ pub trait ManifestReader: Send + Sync {
     async fn list_projects(&self) -> Result<Vec<ProjectManifest>>;
     /// Look up one project by ID.
     async fn get_project(&self, id: Uuid) -> Result<Option<ProjectManifest>>;
+    /// Look up one project by slug.
+    async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectManifest>> {
+        Ok(self
+            .list_projects()
+            .await?
+            .into_iter()
+            .find(|item| item.slug == slug))
+    }
 
     /// List all cached councils.
     async fn list_councils(&self) -> Result<Vec<CouncilManifest>>;

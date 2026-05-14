@@ -13,13 +13,60 @@ git_release_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
+    "nenjo-cli",
+    "nenjo-crypto-auth",
+    "nenjo-eventbus",
     "nenjo-xml",
     "nenjo-models",
-    "nenjo-tools",
     "nenjo-events",
-    "nenjo-eventbus",
-    "nenjo-worker",
-    "nenjo-crypto-auth",
+    "nenjo-harness",
+    "nenjo-integration-tests",
+    "nenjo-knowledge",
     "nenjo-platform",
-    "nenjo-secure-codec"
+    "nenjo-secure-envelope",
+    "nenjo-sessions",
+    "nenjo-tool-api",
+    "nenjo-worker",
 ]
+
+[[package]]
+name = "nenjo-cli"
+
+[[package]]
+name = "nenjo-crypto-auth"
+
+[[package]]
+name = "nenjo-eventbus"
+
+[[package]]
+name = "nenjo-events"
+
+[[package]]
+name = "nenjo-harness"
+
+[[package]]
+name = "nenjo-integration-tests"
+
+[[package]]
+name = "nenjo-knowledge"
+
+[[package]]
+name = "nenjo-models"
+
+[[package]]
+name = "nenjo-platform"
+
+[[package]]
+name = "nenjo-secure-envelope"
+
+[[package]]
+name = "nenjo-sessions"
+
+[[package]]
+name = "nenjo-tool-api"
+
+[[package]]
+name = "nenjo-worker"
+
+[[package]]
+name = "nenjo-xml"

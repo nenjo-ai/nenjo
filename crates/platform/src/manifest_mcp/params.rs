@@ -173,12 +173,6 @@ pub struct ProjectDeleteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `list_project_documents`.
-pub struct ProjectDocumentsListParams {
-    pub project_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `create_project_document`.
 pub struct ProjectDocumentCreateParams {
     #[serde(flatten)]

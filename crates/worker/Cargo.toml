@@ -23,14 +23,15 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 
 # Workspace crates
+nenjo-knowledge = { workspace = true, features = ["nenjo"] }
 nenjo = { workspace = true }
 nenjo-crypto-auth = { workspace = true }
 nenjo-platform = { workspace = true }
 nenjo-xml = { workspace = true }
-nenjo-tools = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
+nenjo-harness = { workspace = true }
 nenjo-secure-envelope = { workspace = true }
 nenjo-sessions = { workspace = true }
 
@@ -53,6 +54,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 regex = { workspace = true }
 
 # Config

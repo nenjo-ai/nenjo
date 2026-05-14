@@ -13,7 +13,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nenjo_eventbus::{EventBus, EventBusError, ReceivedEnvelope, Transport};
+use nenjo_eventbus::{EventBus, EventBusError, EventBusPublisher, ReceivedEnvelope, Transport};
 use nenjo_events::{Command, Envelope, Response};
 use tracing::{trace, warn};
 use uuid::Uuid;
@@ -85,10 +85,62 @@ pub trait EnvelopeCodec: Send + Sync + 'static {
     async fn decode_response(&self, response: Response) -> CodecResult<Response>;
 }
 
+#[async_trait]
+impl<C> EnvelopeCodec for Arc<C>
+where
+    C: EnvelopeCodec + ?Sized,
+{
+    async fn encode_command(&self, command: Command) -> CodecResult<Command> {
+        (**self).encode_command(command).await
+    }
+
+    async fn decode_command(
+        &self,
+        ctx: &CodecContext,
+        command: Command,
+    ) -> Result<DecodeCommandResult, CodecError> {
+        (**self).decode_command(ctx, command).await
+    }
+
+    async fn encode_response(
+        &self,
+        ctx: &CodecContext,
+        response: Response,
+    ) -> CodecResult<Response> {
+        (**self).encode_response(ctx, response).await
+    }
+
+    async fn decode_response(&self, response: Response) -> CodecResult<Response> {
+        (**self).decode_response(response).await
+    }
+}
+
 /// Secure wrapper over the raw event bus that applies an [`EnvelopeCodec`].
 pub struct SecureEnvelopeBus<T: Transport> {
     raw: EventBus<T>,
     codec: Arc<dyn EnvelopeCodec>,
+}
+
+/// Cloneable outbound secure-envelope publisher.
+pub struct SecureEnvelopePublisher<T: Transport> {
+    raw: EventBusPublisher<T>,
+    codec: Arc<dyn EnvelopeCodec>,
+}
+
+impl<T: Transport> Clone for SecureEnvelopePublisher<T> {
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            codec: Arc::clone(&self.codec),
+        }
+    }
+}
+
+impl<T: Transport> std::fmt::Debug for SecureEnvelopePublisher<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureEnvelopePublisher")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: Transport> std::fmt::Debug for SecureEnvelopeBus<T> {
@@ -114,51 +166,49 @@ impl<T: Transport> SecureEnvelopeBus<T> {
         self.raw.transport()
     }
 
+    /// Create a cloneable outbound publisher handle.
+    pub fn publisher(&self) -> SecureEnvelopePublisher<T> {
+        SecureEnvelopePublisher {
+            raw: self.raw.publisher(),
+            codec: Arc::clone(&self.codec),
+        }
+    }
+
     /// Encode and send a command envelope on behalf of the given actor.
     pub async fn send_command_for(
         &self,
         actor_user_id: Uuid,
         command: Command,
     ) -> Result<(), EventBusError> {
-        let capability = command.capability();
-        let Some(command) = self
-            .codec
-            .encode_command(command)
+        self.publisher()
+            .send_command_for(actor_user_id, command)
             .await
-            .map_err(|error| EventBusError::Codec(error.to_string()))?
-        else {
-            trace!(actor_user_id = %actor_user_id, %capability, "command dropped by secure envelope codec");
-            return Ok(());
-        };
-
-        let payload = serde_json::to_value(&command)?;
-        let envelope = Envelope::new(actor_user_id, payload);
-        let subject = nenjo_events::requests_subject(capability);
-        self.raw.send_envelope(&subject, &envelope).await
     }
 
     /// Encode and send a response envelope on behalf of the given actor.
     pub async fn send_response_for(
         &self,
+        org_id: Uuid,
         actor_user_id: Uuid,
         response: Response,
     ) -> Result<(), EventBusError> {
-        let response_label = response.to_string();
-        let ctx = CodecContext::for_actor(actor_user_id);
-        let Some(response) = self
-            .codec
-            .encode_response(&ctx, response)
+        self.publisher()
+            .send_response_for(org_id, actor_user_id, response)
             .await
-            .map_err(|error| EventBusError::Codec(error.to_string()))?
-        else {
-            trace!(actor_user_id = %actor_user_id, response = %response_label, "response dropped by secure envelope codec");
-            return Ok(());
-        };
+    }
 
-        let payload = serde_json::to_value(&response)?;
-        let envelope = Envelope::new(actor_user_id, payload);
-        let subject = nenjo_events::response_subject(actor_user_id, &response);
-        self.raw.send_envelope(&subject, &envelope).await
+    /// Encode and send a worker-level system response routed by org.
+    ///
+    /// This is intended for cleartext responses such as worker presence updates.
+    /// Actor-encrypted responses should use [`Self::send_response_for`].
+    pub async fn send_system_response(
+        &self,
+        org_id: Uuid,
+        response: Response,
+    ) -> Result<(), EventBusError> {
+        self.publisher()
+            .send_system_response(org_id, response)
+            .await
     }
 
     /// Receive, decode, and classify the next inbound command envelope.
@@ -219,6 +269,80 @@ impl<T: Transport> SecureEnvelopeBus<T> {
     }
 }
 
+impl<T: Transport> SecureEnvelopePublisher<T> {
+    /// Encode and send a command envelope on behalf of the given actor.
+    pub async fn send_command_for(
+        &self,
+        actor_user_id: Uuid,
+        command: Command,
+    ) -> Result<(), EventBusError> {
+        let capability = command.capability();
+        let Some(command) = self
+            .codec
+            .encode_command(command)
+            .await
+            .map_err(|error| EventBusError::Codec(error.to_string()))?
+        else {
+            trace!(actor_user_id = %actor_user_id, %capability, "command dropped by secure envelope codec");
+            return Ok(());
+        };
+
+        let payload = serde_json::to_value(&command)?;
+        let envelope = Envelope::new(actor_user_id, payload);
+        let subject = nenjo_events::requests_subject(capability);
+        self.raw.send_envelope(&subject, &envelope).await
+    }
+
+    /// Encode and send a response envelope on behalf of the given actor.
+    pub async fn send_response_for(
+        &self,
+        org_id: Uuid,
+        actor_user_id: Uuid,
+        response: Response,
+    ) -> Result<(), EventBusError> {
+        let response_label = response.to_string();
+        let ctx = CodecContext::for_actor(actor_user_id);
+        let Some(response) = self
+            .codec
+            .encode_response(&ctx, response)
+            .await
+            .map_err(|error| EventBusError::Codec(error.to_string()))?
+        else {
+            trace!(actor_user_id = %actor_user_id, response = %response_label, "response dropped by secure envelope codec");
+            return Ok(());
+        };
+
+        let payload = serde_json::to_value(&response)?;
+        let envelope = Envelope::new(actor_user_id, payload);
+        let subject = nenjo_events::response_subject(org_id, actor_user_id, &response);
+        self.raw.send_envelope(&subject, &envelope).await
+    }
+
+    /// Encode and send a worker-level system response routed by org.
+    pub async fn send_system_response(
+        &self,
+        org_id: Uuid,
+        response: Response,
+    ) -> Result<(), EventBusError> {
+        let response_label = response.to_string();
+        let ctx = CodecContext::for_actor(org_id);
+        let Some(response) = self
+            .codec
+            .encode_response(&ctx, response)
+            .await
+            .map_err(|error| EventBusError::Codec(error.to_string()))?
+        else {
+            trace!(response = %response_label, "system response dropped by secure envelope codec");
+            return Ok(());
+        };
+
+        let payload = serde_json::to_value(&response)?;
+        let envelope = Envelope::new(org_id, payload);
+        let subject = nenjo_events::responses_subject(org_id);
+        self.raw.send_envelope(&subject, &envelope).await
+    }
+}
+
 /// Decoded command plus its original envelope/ack handle.
 pub struct ReceivedCommand {
     /// Decoded command ready for harness routing.
@@ -238,6 +362,10 @@ impl std::fmt::Debug for ReceivedCommand {
 }
 
 impl ReceivedCommand {
+    pub fn source(&self) -> Option<&nenjo_eventbus::MessageSource> {
+        self.received.msg.source.as_ref()
+    }
+
     /// Acknowledge the underlying transport envelope.
     pub async fn ack(self) -> Result<(), EventBusError> {
         self.received.ack().await
@@ -260,6 +388,10 @@ pub struct ReceivedDecodeFailure {
 }
 
 impl ReceivedDecodeFailure {
+    pub fn source(&self) -> Option<&nenjo_eventbus::MessageSource> {
+        self.received.msg.source.as_ref()
+    }
+
     /// Acknowledge the underlying transport envelope.
     pub async fn ack(self) -> Result<(), EventBusError> {
         self.received.ack().await

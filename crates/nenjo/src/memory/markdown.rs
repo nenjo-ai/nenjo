@@ -1,9 +1,9 @@
 //! File-based markdown memory backend.
 //!
 //! Stores memory categories as markdown files with YAML frontmatter.
-//! Resources are stored as plain files with a `manifest.json` index.
+//! Artifacts are stored as plain files with a `manifest.json` index.
 //!
-//! Both memories and resources live under `~/.nenjo/state/` so that all
+//! Both memories and artifacts live under `~/.nenjo/state/` so that all
 //! agent-generated state can be backed up from a single directory. The
 //! state dir is resolved as an absolute path, so it remains accessible
 //! regardless of the current working directory (including git worktrees).
@@ -15,9 +15,9 @@
 //! │   └── {namespace}/
 //! │       ├── {category}.md      # memory category file
 //! │       └── ...
-//! └── {ns}/resources/
-//!     ├── manifest.json          # resource index
-//!     ├── {file}                 # resource file
+//! └── {ns}/artifacts/
+//!     ├── manifest.json          # artifact index
+//!     ├── {file}                 # artifact file
 //!     └── ...
 //! ```
 
@@ -26,25 +26,25 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::Memory;
-use super::types::{MemoryCategory, MemoryFact, ResourceEntry};
+use super::types::{ArtifactEntry, MemoryCategory, MemoryFact};
 
 /// File-based markdown memory backend.
 pub struct MarkdownMemory {
     /// Root for memory categories (e.g. `~/.nenjo/state/memory/`).
     root: PathBuf,
-    /// Root for resources (e.g. `~/.nenjo/state/`).
-    resource_root: PathBuf,
+    /// Root for artifacts (e.g. `~/.nenjo/state/`).
+    artifact_root: PathBuf,
 }
 
 impl MarkdownMemory {
-    /// Create a new markdown memory with memory and resource roots.
+    /// Create a new markdown memory with memory and artifact roots.
     ///
     /// Memory categories are stored under `memory_root/`.
-    /// Resources are stored under `resource_root/{ns}/`.
-    pub fn new(memory_root: impl Into<PathBuf>, resource_root: impl Into<PathBuf>) -> Self {
+    /// Artifacts are stored under `artifact_root/{ns}/`.
+    pub fn new(memory_root: impl Into<PathBuf>, artifact_root: impl Into<PathBuf>) -> Self {
         Self {
             root: memory_root.into(),
-            resource_root: resource_root.into(),
+            artifact_root: artifact_root.into(),
         }
     }
 
@@ -52,8 +52,8 @@ impl MarkdownMemory {
         self.root.join(ns)
     }
 
-    fn resource_dir(&self, ns: &str) -> PathBuf {
-        self.resource_root.join(ns)
+    fn artifact_dir(&self, ns: &str) -> PathBuf {
+        self.artifact_root.join(ns)
     }
 
     fn category_path(&self, ns: &str, category: &str) -> PathBuf {
@@ -68,13 +68,13 @@ impl Memory for MarkdownMemory {
         let parent = path.parent().ok_or_else(|| {
             anyhow::anyhow!("Invalid category path with no parent: {}", path.display())
         })?;
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
 
         let now = chrono::Utc::now().to_rfc3339();
 
-        if path.exists() {
+        if tokio::fs::try_exists(&path).await? {
             // Read existing, append fact, update timestamp
-            let content = std::fs::read_to_string(&path)?;
+            let content = tokio::fs::read_to_string(&path).await?;
             let (_fm, body) = split_frontmatter(&content)?;
             let mut facts_text = body.trim().to_string();
             if !facts_text.is_empty() {
@@ -84,27 +84,27 @@ impl Memory for MarkdownMemory {
 
             let new_content =
                 format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{facts_text}\n");
-            std::fs::write(&path, new_content)?;
+            tokio::fs::write(&path, new_content).await?;
         } else {
             let content = format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{fact}\n");
-            std::fs::write(&path, content)?;
+            tokio::fs::write(&path, content).await?;
         }
         Ok(())
     }
 
     async fn list_categories(&self, ns: &str) -> Result<Vec<MemoryCategory>> {
         let dir = self.ns_dir(ns);
-        if !dir.is_dir() {
+        if !tokio::fs::try_exists(&dir).await? {
             return Ok(Vec::new());
         }
 
         let mut categories = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file()
+            if entry.file_type().await?.is_file()
                 && path.extension().is_some_and(|e| e == "md")
-                && let Ok(cat) = parse_category(&path)
+                && let Ok(cat) = parse_category(&path).await
             {
                 categories.push(cat);
             }
@@ -115,19 +115,19 @@ impl Memory for MarkdownMemory {
 
     async fn read_category(&self, ns: &str, category: &str) -> Result<Option<MemoryCategory>> {
         let path = self.category_path(ns, category);
-        if !path.exists() {
+        if !tokio::fs::try_exists(&path).await? {
             return Ok(None);
         }
-        parse_category(&path).map(Some)
+        parse_category(&path).await.map(Some)
     }
 
     async fn delete_fact(&self, ns: &str, category: &str, fact: &str) -> Result<bool> {
         let path = self.category_path(ns, category);
-        if !path.exists() {
+        if !tokio::fs::try_exists(&path).await? {
             return Ok(false);
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = tokio::fs::read_to_string(&path).await?;
         let (_fm, body) = split_frontmatter(&content)?;
 
         let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
@@ -143,18 +143,18 @@ impl Memory for MarkdownMemory {
 
         if new_lines.is_empty() {
             // No facts left — remove the file
-            std::fs::remove_file(&path)?;
+            tokio::fs::remove_file(&path).await?;
         } else {
             let now = chrono::Utc::now().to_rfc3339();
             let facts_text = new_lines.join("\n");
             let new_content =
                 format!("---\ncategory: {category}\nupdated_at: {now}\n---\n{facts_text}\n");
-            std::fs::write(&path, new_content)?;
+            tokio::fs::write(&path, new_content).await?;
         }
         Ok(true)
     }
 
-    async fn save_resource(
+    async fn save_artifact(
         &self,
         ns: &str,
         filename: &str,
@@ -162,22 +162,22 @@ impl Memory for MarkdownMemory {
         created_by: &str,
         content: &str,
     ) -> Result<()> {
-        let dir = self.resource_dir(ns);
-        std::fs::create_dir_all(&dir)?;
+        let dir = self.artifact_dir(ns);
+        tokio::fs::create_dir_all(&dir).await?;
 
         // Write the file
         let file_path = dir.join(filename);
-        std::fs::write(&file_path, content)?;
+        tokio::fs::write(&file_path, content).await?;
 
         // Update manifest
         let manifest_path = dir.join("manifest.json");
-        let mut entries = read_manifest(&manifest_path);
+        let mut entries = read_manifest(&manifest_path).await;
 
         // Remove existing entry with same filename (update)
         entries.retain(|e| e.filename != filename);
 
         let size_bytes = content.len() as i64;
-        entries.push(ResourceEntry {
+        entries.push(ArtifactEntry {
             filename: filename.to_string(),
             description: description.to_string(),
             created_by: created_by.to_string(),
@@ -185,39 +185,42 @@ impl Memory for MarkdownMemory {
         });
 
         let json = serde_json::to_string_pretty(&entries)?;
-        std::fs::write(&manifest_path, json)?;
+        tokio::fs::write(&manifest_path, json).await?;
         Ok(())
     }
 
-    async fn list_resources(&self, ns: &str) -> Result<Vec<ResourceEntry>> {
-        let manifest_path = self.resource_dir(ns).join("manifest.json");
-        Ok(read_manifest(&manifest_path))
+    async fn list_artifacts(&self, ns: &str) -> Result<Vec<ArtifactEntry>> {
+        let manifest_path = self.artifact_dir(ns).join("manifest.json");
+        Ok(read_manifest(&manifest_path).await)
     }
 
-    async fn read_resource(&self, ns: &str, filename: &str) -> Result<Option<String>> {
-        let path = self.resource_dir(ns).join(filename);
-        if !path.exists() {
+    async fn read_artifact(&self, ns: &str, filename: &str) -> Result<Option<String>> {
+        let path = self.artifact_dir(ns).join(filename);
+        if !tokio::fs::try_exists(&path).await? {
             return Ok(None);
         }
-        std::fs::read_to_string(&path).map(Some).map_err(Into::into)
+        tokio::fs::read_to_string(&path)
+            .await
+            .map(Some)
+            .map_err(Into::into)
     }
 
-    async fn delete_resource(&self, ns: &str, filename: &str) -> Result<bool> {
-        let dir = self.resource_dir(ns);
+    async fn delete_artifact(&self, ns: &str, filename: &str) -> Result<bool> {
+        let dir = self.artifact_dir(ns);
         let file_path = dir.join(filename);
-        if !file_path.exists() {
+        if !tokio::fs::try_exists(&file_path).await? {
             return Ok(false);
         }
-        std::fs::remove_file(&file_path)?;
+        tokio::fs::remove_file(&file_path).await?;
 
         // Update manifest
         let manifest_path = dir.join("manifest.json");
-        let mut entries = read_manifest(&manifest_path);
+        let mut entries = read_manifest(&manifest_path).await;
         let before = entries.len();
         entries.retain(|e| e.filename != filename);
         if entries.len() != before {
             let json = serde_json::to_string_pretty(&entries)?;
-            std::fs::write(&manifest_path, json)?;
+            tokio::fs::write(&manifest_path, json).await?;
         }
         Ok(true)
     }
@@ -227,8 +230,8 @@ impl Memory for MarkdownMemory {
 // Parsing helpers
 // ---------------------------------------------------------------------------
 
-fn parse_category(path: &Path) -> Result<MemoryCategory> {
-    let content = std::fs::read_to_string(path)?;
+async fn parse_category(path: &Path) -> Result<MemoryCategory> {
+    let content = tokio::fs::read_to_string(path).await?;
     let (frontmatter, body) = split_frontmatter(&content)?;
 
     let category = extract_field(&frontmatter, "category")?;
@@ -250,8 +253,9 @@ fn parse_category(path: &Path) -> Result<MemoryCategory> {
     })
 }
 
-fn read_manifest(path: &Path) -> Vec<ResourceEntry> {
-    std::fs::read_to_string(path)
+async fn read_manifest(path: &Path) -> Vec<ArtifactEntry> {
+    tokio::fs::read_to_string(path)
+        .await
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -370,12 +374,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_crud() {
+    async fn artifact_crud() {
         let (_md, _wd, mem) = temp_memory();
-        let ns = "workspace/resources";
+        let ns = "workspace/artifacts";
 
         // Save
-        mem.save_resource(
+        mem.save_artifact(
             ns,
             "design.md",
             "System design doc",
@@ -386,18 +390,18 @@ mod tests {
         .unwrap();
 
         // List
-        let entries = mem.list_resources(ns).await.unwrap();
+        let entries = mem.list_artifacts(ns).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename, "design.md");
         assert_eq!(entries[0].description, "System design doc");
         assert_eq!(entries[0].created_by, "architect");
 
         // Read
-        let content = mem.read_resource(ns, "design.md").await.unwrap().unwrap();
+        let content = mem.read_artifact(ns, "design.md").await.unwrap().unwrap();
         assert!(content.contains("# Design"));
 
         // Update (overwrite)
-        mem.save_resource(
+        mem.save_artifact(
             ns,
             "design.md",
             "Updated design",
@@ -406,21 +410,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let entries = mem.list_resources(ns).await.unwrap();
+        let entries = mem.list_artifacts(ns).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].description, "Updated design");
 
         // Delete
-        assert!(mem.delete_resource(ns, "design.md").await.unwrap());
-        assert!(!mem.delete_resource(ns, "design.md").await.unwrap());
-        assert!(mem.list_resources(ns).await.unwrap().is_empty());
+        assert!(mem.delete_artifact(ns, "design.md").await.unwrap());
+        assert!(!mem.delete_artifact(ns, "design.md").await.unwrap());
+        assert!(mem.list_artifacts(ns).await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn resource_not_found() {
+    async fn artifact_not_found() {
         let (_md, _wd, mem) = temp_memory();
         assert!(
-            mem.read_resource("resources", "nope.md")
+            mem.read_artifact("artifacts", "nope.md")
                 .await
                 .unwrap()
                 .is_none()
@@ -509,16 +513,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_scope_project_under_state() {
+    async fn artifact_scope_project_under_state() {
         let (_md, rd, mem) = temp_memory();
         let scope = super::super::types::MemoryScope::new("architect", Some("myapp"));
 
-        assert_eq!(scope.resources_project, "myapp/resources");
-        assert_eq!(scope.resources_global, "resources");
+        assert_eq!(scope.artifacts_project, "myapp/artifacts");
+        assert_eq!(scope.artifacts_global, "artifacts");
 
-        // Project resource goes under {state}/myapp/resources/
-        mem.save_resource(
-            &scope.resources_project,
+        // Project artifact goes under {state}/myapp/artifacts/
+        mem.save_artifact(
+            &scope.artifacts_project,
             "prd.md",
             "Product requirements",
             "architect",
@@ -527,9 +531,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Global resource goes under {state}/resources/
-        mem.save_resource(
-            &scope.resources_global,
+        // Global artifact goes under {state}/artifacts/
+        mem.save_artifact(
+            &scope.artifacts_global,
             "standards.md",
             "Coding standards",
             "system",
@@ -538,16 +542,16 @@ mod tests {
         .await
         .unwrap();
 
-        // Verify files are in the resource dir, not memory dir
-        assert!(rd.path().join("myapp/resources/prd.md").exists());
-        assert!(rd.path().join("resources/standards.md").exists());
+        // Verify files are in the artifact dir, not memory dir
+        assert!(rd.path().join("myapp/artifacts/prd.md").exists());
+        assert!(rd.path().join("artifacts/standards.md").exists());
 
-        // Another agent on the same project sees the same resources
+        // Another agent on the same project sees the same artifacts
         let scope_b = super::super::types::MemoryScope::new("coder", Some("myapp"));
-        assert_eq!(scope_b.resources_project, scope.resources_project);
+        assert_eq!(scope_b.artifacts_project, scope.artifacts_project);
 
         let entries = mem
-            .list_resources(&scope_b.resources_project)
+            .list_artifacts(&scope_b.artifacts_project)
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -555,11 +559,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resource_scope_system_agent_global_only() {
+    async fn artifact_scope_system_agent_global_only() {
         let scope = super::super::types::MemoryScope::new("nenji", None);
 
-        // Both project and global resolve to the same "resources" path
-        assert_eq!(scope.resources_project, "resources");
-        assert_eq!(scope.resources_global, "resources");
+        // Both project and global resolve to the same "artifacts" path
+        assert_eq!(scope.artifacts_project, "artifacts");
+        assert_eq!(scope.artifacts_global, "artifacts");
     }
 }

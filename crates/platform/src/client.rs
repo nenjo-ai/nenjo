@@ -309,14 +309,14 @@ fn council_member_id_by_agent(detail: &CouncilResponseDetail, agent_id: Uuid) ->
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-/// Response body for a project document content read.
+/// Response body for a library knowledge item content read.
 pub struct ProjectDocumentContentResponse {
-    /// Plaintext document content when the platform can return it directly.
+    /// Plaintext item content when the platform can return it directly.
     #[serde(default)]
     pub content: Option<String>,
-    /// Stored document filename.
+    /// Stored item filename.
     pub filename: String,
-    /// MIME content type for the stored document.
+    /// MIME content type for the stored item.
     pub content_type: String,
     /// Stored content size in bytes.
     pub size_bytes: i64,
@@ -326,24 +326,24 @@ pub struct ProjectDocumentContentResponse {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Metadata for one project document stored by the platform.
+/// Metadata for one library knowledge item stored by the platform.
 pub struct ProjectDocumentMetadata {
-    /// Document ID.
+    /// Library knowledge item ID.
     pub id: Uuid,
-    /// Owning project ID.
+    /// Owning library pack ID.
     pub project_id: Uuid,
-    /// Stored document filename.
+    /// Stored item filename.
     pub filename: String,
-    /// Optional repository-relative or project-relative path.
+    /// Optional library-relative path.
     #[serde(default)]
     pub path: Option<String>,
     /// Optional display title.
     #[serde(default)]
     pub title: Option<String>,
-    /// Optional document kind classifier.
+    /// Optional library item kind classifier.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Authority that owns or produced the document.
+    /// Authority that owns or produced the library item.
     pub authority: String,
     /// Optional short summary.
     #[serde(default)]
@@ -351,10 +351,16 @@ pub struct ProjectDocumentMetadata {
     /// Optional processing or publication status.
     #[serde(default)]
     pub status: Option<String>,
-    /// Tags associated with the document.
+    /// Tags associated with the library item.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// MIME content type for the stored document.
+    /// Alternate names that should resolve to this library item.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Search keywords associated with the library item.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// MIME content type for the stored item.
     pub content_type: String,
     /// Stored content size in bytes.
     pub size_bytes: i64,
@@ -365,15 +371,15 @@ pub struct ProjectDocumentMetadata {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Directed relationship between two project documents.
+/// Directed relationship between two library knowledge items.
 pub struct ProjectDocumentEdge {
     /// Edge ID.
     pub id: Uuid,
-    /// Owning project ID.
+    /// Owning library pack ID.
     pub project_id: Uuid,
-    /// Source document ID.
+    /// Source library item ID.
     pub source_document_id: Uuid,
-    /// Target document ID.
+    /// Target library item ID.
     pub target_document_id: Uuid,
     /// Platform edge type classifier.
     pub edge_type: String,
@@ -896,7 +902,7 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Create a project document.
+    /// Create a project manifest resource.
     pub async fn create_project_document(
         &self,
         project: &ProjectCreateDocument,
@@ -921,7 +927,7 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Apply a partial metadata update to a project document.
+    /// Apply a partial metadata update to a project manifest resource.
     pub async fn update_project_document(
         &self,
         id: Uuid,
@@ -959,7 +965,7 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Delete a project document by ID.
+    /// Delete a project manifest resource by ID.
     pub async fn delete_project_document(&self, id: Uuid) -> Result<()> {
         let response = self
             .http
@@ -975,7 +981,7 @@ impl PlatformManifestClient {
         }
     }
 
-    /// List project document summaries for a project.
+    /// List library knowledge item summaries for a project.
     pub async fn list_project_documents(
         &self,
         project_id: Uuid,
@@ -994,7 +1000,7 @@ impl PlatformManifestClient {
             .collect())
     }
 
-    /// List project document metadata records for a project.
+    /// List library knowledge item metadata records for a project.
     pub async fn list_project_document_metadata(
         &self,
         project_id: Uuid,
@@ -1014,12 +1020,12 @@ impl PlatformManifestClient {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode project document metadata"),
-            status => bail!("project document list failed with status {status}"),
+                .context("failed to decode library knowledge item metadata"),
+            status => bail!("library knowledge item list failed with status {status}"),
         }
     }
 
-    /// Fetch one project document summary.
+    /// Fetch one library knowledge item summary.
     pub async fn get_project_document(
         &self,
         project_id: Uuid,
@@ -1038,7 +1044,7 @@ impl PlatformManifestClient {
         }))
     }
 
-    /// Fetch one project document metadata record.
+    /// Fetch one library knowledge item metadata record.
     pub async fn get_project_document_metadata(
         &self,
         project_id: Uuid,
@@ -1050,7 +1056,7 @@ impl PlatformManifestClient {
             .find(|document| document.id == document_id))
     }
 
-    /// Fetch raw project document content from the platform.
+    /// Fetch raw library knowledge item content from the platform.
     pub async fn fetch_project_document_content(
         &self,
         project_id: Uuid,
@@ -1066,19 +1072,19 @@ impl PlatformManifestClient {
             .send()
             .await
             .with_context(|| {
-                format!("failed to fetch content for project document {document_id}")
+                format!("failed to fetch content for library knowledge item {document_id}")
             })?;
 
         match response.status() {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode project document content"),
-            status => bail!("project document content fetch failed with status {status}"),
+                .context("failed to decode library knowledge item content"),
+            status => bail!("library knowledge item content fetch failed with status {status}"),
         }
     }
 
-    /// Fetch project document content in the manifest MCP document shape.
+    /// Fetch library knowledge item content in the manifest MCP document shape.
     pub async fn get_project_document_content(
         &self,
         project_id: Uuid,
@@ -1087,13 +1093,13 @@ impl PlatformManifestClient {
         let metadata = self
             .get_project_document_metadata(project_id, document_id)
             .await?
-            .ok_or_else(|| anyhow!("project document not found: {document_id}"))?;
+            .ok_or_else(|| anyhow!("library knowledge item not found: {document_id}"))?;
         let payload = self
             .fetch_project_document_content(project_id, document_id)
             .await?;
-        let content = payload
-            .content
-            .ok_or_else(|| anyhow!("project document content response did not include content"))?;
+        let content = payload.content.ok_or_else(|| {
+            anyhow!("library knowledge item content response did not include content")
+        })?;
         Ok(ProjectDocumentContentDocument {
             document: ProjectDocumentSummary {
                 id: metadata.id,
@@ -1107,7 +1113,7 @@ impl PlatformManifestClient {
         })
     }
 
-    /// List graph edges connected to a project document.
+    /// List graph edges connected to a library knowledge item.
     pub async fn list_project_document_edges(
         &self,
         project_id: Uuid,
@@ -1122,18 +1128,20 @@ impl PlatformManifestClient {
             .header("X-API-Key", &self.api_key)
             .send()
             .await
-            .with_context(|| format!("failed to list edges for project document {document_id}"))?;
+            .with_context(|| {
+                format!("failed to list edges for library knowledge item {document_id}")
+            })?;
 
         match response.status() {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode project document edges"),
-            status => bail!("project document edge list failed with status {status}"),
+                .context("failed to decode library knowledge item edges"),
+            status => bail!("library knowledge item edge list failed with status {status}"),
         }
     }
 
-    /// Create a project file document, optionally sending encrypted content payload.
+    /// Create a library knowledge item, optionally sending encrypted content payload.
     pub async fn create_project_file_document(
         &self,
         document: &ProjectDocumentCreateDocument,
@@ -1146,13 +1154,13 @@ impl PlatformManifestClient {
         let file_part = multipart::Part::bytes(document.description.clone().into_bytes())
             .file_name(document.filename.clone())
             .mime_str(&content_type)
-            .context("failed to encode project document mime type")?;
+            .context("failed to encode library knowledge item mime type")?;
         let mut form = multipart::Form::new().part("file", file_part);
         if let Some(encrypted_payload) = encrypted_payload {
             form = form.text(
                 "encrypted_payload",
                 serde_json::to_string(&encrypted_payload)
-                    .context("failed to encode encrypted project document payload")?,
+                    .context("failed to encode encrypted library knowledge item payload")?,
             );
         }
 
@@ -1168,7 +1176,7 @@ impl PlatformManifestClient {
             .await
             .with_context(|| {
                 format!(
-                    "failed to create project document {} for project {}",
+                    "failed to create library knowledge item {} for project {}",
                     document.filename, document.project_id
                 )
             })?;
@@ -1177,12 +1185,12 @@ impl PlatformManifestClient {
             StatusCode::OK | StatusCode::CREATED => response
                 .json()
                 .await
-                .context("failed to decode created project document"),
-            status => bail!("project document create failed with status {status}"),
+                .context("failed to decode created library knowledge item"),
+            status => bail!("library knowledge item create failed with status {status}"),
         }
     }
 
-    /// Update the content for an existing project document.
+    /// Update the content for an existing library knowledge item.
     pub async fn update_project_document_content(
         &self,
         project_id: Uuid,
@@ -1206,15 +1214,15 @@ impl PlatformManifestClient {
             .send()
             .await
             .with_context(|| {
-                format!("failed to update content for project document {document_id}")
+                format!("failed to update content for library knowledge item {document_id}")
             })?;
 
         match response.status() {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode updated project document"),
-            status => bail!("project document content update failed with status {status}"),
+                .context("failed to decode updated library knowledge item"),
+            status => bail!("library knowledge item content update failed with status {status}"),
         }
     }
 
@@ -1233,11 +1241,11 @@ impl PlatformManifestClient {
             .header("X-API-Key", &self.api_key)
             .send()
             .await
-            .with_context(|| format!("failed to delete project document {document_id}"))?;
+            .with_context(|| format!("failed to delete library knowledge item {document_id}"))?;
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("project document delete failed with status {status}"),
+            status => bail!("library knowledge item delete failed with status {status}"),
         }
     }
 

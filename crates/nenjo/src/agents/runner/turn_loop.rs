@@ -4,36 +4,24 @@
 //! It is independent of Nenjo platform concepts (NATS, streaming, bootstrap).
 //! Callers build prompts and pass pre-built messages to [`run()`].
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use anyhow::Result;
+use nenjo_models::ModelProvider;
 use regex::Regex;
 use tokio::sync::mpsc;
-use tracing::{debug, info, trace, warn};
-
-use nenjo_models::{ChatMessage, ChatRequest};
-use nenjo_tools::{Tool, ToolCategory};
+use tracing::{debug, info, warn};
 
 use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
 use crate::agents::instance::AgentInstance;
-
-fn dedupe_tool_calls(tool_calls: Vec<nenjo_models::ToolCall>) -> Vec<nenjo_models::ToolCall> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::with_capacity(tool_calls.len());
-    for tool_call in tool_calls {
-        let key = (tool_call.name.clone(), tool_call.arguments.clone());
-        if seen.insert(key) {
-            deduped.push(tool_call);
-        }
-    }
-    deduped
-}
+use crate::provider::ProviderRuntime;
+use crate::tools::{Tool, ToolCategory, ToolResult};
+use nenjo_models::{ChatMessage, ChatRequest};
 
 fn tool_for_call<'a>(
     tools: &'a [Arc<dyn Tool>],
@@ -45,6 +33,12 @@ fn tool_for_call<'a>(
             || nenjo_models::sanitize_tool_name(name) == tool_call.name
             || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
     })
+}
+
+fn emit_event(events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>, event: TurnEvent) {
+    if let Some(tx) = events_tx {
+        let _ = tx.send(event);
+    }
 }
 
 tokio::task_local! {
@@ -119,24 +113,27 @@ fn sanitize_tool_text_preview(text: &str) -> Option<String> {
 ///
 /// Returns [`TurnOutput`] with the final text, token counts, and full
 /// conversation messages.
-pub async fn run(
-    agent: &AgentInstance,
+pub async fn run<P>(
+    agent: &AgentInstance<P>,
     mut messages: Vec<ChatMessage>,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     pause_token: Option<super::types::PauseToken>,
-) -> Result<TurnOutput> {
-    let agent_name = &agent.name;
-    let provider = &*agent.provider;
-    let model = &agent.model;
-    let temperature = agent.temperature;
-    let tools = &agent.tools;
+) -> Result<TurnOutput>
+where
+    P: ProviderRuntime,
+{
+    let agent_name = agent.name();
+    let provider = &*agent.model.model_provider;
+    let model = &agent.model.model_name;
+    let temperature = agent.model.temperature;
+    let tools = &agent.runtime.tools;
     let tool_specs = agent.tool_specs();
     let tool_specs = tool_specs.as_slice();
     let config = TurnLoopConfig {
-        max_iterations: agent.agent_config.max_tool_iterations as u32,
-        parallel_tools: agent.agent_config.parallel_tools,
+        max_turns: agent.runtime.config.max_turns as u32,
+        parallel_tools: agent.runtime.config.parallel_tools,
     };
-    let max_iterations = config.max_iterations;
+    let max_turns = config.max_turns;
 
     let mut final_text = String::new();
     let mut total_input_tokens: u64 = 0;
@@ -164,21 +161,6 @@ pub async fn run(
                     tools = ?tool_names,
                     "Turn loop starting with tools"
                 );
-                if tracing::enabled!(tracing::Level::TRACE) {
-                    let tool_names = tool_specs
-                        .iter()
-                        .map(|tool| tool.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n- ");
-                    trace!(
-                        agent = agent_name,
-                        model,
-                        tool_count = tool_specs.len(),
-                        "\nTool belt sent to provider for {}:\n- {}",
-                        agent_name,
-                        tool_names,
-                    );
-                }
             } else {
                 warn!(
                     agent = agent_name,
@@ -186,7 +168,7 @@ pub async fn run(
                 );
             }
 
-            for iteration in 0..max_iterations {
+            for iteration in 0..max_turns {
                 debug!(
                     agent = agent_name,
                     iteration,
@@ -210,7 +192,7 @@ pub async fn run(
                 truncate_old_tool_arguments(
                     &mut messages,
                     context_budget,
-                    agent.agent_config.context_compaction_trigger_percent,
+                    agent.runtime.config.context_compaction_trigger_percent,
                 );
                 // Compact conversation if token estimate still exceeds budget
                 // after argument truncation.
@@ -229,9 +211,9 @@ pub async fn run(
                 if let Some(ref pt) = pause_token
                     && pt.is_paused()
                 {
-                    let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Paused));
+                    emit_event(events_tx.as_ref(), TurnEvent::Paused);
                     pt.wait_if_paused().await;
-                    let _ = events_tx.as_ref().map(|tx| tx.send(TurnEvent::Resumed));
+                    emit_event(events_tx.as_ref(), TurnEvent::Resumed);
                 }
 
                 // Call LLM
@@ -248,7 +230,6 @@ pub async fn run(
 
                 let mut response = provider.chat(request, model, temperature).await?;
                 let original_tool_call_count = response.tool_calls.len();
-                response.tool_calls = dedupe_tool_calls(response.tool_calls);
                 if response.tool_calls.len() != original_tool_call_count {
                     warn!(
                         agent = agent_name,
@@ -337,11 +318,12 @@ pub async fn run(
                     );
                     let assistant_message = ChatMessage::assistant(assistant_content.to_string());
                     messages.push(assistant_message.clone());
-                    let _ = events_tx.as_ref().map(|tx| {
-                        tx.send(TurnEvent::TranscriptMessage {
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::TranscriptMessage {
                             message: assistant_message,
-                        })
-                    });
+                        },
+                    );
 
                     // Execute tool calls — parallel when the model returns multiple
                     // calls in one response (it understands ordering dependencies),
@@ -368,22 +350,24 @@ pub async fn run(
                         .and_then(sanitize_tool_text_preview);
 
                     // Emit a single start event with all tool calls.
-                    let _ = events_tx.as_ref().map(|tx| {
-                        tx.send(TurnEvent::ToolCallStart {
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::ToolCallStart {
                             parent_tool_name: None,
                             calls: response
                                 .tool_calls
                                 .iter()
                                 .map(|tc| ToolCall {
+                                    tool_call_id: Some(tc.id.clone()),
                                     tool_name: tc.name.clone(),
                                     tool_args: truncate(&tc.arguments, 120),
                                     text_preview: tool_text_preview.clone(),
                                 })
                                 .collect(),
-                        })
-                    });
+                        },
+                    );
 
-                    let tool_results: Vec<(&nenjo_models::ToolCall, nenjo_tools::ToolResult)> =
+                    let tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
                         if run_parallel {
                             let message_snapshot = messages.clone();
                             let futs = response.tool_calls.iter().map(|tc| {
@@ -417,13 +401,16 @@ pub async fn run(
 
                     // Emit result events and build messages in order.
                     for (tool_call, tool_result) in &tool_results {
-                        let _ = events_tx.as_ref().map(|tx| {
-                            tx.send(TurnEvent::ToolCallEnd {
+                        emit_event(
+                            events_tx.as_ref(),
+                            TurnEvent::ToolCallEnd {
                                 parent_tool_name: None,
+                                tool_call_id: Some(tool_call.id.clone()),
                                 tool_name: tool_call.name.clone(),
+                                tool_args: truncate(&tool_call.arguments, 120),
                                 result: tool_result.clone(),
-                            })
-                        });
+                            },
+                        );
 
                         // Log tool failures so auth issues (e.g. `gh` CLI) are
                         // visible in worker logs instead of being silently swallowed.
@@ -475,11 +462,12 @@ pub async fn run(
                         });
                         let tool_message = ChatMessage::tool(tool_content.to_string());
                         messages.push(tool_message.clone());
-                        let _ = events_tx.as_ref().map(|tx| {
-                            tx.send(TurnEvent::TranscriptMessage {
+                        emit_event(
+                            events_tx.as_ref(),
+                            TurnEvent::TranscriptMessage {
                                 message: tool_message,
-                            })
-                        });
+                            },
+                        );
                     }
 
                     // Terminal tool: stop the loop. The verdict is already recorded
@@ -489,7 +477,28 @@ pub async fn run(
                             agent = agent_name,
                             model, "Terminal tool called, ending turn loop"
                         );
-                        final_text = response.text.as_deref().unwrap_or("").to_string();
+                        let terminal_tool_text = tool_results
+                            .iter()
+                            .find(|(tc, _)| {
+                                tool_for_call(tools, tc).is_some_and(|t| t.is_terminal())
+                            })
+                            .map(|(_, result)| {
+                                if result.success {
+                                    result.output.clone()
+                                } else {
+                                    result
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| result.output.clone())
+                                }
+                            })
+                            .unwrap_or_default();
+                        final_text = response
+                            .text
+                            .as_deref()
+                            .filter(|text| !text.trim().is_empty())
+                            .map(ToOwned::to_owned)
+                            .unwrap_or(terminal_tool_text);
                         break;
                     }
 
@@ -521,18 +530,21 @@ pub async fn run(
                 final_text = text.clone();
                 let assistant_message = ChatMessage::assistant(text);
                 messages.push(assistant_message.clone());
-                let _ = events_tx.as_ref().map(|tx| {
-                    tx.send(TurnEvent::TranscriptMessage {
+                emit_event(
+                    events_tx.as_ref(),
+                    TurnEvent::TranscriptMessage {
                         message: assistant_message,
-                    })
-                });
+                    },
+                );
                 break;
             }
 
-            if final_text.is_empty() && max_iterations > 0 {
+            if final_text.is_empty() && max_turns > 0 {
                 warn!(
                     agent = agent_name,
-                    model, "Turn loop reached max iterations without final response"
+                    model,
+                    max_turns,
+                    "Turn loop reached max turns without final response"
                 );
                 final_text = messages
                     .iter()
@@ -561,11 +573,12 @@ pub async fn run(
                 messages,
             };
 
-            let _ = events_tx.as_ref().map(|tx| {
-                tx.send(TurnEvent::Done {
+            emit_event(
+                events_tx.as_ref(),
+                TurnEvent::Done {
                     output: output.clone(),
-                })
-            });
+                },
+            );
 
             Ok(output)
                 })
@@ -583,7 +596,7 @@ async fn execute_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &nenjo_models::ToolCall,
     current_messages: &[ChatMessage],
-) -> nenjo_tools::ToolResult {
+) -> ToolResult {
     info!(
         agent = agent_name,
         tool = %tool_call.name,
@@ -596,7 +609,7 @@ async fn execute_tool(
     let tool = match tool_for_call(tools, tool_call) {
         Some(t) => t,
         None => {
-            return nenjo_tools::ToolResult {
+            return ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Unknown tool: {}", tool_call.name)),
@@ -608,7 +621,7 @@ async fn execute_tool(
     let args: serde_json::Value = match serde_json::from_str(&tool_call.arguments) {
         Ok(v) => v,
         Err(e) => {
-            return nenjo_tools::ToolResult {
+            return ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Failed to parse tool arguments: {e}")),
@@ -620,7 +633,7 @@ async fn execute_tool(
     let execute = async {
         match tool.execute(args).await {
             Ok(result) => result,
-            Err(e) => nenjo_tools::ToolResult {
+            Err(e) => ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Tool execution error: {e}")),

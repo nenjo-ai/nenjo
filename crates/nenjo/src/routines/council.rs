@@ -14,24 +14,50 @@ use uuid::Uuid;
 
 use super::RoutineEvent;
 use super::types::RoutineState;
-use super::{apply_session_binding_memory_scope, gate};
+use super::{
+    apply_session_binding_memory_scope, gate, with_agent_step_tools, with_routine_step_max_turns,
+};
+use crate::AgentBuilder;
 use crate::agents::runner::types::TurnOutput;
+use crate::input::{AgentRun, ChatInput, CouncilSubtaskInput, ProjectLocation};
 use crate::manifest::{CouncilDelegationStrategy, CouncilManifest, RoutineStepManifest};
-use crate::provider::Provider;
+use crate::provider::ProviderRuntime;
 use crate::routines::types::StepResult;
-use crate::types::TaskType;
+
+fn scope_tools_to_work_dir<P>(mut builder: AgentBuilder<P>, state: &RoutineState) -> AgentBuilder<P>
+where
+    P: ProviderRuntime,
+{
+    if let Some(ref git) = state.input.git
+        && !git.work_dir.is_empty()
+    {
+        builder = builder.with_work_dir(&git.work_dir);
+    }
+    builder
+}
+
+fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
+    if let Some(git) = state.input.git.clone() {
+        run.execution.project_location = Some(ProjectLocation::from_git(git));
+    }
+    run
+}
 
 /// Execute a council step, dispatching based on the council's delegation_strategy.
-pub(crate) async fn execute_council(
-    provider: &Provider,
+pub(crate) async fn execute_council<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let council_id = step.council_id.context("Council step missing council_id")?;
+    let manifest = provider.manifest_snapshot();
 
-    let council = provider
-        .manifest()
+    let council = manifest
         .councils
         .iter()
         .find(|c| c.id == council_id)
@@ -40,40 +66,65 @@ pub(crate) async fn execute_council(
 
     match council.delegation_strategy {
         CouncilDelegationStrategy::Dynamic => {
-            execute_dynamic(provider, step, state, &council, events_tx).await
+            execute_dynamic(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Decompose => {
-            execute_decompose(provider, step, state, &council, events_tx).await
+            execute_decompose(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Broadcast => {
-            execute_broadcast(provider, step, state, &council, events_tx).await
+            execute_broadcast(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::RoundRobin => {
-            execute_round_robin(provider, step, state, &council, events_tx).await
+            execute_round_robin(provider, step, step_run_id, state, &council, events_tx).await
         }
         CouncilDelegationStrategy::Vote => {
-            execute_vote(provider, step, state, &council, events_tx).await
+            execute_vote(provider, step, step_run_id, state, &council, events_tx).await
         }
     }
 }
 
-async fn run_streamed_task(
-    provider: &Provider,
+struct StreamedTaskParams<'a, P> {
+    provider: &'a P,
     agent_id: Uuid,
-    state: &RoutineState,
-    task: TaskType,
-    step_id: Uuid,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<TurnOutput> {
-    let builder = provider
-        .agent_by_id(agent_id)
-        .await?
-        .with_tool(gate::PassVerdictTool::new());
-    let runner = apply_session_binding_memory_scope(builder, state.input.session_binding.as_ref())
+    state: &'a RoutineState,
+    step: &'a RoutineStepManifest,
+    task: AgentRun,
+    step_run_id: Uuid,
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+}
+
+async fn run_streamed_task<P>(params: StreamedTaskParams<'_, P>) -> Result<TurnOutput>
+where
+    P: ProviderRuntime,
+{
+    let StreamedTaskParams {
+        provider,
+        agent_id,
+        state,
+        step,
+        task,
+        step_run_id,
+        events_tx,
+    } = params;
+
+    let builder = apply_session_binding_memory_scope(
+        provider.build_agent_by_id(agent_id).await?,
+        state.input.session_binding.as_ref(),
+    );
+    let builder = scope_tools_to_work_dir(builder, state);
+    let runner = with_agent_step_tools(with_routine_step_max_turns(builder, step))
         .build()
         .await?;
 
-    gate::execute_with_pass_verdict(&runner, task, state.input.project_id, step_id, events_tx).await
+    gate::execute_with_pass_verdict(
+        &runner,
+        task,
+        state.input.project_id,
+        step.id,
+        step_run_id,
+        events_tx,
+    )
+    .await
 }
 
 fn member_agent_ids(council: &CouncilManifest) -> Result<Vec<Uuid>> {
@@ -84,13 +135,17 @@ fn member_agent_ids(council: &CouncilManifest) -> Result<Vec<Uuid>> {
     Ok(ids)
 }
 
-async fn run_member_tasks(
-    provider: &Provider,
+async fn run_member_tasks<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     members: &[(Uuid, String)],
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<Vec<StepResult>> {
+) -> Result<Vec<StepResult>>
+where
+    P: ProviderRuntime,
+{
     let mut member_results = Vec::new();
 
     for (i, (agent_id, task_text)) in members.iter().enumerate() {
@@ -101,14 +156,30 @@ async fn run_member_tasks(
             "Executing council member task"
         );
 
-        let task = TaskType::CouncilSubtask {
-            parent_task: state.initial_input.clone(),
-            subtask_description: task_text.clone(),
-            subtask_index: i,
-            project_id: state.input.project_id,
-        };
+        let task = attach_location(
+            AgentRun {
+                kind: crate::input::AgentRunKind::CouncilSubtask(CouncilSubtaskInput {
+                    parent_task: state.initial_input.clone(),
+                    subtask_description: task_text.clone(),
+                    subtask_index: i,
+                    project_id: state.input.project_id,
+                }),
+                execution: Default::default(),
+            },
+            state,
+        );
 
-        match run_streamed_task(provider, *agent_id, state, task, step.id, events_tx).await {
+        match run_streamed_task(StreamedTaskParams {
+            provider,
+            agent_id: *agent_id,
+            state,
+            step,
+            task,
+            step_run_id,
+            events_tx,
+        })
+        .await
+        {
             Ok(output) => member_results.push(StepResult {
                 passed: gate::resolve_pass_verdict(&output.messages)?.passed,
                 output: output.text,
@@ -133,9 +204,10 @@ async fn run_member_tasks(
     Ok(member_results)
 }
 
-struct AggregateMemberResultsParams<'a> {
-    provider: &'a Provider,
+struct AggregateMemberResultsParams<'a, P> {
+    provider: &'a P,
     step: &'a RoutineStepManifest,
+    step_run_id: Uuid,
     state: &'a RoutineState,
     council: &'a CouncilManifest,
     events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
@@ -144,10 +216,16 @@ struct AggregateMemberResultsParams<'a> {
     extra_data: serde_json::Value,
 }
 
-async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> Result<StepResult> {
+async fn aggregate_member_results<P>(
+    params: AggregateMemberResultsParams<'_, P>,
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -174,18 +252,22 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
         "\nSynthesize the final result and submit a pass_verdict that reflects the council outcome.",
     );
 
-    let aggregate_result = run_streamed_task(
+    let aggregate_result = run_streamed_task(StreamedTaskParams {
         provider,
-        council.leader_agent_id,
+        agent_id: council.leader_agent_id,
         state,
-        TaskType::Chat {
-            user_message: prompt,
-            history: Vec::new(),
-            project_id: state.input.project_id,
-        },
-        step.id,
+        step,
+        task: attach_location(
+            AgentRun::chat(ChatInput {
+                message: prompt,
+                history: Vec::new(),
+                project_id: Some(state.input.project_id),
+            }),
+            state,
+        ),
+        step_run_id,
         events_tx,
-    )
+    })
     .await?;
 
     let verdict = gate::resolve_pass_verdict(&aggregate_result.messages)?;
@@ -196,13 +278,15 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
         + aggregate_result.output_tokens;
     let total_tool_calls =
         member_results.iter().map(|r| r.tool_calls).sum::<u32>() + aggregate_result.tool_calls;
+    let output = gate::pass_verdict_display_output(&verdict, &aggregate_result.text);
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: aggregate_result.text,
+        output,
         data: serde_json::json!({
             "verdict": if verdict.passed { "pass" } else { "fail" },
             "reasoning": verdict.reasoning,
+            "output": verdict.output,
             "member_results": member_results.iter().map(|r| serde_json::json!({
                 "step_name": r.step_name,
                 "passed": r.passed,
@@ -224,13 +308,17 @@ async fn aggregate_member_results(params: AggregateMemberResultsParams<'_>) -> R
 }
 
 /// Dynamic: leader gets free reign to work (with delegation tools if configured).
-async fn execute_dynamic(
-    provider: &Provider,
+async fn execute_dynamic<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let leader_agent_id = council.leader_agent_id;
 
     info!(
@@ -240,18 +328,22 @@ async fn execute_dynamic(
         "Starting dynamic council execution"
     );
 
-    let output = run_streamed_task(
+    let output = run_streamed_task(StreamedTaskParams {
         provider,
-        leader_agent_id,
+        agent_id: leader_agent_id,
         state,
-        TaskType::Chat {
-            user_message: state.initial_input.clone(),
-            history: Vec::new(),
-            project_id: state.input.project_id,
-        },
-        step.id,
+        step,
+        task: attach_location(
+            AgentRun::chat(ChatInput {
+                message: state.initial_input.clone(),
+                history: Vec::new(),
+                project_id: Some(state.input.project_id),
+            }),
+            state,
+        ),
+        step_run_id,
         events_tx,
-    )
+    })
     .await?;
 
     info!(
@@ -260,14 +352,16 @@ async fn execute_dynamic(
     );
 
     let verdict = gate::resolve_pass_verdict(&output.messages)?;
+    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
     let data = serde_json::json!({
         "verdict": if verdict.passed { "pass" } else { "fail" },
         "reasoning": verdict.reasoning,
+        "output": verdict.output,
     });
 
     Ok(StepResult {
         passed: verdict.passed,
-        output: output.text,
+        output: step_output,
         data,
         step_id: step.id,
         step_name: step.name.clone(),
@@ -279,13 +373,17 @@ async fn execute_dynamic(
 }
 
 /// Decompose: leader splits → members execute → leader aggregates.
-async fn execute_decompose(
-    provider: &Provider,
+async fn execute_decompose<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let leader_agent_id = council.leader_agent_id;
     let member_agent_ids = member_agent_ids(council)?;
 
@@ -310,18 +408,22 @@ async fn execute_decompose(
         state.initial_input
     );
 
-    let decompose_result = run_streamed_task(
+    let decompose_result = run_streamed_task(StreamedTaskParams {
         provider,
-        leader_agent_id,
+        agent_id: leader_agent_id,
         state,
-        TaskType::Chat {
-            user_message: decompose_message,
-            history: Vec::new(),
-            project_id: state.input.project_id,
-        },
-        step.id,
+        step,
+        task: attach_location(
+            AgentRun::chat(ChatInput {
+                message: decompose_message,
+                history: Vec::new(),
+                project_id: Some(state.input.project_id),
+            }),
+            state,
+        ),
+        step_run_id,
         events_tx,
-    )
+    })
     .await?;
     let subtasks = parse_subtasks(&decompose_result.text, member_agent_ids.len());
 
@@ -332,11 +434,13 @@ async fn execute_decompose(
         .zip(subtasks.iter())
         .map(|(agent_id, subtask)| (*agent_id, subtask.clone()))
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
 
     let mut result = aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -356,13 +460,17 @@ async fn execute_decompose(
     Ok(result)
 }
 
-async fn execute_broadcast(
-    provider: &Provider,
+async fn execute_broadcast<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let member_agent_ids = member_agent_ids(council)?;
     let members: Vec<(Uuid, String)> = member_agent_ids
         .iter()
@@ -376,10 +484,12 @@ async fn execute_broadcast(
             )
         })
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -391,13 +501,17 @@ async fn execute_broadcast(
     .await
 }
 
-async fn execute_round_robin(
-    provider: &Provider,
+async fn execute_round_robin<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let member_agent_ids = member_agent_ids(council)?;
     let mut running_context = String::new();
     let mut members = Vec::new();
@@ -417,11 +531,18 @@ async fn execute_round_robin(
             )
         };
         let single_member = vec![(*agent_id, task)];
-        let result = run_member_tasks(provider, step, state, &single_member, events_tx)
-            .await?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let result = run_member_tasks(
+            provider,
+            step,
+            step_run_id,
+            state,
+            &single_member,
+            events_tx,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
         running_context.push_str(&format!(
             "\n--- Contribution {} ---\n{}\n",
             index + 1,
@@ -433,6 +554,7 @@ async fn execute_round_robin(
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,
@@ -447,13 +569,17 @@ async fn execute_round_robin(
     .await
 }
 
-async fn execute_vote(
-    provider: &Provider,
+async fn execute_vote<P>(
+    provider: &P,
     step: &RoutineStepManifest,
+    step_run_id: Uuid,
     state: &RoutineState,
     council: &CouncilManifest,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult> {
+) -> Result<StepResult>
+where
+    P: ProviderRuntime,
+{
     let member_agent_ids = member_agent_ids(council)?;
     let members: Vec<(Uuid, String)> = member_agent_ids
         .iter()
@@ -467,10 +593,12 @@ async fn execute_vote(
             )
         })
         .collect();
-    let member_results = run_member_tasks(provider, step, state, &members, events_tx).await?;
+    let member_results =
+        run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
         step,
+        step_run_id,
         state,
         council,
         events_tx,

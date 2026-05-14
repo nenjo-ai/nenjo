@@ -6,21 +6,21 @@ use std::fmt::Display;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use nenjo_models::ModelProvider;
-use nenjo_tools::security::SecurityPolicy;
-use nenjo_tools::{Tool, ToolSpec};
-
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
+use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, PromptConfig};
-use crate::provider::ToolFactory;
-use crate::types::{RenderContextExt, RenderContextVars, TaskType};
+use crate::provider::{ErasedProvider, ProviderRuntime};
+use crate::tools::{Tool, ToolSecurity, ToolSpec};
 
 /// The system and developer prompts ready for the turn loop.
 #[derive(Debug)]
 pub struct BuiltPrompts {
+    /// Rendered system prompt.
     pub system: String,
+    /// Rendered developer prompt.
     pub developer: String,
+    /// Rendered user message for the current run.
     pub user_message: String,
 }
 
@@ -39,44 +39,151 @@ impl Display for BuiltPrompts {
 }
 
 /// A fully configured agent instance ready for task execution.
-#[derive(Clone)]
-pub struct AgentInstance {
-    pub name: String,
-    pub description: String,
-    pub agent_id: Option<Uuid>,
-    pub model: String,
-    pub model_id: Uuid,
-    pub temperature: f64,
-    pub prompt_config: PromptConfig,
-    pub prompt_context: PromptContext,
-    pub provider: Arc<dyn ModelProvider>,
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub security: Arc<SecurityPolicy>,
-    pub agent_config: AgentConfig,
-    pub context_renderer: ContextRenderer,
-    pub source_manifest: Option<AgentManifest>,
-    pub tool_factory: Option<Arc<dyn ToolFactory>>,
-    pub memory_vars: HashMap<String, String>,
-    pub resource_vars: HashMap<String, String>,
-    pub documents_xml: String,
+pub struct AgentInstance<P: ProviderRuntime = ErasedProvider> {
+    pub(crate) manifest: AgentManifest,
+    pub(crate) model: AgentModel<P>,
+    pub(crate) prompt: AgentPromptState,
+    pub(crate) runtime: AgentRuntime<P>,
 }
 
-impl std::fmt::Debug for AgentInstance {
+/// Model provider binding selected for an agent instance.
+pub(crate) struct AgentModel<P: ProviderRuntime = ErasedProvider> {
+    pub(crate) model_name: String,
+    pub(crate) id: Uuid,
+    pub(crate) temperature: f64,
+    pub(crate) model_provider: Arc<P::Model<'static>>,
+}
+
+/// Prompt rendering state carried by an agent instance.
+#[derive(Clone)]
+pub(crate) struct AgentPromptState {
+    pub(crate) context: PromptContext,
+    pub(crate) renderer: ContextRenderer,
+    pub(crate) memory_vars: HashMap<String, String>,
+    pub(crate) artifact_vars: HashMap<String, String>,
+}
+
+/// Runtime resources attached to an agent instance.
+pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
+    pub(crate) tools: Vec<Arc<dyn Tool>>,
+    pub(crate) security: Arc<ToolSecurity>,
+    pub(crate) config: AgentConfig,
+    pub(crate) provider_runtime: Option<P>,
+}
+
+impl<P: ProviderRuntime> Clone for AgentModel<P> {
+    fn clone(&self) -> Self {
+        Self {
+            model_name: self.model_name.clone(),
+            id: self.id,
+            temperature: self.temperature,
+            model_provider: self.model_provider.clone(),
+        }
+    }
+}
+
+impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            security: self.security.clone(),
+            config: self.config.clone(),
+            provider_runtime: self.provider_runtime.clone(),
+        }
+    }
+}
+
+impl<P: ProviderRuntime> Clone for AgentInstance<P> {
+    fn clone(&self) -> Self {
+        Self {
+            manifest: self.manifest.clone(),
+            model: self.model.clone(),
+            prompt: self.prompt.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+impl<P: ProviderRuntime> std::fmt::Debug for AgentInstance<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentInstance")
-            .field("name", &self.name)
-            .field("model_id", &self.model_id)
-            .field("model", &self.model)
-            .field("temperature", &self.temperature)
-            .field("tools_count", &self.tools.len())
+            .field("name", &self.manifest.name)
+            .field("model_id", &self.model.id)
+            .field("model", &self.model.model_name)
+            .field("temperature", &self.model.temperature)
+            .field("tools_count", &self.runtime.tools.len())
             .finish_non_exhaustive()
     }
 }
 
-impl AgentInstance {
+impl<P: ProviderRuntime> AgentInstance<P> {
+    /// Agent name from the manifest.
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    /// Agent description from the manifest, or an empty string if absent.
+    pub fn description(&self) -> &str {
+        self.manifest.description.as_deref().unwrap_or_default()
+    }
+
+    /// Agent manifest ID.
+    pub fn agent_id(&self) -> Uuid {
+        self.manifest.id
+    }
+
+    /// Prompt configuration from the agent manifest.
+    pub fn prompt_config(&self) -> &PromptConfig {
+        &self.manifest.prompt_config
+    }
+
+    /// Agent manifest used to build this instance.
+    pub fn manifest(&self) -> &AgentManifest {
+        &self.manifest
+    }
+
+    /// Model name selected for this instance.
+    pub fn model_name(&self) -> &str {
+        &self.model.model_name
+    }
+
+    /// Model manifest ID selected for this instance.
+    pub fn model_id(&self) -> Uuid {
+        self.model.id
+    }
+
+    /// Model temperature selected for this instance.
+    pub fn temperature(&self) -> f64 {
+        self.model.temperature
+    }
+
+    /// Prompt context used when rendering agent prompts.
+    pub fn prompt_context(&self) -> &PromptContext {
+        &self.prompt.context
+    }
+
+    /// Tools available to this agent instance.
+    pub fn tools(&self) -> &[Arc<dyn Tool>] {
+        &self.runtime.tools
+    }
+
+    /// Tool security policy for this instance.
+    pub fn security(&self) -> &ToolSecurity {
+        &self.runtime.security
+    }
+
+    /// Update the active domain session ID, returning whether a domain was active.
+    pub fn set_active_domain_session_id(&mut self, session_id: Uuid) -> bool {
+        let Some(active_domain) = self.prompt.context.active_domain.as_mut() else {
+            return false;
+        };
+        active_domain.session_id = session_id;
+        true
+    }
+
     /// Get tool specs for LLM function calling registration.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools.iter().map(|t| t.spec()).collect()
+        self.runtime.tools.iter().map(|t| t.spec()).collect()
     }
 
     /// Build the system, developer, and user prompts for an execution.
@@ -85,10 +192,19 @@ impl AgentInstance {
     /// `HashMap<String, String>` of template variables. Context blocks
     /// (from the DB) are rendered first, then merged into the vars so
     /// `{{ context.* }}` references resolve in the final prompts.
-    pub fn build_prompts(&self, task: &TaskType) -> BuiltPrompts {
-        // 1. Build the render context from task + extras
-        let mut ctx = RenderContextVars::from_task(task);
-        let ex = &self.prompt_context.render_ctx_extra;
+    pub fn build_prompts(&self, run: &AgentRun) -> BuiltPrompts {
+        self.build_prompts_with_vars(run, None, None)
+    }
+
+    pub(crate) fn build_prompts_with_vars(
+        &self,
+        run: &AgentRun,
+        memory_vars: Option<&HashMap<String, String>>,
+        artifact_vars: Option<&HashMap<String, String>>,
+    ) -> BuiltPrompts {
+        // 1. Build the render context from the run input + extras
+        let mut ctx = render_context_from_agent_run(run);
+        let ex = &self.prompt.context.render_ctx_extra;
 
         // Project — merge from extras, derive working_dir from workspace/slug
         if !ex.project.name.is_empty() {
@@ -96,6 +212,7 @@ impl AgentInstance {
         }
         if !ex.project.slug.is_empty() {
             ctx.project.working_dir = self
+                .runtime
                 .security
                 .workspace_dir
                 .join(&ex.project.slug)
@@ -103,9 +220,7 @@ impl AgentInstance {
                 .to_string();
         }
 
-        // Git — task-level git (worktree) takes priority over project-level git (repo).
-        // from_task() already set ctx.git if the task had git context.
-        // Only fall back to project-level git if the task didn't provide one.
+        // Runtime git/worktree context takes priority over project-level git.
         if ctx.git.is_empty() && !ex.git.is_empty() {
             ctx.git = ex.git.clone();
         }
@@ -119,79 +234,104 @@ impl AgentInstance {
         }
 
         // Agent (self)
-        ctx._self.id = self.agent_id.unwrap_or_default();
-        ctx._self.role = self.name.clone();
-        ctx._self.display_name = self.name.clone();
-        ctx._self.model_name = self.model.clone();
-        ctx._self.description = Some(self.description.clone());
+        ctx._self.id = self.agent_id();
+        ctx._self.role = self.name().to_string();
+        ctx._self.display_name = self.name().to_string();
+        ctx._self.model_name = self.model.model_name.clone();
+        ctx._self.description = Some(self.description().to_string());
 
         // Global
         ctx.timestamp = chrono::Utc::now().to_rfc3339();
 
         // Memory profile
+        let prompt_config = self.prompt_config();
         ctx.memory_profile = crate::context::MemoryProfileContext {
-            core_focus: if self.prompt_config.memory_profile.core_focus.is_empty() {
+            core_focus: if prompt_config.memory_profile.core_focus.is_empty() {
                 None
             } else {
                 Some(crate::context::FocusListContext {
-                    items: self.prompt_config.memory_profile.core_focus.clone(),
+                    items: prompt_config.memory_profile.core_focus.clone(),
                 })
             },
-            project_focus: if self.prompt_config.memory_profile.project_focus.is_empty() {
+            project_focus: if prompt_config.memory_profile.project_focus.is_empty() {
                 None
             } else {
                 Some(crate::context::FocusListContext {
-                    items: self.prompt_config.memory_profile.project_focus.clone(),
+                    items: prompt_config.memory_profile.project_focus.clone(),
                 })
             },
-            shared_focus: if self.prompt_config.memory_profile.shared_focus.is_empty() {
+            shared_focus: if prompt_config.memory_profile.shared_focus.is_empty() {
                 None
             } else {
                 Some(crate::context::FocusListContext {
-                    items: self.prompt_config.memory_profile.shared_focus.clone(),
+                    items: prompt_config.memory_profile.shared_focus.clone(),
                 })
             },
         };
 
         // 2. Populate available collections (exclude self from agents)
-        let self_id = self.agent_id;
+        let self_id = self.agent_id();
         ctx.available_agents = self
-            .prompt_context
+            .prompt
+            .context
             .available_agents
             .iter()
-            .filter(|a| self_id.is_none_or(|id| a.id != id))
+            .filter(|a| a.id != self_id)
             .map(prompts::render_agent)
             .collect();
         ctx.available_abilities = self
-            .prompt_context
+            .prompt
+            .context
             .available_abilities
             .iter()
             .map(prompts::render_ability)
             .collect();
         ctx.available_domains = self
-            .prompt_context
+            .prompt
+            .context
             .available_domains
             .iter()
             .map(prompts::render_domain)
             .collect();
 
-        // Memories, resources, and documents
-        ctx.memory_vars = self.memory_vars.clone();
-        ctx.resource_vars = self.resource_vars.clone();
-        ctx.documents_xml = self.documents_xml.clone();
+        // Memories and artifacts
+        ctx.memory_vars = memory_vars
+            .cloned()
+            .unwrap_or_else(|| self.prompt.memory_vars.clone());
+        ctx.artifact_vars = artifact_vars
+            .cloned()
+            .unwrap_or_else(|| self.prompt.artifact_vars.clone());
+        ctx.knowledge_vars = ex.knowledge_vars.clone();
 
         // 3. Build the vars HashMap once
         let mut vars = ctx.to_vars();
 
         // 4. Render context blocks and merge into vars
-        let rendered_blocks = self.context_renderer.render_all(&vars);
+        let rendered_blocks = self.prompt.renderer.render_all(&vars);
         vars.extend(rendered_blocks);
+
+        if !ctx.project.context.is_empty() {
+            let mut project_context_vars = vars.clone();
+            project_context_vars.remove("project");
+            project_context_vars.remove("project.context");
+            let rendered_context =
+                nenjo_xml::template::render_template(&ctx.project.context, &project_context_vars);
+            ctx.project.context = rendered_context.clone();
+            if rendered_context.is_empty() {
+                vars.remove("project.context");
+            } else {
+                vars.insert("project.context".into(), rendered_context);
+            }
+            if !ctx.project.is_empty() {
+                vars.insert("project".into(), nenjo_xml::to_xml_pretty(&ctx.project, 2));
+            }
+        }
 
         // 5. Assemble developer prompt
         // Domain developer prompt addon is appended when a domain session is active.
-        let mut developer = self.prompt_config.developer_prompt.clone();
-        if self.prompt_context.append_active_domain_addon
-            && let Some(ref domain) = self.prompt_context.active_domain
+        let mut developer = prompt_config.developer_prompt.clone();
+        if self.prompt.context.append_active_domain_addon
+            && let Some(ref domain) = self.prompt.context.active_domain
             && let Some(ref addon) = domain.manifest.prompt_config.developer_prompt_addon
             && !addon.is_empty()
         {
@@ -202,27 +342,27 @@ impl AgentInstance {
         }
 
         // 6. Select the user message template based on task type
-        let (task_type_name, task_template) = match task {
-            TaskType::Task { .. } => ("Task", &self.prompt_config.templates.task_execution),
-            TaskType::Chat { .. } => ("Chat", &self.prompt_config.templates.chat_task),
-            TaskType::Gate { .. } => ("Gate", &self.prompt_config.templates.gate_eval),
-            TaskType::CouncilSubtask { .. } => {
-                ("CouncilSubtask", &self.prompt_config.templates.chat_task)
+        let (task_type_name, task_template) = match &run.kind {
+            AgentRunKind::Task { .. } => ("Task", &prompt_config.templates.task_execution),
+            AgentRunKind::Chat { .. } => ("Chat", &prompt_config.templates.chat_task),
+            AgentRunKind::Gate { .. } => ("Gate", &prompt_config.templates.gate_eval),
+            AgentRunKind::CouncilSubtask { .. } => {
+                ("CouncilSubtask", &prompt_config.templates.chat_task)
             }
-            TaskType::Cron { .. } => ("Cron", &self.prompt_config.templates.cron_task),
-            TaskType::Heartbeat { .. } => {
-                ("Heartbeat", &self.prompt_config.templates.heartbeat_task)
+            AgentRunKind::Cron { .. } => ("Cron", &prompt_config.templates.cron_task),
+            AgentRunKind::Heartbeat { .. } => {
+                ("Heartbeat", &prompt_config.templates.heartbeat_task)
             }
         };
         tracing::debug!(
-            agent = %self.name,
+            agent = %self.name(),
             task_type = task_type_name,
             template_len = task_template.len(),
             "Selected task template"
         );
 
         // 7. Render all three prompts with the same vars
-        let system = nenjo_xml::template::render_template(&self.prompt_config.system_prompt, &vars);
+        let system = nenjo_xml::template::render_template(&prompt_config.system_prompt, &vars);
         let developer = nenjo_xml::template::render_template(&developer, &vars);
         let user_message = nenjo_xml::template::render_template(task_template, &vars);
 
@@ -232,91 +372,4 @@ impl AgentInstance {
             user_message,
         }
     }
-}
-
-/// Document manifest entry (mirrors harness doc_sync).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ManifestEntry {
-    filename: String,
-    path: Option<String>,
-    title: Option<String>,
-    kind: Option<String>,
-    authority: Option<String>,
-    summary: Option<String>,
-    status: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    size_bytes: i64,
-}
-
-/// Document manifest (mirrors harness doc_sync).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct DocumentManifest {
-    documents: Vec<ManifestEntry>,
-}
-
-/// Build a compact XML listing of project documents from a manifest file.
-///
-/// Returns empty string if no manifest exists or no documents are present.
-pub fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &str) -> String {
-    let project_dir = docs_base_dir.join(project_slug);
-    let manifest_path = project_dir.join("manifest.json");
-    let manifest: DocumentManifest = match std::fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-    {
-        Some(m) => m,
-        None => return String::new(),
-    };
-
-    if manifest.documents.is_empty() {
-        return String::new();
-    }
-
-    let ctx = crate::context::ProjectDocumentsContext {
-        path: project_slug.to_string(),
-        documents: manifest
-            .documents
-            .iter()
-            .map(|doc| crate::context::DocumentContext {
-                name: doc.filename.clone(),
-                title: doc.title.clone(),
-                path: doc.path.clone(),
-                kind: doc.kind.clone(),
-                authority: doc.authority.clone(),
-                size: format_size(doc.size_bytes),
-                status: doc.status.clone(),
-                tags: doc.tags.clone(),
-                summary: doc.summary.clone(),
-            })
-            .collect(),
-    };
-
-    nenjo_xml::to_xml_pretty(&ctx, 2)
-}
-
-/// Format bytes into a human-readable size string.
-fn format_size(bytes: i64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{}KB", bytes / 1024)
-    } else {
-        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(512), "512B");
-        assert_eq!(format_size(2048), "2KB");
-        assert_eq!(format_size(1_500_000), "1.4MB");
-    }
-
-    // Agent prompt building tests live in harness (they need AgentBuilder
-    // and doc_sync which depend on harness infrastructure).
 }

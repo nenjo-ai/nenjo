@@ -41,7 +41,7 @@ pub enum ManifestKind {
     Domain,
     /// Context block manifest resource.
     ContextBlock,
-    /// Project document content resource.
+    /// Library knowledge item content resource.
     ProjectDocument,
     /// Project task content resource.
     Task,

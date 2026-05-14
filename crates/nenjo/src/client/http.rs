@@ -1,6 +1,10 @@
 //! HTTP client implementation.
 
+use std::sync::Arc;
+
 use super::types::ActiveAgentHeartbeatState;
+use async_trait::async_trait;
+use nenjo_events::EncryptedPayload;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -12,14 +16,45 @@ use crate::manifest::*;
 /// Result alias for client operations.
 pub type Result<T> = std::result::Result<T, ApiClientError>;
 
+/// Encrypted payload codec used to normalize platform fetch responses.
+///
+/// The client owns HTTP and response shaping, but not key storage. Worker or
+/// embedded runtimes can provide a codec backed by secure-envelope, KMS, or
+/// another crypto provider.
+#[async_trait]
+pub trait PayloadCodec: Send + Sync {
+    async fn decode_text(&self, payload: &EncryptedPayload) -> anyhow::Result<Option<String>>;
+}
+
+/// Default payload codec for clients that do not decrypt platform payloads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopPayloadCodec;
+
+#[async_trait]
+impl PayloadCodec for NoopPayloadCodec {
+    async fn decode_text(&self, _payload: &EncryptedPayload) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
 /// Typed HTTP client for the Nenjo backend.
 ///
 /// Every request automatically includes the `X-API-Key` header.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NenjoClient {
     http: Client,
     base_url: String,
     api_key: String,
+    payload_codec: Arc<dyn PayloadCodec>,
+}
+
+impl std::fmt::Debug for NenjoClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NenjoClient")
+            .field("base_url", &self.base_url)
+            .field("payload_codec", &"<configured>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl NenjoClient {
@@ -34,6 +69,7 @@ impl NenjoClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            payload_codec: Arc::new(NoopPayloadCodec),
         }
     }
 
@@ -47,7 +83,23 @@ impl NenjoClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            payload_codec: Arc::new(NoopPayloadCodec),
         }
+    }
+
+    /// Return a client that decodes encrypted platform payloads in fetch responses.
+    pub fn with_payload_codec<C>(mut self, codec: C) -> Self
+    where
+        C: PayloadCodec + 'static,
+    {
+        self.payload_codec = Arc::new(codec);
+        self
+    }
+
+    /// Return a client using a shared encrypted platform payload codec.
+    pub fn with_shared_payload_codec(mut self, codec: Arc<dyn PayloadCodec>) -> Self {
+        self.payload_codec = codec;
+        self
     }
 
     /// Return the base URL this client targets.
@@ -203,8 +255,12 @@ impl NenjoClient {
         &self,
         id: Uuid,
     ) -> Result<Option<ContextBlockContentResponse>> {
-        self.fetch_resource(&format!("/api/v1/context-blocks/{id}/content"))
-            .await
+        let content = self
+            .fetch_resource::<ContextBlockContentResponse>(&format!(
+                "/api/v1/context-blocks/{id}/content"
+            ))
+            .await?;
+        self.decode_context_block_content(content).await
     }
 
     pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
@@ -221,11 +277,13 @@ impl NenjoClient {
         let resp = self.get(&url).await?;
 
         match resp.status() {
-            StatusCode::OK => resp
-                .json::<AgentPromptConfigResponse>()
-                .await
-                .map(Some)
-                .map_err(ApiClientError::Http),
+            StatusCode::OK => {
+                let response = resp
+                    .json::<AgentPromptConfigResponse>()
+                    .await
+                    .map_err(ApiClientError::Http)?;
+                self.decode_agent_prompt_config(Some(response)).await
+            }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(self.api_error(status, resp).await),
         }
@@ -239,66 +297,102 @@ impl NenjoClient {
     }
 
     // -----------------------------------------------------------------------
-    // Document sync
+    // Knowledge sync
     // -----------------------------------------------------------------------
 
-    /// List all documents for a project.
-    pub async fn list_project_documents(&self, project_id: Uuid) -> Result<Vec<DocumentSyncMeta>> {
-        let url = format!("{}/api/v1/projects/{}/documents", self.base_url, project_id);
+    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackSyncMeta>> {
+        let url = format!("{}/api/v1/knowledge", self.base_url);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let docs: Vec<DocumentSyncMeta> = resp.json().await?;
-                debug!(project_id = %project_id, count = docs.len(), "Listed project documents");
-                Ok(docs)
+                let packs: Vec<KnowledgePackSyncMeta> = resp.json().await?;
+                debug!(count = packs.len(), "Listed knowledge packs");
+                Ok(packs)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    /// Get the content envelope of a single project document.
-    pub async fn get_document_content(
+    pub async fn list_knowledge_items(&self, pack_id: Uuid) -> Result<Vec<KnowledgeItemSyncMeta>> {
+        let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack_id);
+        let resp = self.get(&url).await?;
+
+        match resp.status() {
+            StatusCode::OK => {
+                let items: Vec<KnowledgeItemSyncMeta> = resp.json().await?;
+                debug!(pack_id = %pack_id, count = items.len(), "Listed knowledge items");
+                Ok(items)
+            }
+            status => Err(self.api_error(status, resp).await),
+        }
+    }
+
+    pub async fn get_knowledge_item_content(
         &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<DocumentSyncContent> {
+        pack_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<KnowledgeItemSyncContent> {
         let url = format!(
-            "{}/api/v1/projects/{}/documents/{}/content",
-            self.base_url, project_id, doc_id
+            "{}/api/v1/knowledge/{}/items/{}/content",
+            self.base_url, pack_id, item_id
         );
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
                 let content = resp.json().await.map_err(ApiClientError::Http)?;
-                debug!(project_id = %project_id, doc_id = %doc_id, "Fetched document content");
+                let content = self.decode_document_content(content).await?;
+                debug!(pack_id = %pack_id, item_id = %item_id, "Fetched knowledge item content");
                 Ok(content)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    /// List all graph edges touching a single project document.
-    pub async fn list_project_document_edges(
+    pub async fn list_knowledge_item_edges(
         &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<Vec<DocumentSyncEdge>> {
+        pack_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<Vec<KnowledgeItemSyncEdge>> {
         let url = format!(
-            "{}/api/v1/projects/{}/documents/{}/edges",
-            self.base_url, project_id, doc_id
+            "{}/api/v1/knowledge/{}/items/{}/edges",
+            self.base_url, pack_id, item_id
         );
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let edges: Vec<DocumentSyncEdge> = resp.json().await?;
-                debug!(project_id = %project_id, doc_id = %doc_id, count = edges.len(), "Listed project document edges");
+                let edges: Vec<KnowledgeItemSyncEdge> = resp.json().await?;
+                debug!(pack_id = %pack_id, item_id = %item_id, count = edges.len(), "Listed knowledge item edges");
                 Ok(edges)
             }
             status => Err(self.api_error(status, resp).await),
         }
+    }
+
+    #[deprecated(note = "Use workspace knowledge APIs")]
+    pub async fn list_project_documents(&self, project_id: Uuid) -> Result<Vec<DocumentSyncMeta>> {
+        let _ = project_id;
+        self.list_knowledge_packs().await.map(|_| Vec::new())
+    }
+
+    #[deprecated(note = "Use get_knowledge_item_content")]
+    pub async fn get_document_content(
+        &self,
+        project_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<DocumentSyncContent> {
+        self.get_knowledge_item_content(project_id, doc_id).await
+    }
+
+    #[deprecated(note = "Use list_knowledge_item_edges")]
+    pub async fn list_project_document_edges(
+        &self,
+        project_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<Vec<DocumentSyncEdge>> {
+        self.list_knowledge_item_edges(project_id, doc_id).await
     }
 
     // -----------------------------------------------------------------------
@@ -373,6 +467,91 @@ impl NenjoClient {
             code: "unknown".into(),
             message: body,
         }
+    }
+
+    async fn decode_agent_prompt_config(
+        &self,
+        response: Option<AgentPromptConfigResponse>,
+    ) -> Result<Option<AgentPromptConfigResponse>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt agent prompt: {error}"))
+            })?
+        else {
+            return Ok(Some(response));
+        };
+
+        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!("Failed to parse decrypted agent prompt: {error}"))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_context_block_content(
+        &self,
+        response: Option<ContextBlockContentResponse>,
+    ) -> Result<Option<ContextBlockContentResponse>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt context block content: {error}"))
+            })?
+        else {
+            return Ok(Some(response));
+        };
+
+        response.template = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!(
+                "Failed to parse decrypted context block content: {error}"
+            ))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_document_content(
+        &self,
+        mut content: DocumentSyncContent,
+    ) -> Result<DocumentSyncContent> {
+        let Some(payload) = content.encrypted_payload.as_ref() else {
+            return Ok(content);
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt document content: {error}"))
+            })?
+        else {
+            return Ok(content);
+        };
+
+        content.content = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!(
+                "Failed to parse decrypted document content: {error}"
+            ))
+        })?);
+        content.encrypted_payload = None;
+        Ok(content)
     }
 }
 

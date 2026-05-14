@@ -7,39 +7,28 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, PromptConfig,
-    RoutineManifest,
+    ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter};
-use serde::{Deserialize, Serialize};
+use nenjo_knowledge::tools::{
+    KnowledgeDocReadResult, KnowledgeListArgs, KnowledgeNeighborArgs, KnowledgePackSummary,
+    KnowledgeReadArgs, KnowledgeRegistry, KnowledgeSearchArgs, KnowledgeTreeArgs, knowledge_filter,
+    knowledge_manifest_result, knowledge_search_result, parse_knowledge_enum,
+};
+use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
 use crate::client::PlatformManifestClient;
+use crate::knowledge_backend::{
+    ResolvedKnowledgePack, builtin_pack, ensure_known_pack_selector,
+    is_default_library_pack_selector, is_nenjo_pack_selector, library_pack_selector,
+    parse_library_pack_selector, unknown_pack,
+};
+use crate::library_knowledge::LibraryKnowledgePack;
 use crate::manifest_contract::ManifestKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
-
-fn merge_json_patch(target: &mut serde_json::Value, patch: serde_json::Value) {
-    match (target, patch) {
-        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
-            for (key, value) in patch {
-                match target.get_mut(&key) {
-                    Some(existing) => merge_json_patch(existing, value),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
-            }
-        }
-        (target, patch) => *target = patch,
-    }
-}
-
-fn merge_prompt_config(current: &PromptConfig, patch: serde_json::Value) -> Result<PromptConfig> {
-    let mut value = serde_json::to_value(current)?;
-    merge_json_patch(&mut value, patch);
-    Ok(serde_json::from_value(value)?)
-}
+use crate::prompt_merge::merge_prompt_config;
 
 fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {
@@ -108,6 +97,7 @@ pub struct PlatformManifestBackend<L, E> {
     access_policy: Option<ManifestAccessPolicy>,
     workspace_dir: Option<PathBuf>,
     cached_org_id: Option<Uuid>,
+    current_library_slug: Option<String>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -124,6 +114,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
             access_policy: None,
             workspace_dir: None,
             cached_org_id: None,
+            current_library_slug: None,
         }
     }
 
@@ -133,7 +124,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
         self
     }
 
-    /// Attach the worker workspace root used for local-first project document reads.
+    /// Attach the worker workspace root used for local-first library knowledge reads.
     pub fn with_workspace_dir(mut self, workspace_dir: PathBuf) -> Self {
         self.workspace_dir = Some(workspace_dir);
         self
@@ -142,6 +133,12 @@ impl<L, E> PlatformManifestBackend<L, E> {
     /// Attach the org id cached from worker bootstrap metadata.
     pub fn with_cached_org_id(mut self, org_id: Option<Uuid>) -> Self {
         self.cached_org_id = org_id.filter(|id| !id.is_nil());
+        self
+    }
+
+    /// Attach the default library slug used to resolve the `workspace` library pack alias.
+    pub fn with_current_library_slug(mut self, pack_slug: Option<String>) -> Self {
+        self.current_library_slug = pack_slug.filter(|slug| !slug.trim().is_empty());
         self
     }
 
@@ -223,605 +220,195 @@ where
     fn workspace_dir(&self) -> Result<&Path> {
         self.workspace_dir
             .as_deref()
-            .ok_or_else(|| anyhow!("project document tools require a configured workspace_dir"))
+            .ok_or_else(|| anyhow!("knowledge tools require a configured workspace_dir"))
     }
 
-    async fn project_workspace_dir(&self, project_id: Uuid) -> Result<PathBuf> {
-        let project = self
-            .local_store
-            .get_project(project_id)
-            .await?
-            .ok_or_else(|| anyhow!("project {project_id} is not cached locally"))?;
-        Ok(self.workspace_dir()?.join(project.slug))
+    async fn workspace_library_dir(&self, pack_slug: &str) -> Result<PathBuf> {
+        Ok(self.workspace_dir()?.join("library").join(pack_slug))
     }
 
-    async fn list_local_project_documents(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Vec<ProjectKnowledgeDocManifest>> {
-        let project_dir = self.project_workspace_dir(project_id).await?;
-        // Project document tools read from the worker's local knowledge cache rather than
-        // hydrating documents directly from the platform on demand.
-        let manifest = load_project_knowledge_manifest(&project_dir).ok_or_else(|| {
-            anyhow!("project documents are not cached locally for project {project_id}")
-        })?;
-        Ok(manifest.docs)
+    async fn library_knowledge_pack(&self, pack_slug: &str) -> Result<LibraryKnowledgePack> {
+        let pack_dir = self.workspace_library_dir(pack_slug).await?;
+        LibraryKnowledgePack::load(&pack_dir)
+            .ok_or_else(|| anyhow!("knowledge pack '{pack_slug}' is not cached locally"))
     }
 
-    async fn read_local_project_document(
-        &self,
-        project_id: Uuid,
-        source_path: &str,
-        fallback_filename: Option<&str>,
-    ) -> Result<String> {
-        let project_dir = self.project_workspace_dir(project_id).await?;
-        let path = project_dir.join(source_path);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => Ok(content),
-            Err(primary_error) => {
-                if let Some(filename) = fallback_filename {
-                    let fallback_path = project_dir.join("docs").join(filename);
-                    if fallback_path != path {
-                        return Ok(
-                            std::fs::read_to_string(&fallback_path).map_err(|_| primary_error)?
-                        );
+    async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
+        ensure_known_pack_selector(selector)?;
+        if is_nenjo_pack_selector(selector) {
+            return Ok(builtin_pack());
+        }
+        if is_default_library_pack_selector(selector) {
+            let pack_slug = self.current_library_slug.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "knowledge pack 'workspace' requires a selected pack; use workspace:<slug> outside pack context"
+                )
+            })?;
+            return self
+                .library_knowledge_pack(pack_slug)
+                .await
+                .map(ResolvedKnowledgePack::Library);
+        }
+        if selector.starts_with("workspace:") {
+            let pack_slug = parse_library_pack_selector(selector)?;
+            return self
+                .library_knowledge_pack(pack_slug)
+                .await
+                .map(ResolvedKnowledgePack::Library);
+        }
+        Err(unknown_pack(selector))
+    }
+}
+
+#[async_trait]
+impl<L, E> KnowledgeRegistry for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
+        let mut packs = vec![KnowledgePackSummary::new(
+            "builtin:nenjo",
+            builtin_pack().manifest(),
+        )];
+        if self.workspace_dir.is_some() {
+            let library_dir = self.workspace_dir()?.join("library");
+            if let Ok(entries) = std::fs::read_dir(library_dir) {
+                for entry in entries.flatten() {
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
                     }
-                }
-                Err(anyhow::Error::from(primary_error)).with_context(|| {
-                    format!("failed to read local project document {}", path.display())
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProjectKnowledgeManifest {
-    docs: Vec<ProjectKnowledgeDocManifest>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProjectKnowledgeDocManifest {
-    id: String,
-    virtual_path: String,
-    source_path: String,
-    title: String,
-    summary: String,
-    description: Option<String>,
-    kind: String,
-    authority: String,
-    status: String,
-    tags: Vec<String>,
-    aliases: Vec<String>,
-    keywords: Vec<String>,
-    related: Vec<ProjectKnowledgeDocEdge>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProjectKnowledgeDocEdge {
-    #[serde(rename = "type", alias = "edge_type")]
-    edge_type: String,
-    target: String,
-    description: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ProjectDocFilterArgs {
-    #[serde(default)]
-    tags: Vec<String>,
-    kind: Option<String>,
-    authority: Option<String>,
-    status: Option<String>,
-    path_prefix: Option<String>,
-    related_to: Option<String>,
-    edge_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocListArgs {
-    project_id: Uuid,
-    #[serde(flatten)]
-    filter: ProjectDocFilterArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocLookupArgs {
-    project_id: Uuid,
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocSearchArgs {
-    project_id: Uuid,
-    query: String,
-    #[serde(flatten)]
-    filter: ProjectDocFilterArgs,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocTreeArgs {
-    project_id: Uuid,
-    prefix: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectDocNeighborArgs {
-    project_id: Uuid,
-    #[serde(alias = "id", alias = "path")]
-    id_or_path: String,
-    edge_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocManifest {
-    id: String,
-    project_id: String,
-    virtual_path: String,
-    filename: String,
-    path: Option<String>,
-    title: String,
-    summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    kind: String,
-    authority: String,
-    status: String,
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocRead {
-    manifest: ProjectDocManifest,
-    content: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocSearchHit {
-    id: String,
-    virtual_path: String,
-    title: String,
-    summary: String,
-    kind: String,
-    authority: String,
-    tags: Vec<String>,
-    score: usize,
-    matched: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocTree {
-    root_uri: String,
-    entries: Vec<ProjectDocTreeEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocTreeEntry {
-    path: String,
-    title: String,
-    kind: String,
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocNeighbor {
-    target: String,
-    edges: Vec<ProjectDocNeighborEdge>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectDocNeighborEdge {
-    edge_type: String,
-    source: String,
-    target: String,
-    note: Option<String>,
-}
-
-fn load_project_knowledge_manifest(project_dir: &Path) -> Option<ProjectKnowledgeManifest> {
-    let path = project_dir.join("knowledge_manifest.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn project_doc_relative_path(doc: &ProjectKnowledgeDocManifest) -> String {
-    doc.virtual_path
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split_once('/'))
-        .map(|(_, path)| path.to_string())
-        .unwrap_or_else(|| doc.virtual_path.clone())
-}
-
-fn project_doc_filename(doc: &ProjectKnowledgeDocManifest) -> String {
-    let relative = project_doc_relative_path(doc);
-    relative
-        .rsplit('/')
-        .next()
-        .map(ToString::to_string)
-        .unwrap_or(relative)
-}
-
-fn project_doc_path(doc: &ProjectKnowledgeDocManifest) -> Option<String> {
-    project_doc_relative_path(doc)
-        .rsplit_once('/')
-        .map(|(path, _)| path.to_string())
-}
-
-fn normalize_project_lookup(project_id: Uuid, value: &str) -> String {
-    let trimmed = value.trim().trim_matches('/').to_string();
-    if let Some(stripped) = trimmed.strip_prefix(&format!("project://{project_id}/")) {
-        stripped.trim_matches('/').to_string()
-    } else {
-        trimmed
-    }
-}
-
-fn project_doc_manifest(doc: &ProjectKnowledgeDocManifest) -> ProjectDocManifest {
-    ProjectDocManifest {
-        id: doc.id.clone(),
-        project_id: doc
-            .virtual_path
-            .split_once("project://")
-            .and_then(|(_, rest)| rest.split_once('/'))
-            .map(|(project_id, _)| project_id.to_string())
-            .unwrap_or_default(),
-        virtual_path: doc.virtual_path.clone(),
-        filename: project_doc_filename(doc),
-        path: project_doc_path(doc),
-        title: doc.title.clone(),
-        summary: doc.summary.clone(),
-        description: doc.description.clone(),
-        kind: doc.kind.clone(),
-        authority: doc.authority.clone(),
-        status: doc.status.clone(),
-        tags: doc.tags.clone(),
-    }
-}
-
-fn filter_project_docs(
-    docs: Vec<ProjectKnowledgeDocManifest>,
-    filter: &ProjectDocFilterArgs,
-) -> Vec<ProjectKnowledgeDocManifest> {
-    docs.into_iter()
-        .filter(|doc| {
-            if !filter.tags.is_empty()
-                && !filter.tags.iter().all(|tag| {
-                    doc.tags
-                        .iter()
-                        .any(|candidate| candidate.eq_ignore_ascii_case(tag))
-                })
-            {
-                return false;
-            }
-            if let Some(kind) = filter.kind.as_ref()
-                && !doc.kind.eq_ignore_ascii_case(kind)
-            {
-                return false;
-            }
-            if let Some(authority) = filter.authority.as_ref()
-                && !doc.authority.eq_ignore_ascii_case(authority)
-            {
-                return false;
-            }
-            if let Some(status) = filter.status.as_ref()
-                && !doc.status.eq_ignore_ascii_case(status)
-            {
-                return false;
-            }
-            if let Some(path_prefix) = filter.path_prefix.as_ref() {
-                let prefix = path_prefix.trim_matches('/');
-                let relative = project_doc_relative_path(doc);
-                if !relative.starts_with(prefix) && !doc.virtual_path.starts_with(path_prefix) {
-                    return false;
+                    let Some(slug) = entry.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    let selector = library_pack_selector(&slug);
+                    let Some(pack) = LibraryKnowledgePack::load(entry.path()) else {
+                        continue;
+                    };
+                    if self.current_library_slug.as_deref() == Some(slug.as_str()) {
+                        packs.push(KnowledgePackSummary::new("workspace", pack.manifest()));
+                    }
+                    packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
                 }
             }
-            true
-        })
-        .collect()
-}
-
-async fn lookup_project_doc<L, E>(
-    backend: &PlatformManifestBackend<L, E>,
-    project_id: Uuid,
-    id_or_path: &str,
-) -> Result<ProjectKnowledgeDocManifest>
-where
-    L: ManifestReader + ManifestWriter + Send + Sync,
-    E: SensitivePayloadEncoder,
-{
-    let docs = backend.list_local_project_documents(project_id).await?;
-    let normalized = normalize_project_lookup(project_id, id_or_path);
-    docs.into_iter()
-        .find(|doc| {
-            doc.id == id_or_path
-                || doc.virtual_path == id_or_path
-                || project_doc_relative_path(doc) == normalized
-                || project_doc_filename(doc) == normalized
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "unknown project doc '{}'; use a document id, relative path, filename, or project://{project_id}/ path",
-                id_or_path
-            )
-        })
-}
-
-fn project_doc_score(
-    doc: &ProjectKnowledgeDocManifest,
-    query: &str,
-    content: Option<&str>,
-) -> Option<(usize, Vec<String>)> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return None;
-    }
-
-    let mut score = 0;
-    let mut matched = Vec::new();
-    let relative_path = project_doc_relative_path(doc).to_lowercase();
-    let virtual_path = doc.virtual_path.to_lowercase();
-    let title = doc.title.to_lowercase();
-    let summary = doc.summary.to_lowercase();
-    let kind = doc.kind.to_lowercase();
-    let authority = doc.authority.to_lowercase();
-    let status = doc.status.to_lowercase();
-    let tags = doc
-        .tags
-        .iter()
-        .map(|tag| tag.to_lowercase())
-        .collect::<Vec<_>>();
-    let aliases = doc
-        .aliases
-        .iter()
-        .map(|alias| alias.to_lowercase())
-        .collect::<Vec<_>>();
-    let keywords = doc
-        .keywords
-        .iter()
-        .map(|keyword| keyword.to_lowercase())
-        .collect::<Vec<_>>();
-
-    if relative_path.contains(&query) || virtual_path.contains(&query) {
-        score += 6;
-        matched.push("path".to_string());
-    }
-    if title.contains(&query) {
-        score += 5;
-        matched.push("title".to_string());
-    }
-    if summary.contains(&query) {
-        score += 4;
-        matched.push("summary".to_string());
-    }
-    if kind.contains(&query) {
-        score += 3;
-        matched.push("kind".to_string());
-    }
-    if authority.contains(&query) {
-        score += 2;
-        matched.push("authority".to_string());
-    }
-    if status.contains(&query) {
-        score += 2;
-        matched.push("status".to_string());
-    }
-    if tags.iter().any(|tag| tag.contains(&query)) {
-        score += 4;
-        matched.push("tags".to_string());
-    }
-    if aliases.iter().any(|alias| alias.contains(&query)) {
-        score += 4;
-        matched.push("aliases".to_string());
-    }
-    if keywords.iter().any(|keyword| keyword.contains(&query)) {
-        score += 3;
-        matched.push("keywords".to_string());
-    }
-    if let Some(content) = content
-        && content.to_lowercase().contains(&query)
-    {
-        score += 3;
-        matched.push("content".to_string());
-    }
-
-    if score == 0 {
-        None
-    } else {
-        matched.sort();
-        matched.dedup();
-        Some((score, matched))
-    }
-}
-
-async fn project_doc_neighbors<L, E>(
-    backend: &PlatformManifestBackend<L, E>,
-    project_id: Uuid,
-    doc: &ProjectKnowledgeDocManifest,
-    edge_type: Option<&str>,
-) -> Result<Vec<ProjectDocNeighbor>>
-where
-    L: ManifestReader + ManifestWriter + Send + Sync,
-    E: SensitivePayloadEncoder,
-{
-    let docs = backend.list_local_project_documents(project_id).await?;
-    let docs_by_virtual_path = docs
-        .iter()
-        .map(|candidate| (candidate.virtual_path.clone(), candidate))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut neighbors = std::collections::BTreeMap::<String, ProjectDocNeighbor>::new();
-
-    for edge in &doc.related {
-        if let Some(filter) = edge_type
-            && !edge.edge_type.eq_ignore_ascii_case(filter)
-        {
-            continue;
         }
-        if let Some(target) = docs_by_virtual_path.get(&edge.target) {
-            push_project_neighbor_edge(
-                &mut neighbors,
-                target.virtual_path.clone(),
-                ProjectDocNeighborEdge {
-                    edge_type: edge.edge_type.clone(),
-                    source: doc.virtual_path.clone(),
-                    target: target.virtual_path.clone(),
-                    note: edge.description.clone(),
-                },
-            );
-        }
+        Ok(packs)
     }
 
-    for candidate in &docs {
-        for edge in &candidate.related {
-            if edge.target != doc.virtual_path {
-                continue;
-            }
-            if let Some(filter) = edge_type
-                && !edge.edge_type.eq_ignore_ascii_case(filter)
-            {
-                continue;
-            }
-            push_project_neighbor_edge(
-                &mut neighbors,
-                candidate.virtual_path.clone(),
-                ProjectDocNeighborEdge {
-                    edge_type: edge.edge_type.clone(),
-                    source: candidate.virtual_path.clone(),
-                    target: doc.virtual_path.clone(),
-                    note: edge.description.clone(),
-                },
-            );
-        }
-    }
-
-    Ok(neighbors.into_values().collect())
-}
-
-fn push_project_neighbor_edge(
-    neighbors: &mut std::collections::BTreeMap<String, ProjectDocNeighbor>,
-    neighbor_target: String,
-    edge: ProjectDocNeighborEdge,
-) {
-    let neighbor = neighbors
-        .entry(neighbor_target.clone())
-        .or_insert_with(|| ProjectDocNeighbor {
-            target: neighbor_target,
-            edges: Vec::new(),
-        });
-    if !neighbor.edges.iter().any(|existing| {
-        existing.edge_type == edge.edge_type
-            && existing.source == edge.source
-            && existing.target == edge.target
-            && existing.note == edge.note
-    }) {
-        neighbor.edges.push(edge);
-        neighbor.edges.sort_by(|left, right| {
-            left.source
-                .cmp(&right.source)
-                .then_with(|| left.target.cmp(&right.target))
-                .then_with(|| left.edge_type.cmp(&right.edge_type))
-                .then_with(|| left.note.cmp(&right.note))
-        });
-    }
-}
-
-async fn search_project_docs<L, E>(
-    backend: &PlatformManifestBackend<L, E>,
-    project_id: Uuid,
-    docs: Vec<ProjectKnowledgeDocManifest>,
-    query: &str,
-    filter: &ProjectDocFilterArgs,
-    include_content: bool,
-) -> Result<Vec<ProjectDocSearchHit>>
-where
-    L: ManifestReader + ManifestWriter + Send + Sync,
-    E: SensitivePayloadEncoder,
-{
-    let docs = filter_project_docs(docs, filter);
-    let related_doc = if let Some(related_to) = filter.related_to.as_ref() {
-        Some(lookup_project_doc(backend, project_id, related_to).await?)
-    } else {
-        None
-    };
-    let mut hits = Vec::new();
-
-    for doc in docs {
-        if let Some(related) = related_doc.as_ref() {
-            let neighbors =
-                project_doc_neighbors(backend, project_id, related, filter.edge_type.as_deref())
-                    .await?;
-            if !neighbors
-                .iter()
-                .any(|neighbor| neighbor.target == doc.virtual_path)
-            {
-                continue;
-            }
-        }
-
-        let content = backend
-            .read_local_project_document(
-                project_id,
-                &doc.source_path,
-                Some(&project_doc_filename(&doc)),
-            )
+    async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
+        self.resolve_knowledge_pack(selector)
             .await
-            .ok();
-
-        let Some((score, matched)) = project_doc_score(&doc, query, content.as_deref()) else {
-            continue;
-        };
-
-        hits.push(ProjectDocSearchHit {
-            id: doc.id.clone(),
-            virtual_path: doc.virtual_path.clone(),
-            title: doc.title.clone(),
-            summary: doc.summary.clone(),
-            kind: doc.kind.clone(),
-            authority: doc.authority.clone(),
-            tags: doc.tags.clone(),
-            score,
-            matched,
-            content: if include_content { content } else { None },
-        });
+            .map(|pack| Arc::new(pack) as Arc<dyn KnowledgePack>)
     }
-
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.virtual_path.cmp(&right.virtual_path))
-    });
-
-    Ok(hits)
 }
 
-fn project_doc_tree(
-    project_id: Uuid,
-    docs: &[ProjectKnowledgeDocManifest],
-    prefix: Option<&str>,
-) -> ProjectDocTree {
-    let normalized_prefix = prefix.map(|value| normalize_project_lookup(project_id, value));
-    let mut entries = docs
-        .iter()
-        .filter_map(|doc| {
-            let relative = project_doc_relative_path(doc);
-            if let Some(prefix) = normalized_prefix.as_ref()
-                && !relative.starts_with(prefix)
-            {
-                return None;
-            }
-            Some(ProjectDocTreeEntry {
-                path: doc.virtual_path.clone(),
-                title: doc.title.clone(),
-                kind: doc.kind.clone(),
-                tags: doc.tags.clone(),
-            })
+#[async_trait]
+impl<L, E> KnowledgeManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_knowledge_packs(&self) -> Result<serde_json::Value> {
+        let packs = KnowledgeRegistry::list_packs(self).await?;
+        serde_json::to_value(packs).map_err(Into::into)
+    }
+
+    async fn list_knowledge_docs(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeListArgs =
+            serde_json::from_value(params).context("invalid list_knowledge_docs args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.list_docs(filter)
+                .into_iter()
+                .map(|doc| knowledge_manifest_result(&args.pack, doc))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn read_knowledge_doc_manifest(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: KnowledgeReadArgs =
+            serde_json::from_value(params).context("invalid read_knowledge_doc_manifest args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let manifest = pack.read_manifest(&args.path).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(knowledge_manifest_result(&args.pack, manifest)).map_err(Into::into)
+    }
+
+    async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeReadArgs =
+            serde_json::from_value(params).context("invalid read_knowledge_doc args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let doc = pack.read_doc(&args.path).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(KnowledgeDocReadResult {
+            manifest: knowledge_manifest_result(&args.pack, &doc.manifest),
+            content: doc.content,
         })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    ProjectDocTree {
-        root_uri: format!("project://{project_id}/"),
-        entries,
+        .map_err(Into::into)
+    }
+
+    async fn search_knowledge(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeSearchArgs =
+            serde_json::from_value(params).context("invalid search_knowledge args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.search_docs(&args.query, filter)
+                .into_iter()
+                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn search_knowledge_paths(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeSearchArgs =
+            serde_json::from_value(params).context("invalid search_knowledge_paths args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let filter = knowledge_filter(args.filter)?;
+        serde_json::to_value(
+            pack.search_paths(&args.query, filter)
+                .into_iter()
+                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(Into::into)
+    }
+
+    async fn list_knowledge_tree(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let args: KnowledgeTreeArgs =
+            serde_json::from_value(params).context("invalid list_knowledge_tree args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        serde_json::to_value(pack.list_tree(args.prefix.as_deref())).map_err(Into::into)
+    }
+
+    async fn list_knowledge_neighbors(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let args: KnowledgeNeighborArgs =
+            serde_json::from_value(params).context("invalid list_knowledge_neighbors args")?;
+        let pack = self.resolve_knowledge_pack(&args.pack).await?;
+        let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
+        serde_json::to_value(pack.neighbors(&args.path, edge_type)).map_err(Into::into)
     }
 }
 
@@ -1525,107 +1112,6 @@ where
         })
     }
 
-    async fn list_project_documents(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: ProjectDocListArgs =
-            serde_json::from_value(params).context("invalid list_project_documents args")?;
-        let docs = self.list_local_project_documents(args.project_id).await?;
-        let docs = filter_project_docs(docs, &args.filter);
-        serde_json::to_value(
-            docs.iter()
-                .map(project_doc_manifest)
-                .collect::<Vec<ProjectDocManifest>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn read_project_document_manifest(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: ProjectDocLookupArgs = serde_json::from_value(params)
-            .context("invalid read_project_document_manifest args")?;
-        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
-        serde_json::to_value(project_doc_manifest(&manifest)).map_err(Into::into)
-    }
-
-    async fn read_project_document(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: ProjectDocLookupArgs =
-            serde_json::from_value(params).context("invalid read_project_document args")?;
-        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
-        let content = self
-            .read_local_project_document(
-                args.project_id,
-                &manifest.source_path,
-                Some(&project_doc_filename(&manifest)),
-            )
-            .await?;
-        serde_json::to_value(ProjectDocRead {
-            manifest: project_doc_manifest(&manifest),
-            content,
-        })
-        .map_err(Into::into)
-    }
-
-    async fn search_project_documents(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: ProjectDocSearchArgs =
-            serde_json::from_value(params).context("invalid search_project_documents args")?;
-        let docs = self.list_local_project_documents(args.project_id).await?;
-        let hits =
-            search_project_docs(self, args.project_id, docs, &args.query, &args.filter, true)
-                .await?;
-        serde_json::to_value(hits).map_err(Into::into)
-    }
-
-    async fn search_project_document_paths(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: ProjectDocSearchArgs =
-            serde_json::from_value(params).context("invalid search_project_document_paths args")?;
-        let docs = self.list_local_project_documents(args.project_id).await?;
-        let hits = search_project_docs(
-            self,
-            args.project_id,
-            docs,
-            &args.query,
-            &args.filter,
-            false,
-        )
-        .await?;
-        serde_json::to_value(hits).map_err(Into::into)
-    }
-
-    async fn list_project_document_tree(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: ProjectDocTreeArgs =
-            serde_json::from_value(params).context("invalid list_project_document_tree args")?;
-        let docs = self.list_local_project_documents(args.project_id).await?;
-        serde_json::to_value(project_doc_tree(
-            args.project_id,
-            &docs,
-            args.prefix.as_deref(),
-        ))
-        .map_err(Into::into)
-    }
-
-    async fn list_project_document_neighbors(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: ProjectDocNeighborArgs = serde_json::from_value(params)
-            .context("invalid list_project_document_neighbors args")?;
-        let manifest = lookup_project_doc(self, args.project_id, &args.id_or_path).await?;
-        let neighbors =
-            project_doc_neighbors(self, args.project_id, &manifest, args.edge_type.as_deref())
-                .await?;
-        serde_json::to_value(neighbors).map_err(Into::into)
-    }
-
     async fn create_project_document(
         &self,
         params: ProjectDocumentCreateParams,
@@ -2225,39 +1711,40 @@ mod tests {
 
     use super::*;
 
-    async fn project_backend_fixture() -> Result<(
+    async fn library_backend_fixture() -> Result<(
         PlatformManifestBackend<LocalManifestStore, NoopSensitivePayloadEncoder>,
         Uuid,
+        String,
         TempDir,
     )> {
         let temp = tempdir()?;
         let manifests_dir = temp.path().join("manifests");
         let workspace_dir = temp.path().join("workspace");
         let project_id = Uuid::new_v4();
-        let project_slug = "graph-eval";
-        let project_dir = workspace_dir.join(project_slug);
-        std::fs::create_dir_all(project_dir.join("docs"))?;
+        let pack_slug = "graph-eval";
+        let library_dir = workspace_dir.join("library").join(pack_slug);
+        std::fs::create_dir_all(library_dir.join("docs"))?;
 
         let store = Arc::new(LocalManifestStore::new(manifests_dir));
         store
             .upsert_resource(&ManifestResource::Project(ProjectManifest {
                 id: project_id,
                 name: "Graph Eval".to_string(),
-                slug: project_slug.to_string(),
+                slug: pack_slug.to_string(),
                 description: None,
                 settings: json!({}),
             }))
             .await?;
 
-        let overview_path = format!("project://{project_id}/docs/overview.md");
-        let routine_path = format!("project://{project_id}/docs/routine.md");
-        let gate_path = format!("project://{project_id}/docs/gate.md");
-        let unrelated_path = format!("project://{project_id}/docs/unrelated.md");
+        let overview_path = format!("library://{pack_slug}/docs/overview.md");
+        let routine_path = format!("library://{pack_slug}/docs/routine.md");
+        let gate_path = format!("library://{pack_slug}/docs/gate.md");
+        let unrelated_path = format!("library://{pack_slug}/docs/unrelated.md");
         let manifest = json!({
-            "pack_id": format!("project-{project_id}"),
+            "pack_id": format!("library-knowledge-{pack_slug}"),
             "pack_version": "1",
             "schema_version": 1,
-            "root_uri": format!("project://{project_id}/"),
+            "root_uri": format!("library://{pack_slug}/"),
             "synced_at": "2026-01-01T00:00:00Z",
             "docs": [
                 {
@@ -2265,12 +1752,12 @@ mod tests {
                     "virtual_path": overview_path,
                     "source_path": "docs/overview.md",
                     "title": "Overview",
-                    "summary": "Project overview",
+                    "summary": "Library overview",
                     "description": null,
                     "kind": "guide",
                     "authority": "canonical",
                     "status": "stable",
-                    "tags": ["domain:project"],
+                    "tags": ["domain:library"],
                     "aliases": ["overview.md"],
                     "keywords": ["overview"],
                     "related": [
@@ -2335,13 +1822,13 @@ mod tests {
             ]
         });
         std::fs::write(
-            project_dir.join("knowledge_manifest.json"),
+            library_dir.join(LibraryKnowledgePack::MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest)?,
         )?;
 
         for filename in ["overview.md", "routine.md", "gate.md", "unrelated.md"] {
             std::fs::write(
-                project_dir.join("docs").join(filename),
+                library_dir.join("docs").join(filename),
                 format!("# {filename}\n"),
             )?;
         }
@@ -2350,20 +1837,44 @@ mod tests {
         let backend = PlatformManifestBackend::new(store, client, NoopSensitivePayloadEncoder)
             .with_workspace_dir(workspace_dir);
 
-        Ok((backend, project_id, temp))
+        Ok((backend, project_id, pack_slug.to_string(), temp))
     }
 
     #[tokio::test]
-    async fn project_document_neighbors_expose_outgoing_and_incoming_edges() {
-        let (backend, project_id, _temp) = project_backend_fixture().await.unwrap();
-        let routine_path = format!("project://{project_id}/docs/routine.md");
-        let overview_path = format!("project://{project_id}/docs/overview.md");
-        let gate_path = format!("project://{project_id}/docs/gate.md");
+    async fn library_knowledge_alias_resolves_default_library_pack() {
+        let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
+        let backend = backend.with_current_library_slug(Some(pack_slug.clone()));
+
+        let packs = backend.list_knowledge_packs().await.unwrap();
+        let packs = packs.as_array().expect("packs array");
+        assert!(packs.iter().any(|pack| pack["pack"] == "workspace"));
 
         let value = backend
-            .list_project_document_neighbors(json!({
-                "project_id": project_id,
-                "id_or_path": "routine"
+            .read_knowledge_doc_manifest(json!({
+                "pack": "workspace",
+                "path": "routine"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(value["pack"], "workspace");
+        assert_eq!(
+            value["virtual_path"],
+            format!("library://{pack_slug}/docs/routine.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn library_knowledge_neighbors_expose_outgoing_and_incoming_edges() {
+        let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
+        let routine_path = format!("library://{pack_slug}/docs/routine.md");
+        let overview_path = format!("library://{pack_slug}/docs/overview.md");
+        let gate_path = format!("library://{pack_slug}/docs/gate.md");
+
+        let value = backend
+            .list_knowledge_neighbors(json!({
+                "pack": format!("workspace:{pack_slug}"),
+                "path": "routine"
             }))
             .await
             .unwrap();
@@ -2393,9 +1904,9 @@ mod tests {
         }));
 
         let filtered = backend
-            .list_project_document_neighbors(json!({
-                "project_id": project_id,
-                "id_or_path": routine_path,
+            .list_knowledge_neighbors(json!({
+                "pack": format!("workspace:{pack_slug}"),
+                "path": routine_path,
                 "edge_type": "depends_on"
             }))
             .await
@@ -2408,7 +1919,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_manifest_org_id_uses_cached_bootstrap_org_id() {
-        let (backend, _project_id, _temp) = project_backend_fixture().await.unwrap();
+        let (backend, _project_id, _pack_slug, _temp) = library_backend_fixture().await.unwrap();
         let org_id = Uuid::new_v4();
         let backend = backend.with_cached_org_id(Some(org_id));
 

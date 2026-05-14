@@ -1,13 +1,13 @@
-//! Memory & resource → prompt template variable injection.
+//! Memory & artifact → prompt template variable injection.
 
 use std::collections::HashMap;
 
 use anyhow::Result;
 
 use crate::context::{
+    ArtifactContext, ArtifactsContext, ArtifactsProjectContext, ArtifactsWorkspaceContext,
     MemoriesContext, MemoriesCoreContext, MemoriesProjectContext, MemoriesSharedContext,
-    MemoryCategoryContext, ResourceContext, ResourcesContext, ResourcesProjectContext,
-    ResourcesWorkspaceContext,
+    MemoryCategoryContext,
 };
 
 use super::Memory;
@@ -38,10 +38,13 @@ fn categories_to_contexts(
 ///
 /// Returns a `HashMap` with keys: `memories`, `memories.core`,
 /// `memories.project`, `memories.shared` (only non-empty tiers).
-pub async fn build_memory_vars(
-    memory: &dyn Memory,
+pub async fn build_memory_vars<M>(
+    memory: &M,
     scope: &MemoryScope,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<String, String>>
+where
+    M: Memory + ?Sized,
+{
     let core_cats = memory.list_categories(&scope.core).await?;
     // Skip project tier if it resolves to the same namespace as core (system agents
     // with no project have both point to `agent_{name}_core`).
@@ -107,21 +110,24 @@ pub async fn build_memory_vars(
     Ok(vars)
 }
 
-/// Build resource template variables from project + workspace scopes.
+/// Build artifact template variables from project + workspace scopes.
 ///
-/// Returns a `HashMap` with keys: `resources`, `resources.project`,
-/// `resources.workspace` (only non-empty scopes).
-pub async fn build_resource_vars(
-    memory: &dyn Memory,
+/// Returns a `HashMap` with keys: `artifacts`, `artifacts.project`,
+/// `artifacts.workspace` (only non-empty scopes).
+pub async fn build_artifact_vars<M>(
+    memory: &M,
     scope: &MemoryScope,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<String, String>>
+where
+    M: Memory + ?Sized,
+{
     // Skip project tier if it resolves to the same path as global (system agents).
-    let project_entries = if scope.resources_project == scope.resources_global {
+    let project_entries = if scope.artifacts_project == scope.artifacts_global {
         vec![]
     } else {
-        memory.list_resources(&scope.resources_project).await?
+        memory.list_artifacts(&scope.artifacts_project).await?
     };
-    let workspace_entries = memory.list_resources(&scope.resources_global).await?;
+    let workspace_entries = memory.list_artifacts(&scope.artifacts_global).await?;
 
     let mut vars = HashMap::new();
 
@@ -129,10 +135,10 @@ pub async fn build_resource_vars(
         return Ok(vars);
     }
 
-    fn entries_to_contexts(entries: &[super::types::ResourceEntry]) -> Vec<ResourceContext> {
+    fn entries_to_contexts(entries: &[super::types::ArtifactEntry]) -> Vec<ArtifactContext> {
         entries
             .iter()
-            .map(|e| ResourceContext {
+            .map(|e| ArtifactContext {
                 name: e.filename.clone(),
                 description: e.description.clone(),
                 created_by: e.created_by.clone(),
@@ -142,11 +148,11 @@ pub async fn build_resource_vars(
     }
 
     let project = if !project_entries.is_empty() {
-        let ctx = ResourcesProjectContext {
-            resources: entries_to_contexts(&project_entries),
+        let ctx = ArtifactsProjectContext {
+            artifacts: entries_to_contexts(&project_entries),
         };
         vars.insert(
-            "resources.project".to_string(),
+            "artifacts.project".to_string(),
             nenjo_xml::to_xml_pretty(&ctx, 2),
         );
         Some(ctx)
@@ -155,11 +161,11 @@ pub async fn build_resource_vars(
     };
 
     let workspace = if !workspace_entries.is_empty() {
-        let ctx = ResourcesWorkspaceContext {
-            resources: entries_to_contexts(&workspace_entries),
+        let ctx = ArtifactsWorkspaceContext {
+            artifacts: entries_to_contexts(&workspace_entries),
         };
         vars.insert(
-            "resources.workspace".to_string(),
+            "artifacts.workspace".to_string(),
             nenjo_xml::to_xml_pretty(&ctx, 2),
         );
         Some(ctx)
@@ -167,8 +173,8 @@ pub async fn build_resource_vars(
         None
     };
 
-    let full = ResourcesContext { project, workspace };
-    vars.insert("resources".to_string(), nenjo_xml::to_xml_pretty(&full, 2));
+    let full = ArtifactsContext { project, workspace };
+    vars.insert("artifacts".to_string(), nenjo_xml::to_xml_pretty(&full, 2));
 
     Ok(vars)
 }

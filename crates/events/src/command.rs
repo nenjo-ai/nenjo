@@ -1,9 +1,23 @@
-//! Commands sent from the backend to the harness (`requests.<capability>`).
+//! Commands sent from the backend to the harness.
+//!
+//! [`Command::capability`] selects the capability subject segment, and
+//! [`Command::delivery`] selects queue, broadcast, or targeted delivery.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Capability, EncryptedPayload, TaskExecuteContent};
+
+/// Transport delivery policy for a backend-to-worker command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommandDelivery {
+    /// Shared queue for one org/user and capability.
+    Queue,
+    /// Fanout queue for every subscribed worker in the route scope.
+    Broadcast,
+    /// Command must be addressed to one worker enrollment.
+    Targeted,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrappedAccountContentKey {
@@ -306,6 +320,17 @@ impl Command {
             Command::RepoSync { .. } | Command::RepoUnsync { .. } => Capability::Repo,
         }
     }
+
+    /// How this command should be delivered over worker transport.
+    pub fn delivery(&self) -> CommandDelivery {
+        match self {
+            Command::ManifestChanged { .. }
+            | Command::RepoSync { .. }
+            | Command::RepoUnsync { .. } => CommandDelivery::Broadcast,
+            Command::WorkerAccountKeyUpdated { .. } => CommandDelivery::Targeted,
+            _ => CommandDelivery::Queue,
+        }
+    }
 }
 
 /// Type of platform resource that changed.
@@ -348,4 +373,71 @@ pub enum ResourceAction {
     Created,
     Updated,
     Deleted,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_delivery_uses_queue_broadcast_and_targeted_lanes() {
+        let id = Uuid::nil();
+
+        assert_eq!(
+            Command::ChatCancel {
+                project_id: id,
+                agent_id: None,
+            }
+            .delivery(),
+            CommandDelivery::Queue
+        );
+        assert_eq!(
+            Command::TaskExecute {
+                task_id: id,
+                project_id: id,
+                execution_run_id: id,
+                routine_id: None,
+                assigned_agent_id: None,
+                payload: None,
+                encrypted_payload: None,
+            }
+            .delivery(),
+            CommandDelivery::Queue
+        );
+        assert_eq!(
+            Command::ManifestChanged {
+                resource_type: ResourceType::Agent,
+                resource_id: id,
+                action: ResourceAction::Updated,
+                project_id: None,
+                payload: None,
+                encrypted_payload: None,
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::RepoSync {
+                project_id: id,
+                repo_url: "https://example.test/repo.git".into(),
+                target_branch: "main".into(),
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::WorkerAccountKeyUpdated {
+                wrapped_ack: WrappedAccountContentKey {
+                    key_version: 1,
+                    algorithm: "x25519-aes-gcm".into(),
+                    ephemeral_public_key: "epk".into(),
+                    nonce: "nonce".into(),
+                    ciphertext: "ciphertext".into(),
+                    created_at: chrono::Utc::now(),
+                },
+            }
+            .delivery(),
+            CommandDelivery::Targeted
+        );
+    }
 }

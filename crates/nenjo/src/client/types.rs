@@ -14,10 +14,23 @@ use crate::manifest::{
     RoutineTrigger,
 };
 
-/// Metadata for a project document, used during doc sync.
+/// Metadata for a workspace knowledge pack, used during knowledge sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentSyncMeta {
+pub struct KnowledgePackSyncMeta {
     pub id: Uuid,
+    pub slug: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub updated_at: String,
+}
+
+/// Metadata for a workspace knowledge item, used during knowledge sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeItemSyncMeta {
+    pub id: Uuid,
+    pub pack_id: Uuid,
+    pub slug: String,
     pub filename: String,
     #[serde(default)]
     pub path: Option<String>,
@@ -33,13 +46,17 @@ pub struct DocumentSyncMeta {
     pub status: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     pub content_type: String,
     pub size_bytes: i64,
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentSyncContent {
+pub struct KnowledgeItemSyncContent {
     #[serde(default)]
     pub content: Option<String>,
     pub filename: String,
@@ -50,17 +67,21 @@ pub struct DocumentSyncContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentSyncEdge {
+pub struct KnowledgeItemSyncEdge {
     pub id: Uuid,
-    pub project_id: Uuid,
-    pub source_document_id: Uuid,
-    pub target_document_id: Uuid,
+    pub pack_id: Uuid,
+    pub source_item_id: Uuid,
+    pub target_item_id: Uuid,
     pub edge_type: String,
     #[serde(default)]
     pub note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+pub type DocumentSyncMeta = KnowledgeItemSyncMeta;
+pub type DocumentSyncContent = KnowledgeItemSyncContent;
+pub type DocumentSyncEdge = KnowledgeItemSyncEdge;
 
 // ---------------------------------------------------------------------------
 // Agent detail response (from GET /agents/{id}) → conversion to Manifest

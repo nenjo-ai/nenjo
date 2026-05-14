@@ -11,7 +11,7 @@ keywords = ["ai-agents", "llm", "openai", "anthropic", "model-provider"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-nenjo-tools = { workspace = true }
+nenjo-tool-api = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
@@ -23,3 +23,6 @@ base64 = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

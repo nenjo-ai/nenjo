@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use nenjo_tools::ToolSpec;
+pub use nenjo_tool_api::{ToolCall, ToolCategory, ToolResultMessage, ToolSpec};
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,20 +46,6 @@ impl ChatMessage {
     }
 }
 
-/// A tool call requested by the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-impl Display for ToolCall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "name={} arguments={}", self.name, self.arguments)
-    }
-}
-
 /// Token usage reported by the LLM provider.
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
@@ -96,13 +81,6 @@ impl ChatResponse {
 pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
-}
-
-/// A tool result to feed back to the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResultMessage {
-    pub tool_call_id: String,
-    pub content: String,
 }
 
 /// A message in a multi-turn conversation, including tool interactions.

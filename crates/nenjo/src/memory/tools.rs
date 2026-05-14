@@ -1,9 +1,9 @@
-//! Memory and resource tools for agent use.
+//! Memory and artifact tools for agent use.
 
 use std::sync::Arc;
 
+use crate::tools::{Tool, ToolCategory, ToolResult};
 use anyhow::Result;
-use nenjo_tools::{Tool, ToolCategory, ToolResult};
 
 use super::Memory;
 use super::types::{MemoryCategory, MemoryScope};
@@ -37,19 +37,22 @@ fn fact_matches(query: &str, candidate: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Tool for agents to store facts in memory.
-pub struct MemoryStoreTool {
-    memory: Arc<dyn Memory>,
+pub struct MemoryStoreTool<M: Memory + ?Sized = dyn Memory> {
+    memory: Arc<M>,
     scope: MemoryScope,
 }
 
-impl MemoryStoreTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
+impl<M: Memory + ?Sized> MemoryStoreTool<M> {
+    pub fn new(memory: Arc<M>, scope: MemoryScope) -> Self {
         Self { memory, scope }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for MemoryStoreTool {
+impl<M> Tool for MemoryStoreTool<M>
+where
+    M: Memory + ?Sized + 'static,
+{
     fn name(&self) -> &str {
         "save_memory"
     }
@@ -113,19 +116,22 @@ impl Tool for MemoryStoreTool {
 // ---------------------------------------------------------------------------
 
 /// Tool for agents to recall facts from memory.
-pub struct MemoryRecallTool {
-    memory: Arc<dyn Memory>,
+pub struct MemoryRecallTool<M: Memory + ?Sized = dyn Memory> {
+    memory: Arc<M>,
     scope: MemoryScope,
 }
 
-impl MemoryRecallTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
+impl<M: Memory + ?Sized> MemoryRecallTool<M> {
+    pub fn new(memory: Arc<M>, scope: MemoryScope) -> Self {
         Self { memory, scope }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for MemoryRecallTool {
+impl<M> Tool for MemoryRecallTool<M>
+where
+    M: Memory + ?Sized + 'static,
+{
     fn name(&self) -> &str {
         "recall_memory"
     }
@@ -211,19 +217,22 @@ impl Tool for MemoryRecallTool {
 // ---------------------------------------------------------------------------
 
 /// Tool for agents to delete facts from memory.
-pub struct MemoryForgetTool {
-    memory: Arc<dyn Memory>,
+pub struct MemoryForgetTool<M: Memory + ?Sized = dyn Memory> {
+    memory: Arc<M>,
     scope: MemoryScope,
 }
 
-impl MemoryForgetTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
+impl<M: Memory + ?Sized> MemoryForgetTool<M> {
+    pub fn new(memory: Arc<M>, scope: MemoryScope) -> Self {
         Self { memory, scope }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for MemoryForgetTool {
+impl<M> Tool for MemoryForgetTool<M>
+where
+    M: Memory + ?Sized + 'static,
+{
     fn name(&self) -> &str {
         "forget_memory"
     }
@@ -276,10 +285,10 @@ impl Tool for MemoryForgetTool {
             if self.memory.delete_fact(ns, category, fact).await? {
                 true
             } else {
-                delete_matching_fact(&*self.memory, ns, Some(category), fact).await?
+                delete_matching_fact(self.memory.as_ref(), ns, Some(category), fact).await?
             }
         } else {
-            delete_matching_fact(&*self.memory, ns, None, fact).await?
+            delete_matching_fact(self.memory.as_ref(), ns, None, fact).await?
         };
 
         Ok(ToolResult {
@@ -302,12 +311,15 @@ impl Tool for MemoryForgetTool {
     }
 }
 
-async fn delete_matching_fact(
-    memory: &dyn Memory,
+async fn delete_matching_fact<M>(
+    memory: &M,
     ns: &str,
     category: Option<&str>,
     fact: &str,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    M: Memory + ?Sized,
+{
     let categories: Vec<MemoryCategory> = if let Some(category) = category {
         memory
             .read_category(ns, category)
@@ -333,265 +345,29 @@ async fn delete_matching_fact(
     Ok(false)
 }
 
-// ---------------------------------------------------------------------------
-// ResourceSaveTool
-// ---------------------------------------------------------------------------
+mod artifacts;
 
-/// Tool for agents to save resource documents.
-pub struct ResourceSaveTool {
-    memory: Arc<dyn Memory>,
-    scope: MemoryScope,
-    agent_name: String,
-}
-
-impl ResourceSaveTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope, agent_name: String) -> Self {
-        Self {
-            memory,
-            scope,
-            agent_name,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ResourceSaveTool {
-    fn name(&self) -> &str {
-        "save_resource"
-    }
-
-    fn description(&self) -> &str {
-        "Save a document as a shared resource. Resources are visible to all agents."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename for the resource (e.g. 'auth-prd.md')"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "One-line description of the resource"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Full content of the resource document"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["project", "workspace"],
-                    "description": "Where to save: 'project' (default) or 'workspace' (global)"
-                }
-            },
-            "required": ["filename", "description", "content"]
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Write
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let filename = args["filename"].as_str().unwrap_or("");
-        let description = args["description"].as_str().unwrap_or("");
-        let content = args["content"].as_str().unwrap_or("");
-        let scope = args["scope"].as_str().unwrap_or("project");
-
-        if filename.is_empty() || content.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("filename and content are required".into()),
-            });
-        }
-
-        let ns = self.scope.resolve_resource(scope);
-        self.memory
-            .save_resource(ns, filename, description, &self.agent_name, content)
-            .await?;
-
-        Ok(ToolResult {
-            success: true,
-            output: format!("Saved resource '{filename}' in {scope} scope"),
-            error: None,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResourceReadTool
-// ---------------------------------------------------------------------------
-
-/// Tool for agents to read resource documents.
-pub struct ResourceReadTool {
-    memory: Arc<dyn Memory>,
-    scope: MemoryScope,
-}
-
-impl ResourceReadTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
-        Self { memory, scope }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ResourceReadTool {
-    fn name(&self) -> &str {
-        "read_resource"
-    }
-
-    fn description(&self) -> &str {
-        "Read a shared resource document by filename."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename of the resource to read"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["project", "workspace"],
-                    "description": "Where to look: 'project' (default) or 'workspace'"
-                }
-            },
-            "required": ["filename"]
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let filename = args["filename"].as_str().unwrap_or("");
-        let scope = args["scope"].as_str().unwrap_or("project");
-
-        if filename.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("filename is required".into()),
-            });
-        }
-
-        let ns = self.scope.resolve_resource(scope);
-        match self.memory.read_resource(ns, filename).await? {
-            Some(content) => Ok(ToolResult {
-                success: true,
-                output: content,
-                error: None,
-            }),
-            None => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Resource '{filename}' not found in {scope} scope")),
-            }),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResourceDeleteTool
-// ---------------------------------------------------------------------------
-
-/// Tool for agents to delete resource documents.
-pub struct ResourceDeleteTool {
-    memory: Arc<dyn Memory>,
-    scope: MemoryScope,
-}
-
-impl ResourceDeleteTool {
-    pub fn new(memory: Arc<dyn Memory>, scope: MemoryScope) -> Self {
-        Self { memory, scope }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ResourceDeleteTool {
-    fn name(&self) -> &str {
-        "delete_resource"
-    }
-
-    fn description(&self) -> &str {
-        "Delete a shared resource document."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "Filename of the resource to delete"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["project", "workspace"],
-                    "description": "Where to delete from: 'project' (default) or 'workspace'"
-                }
-            },
-            "required": ["filename"]
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Write
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let filename = args["filename"].as_str().unwrap_or("");
-        let scope = args["scope"].as_str().unwrap_or("project");
-
-        if filename.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("filename is required".into()),
-            });
-        }
-
-        let ns = self.scope.resolve_resource(scope);
-        let deleted = self.memory.delete_resource(ns, filename).await?;
-
-        Ok(ToolResult {
-            success: true,
-            output: if deleted {
-                format!("Deleted resource '{filename}' from {scope} scope")
-            } else {
-                format!("Resource '{filename}' not found in {scope} scope")
-            },
-            error: None,
-        })
-    }
-}
+pub use artifacts::{ArtifactDeleteTool, ArtifactReadTool, ArtifactSaveTool};
 
 // ---------------------------------------------------------------------------
 // Tool factory
 // ---------------------------------------------------------------------------
 
-/// Create all memory and resource tools for an agent.
-pub fn memory_tools(
-    memory: Arc<dyn Memory>,
-    scope: MemoryScope,
-    agent_name: &str,
-) -> Vec<Arc<dyn Tool>> {
+/// Create all memory and artifact tools for an agent.
+pub fn memory_tools<M>(memory: Arc<M>, scope: MemoryScope, agent_name: &str) -> Vec<Arc<dyn Tool>>
+where
+    M: Memory + ?Sized + 'static,
+{
     vec![
         Arc::new(MemoryStoreTool::new(memory.clone(), scope.clone())),
         Arc::new(MemoryRecallTool::new(memory.clone(), scope.clone())),
         Arc::new(MemoryForgetTool::new(memory.clone(), scope.clone())),
-        Arc::new(ResourceSaveTool::new(
+        Arc::new(ArtifactSaveTool::new(
             memory.clone(),
             scope.clone(),
             agent_name.to_string(),
         )),
-        Arc::new(ResourceReadTool::new(memory.clone(), scope.clone())),
-        Arc::new(ResourceDeleteTool::new(memory, scope)),
+        Arc::new(ArtifactReadTool::new(memory.clone(), scope.clone())),
+        Arc::new(ArtifactDeleteTool::new(memory, scope)),
     ]
 }
