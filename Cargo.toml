@@ -19,26 +19,26 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 authors = ["Boon Labs"]
 license = "Apache-2.0"
 repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
-nenjo = { path = "crates/nenjo", version = "0.11.0" }
-nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.11.0" }
-nenjo-platform = { path = "crates/platform", version = "0.11.0" }
-nenjo-xml = { path = "crates/xml", version = "0.11.0" }
-nenjo-models = { path = "crates/models", version = "0.11.0" }
-nenjo-events = { path = "crates/events", version = "0.11.0" }
-nenjo-eventbus = { path = "crates/eventbus", version = "0.11.0" }
-nenjo-harness = { path = "crates/harness", version = "0.11.0" }
-nenjo-knowledge = { path = "crates/knowledge", version = "0.11.0" }
-nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.11.0" }
-nenjo-sessions = { path = "crates/sessions", version = "0.11.0" }
+nenjo = { path = "crates/nenjo", version = "0.12.0" }
+nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.12.0" }
+nenjo-platform = { path = "crates/platform", version = "0.12.0" }
+nenjo-xml = { path = "crates/xml", version = "0.12.0" }
+nenjo-models = { path = "crates/models", version = "0.12.0" }
+nenjo-events = { path = "crates/events", version = "0.12.0" }
+nenjo-eventbus = { path = "crates/eventbus", version = "0.12.0" }
+nenjo-harness = { path = "crates/harness", version = "0.12.0" }
+nenjo-knowledge = { path = "crates/knowledge", version = "0.12.0" }
+nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.12.0" }
+nenjo-sessions = { path = "crates/sessions", version = "0.12.0" }
 nenjo-worker = { path = "crates/worker" }
-nenjo-tool-api = { path = "crates/tool-api", version = "0.11.0" }
+nenjo-tool-api = { path = "crates/tool-api", version = "0.12.0" }
 
 aes-gcm = "0.10"
 anyhow = "1.0"
