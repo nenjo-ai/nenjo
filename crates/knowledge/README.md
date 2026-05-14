@@ -3,7 +3,7 @@
 Knowledge pack primitives and reusable knowledge tools for Nenjo agents.
 
 This crate is intentionally separate from the core `nenjo` SDK. It owns the shared
-metadata/search/read contracts for knowledge packs, plus `tool-api` backed tools
+metadata/search/read contracts for knowledge packs, plus `nenjo-tool-api` backed tools
 that expose packs to agents through a consistent interface.
 
 ## Features

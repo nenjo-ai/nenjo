@@ -38,7 +38,7 @@ nenjo-knowledge = { path = "crates/knowledge", version = "0.11.0" }
 nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.11.0" }
 nenjo-sessions = { path = "crates/sessions", version = "0.11.0" }
 nenjo-worker = { path = "crates/worker" }
-tool-api = { package = "nenjo-tool-api", path = "crates/tool-api", version = "0.11.0" }
+nenjo-tool-api = { path = "crates/tool-api", version = "0.11.0" }
 
 aes-gcm = "0.10"
 anyhow = "1.0"

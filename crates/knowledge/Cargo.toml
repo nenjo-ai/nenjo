@@ -19,4 +19,4 @@ nenjo-xml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true, optional = true }
-tool-api = { workspace = true }
+nenjo-tool-api = { workspace = true }

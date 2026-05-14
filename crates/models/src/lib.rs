@@ -20,7 +20,7 @@ pub mod router;
 pub mod traits;
 
 // Re-export core types at crate root.
-pub use tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
+pub use nenjo_tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
     ToolCall, ToolCategory, ToolResultMessage, ToolSpec, one_shot,

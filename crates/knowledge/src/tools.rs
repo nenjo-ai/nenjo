@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use nenjo_tool_api::{Tool, ToolCategory, ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tool_api::{Tool, ToolCategory, ToolResult, ToolSpec};
 
 use crate::{
     KnowledgeDocAuthority, KnowledgeDocFilter, KnowledgeDocKind, KnowledgeDocManifest,

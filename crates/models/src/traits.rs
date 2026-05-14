@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+pub use nenjo_tool_api::{ToolCall, ToolCategory, ToolResultMessage, ToolSpec};
 use serde::{Deserialize, Serialize};
-pub use tool_api::{ToolCall, ToolCategory, ToolResultMessage, ToolSpec};
 
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,7 +11,7 @@ keywords = ["ai-agents", "llm", "openai", "anthropic", "model-provider"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-tool-api = { workspace = true }
+nenjo-tool-api = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
