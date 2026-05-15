@@ -81,6 +81,7 @@ pub struct SecurityPolicy {
     pub autonomy: AutonomyLevel,
     pub workspace_dir: PathBuf,
     pub workspace_only: bool,
+    pub allowed_runtime_roots: Vec<PathBuf>,
     pub blocked_commands: Vec<String>,
     pub forbidden_paths: Vec<String>,
     pub max_actions_per_hour: u32,
@@ -104,6 +105,7 @@ impl Default for SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: home.join(".nenjo").join("workspace"),
             workspace_only: true,
+            allowed_runtime_roots: default_runtime_roots(&home.join(".nenjo").join("workspace")),
             blocked_commands: default_blocked_commands(),
             forbidden_paths: vec![
                 // System directories (blocked even when workspace_only=false)
@@ -137,6 +139,14 @@ impl Default for SecurityPolicy {
     }
 }
 
+fn default_runtime_roots(workspace_dir: &Path) -> Vec<PathBuf> {
+    let runtime_home = workspace_dir.join(".nenjo");
+    ["skills", "plugins", "library"]
+        .into_iter()
+        .map(|name| runtime_home.join(name))
+        .collect()
+}
+
 /// Collect environment variables that should be forwarded to shell subprocesses.
 fn collect_forwarded_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
@@ -155,7 +165,6 @@ fn collect_forwarded_env() -> Vec<(String, String)> {
             env.push(("GITHUB_TOKEN".into(), token));
         }
     }
-
     if let Ok(home) = std::env::var("HOME") {
         let global_config = Path::new(&home).join(".gitconfig");
         if global_config.exists() {
@@ -352,9 +361,32 @@ impl SecurityPolicy {
     /// so that tool scoping and template variables resolve to the correct paths.
     pub fn with_workspace_dir(workspace_dir: PathBuf) -> Self {
         Self {
+            allowed_runtime_roots: default_runtime_roots(&workspace_dir),
             workspace_dir,
             ..Default::default()
         }
+    }
+
+    pub fn with_workspace_and_runtime_roots(
+        workspace_dir: PathBuf,
+        runtime_roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            workspace_dir,
+            allowed_runtime_roots: runtime_roots,
+            ..Default::default()
+        }
+    }
+
+    pub fn is_managed_runtime_path(&self, path: &Path) -> bool {
+        let workspace_root = self
+            .workspace_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_dir.clone());
+        let runtime_home = workspace_root.join(".nenjo");
+        ["skills", "plugins", "library"]
+            .into_iter()
+            .any(|name| path.starts_with(runtime_home.join(name)))
     }
 
     /// Classify command risk. Any high-risk segment marks the whole command high.
@@ -536,6 +568,25 @@ impl SecurityPolicy {
         }
     }
 
+    fn is_within_allowed_runtime_root(&self, arg: &str) -> bool {
+        let expanded = if let Some(stripped) = arg.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(home).join(stripped)
+            } else {
+                return false;
+            }
+        } else {
+            PathBuf::from(arg)
+        };
+
+        self.allowed_runtime_roots.iter().any(|root| {
+            match (expanded.canonicalize(), root.canonicalize()) {
+                (Ok(resolved), Ok(root)) => resolved.starts_with(root),
+                _ => expanded.starts_with(root),
+            }
+        })
+    }
+
     pub fn is_command_allowed(&self, command: &str) -> bool {
         if self.autonomy == AutonomyLevel::ReadOnly {
             return false;
@@ -633,6 +684,7 @@ impl SecurityPolicy {
                     }
                     if (arg.starts_with('/') || arg.starts_with("~/"))
                         && !self.is_within_workspace(arg)
+                        && !self.is_within_allowed_runtime_root(arg)
                     {
                         return false;
                     }
@@ -677,6 +729,7 @@ impl SecurityPolicy {
         if self.workspace_only
             && Path::new(&expanded).is_absolute()
             && !self.is_within_workspace(path)
+            && !self.is_within_allowed_runtime_root(path)
         {
             return false;
         }

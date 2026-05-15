@@ -25,21 +25,19 @@ use nenjo_platform::library_knowledge::{
 
 pub fn manifest_library_dir(
     manifest: &nenjo::Manifest,
-    workspace_dir: &Path,
+    platform_library_root: &Path,
     project_id: Uuid,
 ) -> PathBuf {
-    workspace_dir
-        .join("library")
-        .join(library_pack_slug(manifest, project_id))
+    platform_library_root.join(library_pack_slug(manifest, project_id))
 }
 
 pub fn remove_manifest_document(
     manifest: &nenjo::Manifest,
-    workspace_dir: &Path,
+    platform_library_root: &Path,
     project_id: Uuid,
     document_id: Uuid,
 ) -> Result<()> {
-    let library_dir = manifest_library_dir(manifest, workspace_dir, project_id);
+    let library_dir = manifest_library_dir(manifest, platform_library_root, project_id);
     let existing = library_knowledge_item_relative_path(&library_dir, document_id);
     remove_library_knowledge_entry(&library_dir, document_id)?;
     if let Some(filename) = existing {
@@ -177,15 +175,16 @@ pub fn compute_diff(
 /// Filesystem errors are propagated (hard-fail).
 pub async fn sync_all(
     api: &NenjoClient,
-    workspace_dir: &Path,
+    nenjo_home: &Path,
     state_dir: &Path,
     _projects: &[nenjo::manifest::ProjectManifest],
 ) -> Result<()> {
-    let library_dir = workspace_dir.join("library");
-    std::fs::create_dir_all(&library_dir).with_context(|| {
+    let library_root = nenjo_home.join("library");
+    let platform_library_dir = library_root.join("platform");
+    std::fs::create_dir_all(&platform_library_dir).with_context(|| {
         format!(
-            "Failed to create library directory: {}",
-            library_dir.display()
+            "Failed to create platform library directory: {}",
+            platform_library_dir.display()
         )
     })?;
 
@@ -201,11 +200,17 @@ pub async fn sync_all(
     };
 
     for pack in packs {
-        let pack_dir = library_dir.join(&pack.slug);
-        if let Err(e) = sync_pack(api, &pack_dir, pack.id, state_dir).await {
+        let pack_dir = platform_library_dir.join(&pack.slug);
+        let result = if pack.source_type == "github" {
+            crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
+        } else {
+            sync_pack(api, &pack_dir, pack.id, state_dir).await
+        };
+        if let Err(e) = result {
             warn!(
                 pack_id = %pack.id,
                 pack_slug = %pack.slug,
+                source_type = %pack.source_type,
                 error = %e,
                 "Knowledge sync failed for pack — continuing"
             );

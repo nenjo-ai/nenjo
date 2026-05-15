@@ -162,15 +162,15 @@ async fn project_context_renders_template_and_knowledge_vars() {
         .with_manifest(manifest)
         .with_model_factory(MockFactory)
         .with_tool_factory(NoopToolFactory)
-        .with_knowledge_pack(
-            "workspace:product",
+        .with_knowledge_packs([KnowledgePackEntry::new(
+            "lib:product",
             TestKnowledgePack::new(
                 "product",
                 "library://product/",
                 "first_doc",
                 "library://product/first.md",
             ),
-        )
+        )])
         .build()
         .await
         .unwrap();

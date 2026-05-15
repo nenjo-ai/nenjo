@@ -211,5 +211,15 @@ fn security_policy_from_sdk(policy: &ToolSecurity) -> SecurityPolicy {
         ToolAutonomy::Supervised => AutonomyLevel::Supervised,
         ToolAutonomy::Full => AutonomyLevel::Full,
     };
+    for name in &policy.forwarded_env_names {
+        if let Ok(value) = std::env::var(name)
+            && !security
+                .forwarded_env
+                .iter()
+                .any(|(existing, _)| existing == name)
+        {
+            security.forwarded_env.push((name.clone(), value));
+        }
+    }
     security
 }

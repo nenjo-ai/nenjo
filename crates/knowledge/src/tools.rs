@@ -319,10 +319,21 @@ pub fn knowledge_pack_prompt_vars(
 }
 
 pub fn knowledge_pack_var_prefix(selector: &str) -> String {
-    if let Some(slug) = selector.strip_prefix("workspace:") {
+    if let Some(slug) = selector.strip_prefix("lib:") {
         format!("lib.{}", normalize_var_segment(slug))
-    } else if selector == "workspace" {
+    } else if selector == "lib" {
         "lib".to_string()
+    } else if let Some(repo_selector) = selector.strip_prefix("repo://") {
+        let segments = repo_selector
+            .split('/')
+            .map(normalize_var_segment)
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            "repo".to_string()
+        } else {
+            format!("repo.{}", segments.join("."))
+        }
     } else {
         selector.replace(':', ".").replace('-', "_")
     }
@@ -528,7 +539,7 @@ fn prompt_doc_path(doc: &KnowledgeDocManifest) -> String {
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Knowledge pack selector such as builtin:nenjo, workspace:<pack_slug>, or remote:<pack_id>."
+        "description": "Knowledge pack selector such as builtin:nenjo, lib:<pack_slug>, or repo://owner/repo/package."
     })
 }
 
@@ -826,11 +837,23 @@ mod tests {
     use super::knowledge_pack_var_prefix;
 
     #[test]
-    fn workspace_knowledge_uses_lib_template_namespace() {
+    fn library_knowledge_uses_lib_template_namespace() {
         assert_eq!(
-            knowledge_pack_var_prefix("workspace:Product Docs"),
+            knowledge_pack_var_prefix("lib:Product Docs"),
             "lib.product_docs"
         );
-        assert_eq!(knowledge_pack_var_prefix("workspace"), "lib");
+        assert_eq!(knowledge_pack_var_prefix("lib"), "lib");
+    }
+
+    #[test]
+    fn repo_knowledge_uses_owner_qualified_template_namespace() {
+        assert_eq!(
+            knowledge_pack_var_prefix("repo://nenjo-ai/knowledge/platform"),
+            "repo.nenjo_ai.knowledge.platform"
+        );
+        assert_eq!(
+            knowledge_pack_var_prefix("repo://trailofbits/skills-curated/x-research"),
+            "repo.trailofbits.skills_curated.x_research"
+        );
     }
 }

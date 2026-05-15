@@ -90,15 +90,17 @@ knowledge tools when they need source detail.
 SDK users register packs while building a provider:
 
 ```rust
+use nenjo_knowledge::tools::KnowledgePackEntry;
+
 let provider = nenjo::Provider::builder()
     .with_loader(loader)
     .with_model_factory(model_factory)
-    .with_knowledge_pack("docs:app", app_docs)
+    .with_knowledge_packs([KnowledgePackEntry::new("docs:app", app_docs)])
     .build()
     .await?;
 ```
 
-For multiple concrete pack types, wrap each one in `KnowledgePackEntry`.
+For multiple packs, pass multiple `KnowledgePackEntry` values.
 
 Registered packs add prompt metadata variables and the generic knowledge tools
 for agents built by the provider.

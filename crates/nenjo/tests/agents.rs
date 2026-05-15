@@ -373,6 +373,9 @@ fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
         },
         platform_scopes: scopes.into_iter().map(String::from).collect(),
         mcp_server_ids: vec![],
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     }
 }
 
@@ -890,6 +893,9 @@ async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
             args: None,
             url: None,
             env_schema: serde_json::Value::Null,
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         });
 
     let provider = Provider::builder()

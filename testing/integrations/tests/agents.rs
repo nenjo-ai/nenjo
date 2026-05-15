@@ -392,6 +392,9 @@ async fn assigned_ability_tool_with_real_llm() {
         },
         platform_scopes: vec![],
         mcp_server_ids: vec![],
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     };
 
     let manifest = Manifest {

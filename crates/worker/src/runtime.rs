@@ -345,6 +345,7 @@ mod tests {
                 manifests_dir: config.manifests_dir.clone(),
                 workspace_dir: config.workspace_dir.clone(),
                 state_dir: config.state_dir.clone(),
+                config_dir: config.config_dir.clone(),
             })
             .with_mcp_runtime(external_mcp.clone())
             .build();

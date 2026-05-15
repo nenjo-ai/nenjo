@@ -249,6 +249,9 @@ impl From<AbilityDocument> for AbilityManifest {
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: ability.platform_scopes,
             mcp_server_ids: ability.mcp_server_ids,
+            source_type: "native".to_string(),
+            read_only: false,
+            metadata: serde_json::json!({}),
         }
     }
 }

@@ -110,7 +110,9 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
         manifests_dir: manifests_dir.clone(),
         workspace_dir: workspace_dir.clone(),
         state_dir: state_dir.clone(),
+        config_dir: temp.path().join("config"),
     };
+    let config_dir = cache.config_dir.clone();
 
     cache
         .persist_resource(
@@ -132,8 +134,15 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
         )
         .await
         .expect("sync document metadata");
-    let pack_dir = workspace_dir.join("library").join("alpha");
+    let pack_dir = config_dir.join("library").join("platform").join("alpha");
     assert!(pack_dir.join("manifest.json").exists());
+    assert!(
+        !workspace_dir
+            .join("library")
+            .join("alpha")
+            .join("manifest.json")
+            .exists()
+    );
     assert!(
         !manifests_dir
             .join("library")

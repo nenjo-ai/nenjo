@@ -309,6 +309,7 @@ pub async fn sync(
     manifests_dir: &Path,
     workspace_dir: &Path,
     state_dir: &Path,
+    nenjo_home: &Path,
 ) -> Result<()> {
     // Ensure the data directory exists (filesystem error = hard fail)
     std::fs::create_dir_all(manifests_dir).with_context(|| {
@@ -337,7 +338,8 @@ pub async fn sync(
     )
     .await
     .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
-    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
+    let runtime_assets_home = workspace_dir.join(".nenjo");
+    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir, &runtime_assets_home).await?;
     let manifest = &data.manifest;
 
     info!(
@@ -367,8 +369,8 @@ pub async fn sync(
         &manifest.context_blocks,
     )?;
 
-    // Sync library knowledge packs to the workspace library.
-    crate::local_documents::sync_all(api, workspace_dir, state_dir, &manifest.projects).await?;
+    // Sync platform-uploaded and repo-backed library knowledge under ~/.nenjo/library.
+    crate::local_documents::sync_all(api, nenjo_home, state_dir, &manifest.projects).await?;
 
     Ok(())
 }
@@ -377,6 +379,7 @@ async fn hydrate_bootstrap_manifest(
     api: &NenjoClient,
     bootstrap: serde_json::Value,
     state_dir: &Path,
+    nenjo_home: &Path,
 ) -> Result<HydratedBootstrap> {
     let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
         Ok(value) => value,
@@ -418,6 +421,16 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
+    for ability in bootstrap.abilities {
+        abilities.push(crate::marketplace::hydrate_skill_ability(ability, nenjo_home).await?);
+    }
+
+    let mut mcp_servers = Vec::with_capacity(bootstrap.mcp_servers.len());
+    for server in bootstrap.mcp_servers {
+        mcp_servers.push(crate::marketplace::hydrate_plugin_mcp_server(server, nenjo_home).await?);
+    }
+
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
         manifest: Manifest {
@@ -427,8 +440,8 @@ async fn hydrate_bootstrap_manifest(
             councils: bootstrap.councils,
             domains: bootstrap.domains,
             projects: bootstrap.projects,
-            mcp_servers: bootstrap.mcp_servers,
-            abilities: bootstrap.abilities,
+            mcp_servers,
+            abilities,
             context_blocks,
         },
         nats: bootstrap.nats,
@@ -508,6 +521,7 @@ pub struct WorkerManifestCache {
     pub manifests_dir: PathBuf,
     pub workspace_dir: PathBuf,
     pub state_dir: PathBuf,
+    pub config_dir: PathBuf,
 }
 
 impl WorkerManifestCache {
@@ -554,6 +568,7 @@ impl WorkerManifestCache {
             &self.manifests_dir,
             &self.workspace_dir,
             &self.state_dir,
+            &self.config_dir,
         )
         .await?;
         let loader = nenjo::LocalManifestStore::new(&self.manifests_dir);
@@ -568,17 +583,60 @@ impl WorkerManifestCache {
             .find(|pack| pack.id == pack_id)
             .map(|pack| pack.slug)
             .unwrap_or_else(|| pack_id.to_string());
-        Ok(self.workspace_dir.join("library").join(slug))
+        Ok(self.config_dir.join("library").join("platform").join(slug))
     }
 
     fn knowledge_pack_slug_dir(&self, slug: &str) -> Option<PathBuf> {
         let slug = slug.trim();
-        (!slug.is_empty()).then(|| self.workspace_dir.join("library").join(slug))
+        (!slug.is_empty()).then(|| self.config_dir.join("library").join("platform").join(slug))
+    }
+
+    fn platform_library_root(&self) -> PathBuf {
+        self.config_dir.join("library").join("platform")
     }
 }
 
 #[async_trait::async_trait]
 impl ManifestStore for WorkerManifestCache {
+    async fn prepare_resource(
+        &self,
+        manifest: &mut nenjo::Manifest,
+        resource_type: ResourceType,
+    ) -> Result<()> {
+        match resource_type {
+            ResourceType::Ability => {
+                let abilities = std::mem::take(&mut manifest.abilities);
+                let mut hydrated = Vec::with_capacity(abilities.len());
+                for ability in abilities {
+                    hydrated.push(
+                        crate::marketplace::hydrate_skill_ability(
+                            ability,
+                            &self.workspace_dir.join(".nenjo"),
+                        )
+                        .await?,
+                    );
+                }
+                manifest.abilities = hydrated;
+            }
+            ResourceType::McpServer => {
+                let servers = std::mem::take(&mut manifest.mcp_servers);
+                let mut hydrated = Vec::with_capacity(servers.len());
+                for server in servers {
+                    hydrated.push(
+                        crate::marketplace::hydrate_plugin_mcp_server(
+                            server,
+                            &self.workspace_dir.join(".nenjo"),
+                        )
+                        .await?,
+                    );
+                }
+                manifest.mcp_servers = hydrated;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn persist_resource(
         &self,
         manifest: &nenjo::Manifest,
@@ -594,6 +652,33 @@ impl ManifestStore for WorkerManifestCache {
         _resource_id: Uuid,
     ) -> Result<()> {
         WorkerManifestCache::persist_resource(self, manifest, resource_type)
+    }
+
+    async fn cleanup_deleted_resource(
+        &self,
+        resource_type: ResourceType,
+        resource_id: Uuid,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let nenjo_home = self.workspace_dir.join(".nenjo");
+        match resource_type {
+            ResourceType::Ability => {
+                let Some(metadata) = deleted_resource_metadata(payload, "skill") else {
+                    return Ok(());
+                };
+                crate::marketplace::uninstall_skill_ability(resource_id, metadata, &nenjo_home)
+                    .await?;
+            }
+            ResourceType::McpServer => {
+                let Some(metadata) = deleted_resource_metadata(payload, "plugin") else {
+                    return Ok(());
+                };
+                crate::marketplace::uninstall_plugin_mcp_server(resource_id, metadata, &nenjo_home)
+                    .await?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     async fn full_refresh(&self, client: &NenjoClient) -> Result<nenjo::Manifest> {
@@ -615,7 +700,11 @@ impl ManifestStore for WorkerManifestCache {
                 self.knowledge_pack_dir(client, meta.pack_id).await?
             }
         } else {
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id)
+            crate::local_documents::manifest_library_dir(
+                manifest,
+                &self.platform_library_root(),
+                project_id,
+            )
         };
         crate::local_documents::sync_document_metadata(
             client,
@@ -642,7 +731,11 @@ impl ManifestStore for WorkerManifestCache {
                 self.knowledge_pack_dir(client, meta.pack_id).await?
             }
         } else {
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id)
+            crate::local_documents::manifest_library_dir(
+                manifest,
+                &self.platform_library_root(),
+                project_id,
+            )
         };
         crate::local_documents::sync_document(
             client,
@@ -663,7 +756,7 @@ impl ManifestStore for WorkerManifestCache {
     ) -> Result<()> {
         crate::local_documents::remove_manifest_document(
             manifest,
-            &self.workspace_dir,
+            &self.platform_library_root(),
             project_id,
             document_id,
         )
@@ -676,10 +769,31 @@ impl ManifestStore for WorkerManifestCache {
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        let pack_dir =
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id);
+        let pack_dir = crate::local_documents::manifest_library_dir(
+            manifest,
+            &self.platform_library_root(),
+            project_id,
+        );
         crate::local_documents::write_document_content(&pack_dir, relative_path, content)
     }
+}
+
+fn deleted_resource_metadata(
+    payload: Option<&serde_json::Value>,
+    expected_source_type: &str,
+) -> Option<serde_json::Value> {
+    let payload = payload?;
+    if payload
+        .get("source_type")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_source_type)
+    {
+        return None;
+    }
+    payload
+        .get("metadata")
+        .cloned()
+        .or_else(|| payload.get("install_metadata").cloned())
 }
 
 async fn ensure_worker_ack(

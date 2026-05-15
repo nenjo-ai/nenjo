@@ -266,7 +266,7 @@ fn local_knowledge_pack(selector: &str) -> Result<crate::knowledge_backend::Reso
         Ok(builtin_pack())
     } else if is_default_library_pack_selector(selector) {
         Err(anyhow::anyhow!(
-            "knowledge pack 'workspace' requires a default library pack; use workspace:<slug> in the worker harness"
+            "knowledge pack 'lib' requires a default library pack; use lib:<slug> in the worker harness"
         ))
     } else {
         Err(unknown_pack(selector))
@@ -448,6 +448,9 @@ where
             prompt_config: params.data.prompt_config,
             platform_scopes: Vec::new(),
             mcp_server_ids: params.data.mcp_server_ids.unwrap_or_default(),
+            source_type: "native".to_string(),
+            read_only: false,
+            metadata: serde_json::json!({}),
         };
         self.writer
             .upsert_resource(&ManifestResource::Ability(ability.clone()))
@@ -1361,6 +1364,9 @@ mod tests {
             },
             platform_scopes: vec!["projects:read".into()],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
 
         let domain = DomainManifest {

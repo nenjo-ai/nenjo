@@ -71,6 +71,17 @@ where
 
     if action == ResourceAction::Deleted {
         apply_delete(&mut manifest, resource_type, resource_id);
+        if let Err(error) = store
+            .cleanup_deleted_resource(resource_type, resource_id, payload.as_ref())
+            .await
+        {
+            warn!(
+                error = %error,
+                %resource_type,
+                %resource_id,
+                "Failed to clean up deleted manifest resource"
+            );
+        }
         source = ManifestApplySource::Deleted;
     } else {
         if let Some(ref data) = payload
@@ -117,6 +128,17 @@ where
                 source = ManifestApplySource::FetchedResource;
             }
         }
+    }
+
+    if action != ResourceAction::Deleted
+        && let Err(error) = store.prepare_resource(&mut manifest, resource_type).await
+    {
+        warn!(
+            error = %error,
+            %resource_type,
+            %resource_id,
+            "Failed to prepare manifest resource"
+        );
     }
 
     match resource_type {

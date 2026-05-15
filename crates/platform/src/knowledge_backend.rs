@@ -79,17 +79,17 @@ pub(crate) fn builtin_pack() -> ResolvedKnowledgePack {
 }
 
 pub(crate) fn library_pack_selector(pack_slug: &str) -> String {
-    format!("workspace:{pack_slug}")
+    format!("lib:{pack_slug}")
 }
 
 pub(crate) fn is_default_library_pack_selector(selector: &str) -> bool {
-    selector == "workspace"
+    selector == "lib"
 }
 
 pub(crate) fn parse_library_pack_selector(selector: &str) -> Result<&str> {
     let slug = selector
-        .strip_prefix("workspace:")
-        .ok_or_else(|| anyhow!("library knowledge packs must use workspace:<slug>"))?;
+        .strip_prefix("lib:")
+        .ok_or_else(|| anyhow!("library knowledge packs must use lib:<slug>"))?;
     if slug.is_empty() {
         bail!("library knowledge pack selector must include a slug")
     }
@@ -98,14 +98,15 @@ pub(crate) fn parse_library_pack_selector(selector: &str) -> Result<&str> {
 
 pub(crate) fn unknown_pack(selector: &str) -> anyhow::Error {
     anyhow!(
-        "unknown knowledge pack '{selector}'; use 'builtin:nenjo', 'workspace' when a default library pack is available, or 'workspace:<slug>'"
+        "unknown knowledge pack '{selector}'; use 'builtin:nenjo', 'lib' when a default library pack is available, 'lib:<slug>', or repo://owner/repo/package"
     )
 }
 
 pub(crate) fn ensure_known_pack_selector(selector: &str) -> Result<()> {
     if is_nenjo_pack_selector(selector)
         || is_default_library_pack_selector(selector)
-        || selector.starts_with("workspace:")
+        || selector.starts_with("lib:")
+        || selector.starts_with("repo://")
     {
         Ok(())
     } else {

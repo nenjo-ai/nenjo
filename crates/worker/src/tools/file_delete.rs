@@ -126,6 +126,13 @@ impl Tool for FileDeleteTool {
                 error: Some("Refusing to delete workspace root".into()),
             });
         }
+        if self.security.is_managed_runtime_path(&resolved_path) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Path is managed by Nenjo runtime installs and is read-only".into()),
+            });
+        }
 
         if resolved_path
             .components()

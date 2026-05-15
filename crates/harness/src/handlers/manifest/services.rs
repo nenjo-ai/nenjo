@@ -37,6 +37,16 @@ where
 #[async_trait]
 /// Host-owned manifest persistence and document side-effect hooks.
 pub trait ManifestStore: Send + Sync {
+    /// Let the host normalize or materialize resource data before the manifest
+    /// is swapped into the running provider and persisted.
+    async fn prepare_resource(
+        &self,
+        _manifest: &mut nenjo::Manifest,
+        _resource_type: ResourceType,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Persist the current manifest cache for one resource type.
     async fn persist_resource(
         &self,
@@ -52,6 +62,17 @@ pub trait ManifestStore: Send + Sync {
         _resource_id: Uuid,
     ) -> Result<()> {
         self.persist_resource(manifest, resource_type).await
+    }
+
+    /// Apply host-owned cleanup for a deleted resource using the optional
+    /// inline tombstone payload sent with the delete event.
+    async fn cleanup_deleted_resource(
+        &self,
+        _resource_type: ResourceType,
+        _resource_id: Uuid,
+        _payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Rebuild the full manifest cache from the platform client.
@@ -128,6 +149,14 @@ impl<T> ManifestStore for Arc<T>
 where
     T: ManifestStore + ?Sized,
 {
+    async fn prepare_resource(
+        &self,
+        manifest: &mut nenjo::Manifest,
+        resource_type: ResourceType,
+    ) -> Result<()> {
+        (**self).prepare_resource(manifest, resource_type).await
+    }
+
     async fn persist_resource(
         &self,
         manifest: &nenjo::Manifest,

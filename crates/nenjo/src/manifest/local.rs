@@ -429,6 +429,9 @@ mod tests {
             },
             platform_scopes: vec![],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
 
         Manifest {

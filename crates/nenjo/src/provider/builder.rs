@@ -12,7 +12,6 @@ use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use nenjo_knowledge::KnowledgePack;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 
 /// Builder for creating a [`Provider`].
@@ -241,23 +240,12 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
         self
     }
 
-    /// Register a knowledge pack with this provider.
-    ///
-    /// Registered packs automatically contribute reusable knowledge tools and
-    /// prompt metadata variables for all agents built by the provider.
-    pub fn with_knowledge_pack(
-        mut self,
-        selector: impl Into<String>,
-        pack: impl KnowledgePack + 'static,
-    ) -> Self {
-        self.add_knowledge_pack(KnowledgePackEntry::new(selector, pack));
-        self
-    }
-
     /// Register multiple knowledge packs with this provider.
     ///
-    /// Use [`KnowledgePackEntry`] when the collection contains different
-    /// concrete pack types.
+    /// Registered packs automatically contribute reusable knowledge tools and
+    /// prompt metadata variables for all agents built by the provider. Use
+    /// [`KnowledgePackEntry`] to preserve selector metadata and support
+    /// collections with different concrete pack types.
     pub fn with_knowledge_packs<I, E>(mut self, packs: I) -> Self
     where
         I: IntoIterator<Item = E>,

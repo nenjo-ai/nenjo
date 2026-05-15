@@ -23,7 +23,6 @@ fn collect_forwarded_env() -> Vec<(String, String)> {
             env.push(("GITHUB_TOKEN".into(), token));
         }
     }
-
     if let Ok(home) = std::env::var("HOME") {
         let global_config = Path::new(&home).join(".gitconfig");
         if global_config.exists() {
@@ -51,6 +50,8 @@ pub fn security_policy_from_config(
         autonomy: AutonomyLevel::Full,
         workspace_dir: workspace_dir.to_path_buf(),
         workspace_only: autonomy_config.workspace_only,
+        allowed_runtime_roots: SecurityPolicy::with_workspace_dir(workspace_dir.to_path_buf())
+            .allowed_runtime_roots,
         blocked_commands: autonomy_config.blocked_commands.clone(),
         forbidden_paths: autonomy_config.forbidden_paths.clone(),
         max_actions_per_hour: autonomy_config.max_actions_per_hour,

@@ -42,6 +42,7 @@ pub const LIBRARY_KNOWLEDGE_MANIFEST_FILENAME: &str = "manifest.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryKnowledgePackManifest {
     pub pack_id: String,
+    #[serde(default = "default_library_pack_version")]
     pub pack_version: String,
     pub schema_version: u32,
     pub root_uri: String,
@@ -50,6 +51,10 @@ pub struct LibraryKnowledgePackManifest {
     #[serde(default)]
     pub synced_at: String,
     pub docs: Vec<KnowledgeDocManifest>,
+}
+
+fn default_library_pack_version() -> String {
+    "1".to_string()
 }
 
 impl KnowledgePackManifest for LibraryKnowledgePackManifest {

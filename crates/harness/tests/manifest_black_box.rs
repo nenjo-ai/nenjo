@@ -254,6 +254,9 @@ fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
         },
         platform_scopes: Vec::new(),
         mcp_server_ids: Vec::new(),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     }
 }
 
@@ -279,6 +282,9 @@ fn mcp_server(id: Uuid, name: &str) -> McpServerManifest {
         args: Some(Vec::new()),
         url: None,
         env_schema: serde_json::json!({}),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     }
 }
 

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,6 +9,7 @@ use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
 use nenjo_harness::execution_trace::NoopExecutionTraceRuntime;
+use nenjo_knowledge::KnowledgePack;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::library_knowledge::LibraryKnowledgePack;
@@ -122,6 +123,7 @@ impl WorkerAssembly {
                 manifests_dir: config.manifests_dir.clone(),
                 workspace_dir: config.workspace_dir.clone(),
                 state_dir: config.state_dir.clone(),
+                config_dir: config.config_dir.clone(),
             })
             .with_mcp_runtime(external_mcp.clone())
             .build();
@@ -158,7 +160,7 @@ pub(crate) async fn build_provider(
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
 
-    let library_knowledge_packs = load_library_knowledge_packs(&config.workspace_dir);
+    let library_knowledge_packs = load_library_knowledge_packs(&config.config_dir);
 
     Provider::builder()
         .with_loader(loader)
@@ -166,34 +168,70 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
-        .with_knowledge_pack(
-            "builtin:nenjo",
-            nenjo_knowledge::builtin::nenjo_pack().clone(),
+        .with_knowledge_packs(
+            [KnowledgePackEntry::new(
+                "builtin:nenjo",
+                nenjo_knowledge::builtin::nenjo_pack().clone(),
+            )]
+            .into_iter()
+            .chain(library_knowledge_packs),
         )
-        .with_knowledge_packs(library_knowledge_packs)
         .build()
         .await
         .context("Failed to build Provider")
 }
 
-fn load_library_knowledge_packs(workspace_dir: &Path) -> Vec<KnowledgePackEntry> {
-    let library_dir = workspace_dir.join("library");
-    let Ok(entries) = std::fs::read_dir(&library_dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
+fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
+    let mut packs = Vec::new();
+    let platform_dir = nenjo_home.join("library").join("platform");
+    if let Ok(entries) = std::fs::read_dir(&platform_dir) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             if !file_type.is_dir() {
-                return None;
+                continue;
             }
             let slug = entry.file_name().to_string_lossy().to_string();
-            LibraryKnowledgePack::load(entry.path())
-                .map(|pack| KnowledgePackEntry::new(format!("workspace:{slug}"), pack))
-        })
-        .collect()
+            if let Some(pack) = LibraryKnowledgePack::load(entry.path()) {
+                packs.push(KnowledgePackEntry::new(format!("lib:{slug}"), pack));
+            }
+        }
+    }
+
+    let repos_dir = nenjo_home.join("library").join("repos");
+    for pack_dir in find_library_pack_dirs(&repos_dir) {
+        let Some(pack) = LibraryKnowledgePack::load(&pack_dir) else {
+            continue;
+        };
+        let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
+        if selector.starts_with("repo://") {
+            packs.push(KnowledgePackEntry::new(selector, pack));
+        }
+    }
+    packs
+}
+
+fn find_library_pack_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if LibraryKnowledgePack::load(&path).is_some() {
+            found.push(path);
+        } else {
+            found.extend(find_library_pack_dirs(&path));
+        }
+    }
+    found
 }
 
 fn build_platform_tool_services(
@@ -218,6 +256,6 @@ fn build_platform_tool_services(
         platform_client,
         payload_encoder,
         cached_org_id,
-        config.workspace_dir.clone(),
+        config.config_dir.clone(),
     )
 }

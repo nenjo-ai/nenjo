@@ -17,15 +17,17 @@ that expose packs to agents through a consistent interface.
 Register packs at provider construction time:
 
 ```rust
+use nenjo_knowledge::tools::KnowledgePackEntry;
+
 let provider = nenjo::Provider::builder()
     .with_loader(loader)
     .with_model_factory(model_factory)
-    .with_knowledge_pack("docs:app", app_docs)
+    .with_knowledge_packs([KnowledgePackEntry::new("docs:app", app_docs)])
     .build()
     .await?;
 ```
 
-For multiple concrete pack types, use `KnowledgePackEntry`:
+For multiple packs, pass multiple `KnowledgePackEntry` values:
 
 ```rust
 use nenjo_knowledge::tools::KnowledgePackEntry;

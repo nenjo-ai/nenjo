@@ -22,7 +22,23 @@ pub struct KnowledgePackSyncMeta {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_knowledge_pack_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub is_system: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub updated_at: String,
+}
+
+fn default_knowledge_pack_source_type() -> String {
+    "uploaded".to_string()
 }
 
 /// Metadata for a workspace knowledge item, used during knowledge sync.
