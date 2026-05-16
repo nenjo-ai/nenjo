@@ -7,35 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.12.0](https://github.com/nenjo-ai/nenjo/compare/v0.11.0...v0.12.0) - 2026-05-14
-
-### Added
-
-- add workspace library knowledge packs ([#48](https://github.com/nenjo-ai/nenjo/pull/48))
-- improved abilites, domains, and turn loop events
-- added configurable nenjo dir
-- git worktree isolation, agent identity tracking, and config-driven git identity
-- improve memory and resource system
-- per user nat account isolation
-- inject chat message into agent prompt, harden config defaults, add worker ping
-- add nenjo
-
-### Fixed
-
-- release worker to crates io ([#31](https://github.com/nenjo-ai/nenjo/pull/31))
-- concurrency nonce for manifest sync
-- propagate custom workspace dir
-- address dependabot and codeql findings
-- nenjo git config stays local
-- clean up log output
-- ability and domain scoping
-- pass manifest into use_ability
-
-### Other
-
-- refactor folder structure for mems and res
-- add release workflows
-
 ## [0.11.0](https://github.com/nenjo-ai/nenjo/compare/v0.10.0...v0.11.0) - 2026-05-04
 
 ### Added
