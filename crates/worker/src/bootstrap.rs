@@ -43,7 +43,7 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     domains: Vec<nenjo::manifest::DomainManifest>,
     #[serde(default)]
-    projects: Vec<nenjo::manifest::ProjectManifest>,
+    projects: Vec<BootstrapProjectManifest>,
     #[serde(default)]
     mcp_servers: Vec<nenjo::manifest::McpServerManifest>,
     #[serde(default)]
@@ -202,6 +202,18 @@ struct BootstrapContextBlockManifest {
     #[serde(default)]
     template: String,
     #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapProjectManifest {
+    id: Uuid,
+    name: String,
+    slug: String,
+    description: Option<String>,
+    #[serde(default)]
+    settings: serde_json::Value,
+    #[serde(default, alias = "settings_encrypted_payload")]
     encrypted_payload: Option<EncryptedPayload>,
 }
 
@@ -421,6 +433,18 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let mut projects = Vec::with_capacity(bootstrap.projects.len());
+    for project in bootstrap.projects {
+        let settings = resolve_bootstrap_project_settings(&project, state_dir).await?;
+        projects.push(nenjo::manifest::ProjectManifest {
+            id: project.id,
+            name: project.name,
+            slug: project.slug,
+            description: project.description,
+            settings,
+        });
+    }
+
     let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
     for ability in bootstrap.abilities {
         abilities.push(crate::marketplace::hydrate_skill_ability(ability, nenjo_home).await?);
@@ -439,7 +463,7 @@ async fn hydrate_bootstrap_manifest(
             agents,
             councils: bootstrap.councils,
             domains: bootstrap.domains,
-            projects: bootstrap.projects,
+            projects,
             mcp_servers,
             abilities,
             context_blocks,
@@ -920,6 +944,73 @@ async fn decrypt_context_block_template_payload(
             block_id
         )
     })
+}
+
+async fn resolve_bootstrap_project_settings(
+    project: &BootstrapProjectManifest,
+    state_dir: &Path,
+) -> Result<serde_json::Value> {
+    let mut settings = project.settings.clone();
+    let Some(payload) = project.encrypted_payload.as_ref() else {
+        return Ok(settings);
+    };
+
+    let decrypted = decrypt_project_settings_payload(payload, state_dir, project.id).await?;
+    merge_json_object(&mut settings, decrypted).with_context(|| {
+        format!(
+            "Failed to merge decrypted bootstrap project settings for project {}",
+            project.id
+        )
+    })?;
+    Ok(settings)
+}
+
+async fn decrypt_project_settings_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    project_id: Uuid,
+) -> Result<serde_json::Value> {
+    if payload.object_type != "project.settings" {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for project {}",
+            payload.object_type,
+            project_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap project settings decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap project settings payload for project {}",
+                project_id
+            )
+        })?;
+
+    serde_json::from_str::<serde_json::Value>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap project settings JSON for project {}",
+            project_id
+        )
+    })
+}
+
+fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) -> Result<()> {
+    if target.is_null() {
+        *target = serde_json::json!({});
+    }
+    let target = target
+        .as_object_mut()
+        .context("bootstrap JSON merge target was not an object")?;
+    let source = source
+        .as_object()
+        .context("decrypted bootstrap JSON merge source was not an object")?;
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+    Ok(())
 }
 
 /// Sync a list of tree items to a directory tree on disk.

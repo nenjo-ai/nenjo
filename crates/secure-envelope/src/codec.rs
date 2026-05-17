@@ -427,38 +427,79 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 action,
                 project_id,
                 payload,
-                encrypted_payload: Some(encrypted_payload),
+                encrypted_payload,
+                encrypted_payloads,
             } => {
-                let object_type = encrypted_payload.object_type.clone();
-                let decrypted = match self
-                    .decrypt_enc_payload(actor_user_id, &encrypted_payload)
-                    .await
-                {
-                    Ok(plaintext) => serde_json::from_str::<Value>(&plaintext)
-                        .unwrap_or(Value::String(plaintext)),
-                    Err(error) => {
-                        return Ok(DecodeCommandResult::ClientError(DecodingError {
-                            code: "encrypted_manifest_decode_failed",
-                            message: error.to_string(),
-                            session_id: None,
+                let encrypted_payloads = encrypted_payload
+                    .into_iter()
+                    .chain(encrypted_payloads)
+                    .collect::<Vec<_>>();
+                if encrypted_payloads.is_empty() {
+                    return Ok(DecodeCommandResult::Command(Box::new(
+                        Command::ManifestChanged {
+                            resource_type,
+                            resource_id,
+                            action,
                             project_id,
-                            agent_id: None,
-                        }));
-                    }
+                            payload,
+                            encrypted_payload: None,
+                            encrypted_payloads: Vec::new(),
+                        },
+                    )));
+                }
+
+                let mut decrypted_items = Vec::with_capacity(encrypted_payloads.len());
+                for encrypted_payload in encrypted_payloads {
+                    let object_type = encrypted_payload.object_type.clone();
+                    let decrypted = match self
+                        .decrypt_enc_payload(actor_user_id, &encrypted_payload)
+                        .await
+                    {
+                        Ok(plaintext) => serde_json::from_str::<Value>(&plaintext)
+                            .unwrap_or(Value::String(plaintext)),
+                        Err(error) => {
+                            return Ok(DecodeCommandResult::ClientError(DecodingError {
+                                code: "encrypted_manifest_decode_failed",
+                                message: error.to_string(),
+                                session_id: None,
+                                project_id,
+                                agent_id: None,
+                            }));
+                        }
+                    };
+                    decrypted_items.push(serde_json::json!({
+                        "object_type": object_type,
+                        "object_id": encrypted_payload.object_id,
+                        "decrypted_payload": decrypted,
+                    }));
+                }
+
+                let payload = if decrypted_items.len() == 1 {
+                    let item = decrypted_items.pop().expect("single decrypted item");
+                    serde_json::json!({
+                        "__nenjo_decrypted_manifest_payload": true,
+                        "object_type": item.get("object_type").cloned().unwrap_or(Value::Null),
+                        "object_id": item.get("object_id").cloned().unwrap_or(Value::Null),
+                        "inline_payload": payload,
+                        "decrypted_payload": item.get("decrypted_payload").cloned().unwrap_or(Value::Null),
+                    })
+                } else {
+                    serde_json::json!({
+                        "__nenjo_decrypted_manifest_payloads": true,
+                        "inline_payload": payload,
+                        "items": decrypted_items,
+                    })
                 };
+
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::ManifestChanged {
                         resource_type,
                         resource_id,
                         action,
                         project_id,
-                        payload: Some(serde_json::json!({
-                            "__nenjo_decrypted_manifest_payload": true,
-                            "object_type": object_type,
-                            "inline_payload": payload,
-                            "decrypted_payload": decrypted,
-                        })),
+                        payload: Some(payload),
                         encrypted_payload: None,
+                        encrypted_payloads: Vec::new(),
                     },
                 )))
             }

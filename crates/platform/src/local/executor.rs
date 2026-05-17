@@ -20,9 +20,7 @@ use nenjo_knowledge::tools::{
 };
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 
-use crate::knowledge_backend::{
-    builtin_pack, is_default_library_pack_selector, is_nenjo_pack_selector, unknown_pack,
-};
+use crate::knowledge_backend::{is_default_library_pack_selector, unknown_pack};
 use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
     AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
@@ -41,21 +39,20 @@ use crate::manifest_mcp::{
     DeleteResult, DomainDeleteParams, DomainDocument, DomainGetResult, DomainManifestBackend,
     DomainManifestDocument, DomainManifestGetParams, DomainManifestGetResult,
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeManifestBackend,
-    ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
-    ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectDeleteParams, ProjectDocument,
-    ProjectDocumentContentMutationResult, ProjectDocumentContentUpdateParams,
-    ProjectDocumentMutationResult, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
-    ProjectSummary, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
-    RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
-    RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams, RoutinesGetParams,
-    RoutinesListResult,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeItemContentMutationResult,
+    KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams, KnowledgeItemDeleteParams,
+    KnowledgeItemMutationResult, KnowledgeManifestBackend, ModelDeleteParams, ModelDocument,
+    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
+    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
+    ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
+    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
+    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
+    RoutinesGetParams, RoutinesListResult,
 };
 use crate::prompt_merge::merge_prompt_config;
 use crate::{
     AbilityCreateParams, AgentUpdateParams, ContextBlockCreateParams, CouncilCreateParams,
-    DomainCreateParams, ModelCreateParams, ProjectCreateParams, ProjectDocumentCreateParams,
-    ProjectDocumentDeleteParams, RoutineCreateParams,
+    DomainCreateParams, ModelCreateParams, ProjectCreateParams, RoutineCreateParams,
 };
 
 fn graph_input_to_manifest_parts(
@@ -118,6 +115,7 @@ fn graph_input_to_manifest_parts(
                 .get(&edge.target_step_id)
                 .expect("edge target mapping should exist"),
             condition: edge.condition,
+            metadata: edge.metadata,
         })
         .collect();
 
@@ -144,10 +142,7 @@ where
     W: ManifestWriter + Send + Sync,
 {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
-        Ok(vec![KnowledgePackSummary::new(
-            "builtin:nenjo",
-            builtin_pack().manifest(),
-        )])
+        Ok(Vec::new())
     }
 
     async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
@@ -262,9 +257,7 @@ where
 }
 
 fn local_knowledge_pack(selector: &str) -> Result<crate::knowledge_backend::ResolvedKnowledgePack> {
-    if is_nenjo_pack_selector(selector) {
-        Ok(builtin_pack())
-    } else if is_default_library_pack_selector(selector) {
+    if is_default_library_pack_selector(selector) {
         Err(anyhow::anyhow!(
             "knowledge pack 'lib' requires a default library pack; use lib:<slug> in the worker harness"
         ))
@@ -747,27 +740,27 @@ where
         })
     }
 
-    async fn create_project_document(
+    async fn create_knowledge_item(
         &self,
-        _params: ProjectDocumentCreateParams,
-    ) -> Result<ProjectDocumentMutationResult> {
+        _params: KnowledgeItemCreateParams,
+    ) -> Result<KnowledgeItemMutationResult> {
         bail!("library knowledge item tools require the platform backend")
     }
 
-    async fn update_project_document_content(
+    async fn update_knowledge_item_content(
         &self,
-        _params: ProjectDocumentContentUpdateParams,
-    ) -> Result<ProjectDocumentContentMutationResult> {
+        _params: KnowledgeItemContentUpdateParams,
+    ) -> Result<KnowledgeItemContentMutationResult> {
         bail!("library knowledge item tools require the platform backend")
     }
 
-    async fn delete_project_document(
+    async fn delete_knowledge_item(
         &self,
-        params: ProjectDocumentDeleteParams,
+        params: KnowledgeItemDeleteParams,
     ) -> Result<DeleteResult> {
         Ok(DeleteResult {
             deleted: false,
-            id: params.document_id,
+            id: params.item_id,
         })
     }
 }
@@ -1421,6 +1414,7 @@ mod tests {
                 source_step_id: step_id,
                 target_step_id: step_id,
                 condition: nenjo::manifest::RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
             }],
         };
 
@@ -2310,6 +2304,7 @@ mod tests {
                             source_step_id: step_id.to_string(),
                             target_step_id: terminal_id.to_string(),
                             condition: RoutineEdgeCondition::Always,
+                            metadata: serde_json::json!({}),
                         }],
                     }),
                 },

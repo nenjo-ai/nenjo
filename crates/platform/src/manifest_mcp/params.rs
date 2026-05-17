@@ -9,9 +9,9 @@ use super::types::{
     AbilityCreateDocument, AbilityUpdateDocument, AgentCreateDocument, AgentUpdateDocument,
     ContextBlockCreateDocument, ContextBlockUpdateDocument, CouncilCreateDocument,
     CouncilCreateMemberDocument, CouncilMemberUpdateDocument, CouncilUpdateDocument,
-    DomainCreateDocument, DomainUpdateDocument, ModelCreateDocument, ModelUpdateDocument,
-    ProjectCreateDocument, ProjectDocumentCreateDocument, ProjectUpdateDocument,
-    RoutineCreateDocument, RoutineUpdateDocument,
+    DomainCreateDocument, DomainUpdateDocument, KnowledgeItemCreateDocument, ModelCreateDocument,
+    ModelUpdateDocument, ProjectCreateDocument, ProjectUpdateDocument, RoutineCreateDocument,
+    RoutineUpdateDocument,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,26 +173,25 @@ pub struct ProjectDeleteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_project_document`.
-pub struct ProjectDocumentCreateParams {
+/// Parameters for `create_knowledge_item`.
+pub struct KnowledgeItemCreateParams {
     #[serde(flatten)]
-    pub data: ProjectDocumentCreateDocument,
+    pub data: KnowledgeItemCreateDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_project_document_content`.
-pub struct ProjectDocumentContentUpdateParams {
-    pub project_id: Uuid,
-    pub document_id: Uuid,
-    #[serde(alias = "content")]
-    pub description: String,
+/// Parameters for `update_knowledge_item_content`.
+pub struct KnowledgeItemContentUpdateParams {
+    pub pack_id: Uuid,
+    pub item_id: Uuid,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_project_document`.
-pub struct ProjectDocumentDeleteParams {
-    pub project_id: Uuid,
-    pub document_id: Uuid,
+/// Parameters for `delete_knowledge_item`.
+pub struct KnowledgeItemDeleteParams {
+    pub pack_id: Uuid,
+    pub item_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -253,6 +253,8 @@ pub struct RoutineEdgeManifest {
     pub source_step_id: Uuid,
     pub target_step_id: Uuid,
     pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

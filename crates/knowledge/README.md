@@ -3,14 +3,12 @@
 Knowledge pack primitives and reusable knowledge tools for Nenjo agents.
 
 This crate is intentionally separate from the core `nenjo` SDK. It owns the shared
-metadata/search/read contracts for knowledge packs, plus `nenjo-tool-api` backed tools
-that expose packs to agents through a consistent interface.
+metadata/search/read contracts for knowledge packs, plus `nenjo-tool-api` backed
+tools that expose packs to agents through a consistent interface.
 
 ## Features
 
 - `default` - generic knowledge pack types and reusable knowledge tools.
-- `nenjo` - embeds the built-in Nenjo documentation pack and exposes
-  `nenjo_knowledge::builtin::nenjo_pack()`.
 
 ## Provider Integration
 

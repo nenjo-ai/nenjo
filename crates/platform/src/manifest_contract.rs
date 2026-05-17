@@ -45,6 +45,12 @@ pub enum ManifestKind {
     ProjectDocument,
     /// Project task content resource.
     Task,
+    /// Project settings sensitive envelope.
+    ProjectSettings,
+    /// Routine metadata sensitive envelope.
+    RoutineMetadata,
+    /// Routine step config sensitive envelope.
+    RoutineStepConfig,
     /// Project manifest resource.
     Project,
     /// Routine manifest resource.
@@ -64,6 +70,8 @@ impl ManifestKind {
             Self::Domain => Some(ResourceType::Domain),
             Self::ContextBlock => Some(ResourceType::ContextBlock),
             Self::ProjectDocument => Some(ResourceType::Document),
+            Self::ProjectSettings => Some(ResourceType::Project),
+            Self::RoutineMetadata | Self::RoutineStepConfig => Some(ResourceType::Routine),
             Self::Project => Some(ResourceType::Project),
             Self::Routine => Some(ResourceType::Routine),
             Self::Model => Some(ResourceType::Model),
@@ -81,6 +89,9 @@ impl ManifestKind {
             Self::ContextBlock => Some("manifest.context_block.content"),
             Self::ProjectDocument => Some("manifest.document.content"),
             Self::Task => Some("task_content"),
+            Self::ProjectSettings => Some("project.settings"),
+            Self::RoutineMetadata => Some("routine.metadata"),
+            Self::RoutineStepConfig => Some("routine.step.config"),
             Self::Project | Self::Routine | Self::Model | Self::Council => None,
         }
     }
@@ -93,7 +104,10 @@ impl ManifestKind {
             | Self::Domain
             | Self::ContextBlock
             | Self::ProjectDocument
-            | Self::Task => Some(ContentScope::Org),
+            | Self::Task
+            | Self::ProjectSettings
+            | Self::RoutineMetadata
+            | Self::RoutineStepConfig => Some(ContentScope::Org),
             Self::Project | Self::Routine | Self::Model | Self::Council => None,
         }
     }
@@ -107,6 +121,9 @@ impl ManifestKind {
             "manifest.context_block.content" => Some(Self::ContextBlock),
             "manifest.document.content" => Some(Self::ProjectDocument),
             "task_content" => Some(Self::Task),
+            "project.settings" => Some(Self::ProjectSettings),
+            "routine.metadata" => Some(Self::RoutineMetadata),
+            "routine.step.config" => Some(Self::RoutineStepConfig),
             _ => None,
         }
     }

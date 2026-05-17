@@ -271,6 +271,8 @@ pub struct RoutineDetailResponse {
     #[serde(default)]
     pub metadata: RoutineMetadata,
     #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
+    #[serde(default)]
     pub steps: Vec<RoutineStepDetailResponse>,
     #[serde(default)]
     pub edges: Vec<RoutineEdgeDetailResponse>,
@@ -286,6 +288,8 @@ pub struct RoutineStepDetailResponse {
     pub agent_id: Option<Uuid>,
     #[serde(default)]
     pub config: serde_json::Value,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
     pub order_index: i32,
 }
 
@@ -296,6 +300,8 @@ pub struct RoutineEdgeDetailResponse {
     pub source_step_id: Uuid,
     pub target_step_id: Uuid,
     pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 impl From<RoutineDetailResponse> for RoutineManifest {
@@ -329,6 +335,7 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                     source_step_id: edge.source_step_id,
                     target_step_id: edge.target_step_id,
                     condition: edge.condition,
+                    metadata: edge.metadata,
                 })
                 .collect(),
         }

@@ -197,7 +197,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     }
 
     /// Inject step context so the agent's prompts can reference
-    /// `{{ routine.step.name }}`, `{{ routine.step.type }}`, `{{ routine.step.metadata }}`.
+    /// `{{ routine.step.name }}`, `{{ routine.step.type }}`,
+    /// `{{ routine.step.instructions }}`, and `{{ routine.step.metadata }}`.
     pub fn with_step_context(mut self, ctx: RoutineStepContext) -> Self {
         self.pending_step_context = Some(ctx);
         self

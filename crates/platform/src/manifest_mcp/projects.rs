@@ -9,11 +9,19 @@ fn project_id_schema() -> serde_json::Value {
     })
 }
 
-fn document_id_schema() -> serde_json::Value {
+fn item_id_schema() -> serde_json::Value {
     json!({
         "type": "string",
         "format": "uuid",
         "description": "The unique id of the target library knowledge item."
+    })
+}
+
+fn pack_id_schema() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "format": "uuid",
+        "description": "The unique id of the org-level knowledge pack that owns this library knowledge item."
     })
 }
 
@@ -107,15 +115,15 @@ pub fn project_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Write,
         },
         ToolSpec {
-            name: "create_project_document".to_string(),
-            description: "Create a new library knowledge item with initial body content. Use this when the item does not exist yet; use update_project_document_content to change an existing item.".to_string(),
+            name: "create_knowledge_item".to_string(),
+            description: "Create a new org-level library knowledge item in an existing knowledge pack. Use list_knowledge_packs to choose pack_id first. Do not create project-scoped packs for project context.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["project_id", "filename", "description"],
+                "required": ["pack_id", "filename", "content"],
                 "properties": {
-                    "project_id": project_id_schema(),
+                    "pack_id": pack_id_schema(),
                     "filename": { "type": "string", "description": "Filename to store under the library pack's docs directory." },
-                    "description": { "type": "string", "description": "Full text content for the new library knowledge item." },
+                    "content": { "type": "string", "description": "Full text content for the new library knowledge item." },
                     "content_type": { "type": ["string", "null"], "description": "Optional MIME type such as text/markdown or application/json." }
                 },
                 "additionalProperties": false
@@ -123,29 +131,29 @@ pub fn project_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Write,
         },
         ToolSpec {
-            name: "delete_project_document".to_string(),
+            name: "delete_knowledge_item".to_string(),
             description: "Delete an existing library knowledge item when you want it removed entirely.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["project_id", "document_id"],
+                "required": ["pack_id", "item_id"],
                 "properties": {
-                    "project_id": project_id_schema(),
-                    "document_id": document_id_schema()
+                    "pack_id": pack_id_schema(),
+                    "item_id": item_id_schema()
                 },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
         ToolSpec {
-            name: "update_project_document_content".to_string(),
+            name: "update_knowledge_item_content".to_string(),
             description: "Replace the body content of an existing library knowledge item. Use this to change item text without creating a new item.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["project_id", "document_id", "description"],
+                "required": ["pack_id", "item_id", "content"],
                 "properties": {
-                    "project_id": project_id_schema(),
-                    "document_id": document_id_schema(),
-                    "description": { "type": "string", "description": "Full replacement text content for this library knowledge item." }
+                    "pack_id": pack_id_schema(),
+                    "item_id": item_id_schema(),
+                    "content": { "type": "string", "description": "Full replacement text content for this library knowledge item." }
                 },
                 "additionalProperties": false
             }),

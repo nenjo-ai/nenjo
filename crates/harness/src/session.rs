@@ -71,6 +71,9 @@ pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatM
             SessionTranscriptEventPayload::ChatMessage { message } => {
                 Some(transcript_message_to_chat(message.clone()))
             }
+            SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(ChatMessage::system(
+                format!("Previous turn was interrupted: {reason}"),
+            )),
             _ => None,
         })
         .collect()
@@ -405,4 +408,33 @@ fn preview(value: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nenjo_sessions::{SessionTranscriptEvent, SessionTranscriptEventPayload};
+
+    #[test]
+    fn replay_transcript_history_surfaces_interruption_to_agent() {
+        let session_id = Uuid::new_v4();
+        let events = vec![SessionTranscriptEvent {
+            session_id,
+            seq: 1,
+            recorded_at: Utc::now(),
+            turn_id: None,
+            payload: SessionTranscriptEventPayload::TurnInterrupted {
+                reason: "cancelled by user".to_string(),
+            },
+        }];
+
+        let history = replay_transcript_history(&events);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "system");
+        assert_eq!(
+            history[0].content,
+            "Previous turn was interrupted: cancelled by user"
+        );
+    }
 }

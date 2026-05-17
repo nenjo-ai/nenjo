@@ -14,6 +14,7 @@ members = [
     "crates/eventbus",
     "crates/tool-api",
     "crates/models",
+    "crates/packages",
     "crates/xml",
     "bin",
     "testing/integrations",
@@ -33,6 +34,7 @@ nenjo-platform = { path = "crates/platform", version = "0.11.0" }
 nenjo-packages = { path = "crates/packages", version = "0.11.0" }
 nenjo-xml = { path = "crates/xml", version = "0.11.0" }
 nenjo-models = { path = "crates/models", version = "0.11.0" }
+nenjo-packages = { path = "crates/packages", version = "0.11.0" }
 nenjo-events = { path = "crates/events", version = "0.11.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.11.0" }
 nenjo-harness = { path = "crates/harness", version = "0.11.0" }
@@ -53,6 +55,7 @@ base64 = "0.22.1"
 bon = "3"
 bytes = "1"
 chrono = "0.4"
+chrono-tz = "0.10"
 clap = "4"
 config = "0.15"
 cron = "0.15"

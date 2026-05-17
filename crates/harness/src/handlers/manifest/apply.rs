@@ -8,7 +8,9 @@ use uuid::Uuid;
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::payload::{InlineDocumentMeta, parse_decrypted_manifest_payload};
+use super::payload::{
+    InlineDocumentMeta, parse_decrypted_manifest_payload, parse_decrypted_manifest_payloads,
+};
 use super::services::{ManifestStore, McpRuntime};
 
 #[derive(Debug, Clone)]
@@ -84,24 +86,33 @@ where
         }
         source = ManifestApplySource::Deleted;
     } else {
-        if let Some(ref data) = payload
-            && let Some(decrypted) = parse_decrypted_manifest_payload(data)
-        {
-            applied_inline = apply_decrypted_manifest_upsert(
-                &mut manifest,
-                store,
-                resource_type,
-                resource_id,
-                decrypted,
-            )
-            .await;
-            if applied_inline {
-                source = ManifestApplySource::DecryptedInline;
-            }
-        } else if let Some(ref data) = payload {
-            applied_inline = apply_inline_upsert(&mut manifest, resource_type, resource_id, data);
-            if applied_inline {
-                source = ManifestApplySource::Inline;
+        if let Some(ref data) = payload {
+            let decrypted_payloads = parse_decrypted_manifest_payloads(data);
+            if !decrypted_payloads.is_empty() {
+                applied_inline = true;
+                for decrypted in decrypted_payloads {
+                    if !apply_decrypted_manifest_upsert(
+                        &mut manifest,
+                        store,
+                        resource_type,
+                        resource_id,
+                        decrypted,
+                    )
+                    .await
+                    {
+                        applied_inline = false;
+                        break;
+                    }
+                }
+                if applied_inline {
+                    source = ManifestApplySource::DecryptedInline;
+                }
+            } else {
+                applied_inline =
+                    apply_inline_upsert(&mut manifest, resource_type, resource_id, data);
+                if applied_inline {
+                    source = ManifestApplySource::Inline;
+                }
             }
         } else if encrypted_payload.is_some() {
             warn!(
@@ -110,7 +121,6 @@ where
                 "Manifest command still carried encrypted payload after secure-envelope decode"
             );
         }
-
         if !applied_inline {
             if let Err(e) = apply_upsert(&mut manifest, client, resource_type, resource_id).await {
                 warn!(

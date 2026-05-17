@@ -9,8 +9,8 @@ knowledge tools.
 Prompt injection here means template expansion such as:
 
 ```text
-{{ repo.nenjo_ai.packages.platform }}
-{{ lib.platform }}
+{{ git.nenjo_ai.packages.nenjo.platform }}
+{{ lib.product_docs }}
 ```
 
 The injected value is not the full knowledge content. It is compact XML
@@ -44,19 +44,19 @@ Nenjo platform docs are seeded as a repo-backed system knowledge pack. Worker
 registers:
 
 ```text
-selector = repo://nenjo-ai/packages/platform
+selector = git://nenjo-ai/packages/nenjo/platform
 ```
 
 Prompt variable:
 
 ```text
-{{ repo.nenjo_ai.packages.platform }}
+{{ git.nenjo_ai.packages.nenjo.platform }}
 ```
 
 Tool selector:
 
 ```json
-{ "pack": "repo://nenjo-ai/packages/platform" }
+{ "pack": "git://nenjo-ai/packages/nenjo/platform" }
 ```
 
 ### Platform Uploaded Packs
@@ -82,14 +82,13 @@ Prompt variable:
 Examples:
 
 ```text
-lib:platform      -> {{ lib.platform }}
 lib:Product Docs  -> {{ lib.product_docs }}
 ```
 
 Tool selector:
 
 ```json
-{ "pack": "lib:platform" }
+{ "pack": "lib:product-docs" }
 ```
 
 The special selector `lib` maps to `{{ lib }}`, but new platform library packs
@@ -104,33 +103,33 @@ Worker hydrates GitHub-backed packs under:
 ```
 
 Worker loads repo-backed packs by reading their library manifest root URI. If
-the root URI starts with `repo://`, that root URI becomes the pack selector.
+the root URI starts with `git://`, that root URI becomes the pack selector.
 
 Target selector shape:
 
 ```text
-repo://<owner>/<repo>/<package>
+git://<owner>/<repo>/<package>
 ```
 
 Target prompt variable shape:
 
 ```text
-{{ repo.<owner>.<repo>.<package> }}
+{{ git.<owner>.<repo>.<package> }}
 ```
 
 with every segment normalized to lowercase alphanumeric plus underscores:
 
 ```text
-repo://nenjo-ai/packages/platform -> {{ repo.nenjo_ai.packages.platform }}
+git://nenjo-ai/packages/nenjo/platform -> {{ git.nenjo_ai.packages.nenjo.platform }}
 ```
 
 Tool selector:
 
 ```json
-{ "pack": "repo://nenjo-ai/packages/platform" }
+{ "pack": "git://nenjo-ai/packages/nenjo/platform" }
 ```
 
-Implementation note: `knowledge_pack_var_prefix` parses `repo://` selectors
+Implementation note: `knowledge_pack_var_prefix` parses `git://` selectors
 into dotted owner/repo/package segments. Repo-backed seeded prompts should use
 this owner-qualified shape.
 
@@ -148,8 +147,8 @@ The general form is:
 Examples:
 
 ```text
-{{ repo.nenjo_ai.packages.platform.reference.template_vars }}
-{{ lib.platform.guides.agents }}
+{{ git.nenjo_ai.packages.nenjo.platform.reference.template_vars }}
+{{ lib.product_docs.guides.agents }}
 ```
 
 Document variables inject compact `<knowledge_doc>` metadata, not full document
@@ -169,7 +168,7 @@ selector to the agent. They do not bind tool calls automatically.
 
 Correct agent pattern:
 
-1. Prompt includes the relevant pack index, such as `{{ lib.platform }}`.
+1. Prompt includes the relevant pack index, such as `{{ git.nenjo_ai.packages.nenjo.platform }}`.
 2. Agent sees the pack selector and document summaries in rendered XML.
 3. Agent calls `search_knowledge_paths` or `search_knowledge_docs` with the
    selector.
@@ -181,7 +180,7 @@ Example:
 
 ```json
 {
-  "pack": "lib:platform",
+  "pack": "git://nenjo-ai/packages/nenjo/platform",
   "query": "agent abilities and MCP assignment"
 }
 ```
@@ -192,13 +191,13 @@ Example:
 | --- | --- | --- |
 | `lib` | `{{ lib }}` | Implemented default |
 | `lib:<slug>` | `{{ lib.<slug> }}` | Implemented |
-| `repo://<owner>/<repo>/<package>` | `{{ repo.<owner>.<repo>.<package> }}` | Implemented |
+| `git://<owner>/<repo>/<package>` | `{{ git.<owner>.<repo>.<package> }}` | Implemented |
 
 ## Guardrails
 
 - Do not inject full document bodies through prompt variables.
-- Do not use short repo variables like `{{ repo.platform }}`; they collide.
-- Keep canonical repo selectors owner-qualified.
+- Do not use short git variables like `{{ git.platform }}`; they collide.
+- Keep canonical git selectors owner-qualified.
 - Treat prompt variables as retrieval hints, not authority. Tool calls must use
   the canonical pack selector.
 - Prefer metadata-first retrieval before reading full documents.
@@ -209,5 +208,5 @@ Example:
 
 - `lib:<slug>`
 - `lib`
-- `repo://nenjo-ai/packages/platform`
-- `repo://trailofbits/skills-curated/x-research`
+- `git://nenjo-ai/packages/nenjo/platform`
+- `git://trailofbits/skills-curated/x-research`

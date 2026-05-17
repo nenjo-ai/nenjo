@@ -161,6 +161,8 @@ pub enum Command {
         #[serde(default)]
         project_id: Option<Uuid>,
         schedule: String,
+        #[serde(default)]
+        timezone: Option<String>,
     },
 
     /// Disable a cron schedule.
@@ -177,7 +179,12 @@ pub enum Command {
 
     /// Enable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.enable")]
-    AgentHeartbeatEnable { agent_id: Uuid, interval: String },
+    AgentHeartbeatEnable {
+        agent_id: Uuid,
+        interval: String,
+        #[serde(default)]
+        timezone: Option<String>,
+    },
 
     /// Disable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.disable")]
@@ -227,6 +234,10 @@ pub enum Command {
         /// when the worker has an active ACK.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
+        /// Multiple inline encrypted resource payloads for resources with
+        /// several independently encrypted sub-documents.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        encrypted_payloads: Vec<EncryptedPayload>,
     },
 }
 
@@ -412,6 +423,7 @@ mod tests {
                 project_id: None,
                 payload: None,
                 encrypted_payload: None,
+                encrypted_payloads: Vec::new(),
             }
             .delivery(),
             CommandDelivery::Broadcast

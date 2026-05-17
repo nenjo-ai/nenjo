@@ -158,7 +158,7 @@ Current subresource reads:
 - `get_agent_prompt`
 - `get_ability_prompt`
 - `get_domain_prompt`
-- `get_project_document_content`
+- `read_knowledge_doc`
 - `get_context_block_content`
 
 This is the implemented rule for prompts and large content.
@@ -171,7 +171,7 @@ The current implementation treats these areas as explicit subresources rather th
 - ability prompt config
 - domain prompt config
 - context block template content
-- project document content
+- knowledge item content
 
 That rule is enforced by the `Document` and `PromptDocument` split in `nenjo-platform/src/manifest_mcp/types.rs`.
 
@@ -205,7 +205,7 @@ Prompt/content updates use dedicated request types such as:
 - `AbilityPromptUpdateParams`
 - `DomainPromptUpdateParams`
 - `ContextBlockContentUpdateParams`
-- `ProjectDocumentContentUpdateParams`
+- `KnowledgeItemContentUpdateParams`
 
 ## Resource Taxonomy
 

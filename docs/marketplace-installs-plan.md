@@ -19,16 +19,16 @@ fields like `read_only` or `is_system`.
 Use collision-proof canonical selectors that include the repo owner:
 
 ```text
-repo://<owner>/<repo>/<package>
-repo://nenjo-ai/packages/platform
+git://<owner>/<repo>/<package>
+git://nenjo-ai/packages/nenjo/platform
 repo://nenjo-ai/nenjo-skills/rust-performance
 ```
 
 Prompt variables should use normalized identifier segments:
 
 ```text
-{{repo.nenjo_ai.packages.platform}}
-{{skill.nenjo_ai.nenjo_skills.rust_performance}}
+{{ git.nenjo_ai.packages.nenjo.platform }}
+{{ skill.nenjo_ai.nenjo_skills.rust_performance }}
 ```
 
 Org-local aliases may be added later for ergonomics, but the canonical selector
@@ -42,7 +42,7 @@ layouts used by Codex skills/plugins and Claude plugin marketplaces.
 Recommended catalog path:
 
 ```text
-packages.json
+packages.yaml
 ```
 
 The marketplace manifest is authored source metadata. It should not contain
@@ -74,7 +74,7 @@ Example:
   },
   "packages": [
     {
-      "id": "repo://nenjo-ai/packages/platform",
+      "id": "git://nenjo-ai/packages/nenjo/platform",
       "kind": "knowledge_pack",
       "name": "platform",
       "display_name": "Nenjo Platform",
@@ -157,7 +157,7 @@ Example:
   "commit": "abc123",
   "artifacts": [
     {
-      "package_id": "repo://nenjo-ai/packages/platform",
+      "package_id": "git://nenjo-ai/packages/nenjo/platform",
       "type": "github_archive",
       "url": "https://github.com/nenjo-ai/packages/releases/download/v0.12.0/platform.tar.gz",
       "sha256": "..."
@@ -208,7 +208,7 @@ distribution information required to hydrate the package:
 ```json
 {
   "install": {
-    "selector": "repo://nenjo-ai/packages/platform",
+    "selector": "git://nenjo-ai/packages/nenjo/platform",
     "kind": "knowledge_pack"
   },
   "source": {
@@ -472,11 +472,12 @@ signal used for manifest/bootstrap changes.
 
 ## Dashboard UX
 
-The dashboard should load marketplace sources from the platform. Every org
-should already have the system `Nenjo Official Packages` source seeded, so the
-catalog tab can show Nenjo packages without asking the user to import the repo.
-The dashboard fetches public marketplace package data directly from GitHub,
-caches it locally/SWR, and writes only install records through the platform API.
+The dashboard should load marketplace sources from the platform. During
+onboarding, the official `nenjo-ai/packages` source should be added by calling
+the same marketplace-source API used for user-imported sources, then selected
+packages should be installed through the normal install APIs. The dashboard
+fetches public marketplace package data directly from GitHub, caches it
+locally/SWR, and writes only install records through the platform API.
 
 Knowledge pack card:
 
@@ -484,7 +485,7 @@ Knowledge pack card:
 Nenjo Platform
 Source: GitHub · nenjo-ai/packages
 Version: v0.12.0
-Ref: repo://nenjo-ai/packages/platform
+Ref: git://nenjo-ai/packages/nenjo/platform
 System · Read-only
 ```
 
@@ -502,53 +503,53 @@ System packages should be visible but not destructively editable. User-installed
 packages may support uninstall, enable/disable, alias changes, and version
 updates.
 
-## Seeding Nenjo
+## Onboarding Nenjo
 
-Seed orgs with the official `nenjo-ai/packages` marketplace source and system
-install records. Do not upload package files or create uploaded document rows.
+Add the official `nenjo-ai/packages` marketplace source through the platform API
+and install official packages through the same endpoints used by normal
+marketplace installs. Do not upload package files or create uploaded document
+rows, and do not insert this source or its installs directly through DB seed
+migrations.
 
-Initial system marketplace source:
+Official marketplace source API payload:
 
 ```text
 marketplace_sources.name = Nenjo Official Packages
 marketplace_sources.source_type = github
 marketplace_sources.status = active
-marketplace_sources.is_system = true
 metadata.provider = github
 metadata.owner = nenjo-ai
 metadata.repo = packages
 metadata.ref = v0.12.0
-metadata.manifest_path = packages.json
+metadata.manifest_path = packages.yaml
 ```
 
-Initial system knowledge install:
+Platform knowledge install API payload:
 
 ```text
 knowledge_packs.slug = platform
 knowledge_packs.name = Nenjo Platform
 knowledge_packs.source_type = github
-knowledge_packs.read_only = true
-knowledge_packs.is_system = true
-metadata.install.selector = repo://nenjo-ai/packages/platform
-metadata.install.marketplace_source_id = <seeded-source-id>
+metadata.install.selector = git://nenjo-ai/packages/nenjo/platform
+metadata.install.marketplace_source_id = <source-id>
 metadata.version.ref = v0.12.0
 ```
 
-Initial system skill install:
+Official skill install API payload:
 
 ```text
 abilities.name = rust_performance
 abilities.tool_name = rust_performance
 abilities.path = repo/nenjo_ai/nenjo_skills
 abilities.source_type = skill
-abilities.read_only = true
-abilities.is_system = true
 metadata.install.selector = repo://nenjo-ai/nenjo-skills/rust-performance
 metadata.version.ref = v0.4.0
 ```
 
-Do not keep a `builtin:nenjo` compatibility alias. New prompts, UI, and seeded
-records should use the canonical `repo://nenjo-ai/packages/platform` selector.
+The backend can still apply install policy such as read-only handling for
+official packages, but the flow remains API-driven. Do not keep a legacy
+built-in compatibility alias. New prompts, UI, and installed records should
+use the canonical `git://nenjo-ai/packages/nenjo/platform` selector.
 
 ## Rollout
 
@@ -556,7 +557,8 @@ records should use the canonical `repo://nenjo-ai/packages/platform` selector.
 2. Add `source_type`, `read_only`, `is_system`, and `metadata` to
    `knowledge_packs`.
 3. Add `source_type`, `read_only`, and `metadata` to `abilities`.
-4. Seed the official `nenjo-ai/packages` marketplace source and system install records.
+4. Add onboarding calls that create the official `nenjo-ai/packages`
+   marketplace source and install official packages through the public APIs.
 5. Update dashboard library/skills UI to show source, version, selector, system,
    and read-only state.
 6. Add worker downloader/extractor/validator.

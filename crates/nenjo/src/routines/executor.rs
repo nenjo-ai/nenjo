@@ -1,6 +1,6 @@
 //! DAG executor — walks routine steps following conditional edges.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
@@ -38,6 +38,7 @@ fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContex
     let step = RoutineStepContext {
         name: state.current_step_name.clone().unwrap_or_default(),
         step_type: state.current_step_type.clone().unwrap_or_default(),
+        instructions: state.step_instructions.clone().unwrap_or_default(),
         metadata: state.step_metadata.clone().unwrap_or_default(),
     };
     (routine, step)
@@ -111,6 +112,7 @@ where
 
     let mut current_step = entry_step.clone();
     let mut last_result = StepResult::default();
+    let mut edge_traversals: HashMap<Uuid, u32> = HashMap::new();
     let max_iterations = steps.len() * 100;
 
     for iteration in 0..max_iterations {
@@ -134,6 +136,12 @@ where
         state.current_step_name = Some(current_step.name.clone());
         state.current_step_type = Some(current_step.step_type.to_string());
         state.current_agent_id = current_step.agent_id;
+        state.step_instructions = current_step
+            .config
+            .get("instructions")
+            .or_else(|| current_step.config.get("description"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
         // Parse step metadata — expect a JSON value. If the raw config value
         // is not valid JSON (e.g. a bare string without quotes), serialize it
         // as-is and log a warning so the user can fix their routine config.
@@ -277,11 +285,31 @@ where
 
         match next_edge {
             Some(edge) => {
-                current_step = steps
-                    .iter()
-                    .find(|s| s.id == edge.target_step_id)
-                    .with_context(|| format!("Edge target step {} not found", edge.target_step_id))?
-                    .clone();
+                let traversal_count = edge_traversals.entry(edge.id).or_default();
+                if let Some(max_attempts) = edge_max_attempts(edge)
+                    && *traversal_count >= max_attempts
+                {
+                    last_result = StepResult {
+                        passed: false,
+                        output: format!(
+                            "Routine edge {} exhausted after {} attempts",
+                            edge.id, max_attempts
+                        ),
+                        step_id: current_step.id,
+                        step_name: current_step.name.clone(),
+                        ..Default::default()
+                    };
+                    break;
+                } else {
+                    *traversal_count += 1;
+                    current_step = steps
+                        .iter()
+                        .find(|s| s.id == edge.target_step_id)
+                        .with_context(|| {
+                            format!("Edge target step {} not found", edge.target_step_id)
+                        })?
+                        .clone();
+                }
             }
             None => {
                 debug!(step = %current_step.name, "No matching outgoing edge, routine complete");
@@ -296,6 +324,13 @@ where
     });
 
     Ok(last_result)
+}
+
+fn edge_max_attempts(edge: &RoutineEdgeManifest) -> Option<u32> {
+    edge.metadata
+        .get("max_attempts")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn choose_next_edge<'a>(
@@ -709,16 +744,9 @@ fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
     run
 }
 
-/// Build a task description from step config and routine state.
-fn build_task_description(step: &RoutineStepManifest, state: &RoutineState) -> String {
-    // Use step config description if available, otherwise fall back to input description
-    let base = step
-        .config
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&state.input.description);
-
-    let mut description = base.to_string();
+/// Build the task body from routine input plus execution feedback.
+fn build_task_description(_step: &RoutineStepManifest, state: &RoutineState) -> String {
+    let mut description = state.input.description.clone();
 
     // Append gate feedback if available (from a previous failed gate)
     if let Some(ref feedback) = state.gate_feedback {

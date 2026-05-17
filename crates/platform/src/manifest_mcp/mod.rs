@@ -47,10 +47,10 @@ pub use params::{
     CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainPromptGetParams,
-    DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, ModelCreateParams,
-    ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
-    ProjectDeleteParams, ProjectDocumentContentUpdateParams, ProjectDocumentCreateParams,
-    ProjectDocumentDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
+    DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams,
+    KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams, KnowledgeItemDeleteParams,
+    ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
+    ProjectDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
     RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
 };
 pub use results::{
@@ -61,9 +61,9 @@ pub use results::{
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
     DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
-    ModelGetResult, ModelMutationResult, ModelsListResult, ProjectDocumentContentMutationResult,
-    ProjectDocumentMutationResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
-    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
+    KnowledgeItemContentMutationResult, KnowledgeItemMutationResult, ModelGetResult,
+    ModelMutationResult, ModelsListResult, ProjectGetResult, ProjectMutationResult,
+    ProjectsListResult, RoutineGetResult, RoutineMutationResult, RoutinesListResult,
 };
 pub use types::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,
@@ -73,9 +73,9 @@ pub use types::{
     CouncilCreateMemberDocument, CouncilDocument, CouncilMemberDocument,
     CouncilMemberUpdateDocument, CouncilSummary, CouncilUpdateDocument, DomainCreateDocument,
     DomainDocument, DomainManifestDocument, DomainPromptDocument, DomainSummary,
-    DomainUpdateDocument, ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument,
-    ProjectCreateDocument, ProjectDocument, ProjectDocumentContentDocument,
-    ProjectDocumentCreateDocument, ProjectDocumentSummary, ProjectSummary, ProjectUpdateDocument,
+    DomainUpdateDocument, KnowledgeItemContentDocument, KnowledgeItemCreateDocument,
+    KnowledgeItemSummary, ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument,
+    ProjectCreateDocument, ProjectDocument, ProjectSummary, ProjectUpdateDocument,
     RoutineCreateDocument, RoutineDocument, RoutineEdgeInput, RoutineGraphInput, RoutineStepInput,
     RoutineSummary, RoutineUpdateDocument,
 };

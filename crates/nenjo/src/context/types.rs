@@ -135,6 +135,9 @@ pub struct RoutineStepContext {
     pub name: String,
     #[serde(rename = "@type", skip_serializing_if = "String::is_empty")]
     pub step_type: String,
+    /// Step instructions from the routine step config.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
     /// Arbitrary metadata from the step config, serialized as a JSON string.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub metadata: String,
@@ -142,7 +145,10 @@ pub struct RoutineStepContext {
 
 impl RoutineStepContext {
     pub fn is_empty(&self) -> bool {
-        self.name.is_empty() && self.step_type.is_empty() && self.metadata.is_empty()
+        self.name.is_empty()
+            && self.step_type.is_empty()
+            && self.instructions.is_empty()
+            && self.metadata.is_empty()
     }
 }
 
@@ -599,12 +605,18 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 execution_id: String::new(),
                 description: Some("Deploy to prod".into()),
-                step: Default::default(),
+                step: RoutineStepContext {
+                    name: "review".into(),
+                    step_type: "gate".into(),
+                    instructions: "Check release readiness.".into(),
+                    metadata: String::new(),
+                },
             }],
         };
         let xml = nenjo_xml::to_xml_pretty(&routines, 2);
         assert!(xml.contains("<available_routines>"));
         assert!(xml.contains("name=\"deploy\""));
+        assert!(xml.contains("<instructions>Check release readiness.</instructions>"));
     }
 
     #[test]

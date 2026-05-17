@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Nenjo platform-backed manifest and REST API operations"
 
 [dependencies]
-nenjo-knowledge = { workspace = true, features = ["nenjo"] }
+nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
 nenjo-events = { workspace = true }
 anyhow = { workspace = true }

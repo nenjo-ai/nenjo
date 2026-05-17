@@ -20,9 +20,8 @@ use uuid::Uuid;
 
 use crate::client::PlatformManifestClient;
 use crate::knowledge_backend::{
-    ResolvedKnowledgePack, builtin_pack, ensure_known_pack_selector,
-    is_default_library_pack_selector, is_nenjo_pack_selector, library_pack_selector,
-    parse_library_pack_selector, unknown_pack,
+    ResolvedKnowledgePack, ensure_known_pack_selector, is_default_library_pack_selector,
+    library_pack_selector, parse_library_pack_selector, unknown_pack,
 };
 use crate::library_knowledge::LibraryKnowledgePack;
 use crate::manifest_contract::ManifestKind;
@@ -242,9 +241,6 @@ where
 
     async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
         ensure_known_pack_selector(selector)?;
-        if is_nenjo_pack_selector(selector) {
-            return Ok(builtin_pack());
-        }
         if is_default_library_pack_selector(selector) {
             let pack_slug = self.current_library_slug.as_deref().ok_or_else(|| {
                 anyhow!(
@@ -263,7 +259,7 @@ where
                 .await
                 .map(ResolvedKnowledgePack::Library);
         }
-        if selector.starts_with("repo://") {
+        if selector.starts_with("git://") {
             let library_dir = self.workspace_dir()?.join("library").join("repos");
             return find_repo_knowledge_pack(&library_dir, selector)
                 .map(ResolvedKnowledgePack::Library)
@@ -323,10 +319,7 @@ where
     E: SensitivePayloadEncoder + Send + Sync,
 {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
-        let mut packs = vec![KnowledgePackSummary::new(
-            "builtin:nenjo",
-            builtin_pack().manifest(),
-        )];
+        let mut packs = Vec::new();
         if self.workspace_dir.is_some() {
             let library_dir = self.workspace_dir()?.join("library").join("platform");
             if let Ok(entries) = std::fs::read_dir(library_dir) {
@@ -353,7 +346,7 @@ where
             let repos_dir = self.workspace_dir()?.join("library").join("repos");
             for pack in list_repo_knowledge_packs(&repos_dir) {
                 let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
-                if selector.starts_with("repo://") {
+                if selector.starts_with("git://") {
                     packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
                 }
             }
@@ -1184,10 +1177,10 @@ where
         })
     }
 
-    async fn create_project_document(
+    async fn create_knowledge_item(
         &self,
-        params: ProjectDocumentCreateParams,
-    ) -> Result<ProjectDocumentMutationResult> {
+        params: KnowledgeItemCreateParams,
+    ) -> Result<KnowledgeItemMutationResult> {
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
@@ -1196,53 +1189,53 @@ where
                 ManifestKind::ProjectDocument
                     .encrypted_object_type()
                     .expect("document content object type"),
-                &serde_json::Value::String(params.data.description.clone()),
+                &serde_json::Value::String(params.data.content.clone()),
             )
             .await?;
-        let project_document = self
+        let knowledge_item = self
             .platform_client
-            .create_project_file_document(&params.data, encrypted_payload)
+            .create_knowledge_item(&params.data, encrypted_payload)
             .await?;
-        Ok(ProjectDocumentMutationResult { project_document })
+        Ok(KnowledgeItemMutationResult { knowledge_item })
     }
 
-    async fn update_project_document_content(
+    async fn update_knowledge_item_content(
         &self,
-        params: ProjectDocumentContentUpdateParams,
-    ) -> Result<ProjectDocumentContentMutationResult> {
+        params: KnowledgeItemContentUpdateParams,
+    ) -> Result<KnowledgeItemContentMutationResult> {
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                params.document_id,
+                params.item_id,
                 ManifestKind::ProjectDocument
                     .encrypted_object_type()
                     .expect("document content object type"),
-                &serde_json::Value::String(params.description.clone()),
+                &serde_json::Value::String(params.content.clone()),
             )
             .await?;
-        let project_document = self
+        let knowledge_item = self
             .platform_client
-            .update_project_document_content(
-                params.project_id,
-                params.document_id,
-                &params.description,
+            .update_knowledge_item_content(
+                params.pack_id,
+                params.item_id,
+                &params.content,
                 encrypted_payload,
             )
             .await?;
-        Ok(ProjectDocumentContentMutationResult { project_document })
+        Ok(KnowledgeItemContentMutationResult { knowledge_item })
     }
 
-    async fn delete_project_document(
+    async fn delete_knowledge_item(
         &self,
-        params: ProjectDocumentDeleteParams,
+        params: KnowledgeItemDeleteParams,
     ) -> Result<DeleteResult> {
         self.platform_client
-            .delete_project_file_document(params.project_id, params.document_id)
+            .delete_knowledge_item(params.pack_id, params.item_id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.document_id,
+            id: params.item_id,
         })
     }
 }

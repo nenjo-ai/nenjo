@@ -123,6 +123,7 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
                 request.session_id,
                 request.project_id,
                 &request.schedule_expr,
+                request.timezone.as_deref(),
                 request.next_run_at,
             )
             .await?;
@@ -137,6 +138,7 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
                 HeartbeatRestoreRequest {
                     agent_id: request.session_id,
                     interval: request.interval,
+                    timezone: request.timezone,
                     start_at: request.next_run_at,
                     previous_output_ref: request.previous_output_ref,
                     last_run_at: request.last_run_at,

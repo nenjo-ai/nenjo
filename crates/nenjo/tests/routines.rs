@@ -17,7 +17,9 @@ use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::routines::RoutineEvent;
 use nenjo::routines::gate::PassVerdictTool;
 use nenjo::{CronInput, ProjectLocation, RoutineRun, TaskInput};
-use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use nenjo_models::traits::{
+    ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -204,6 +206,66 @@ impl ModelProviderFactory for RecordingToolsMockFactory {
     }
 }
 
+struct RecordingMessagesMockLlm {
+    response: ChatResponse,
+    seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for RecordingMessagesMockLlm {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        self.seen_messages
+            .lock()
+            .unwrap()
+            .push(request.messages.to_vec());
+        Ok(self.response.clone())
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct RecordingMessagesMockFactory {
+    response: ChatResponse,
+    seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+}
+
+impl RecordingMessagesMockFactory {
+    fn new(response: ChatResponse) -> Self {
+        Self {
+            response,
+            seen_messages: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn seen_messages(&self) -> Arc<Mutex<Vec<Vec<ChatMessage>>>> {
+        self.seen_messages.clone()
+    }
+}
+
+impl ModelProviderFactory for RecordingMessagesMockFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(RecordingMessagesMockLlm {
+            response: self.response.clone(),
+            seen_messages: self.seen_messages.clone(),
+        }))
+    }
+}
+
 fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
     tools.iter().map(|tool| tool.name.clone()).collect()
 }
@@ -255,6 +317,13 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
         prompt_locked: false,
         heartbeat: None,
     }
+}
+
+fn messages_contain(messages: &[Vec<ChatMessage>], needle: &str) -> bool {
+    messages
+        .iter()
+        .flatten()
+        .any(|message| message.content.contains(needle))
 }
 
 fn project() -> ProjectManifest {
@@ -426,6 +495,155 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
             .is_some_and(|tools| tools.iter().any(|name| name == "pass_verdict")),
         "pass_verdict should be sent in the routine model request. Tool requests: {:?}",
         *seen_tools
+    );
+}
+
+#[tokio::test]
+async fn routine_agent_step_renders_step_instructions_context_var() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+    let instructions = "Use the migration checklist before editing files.";
+
+    let mut coder = agent(agent_id, "coder", model_id);
+    coder.prompt_config.templates.task_execution =
+        "Step instructions:\n{{ routine.step.instructions }}\n\nTask:\n{{ task.description }}"
+            .into();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "agent-instructions".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            id: step_id,
+            routine_id,
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council_id: None,
+            agent_id: Some(agent_id),
+            config: serde_json::json!({
+                "instructions": instructions,
+            }),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![coder],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+    let factory = RecordingMessagesMockFactory::new(verdict_response(
+        "Implementation complete.",
+        "pass",
+        "Implementation is complete",
+    ));
+    let seen_messages = factory.seen_messages();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(test_task(
+            Uuid::new_v4(),
+            "Add auth",
+            "Implement JWT authentication",
+        ))
+        .await
+        .unwrap();
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, instructions),
+        "agent step instructions should render through routine.step.instructions. Messages: {seen_messages:#?}"
+    );
+}
+
+#[tokio::test]
+async fn routine_gate_step_renders_step_instructions_context_var() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+    let instructions = "Reject unless the output cites the acceptance criteria.";
+
+    let mut reviewer = agent(agent_id, "reviewer", model_id);
+    reviewer.prompt_config.templates.gate_eval =
+        "Gate instructions:\n{{ routine.step.instructions }}\n\nCriteria:\n{{ gate.criteria }}"
+            .into();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "gate-instructions".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            id: step_id,
+            routine_id,
+            name: "review".into(),
+            step_type: RoutineStepType::Gate,
+            council_id: None,
+            agent_id: Some(agent_id),
+            config: serde_json::json!({
+                "criteria": "Output satisfies the task.",
+                "instructions": instructions,
+            }),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![reviewer],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+    let factory = RecordingMessagesMockFactory::new(verdict_response(
+        "Gate passed.",
+        "pass",
+        "Criteria are satisfied",
+    ));
+    let seen_messages = factory.seen_messages();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(test_task(
+            Uuid::new_v4(),
+            "Review auth",
+            "Confirm JWT implementation is acceptable",
+        ))
+        .await
+        .unwrap();
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, instructions),
+        "gate step instructions should render through routine.step.instructions. Messages: {seen_messages:#?}"
     );
 }
 
@@ -633,6 +851,7 @@ async fn two_step_chain() {
             source_step_id: step1_id,
             target_step_id: step2_id,
             condition: RoutineEdgeCondition::Always,
+            metadata: serde_json::json!({}),
         }],
     };
 
@@ -725,6 +944,7 @@ async fn agent_step_fail_verdict_terminates_routine() {
             source_step_id: step1_id,
             target_step_id: step2_id,
             condition: RoutineEdgeCondition::Always,
+            metadata: serde_json::json!({}),
         }],
     };
 
@@ -857,6 +1077,7 @@ async fn gate_step_pass() {
                 source_step_id: step1_id,
                 target_step_id: gate_id,
                 condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
@@ -864,6 +1085,7 @@ async fn gate_step_pass() {
                 source_step_id: gate_id,
                 target_step_id: terminal_id,
                 condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
             },
         ],
     };
@@ -957,6 +1179,7 @@ async fn gate_always_edge_is_invalid() {
                 source_step_id: step1_id,
                 target_step_id: gate_id,
                 condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
@@ -964,6 +1187,7 @@ async fn gate_always_edge_is_invalid() {
                 source_step_id: gate_id,
                 target_step_id: terminal_id,
                 condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
             },
         ],
     };
@@ -1056,6 +1280,7 @@ async fn gate_on_fail_routes_back_before_completion() {
                 source_step_id: step1_id,
                 target_step_id: gate_id,
                 condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
@@ -1063,6 +1288,7 @@ async fn gate_on_fail_routes_back_before_completion() {
                 source_step_id: gate_id,
                 target_step_id: step1_id,
                 condition: RoutineEdgeCondition::OnFail,
+                metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
@@ -1070,6 +1296,7 @@ async fn gate_on_fail_routes_back_before_completion() {
                 source_step_id: gate_id,
                 target_step_id: terminal_id,
                 condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
             },
         ],
     };
@@ -1128,6 +1355,122 @@ async fn gate_on_fail_routes_back_before_completion() {
     assert!(result.passed);
     assert_eq!(analyze_starts, 2);
     assert_eq!(verify_starts, 2);
+}
+
+#[tokio::test]
+async fn gate_on_fail_edge_exhausts_after_max_attempts() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step1_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let failed_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+    let retry_edge_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "retry-exhaustion-routine".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: step1_id,
+                routine_id,
+                name: "analyze_and_develop".into(),
+                step_type: RoutineStepType::Agent,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: gate_id,
+                routine_id,
+                name: "verify".into(),
+                step_type: RoutineStepType::Gate,
+                council_id: None,
+                agent_id: Some(agent_id),
+                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                id: failed_id,
+                routine_id,
+                name: "failed".into(),
+                step_type: RoutineStepType::TerminalFail,
+                council_id: None,
+                agent_id: None,
+                config: serde_json::json!({ "reason": "Retry limit exhausted." }),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                id: Uuid::new_v4(),
+                routine_id,
+                source_step_id: step1_id,
+                target_step_id: gate_id,
+                condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                id: retry_edge_id,
+                routine_id,
+                source_step_id: gate_id,
+                target_step_id: step1_id,
+                condition: RoutineEdgeCondition::OnFail,
+                metadata: serde_json::json!({
+                    "max_attempts": 1,
+                    "on_exhausted_step_id": failed_id,
+                }),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            verdict_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+            verdict_response(
+                "Implementation revised.",
+                "pass",
+                "Implementation succeeded",
+            ),
+            verdict_response(
+                "Still needs changes.",
+                "fail",
+                "Criteria were not satisfied",
+            ),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let result = provider
+        .routine_by_id(routine_id)
+        .unwrap()
+        .run(test_task(Uuid::new_v4(), "Task", "Build feature"))
+        .await
+        .unwrap();
+
+    assert!(!result.passed);
+    assert_eq!(result.step_id, failed_id);
+    assert_eq!(result.output, "Retry limit exhausted.");
 }
 
 /// Routine not found → error.

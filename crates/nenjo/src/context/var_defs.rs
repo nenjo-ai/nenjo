@@ -180,8 +180,8 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             name: "Knowledge",
             variables: vec![
                 TemplateVarDef {
-                    name: "builtin.nenjo",
-                    description: "Compact XML listing of the built-in Nenjo knowledge pack",
+                    name: "git.<owner>.<repo>.<package>",
+                    description: "Compact XML listing of a repo-backed knowledge pack",
                     group: "Knowledge",
                 },
                 TemplateVarDef {
@@ -222,6 +222,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                 TemplateVarDef {
                     name: "routine.step.type",
                     description: "Type of the current step (agent, gate, council, lambda, terminal, cron)",
+                    group: "Routine",
+                },
+                TemplateVarDef {
+                    name: "routine.step.instructions",
+                    description: "Instructions from the currently executing routine step config",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -415,7 +420,7 @@ mod tests {
     use super::template_var_groups;
 
     #[test]
-    fn builtin_knowledge_has_own_group() {
+    fn repo_knowledge_has_own_group() {
         let groups = template_var_groups();
         let project = groups
             .iter()
@@ -426,17 +431,12 @@ mod tests {
             .find(|group| group.name == "Knowledge")
             .expect("knowledge group");
 
-        assert!(
-            !project
-                .variables
-                .iter()
-                .any(|var| var.name == "builtin.nenjo")
-        );
+        assert!(project.variables.iter().all(|var| var.group == "Project"));
         assert!(
             knowledge
                 .variables
                 .iter()
-                .any(|var| var.name == "builtin.nenjo" && var.group == "Knowledge")
+                .any(|var| var.name == "git.<owner>.<repo>.<package>" && var.group == "Knowledge")
         );
     }
 

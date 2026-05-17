@@ -10,9 +10,9 @@ use crate::manifest_mcp::{
     ContextBlockDocument, ContextBlockUpdateDocument, CouncilCreateDocument,
     CouncilCreateMemberDocument, CouncilDocument, CouncilMemberUpdateDocument,
     CouncilUpdateDocument, DomainCreateDocument, DomainDocument, DomainPromptDocument,
-    DomainPromptMutationResult, DomainUpdateDocument, ModelCreateDocument, ModelDocument,
-    ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectDocumentContentDocument,
-    ProjectDocumentCreateDocument, ProjectDocumentSummary, ProjectUpdateDocument,
+    DomainPromptMutationResult, DomainUpdateDocument, KnowledgeItemContentDocument,
+    KnowledgeItemCreateDocument, KnowledgeItemSummary, ModelCreateDocument, ModelDocument,
+    ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
     RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
 };
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
@@ -69,6 +69,8 @@ struct RoutineResponseEdge {
     source_step_id: Uuid,
     target_step_id: Uuid,
     condition: String,
+    #[serde(default)]
+    metadata: serde_json::Value,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -185,6 +187,7 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
                 source_step_id: edge.source_step_id,
                 target_step_id: edge.target_step_id,
                 condition: RoutineEdgeCondition::from_str_value(&edge.condition),
+                metadata: edge.metadata,
             })
             .collect(),
     }
@@ -310,7 +313,7 @@ fn council_member_id_by_agent(detail: &CouncilResponseDetail, agent_id: Uuid) ->
 
 #[derive(Debug, Clone, serde::Deserialize)]
 /// Response body for a library knowledge item content read.
-pub struct ProjectDocumentContentResponse {
+pub struct KnowledgeItemContentResponse {
     /// Plaintext item content when the platform can return it directly.
     #[serde(default)]
     pub content: Option<String>,
@@ -985,13 +988,13 @@ impl PlatformManifestClient {
     pub async fn list_project_documents(
         &self,
         project_id: Uuid,
-    ) -> Result<Vec<ProjectDocumentSummary>> {
+    ) -> Result<Vec<KnowledgeItemSummary>> {
         let documents = self.list_project_document_metadata(project_id).await?;
         Ok(documents
             .into_iter()
-            .map(|document| ProjectDocumentSummary {
+            .map(|document| KnowledgeItemSummary {
                 id: document.id,
-                project_id: document.project_id,
+                pack_id: document.project_id,
                 filename: document.filename,
                 content_type: document.content_type,
                 size_bytes: document.size_bytes,
@@ -1030,13 +1033,13 @@ impl PlatformManifestClient {
         &self,
         project_id: Uuid,
         document_id: Uuid,
-    ) -> Result<Option<ProjectDocumentSummary>> {
+    ) -> Result<Option<KnowledgeItemSummary>> {
         let document = self
             .get_project_document_metadata(project_id, document_id)
             .await?;
-        Ok(document.map(|document| ProjectDocumentSummary {
+        Ok(document.map(|document| KnowledgeItemSummary {
             id: document.id,
-            project_id: document.project_id,
+            pack_id: document.project_id,
             filename: document.filename,
             content_type: document.content_type,
             size_bytes: document.size_bytes,
@@ -1061,7 +1064,7 @@ impl PlatformManifestClient {
         &self,
         project_id: Uuid,
         document_id: Uuid,
-    ) -> Result<ProjectDocumentContentResponse> {
+    ) -> Result<KnowledgeItemContentResponse> {
         let response = self
             .http
             .get(format!(
@@ -1089,7 +1092,7 @@ impl PlatformManifestClient {
         &self,
         project_id: Uuid,
         document_id: Uuid,
-    ) -> Result<ProjectDocumentContentDocument> {
+    ) -> Result<KnowledgeItemContentDocument> {
         let metadata = self
             .get_project_document_metadata(project_id, document_id)
             .await?
@@ -1100,16 +1103,16 @@ impl PlatformManifestClient {
         let content = payload.content.ok_or_else(|| {
             anyhow!("library knowledge item content response did not include content")
         })?;
-        Ok(ProjectDocumentContentDocument {
-            document: ProjectDocumentSummary {
+        Ok(KnowledgeItemContentDocument {
+            item: KnowledgeItemSummary {
                 id: metadata.id,
-                project_id: metadata.project_id,
+                pack_id: metadata.project_id,
                 filename: payload.filename,
                 content_type: payload.content_type,
                 size_bytes: payload.size_bytes,
                 updated_at: metadata.updated_at,
             },
-            description: content,
+            content,
         })
     }
 
@@ -1142,17 +1145,17 @@ impl PlatformManifestClient {
     }
 
     /// Create a library knowledge item, optionally sending encrypted content payload.
-    pub async fn create_project_file_document(
+    pub async fn create_knowledge_item(
         &self,
-        document: &ProjectDocumentCreateDocument,
+        item: &KnowledgeItemCreateDocument,
         encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<ProjectDocumentSummary> {
-        let content_type = document
+    ) -> Result<KnowledgeItemSummary> {
+        let content_type = item
             .content_type
             .clone()
             .unwrap_or_else(|| "text/plain".to_string());
-        let file_part = multipart::Part::bytes(document.description.clone().into_bytes())
-            .file_name(document.filename.clone())
+        let file_part = multipart::Part::bytes(item.content.clone().into_bytes())
+            .file_name(item.filename.clone())
             .mime_str(&content_type)
             .context("failed to encode library knowledge item mime type")?;
         let mut form = multipart::Form::new().part("file", file_part);
@@ -1167,8 +1170,8 @@ impl PlatformManifestClient {
         let response = self
             .http
             .post(format!(
-                "{}/api/v1/projects/{}/documents",
-                self.base_url, document.project_id
+                "{}/api/v1/knowledge/{}/items",
+                self.base_url, item.pack_id
             ))
             .header("X-API-Key", &self.api_key)
             .multipart(form)
@@ -1176,8 +1179,8 @@ impl PlatformManifestClient {
             .await
             .with_context(|| {
                 format!(
-                    "failed to create library knowledge item {} for project {}",
-                    document.filename, document.project_id
+                    "failed to create library knowledge item {} in pack {}",
+                    item.filename, item.pack_id
                 )
             })?;
 
@@ -1191,14 +1194,14 @@ impl PlatformManifestClient {
     }
 
     /// Update the content for an existing library knowledge item.
-    pub async fn update_project_document_content(
+    pub async fn update_knowledge_item_content(
         &self,
-        project_id: Uuid,
-        document_id: Uuid,
-        description: &str,
+        pack_id: Uuid,
+        item_id: Uuid,
+        content: &str,
         encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<ProjectDocumentSummary> {
-        let mut body = serde_json::json!({ "content": description });
+    ) -> Result<KnowledgeItemSummary> {
+        let mut body = serde_json::json!({ "content": content });
         if let Some(encrypted_payload) = encrypted_payload {
             body["encrypted_payload"] = encrypted_payload;
         }
@@ -1206,7 +1209,7 @@ impl PlatformManifestClient {
         let response = self
             .http
             .put(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}/content",
+                "{}/api/v1/knowledge/{pack_id}/items/{item_id}/content",
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
@@ -1214,7 +1217,7 @@ impl PlatformManifestClient {
             .send()
             .await
             .with_context(|| {
-                format!("failed to update content for library knowledge item {document_id}")
+                format!("failed to update content for library knowledge item {item_id}")
             })?;
 
         match response.status() {
@@ -1226,22 +1229,18 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Delete a project file document by project and document ID.
-    pub async fn delete_project_file_document(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<()> {
+    /// Delete a library knowledge item by pack and item ID.
+    pub async fn delete_knowledge_item(&self, pack_id: Uuid, item_id: Uuid) -> Result<()> {
         let response = self
             .http
             .delete(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}",
+                "{}/api/v1/knowledge/{pack_id}/items/{item_id}",
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
             .send()
             .await
-            .with_context(|| format!("failed to delete library knowledge item {document_id}"))?;
+            .with_context(|| format!("failed to delete library knowledge item {item_id}"))?;
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),

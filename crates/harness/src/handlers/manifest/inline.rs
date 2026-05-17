@@ -18,6 +18,216 @@ fn decrypted_string_payload(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn patch_matches_decrypted(
+    patch: &serde_json::Map<String, serde_json::Value>,
+    decrypted: &DecryptedManifestPayload<'_>,
+) -> bool {
+    let Some(encrypted) = patch.get("encrypted").and_then(|value| value.as_object()) else {
+        return false;
+    };
+    if encrypted
+        .get("object_type")
+        .and_then(|value| value.as_str())
+        != Some(decrypted.object_type)
+    {
+        return false;
+    }
+    match (
+        encrypted
+            .get("object_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok()),
+        decrypted.object_id,
+    ) {
+        (Some(expected), Some(actual)) => expected == actual,
+        (None, _) => true,
+        _ => false,
+    }
+}
+
+fn apply_patch_value(
+    root: &mut serde_json::Value,
+    path: &[serde_json::Value],
+    value: &serde_json::Value,
+) -> bool {
+    let Some((last, parents)) = path.split_last() else {
+        return false;
+    };
+    let Some(parent) = descend_patch_path(root, parents) else {
+        return false;
+    };
+    let Some(target) = descend_patch_segment(parent, last) else {
+        return false;
+    };
+
+    match (target, value) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(source)) => {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        (target, value) => *target = value.clone(),
+    }
+    true
+}
+
+fn descend_patch_path<'a>(
+    mut current: &'a mut serde_json::Value,
+    path: &[serde_json::Value],
+) -> Option<&'a mut serde_json::Value> {
+    for segment in path {
+        current = descend_patch_segment(current, segment)?;
+    }
+    Some(current)
+}
+
+fn descend_patch_segment<'a>(
+    current: &'a mut serde_json::Value,
+    segment: &serde_json::Value,
+) -> Option<&'a mut serde_json::Value> {
+    if let Some(field) = segment.as_str() {
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+        return Some(
+            current
+                .as_object_mut()?
+                .entry(field.to_string())
+                .or_insert_with(|| serde_json::json!({})),
+        );
+    }
+
+    let selector = segment.as_object()?;
+    let id = selector.get("id")?.as_str()?;
+    if !current.is_array() {
+        *current = serde_json::json!([]);
+    }
+    let items = current.as_array_mut()?;
+    let index = items
+        .iter()
+        .position(|item| item.get("id").and_then(|value| value.as_str()) == Some(id))
+        .unwrap_or_else(|| {
+            items.push(serde_json::json!({ "id": id }));
+            items.len() - 1
+        });
+    items.get_mut(index)
+}
+
+fn apply_generic_manifest_patch(
+    manifest: &mut Manifest,
+    decrypted: &DecryptedManifestPayload<'_>,
+) -> bool {
+    let Some(inline_payload) = decrypted.inline_payload else {
+        return false;
+    };
+    let Some(patch_root) = inline_payload.as_object() else {
+        return false;
+    };
+    if patch_root
+        .get("__nenjo_manifest_patch")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return false;
+    }
+    let Some(patches) = patch_root.get("patches").and_then(|value| value.as_array()) else {
+        return false;
+    };
+
+    let mut manifest_value = match serde_json::to_value(&*manifest) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "Failed to serialize manifest for patch apply");
+            return false;
+        }
+    };
+
+    for patch in patches {
+        let Some(patch) = patch.as_object() else {
+            continue;
+        };
+        let Some(path) = patch.get("path").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        if patch.get("encrypted").is_none()
+            && let Some(value) = patch.get("value")
+            && !apply_patch_value(&mut manifest_value, path, value)
+        {
+            return false;
+        }
+        if patch_matches_decrypted(patch, decrypted) {
+            if let Some(value) = patch.get("value")
+                && !apply_patch_value(&mut manifest_value, path, value)
+            {
+                return false;
+            }
+            if !apply_patch_value(&mut manifest_value, path, decrypted.decrypted_payload) {
+                return false;
+            }
+        }
+    }
+
+    match serde_json::from_value::<Manifest>(manifest_value) {
+        Ok(next_manifest) => {
+            *manifest = next_manifest;
+            true
+        }
+        Err(error) => {
+            warn!(error = %error, "Failed to deserialize patched manifest");
+            false
+        }
+    }
+}
+
+fn apply_generic_plain_manifest_patch(manifest: &mut Manifest, data: &serde_json::Value) -> bool {
+    let Some(patch_root) = data.as_object() else {
+        return false;
+    };
+    if patch_root
+        .get("__nenjo_manifest_patch")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return false;
+    }
+    let Some(patches) = patch_root.get("patches").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    let mut manifest_value = match serde_json::to_value(&*manifest) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "Failed to serialize manifest for patch apply");
+            return false;
+        }
+    };
+
+    for patch in patches {
+        let Some(patch) = patch.as_object() else {
+            continue;
+        };
+        let Some(value) = patch.get("value") else {
+            continue;
+        };
+        let Some(path) = patch.get("path").and_then(|value| value.as_array()) else {
+            continue;
+        };
+        if !apply_patch_value(&mut manifest_value, path, value) {
+            return false;
+        }
+    }
+
+    match serde_json::from_value::<Manifest>(manifest_value) {
+        Ok(next_manifest) => {
+            *manifest = next_manifest;
+            true
+        }
+        Err(error) => {
+            warn!(error = %error, "Failed to deserialize patched manifest");
+            false
+        }
+    }
+}
+
 pub(super) async fn apply_decrypted_manifest_upsert<StoreRt>(
     manifest: &mut Manifest,
     store: &StoreRt,
@@ -29,6 +239,9 @@ where
     StoreRt: ManifestStore,
 {
     let object_type = decrypted.object_type;
+    if apply_generic_manifest_patch(manifest, &decrypted) {
+        return true;
+    }
     let handled_inline = match rt {
         ResourceType::Agent => {
             object_type == "manifest.agent"
@@ -61,6 +274,7 @@ where
                     .encrypted_object_type()
                     .expect("document content object type")
         }
+        ResourceType::Project => object_type == "project.settings",
         _ => false,
     };
     if !handled_inline {
@@ -80,6 +294,35 @@ where
     };
 
     match object_type {
+        "project.settings" => {
+            let Some(project_payload) = decrypted.inline_payload else {
+                warn!(%rt, %id, "Encrypted project settings received without inline project payload");
+                return false;
+            };
+            let Some(decrypted_settings) = decrypted.decrypted_payload.as_object() else {
+                warn!(%rt, %id, "Decrypted project settings payload was not an object");
+                return false;
+            };
+            let mut project_payload = project_payload.clone();
+            let Some(project_object) = project_payload.as_object_mut() else {
+                warn!(%rt, %id, "Inline project payload was not an object");
+                return false;
+            };
+
+            let settings = project_object
+                .entry("settings")
+                .or_insert_with(|| serde_json::json!({}));
+            let Some(settings_object) = settings.as_object_mut() else {
+                warn!(%rt, %id, "Inline project settings payload was not an object");
+                return false;
+            };
+            for (key, value) in decrypted_settings {
+                settings_object.insert(key.clone(), value.clone());
+            }
+            project_object.remove("encrypted_payload");
+
+            apply_inline_upsert(manifest, rt, id, &project_payload)
+        }
         "manifest.agent" => apply_inline_upsert(manifest, rt, id, decrypted.decrypted_payload),
         object_type
             if object_type
@@ -368,6 +611,10 @@ pub(super) fn apply_inline_upsert(
     id: Uuid,
     data: &serde_json::Value,
 ) -> bool {
+    if apply_generic_plain_manifest_patch(manifest, data) {
+        return true;
+    }
+
     if rt == ResourceType::Agent {
         if data.get("prompt_config").is_some() {
             return match serde_json::from_value::<nenjo::manifest::AgentManifest>(data.clone()) {
@@ -709,6 +956,7 @@ fn upsert_agent(manifest: &mut Manifest, id: Uuid, agent: nenjo::manifest::Agent
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::manifest::services::NoopManifestStore;
 
     #[test]
     fn decrypted_string_payload_accepts_raw_string_values() {
@@ -817,5 +1065,121 @@ mod tests {
 
         assert_eq!(manifest.agents[0].name, "renamed");
         assert_eq!(manifest.agents[0].prompt_config.developer_prompt, "cached");
+    }
+
+    #[tokio::test]
+    async fn decrypted_project_settings_merge_into_inline_project_payload() {
+        let id = Uuid::new_v4();
+        let mut manifest = Manifest::default();
+        let inline_payload = serde_json::json!({
+            "id": id,
+            "name": "Project",
+            "slug": "project",
+            "description": null,
+            "settings": {
+                "theme": "dark"
+            },
+            "encrypted_payload": {
+                "object_type": "project.settings"
+            }
+        });
+        let decrypted_payload = serde_json::json!({
+            "context": "Use the saved project context.",
+            "notes": ["one", "two"]
+        });
+
+        assert!(
+            apply_decrypted_manifest_upsert(
+                &mut manifest,
+                &NoopManifestStore,
+                ResourceType::Project,
+                id,
+                DecryptedManifestPayload {
+                    object_type: "project.settings",
+                    object_id: Some(id),
+                    inline_payload: Some(&inline_payload),
+                    decrypted_payload: &decrypted_payload,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(manifest.projects.len(), 1);
+        assert_eq!(manifest.projects[0].settings["theme"], "dark");
+        assert_eq!(
+            manifest.projects[0].settings["context"],
+            "Use the saved project context."
+        );
+        assert_eq!(manifest.projects[0].settings["notes"][1], "two");
+    }
+
+    #[tokio::test]
+    async fn decrypted_manifest_patch_merges_nested_object_by_path() {
+        let routine_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+        let mut manifest = Manifest {
+            routines: vec![nenjo::manifest::RoutineManifest {
+                id: routine_id,
+                name: "routine".into(),
+                description: None,
+                trigger: nenjo::manifest::RoutineTrigger::Task,
+                metadata: Default::default(),
+                steps: vec![nenjo::manifest::RoutineStepManifest {
+                    id: step_id,
+                    routine_id,
+                    name: "step".into(),
+                    step_type: nenjo::manifest::RoutineStepType::Agent,
+                    council_id: None,
+                    agent_id: None,
+                    config: serde_json::json!({ "template": "task" }),
+                    order_index: 0,
+                }],
+                edges: vec![],
+            }],
+            ..Default::default()
+        };
+        let patch = serde_json::json!({
+            "__nenjo_manifest_patch": true,
+            "patches": [
+                {
+                    "path": [
+                        "routines",
+                        { "id": routine_id },
+                        "steps",
+                        { "id": step_id },
+                        "config"
+                    ],
+                    "encrypted": {
+                        "object_type": "routine.step.config",
+                        "object_id": step_id
+                    }
+                }
+            ]
+        });
+        let decrypted_payload = serde_json::json!({
+            "instructions": "Use the nested patch."
+        });
+
+        assert!(
+            apply_decrypted_manifest_upsert(
+                &mut manifest,
+                &NoopManifestStore,
+                ResourceType::Routine,
+                routine_id,
+                DecryptedManifestPayload {
+                    object_type: "routine.step.config",
+                    object_id: Some(step_id),
+                    inline_payload: Some(&patch),
+                    decrypted_payload: &decrypted_payload,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(
+            manifest.routines[0].steps[0].config["instructions"],
+            "Use the nested patch."
+        );
+        assert_eq!(manifest.routines[0].steps[0].config["template"], "task");
     }
 }

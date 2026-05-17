@@ -11,9 +11,9 @@ use super::params::{
     CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainUpdateParams,
-    DomainsGetParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams,
-    ProjectCreateParams, ProjectDeleteParams, ProjectDocumentContentUpdateParams,
-    ProjectDocumentCreateParams, ProjectDocumentDeleteParams, ProjectUpdateParams,
+    DomainsGetParams, KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams,
+    KnowledgeItemDeleteParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
+    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
     ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
     RoutinesGetParams,
 };
@@ -24,10 +24,10 @@ use super::results::{
     ContextBlockContentMutationResult, ContextBlockGetResult, ContextBlockMutationResult,
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
-    DomainMutationResult, DomainsListResult, ModelGetResult, ModelMutationResult, ModelsListResult,
-    ProjectDocumentContentMutationResult, ProjectDocumentMutationResult, ProjectGetResult,
-    ProjectMutationResult, ProjectsListResult, RoutineGetResult, RoutineMutationResult,
-    RoutinesListResult,
+    DomainMutationResult, DomainsListResult, KnowledgeItemContentMutationResult,
+    KnowledgeItemMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
+    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
+    RoutineMutationResult, RoutinesListResult,
 };
 
 #[async_trait]
@@ -137,19 +137,19 @@ pub trait ProjectManifestBackend: Send + Sync {
     /// Delete a project.
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult>;
     /// Create a library knowledge item.
-    async fn create_project_document(
+    async fn create_knowledge_item(
         &self,
-        params: ProjectDocumentCreateParams,
-    ) -> Result<ProjectDocumentMutationResult>;
+        params: KnowledgeItemCreateParams,
+    ) -> Result<KnowledgeItemMutationResult>;
     /// Update a library knowledge item's content.
-    async fn update_project_document_content(
+    async fn update_knowledge_item_content(
         &self,
-        params: ProjectDocumentContentUpdateParams,
-    ) -> Result<ProjectDocumentContentMutationResult>;
+        params: KnowledgeItemContentUpdateParams,
+    ) -> Result<KnowledgeItemContentMutationResult>;
     /// Delete a library knowledge item.
-    async fn delete_project_document(
+    async fn delete_knowledge_item(
         &self,
-        params: ProjectDocumentDeleteParams,
+        params: KnowledgeItemDeleteParams,
     ) -> Result<DeleteResult>;
 }
 

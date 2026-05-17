@@ -25,7 +25,7 @@ use crate::transport::{AckHandle, Message, MessageSource, Transport};
 // ---------------------------------------------------------------------------
 
 const DEFAULT_URL: &str = "nats://localhost:4222";
-const DEFAULT_MAX_AGE_SECS: u64 = 86_400; // 24 hours
+const DEFAULT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DEFAULT_MAX_DELIVER: i64 = 3;
 const DEFAULT_ACK_WAIT_SECS: u64 = 10;
 const DEFAULT_MESSAGE_BUFFER: usize = 256;
@@ -422,7 +422,7 @@ impl NatsTransportBuilder {
         self
     }
 
-    /// Set the maximum age for messages in the stream (default: 24h).
+    /// Set the maximum age for messages in the stream (default: 5 minutes).
     pub fn max_age(mut self, duration: Duration) -> Self {
         self.max_age = duration;
         self
@@ -562,7 +562,25 @@ async fn ensure_stream_available(
     label: &str,
 ) -> Result<(), EventBusError> {
     let stream_name = stream_config.name.clone();
-    if jetstream.get_stream(&stream_name).await.is_ok() {
+    if let Ok(mut existing) = jetstream.get_stream(&stream_name).await {
+        let info = existing.info().await.map_err(|e| {
+            EventBusError::Transport(format!("{label} setup failed for '{stream_name}': {e}"))
+        })?;
+        if info.config.retention != stream_config.retention
+            || info.config.max_age != stream_config.max_age
+            || info.config.storage != stream_config.storage
+            || !stream_subjects_cover(&info.config.subjects, &stream_config.subjects)
+        {
+            return Err(EventBusError::Transport(format!(
+                "{label} setup failed for '{stream_name}': existing stream config is incompatible \
+                 (subjects={:?}, retention={:?}, max_age={:?}, storage={:?})",
+                info.config.subjects,
+                info.config.retention,
+                info.config.max_age,
+                info.config.storage
+            )));
+        }
+
         return Ok(());
     }
 
@@ -591,6 +609,21 @@ async fn ensure_stream_available(
     }
 }
 
+fn stream_subjects_cover(existing: &[String], desired: &[String]) -> bool {
+    desired.iter().all(|desired_subject| {
+        existing
+            .iter()
+            .any(|existing_subject| subject_covers(existing_subject, desired_subject))
+    })
+}
+
+fn subject_covers(existing: &str, desired: &str) -> bool {
+    existing == desired
+        || existing
+            .strip_suffix(".>")
+            .is_some_and(|prefix| desired.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +635,28 @@ mod tests {
         assert_eq!(builder.stream_name, "AGENT_WORK_REQUESTS");
         assert_eq!(builder.max_deliver, 3);
         assert_ne!(builder.worker_id, uuid::Uuid::nil());
+    }
+
+    #[test]
+    fn stream_subjects_accept_existing_broader_wildcards() {
+        let existing = vec![
+            "work_requests.>".to_string(),
+            "worker_requests.>".to_string(),
+        ];
+        let desired = vec![
+            "work_requests.*".to_string(),
+            "worker_requests.*.*".to_string(),
+        ];
+
+        assert!(stream_subjects_cover(&existing, &desired));
+    }
+
+    #[test]
+    fn stream_subjects_reject_uncovered_subjects() {
+        let existing = vec!["work_requests.*".to_string()];
+        let desired = vec!["worker_requests.*.*".to_string()];
+
+        assert!(!stream_subjects_cover(&existing, &desired));
     }
 
     #[test]

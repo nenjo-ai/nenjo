@@ -35,6 +35,29 @@ fn agent_update_data_schema() -> serde_json::Value {
     })
 }
 
+fn agent_create_data_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Fields for a new agent. Omit optional fields you do not want to set; do not pass null.",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description of what the agent is responsible for. Omit if unknown."
+            },
+            "color": {
+                "type": "string",
+                "description": "Optional hex color used to render the agent in the dashboard. Omit if unknown."
+            },
+            "model_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Optional directly assigned model id for this agent. Omit if the model should be selected later."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn prompt_config_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -156,9 +179,9 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                         "type": "string",
                         "description": "The agent's runtime name."
                     },
-                    "description": agent_update_data_schema()["properties"]["description"].clone(),
-                    "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone()
+                    "description": agent_create_data_schema()["properties"]["description"].clone(),
+                    "color": agent_create_data_schema()["properties"]["color"].clone(),
+                    "model_id": agent_create_data_schema()["properties"]["model_id"].clone()
                 },
                 "additionalProperties": false
             }),
@@ -212,4 +235,58 @@ pub fn agent_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Write,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_agent_optional_fields_do_not_accept_null() {
+        let tools = agent_tools();
+        let create_agent = tools
+            .iter()
+            .find(|tool| tool.name == "create_agent")
+            .expect("create_agent tool should exist");
+        let properties = create_agent
+            .parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("create_agent should define properties");
+
+        for field in ["description", "color", "model_id"] {
+            assert_eq!(properties[field]["type"], "string");
+            assert!(
+                !properties[field]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("clear")
+            );
+        }
+    }
+
+    #[test]
+    fn update_agent_nullable_fields_still_clear_values() {
+        let tools = agent_tools();
+        let update_agent = tools
+            .iter()
+            .find(|tool| tool.name == "update_agent")
+            .expect("update_agent tool should exist");
+        let properties = update_agent
+            .parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("update_agent should define properties");
+
+        assert_eq!(
+            properties["description"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert!(
+            properties["description"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("clear")
+        );
+    }
 }

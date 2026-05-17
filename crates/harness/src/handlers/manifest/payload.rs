@@ -40,8 +40,49 @@ pub(super) struct InlineDocumentMeta {
 
 pub(super) struct DecryptedManifestPayload<'a> {
     pub object_type: &'a str,
+    pub object_id: Option<Uuid>,
     pub inline_payload: Option<&'a serde_json::Value>,
     pub decrypted_payload: &'a serde_json::Value,
+}
+
+pub(super) fn parse_decrypted_manifest_payloads(
+    data: &serde_json::Value,
+) -> Vec<DecryptedManifestPayload<'_>> {
+    if let Some(payload) = parse_decrypted_manifest_payload(data) {
+        return vec![payload];
+    }
+
+    let Some(object) = data.as_object() else {
+        return Vec::new();
+    };
+    let Some(true) = object
+        .get("__nenjo_decrypted_manifest_payloads")
+        .and_then(|value| value.as_bool())
+    else {
+        return Vec::new();
+    };
+    let inline_payload = object
+        .get("inline_payload")
+        .filter(|value| !value.is_null());
+    let Some(items) = object.get("items").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let item = item.as_object()?;
+            Some(DecryptedManifestPayload {
+                object_type: item.get("object_type")?.as_str()?,
+                object_id: item
+                    .get("object_id")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| Uuid::parse_str(value).ok()),
+                inline_payload,
+                decrypted_payload: item.get("decrypted_payload")?,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn parse_decrypted_manifest_payload(
@@ -57,6 +98,10 @@ pub(super) fn parse_decrypted_manifest_payload(
 
     Some(DecryptedManifestPayload {
         object_type: object.get("object_type")?.as_str()?,
+        object_id: object
+            .get("object_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok()),
         inline_payload: object
             .get("inline_payload")
             .filter(|value| !value.is_null()),

@@ -1,15 +1,13 @@
-//! Shared knowledge pack primitives and embedded Nenjo knowledge.
+//! Shared knowledge pack primitives.
 //!
-//! Knowledge packs expose a common metadata/search/read API for builtin,
-//! project, filesystem, or remote document sets.
+//! Knowledge packs expose a common metadata/search/read API for project,
+//! filesystem, or remote document sets.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "nenjo")]
-pub mod builtin;
 pub mod tools;
 
 /// Shared read-only metadata contract for any knowledge pack manifest.

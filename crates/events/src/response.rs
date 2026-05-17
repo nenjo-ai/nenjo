@@ -171,6 +171,13 @@ pub enum Response {
         error: Option<String>,
     },
 
+    /// Org-scoped encrypted push notification.
+    #[serde(rename = "push.notification")]
+    PushNotification {
+        agent_id: Uuid,
+        encrypted_payload: EncryptedPayload,
+    },
+
     /// Confirms receipt of a command (sent after processing begins).
     #[serde(rename = "delivery_receipt")]
     DeliveryReceipt { message_id: String },
@@ -296,6 +303,9 @@ impl std::fmt::Display for Response {
                     f,
                     "repo.sync_complete(project={project_id}, success={success})"
                 )
+            }
+            Self::PushNotification { agent_id, .. } => {
+                write!(f, "push.notification(agent={agent_id})")
             }
             Self::DeliveryReceipt { message_id } => write!(f, "delivery_receipt({message_id})"),
             Self::WorkerPong => write!(f, "worker.pong"),
@@ -855,6 +865,43 @@ mod tests {
     }
 
     #[test]
+    fn response_push_notification_roundtrip() {
+        let agent_id = Uuid::new_v4();
+        let payload = EncryptedPayload {
+            account_id: Uuid::new_v4(),
+            encryption_scope: Some("org".into()),
+            object_id: Uuid::new_v4(),
+            object_type: "push.notification".into(),
+            algorithm: "aes-256-gcm".into(),
+            key_version: 1,
+            nonce: "bm9uY2U=".into(),
+            ciphertext: "Y2lwaGVydGV4dA==".into(),
+        };
+        let resp = Response::PushNotification {
+            agent_id,
+            encrypted_payload: payload.clone(),
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"push.notification""#));
+        assert!(json.contains(r#""encrypted_payload""#));
+
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Response::PushNotification {
+                agent_id: parsed_agent_id,
+                encrypted_payload,
+            } => {
+                assert_eq!(parsed_agent_id, agent_id);
+                assert_eq!(encrypted_payload.account_id, payload.account_id);
+                assert_eq!(encrypted_payload.encryption_scope.as_deref(), Some("org"));
+                assert_eq!(encrypted_payload.object_type, "push.notification");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn response_worker_heartbeat_roundtrip() {
         let resp = Response::WorkerHeartbeat {
             worker_id: Uuid::nil(),
@@ -1073,6 +1120,7 @@ mod tests {
             project_id: None,
             payload: None,
             encrypted_payload: None,
+            encrypted_payloads: Vec::new(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"manifest.changed""#));
@@ -1096,6 +1144,7 @@ mod tests {
             routine_id: Uuid::nil(),
             project_id: None,
             schedule: "0 * * * *".into(),
+            timezone: Some("America/Chicago".into()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"cron.enable""#));

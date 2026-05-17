@@ -480,10 +480,10 @@ pub struct ProjectUpdateDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Library knowledge item metadata returned by legacy library item routes.
-pub struct ProjectDocumentSummary {
+/// Library knowledge item metadata returned by knowledge pack item routes.
+pub struct KnowledgeItemSummary {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub pack_id: Uuid,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -492,20 +492,18 @@ pub struct ProjectDocumentSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Library knowledge item including inline content.
-pub struct ProjectDocumentContentDocument {
+pub struct KnowledgeItemContentDocument {
     #[serde(flatten)]
-    pub document: ProjectDocumentSummary,
-    #[serde(alias = "content")]
-    pub description: String,
+    pub item: KnowledgeItemSummary,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Request body for creating a library knowledge item.
-pub struct ProjectDocumentCreateDocument {
-    pub project_id: Uuid,
+pub struct KnowledgeItemCreateDocument {
+    pub pack_id: Uuid,
     pub filename: String,
-    #[serde(alias = "content")]
-    pub description: String,
+    pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
 }
@@ -590,6 +588,8 @@ pub struct RoutineEdgeInput {
     pub source_step_id: String,
     pub target_step_id: String,
     pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -661,6 +661,7 @@ impl RoutineDocument {
                     source_step_id: edge.source_step_id.to_string(),
                     target_step_id: edge.target_step_id.to_string(),
                     condition: edge.condition,
+                    metadata: edge.metadata.clone(),
                 })
                 .collect(),
         }

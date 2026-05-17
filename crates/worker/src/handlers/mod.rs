@@ -311,9 +311,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             routine_id,
             project_id,
             schedule,
+            timezone,
         } => {
             ctx.harness
-                .handle_cron_enable(&ctx.cron_context(), routine_id, project_id, &schedule, None)
+                .handle_cron_enable(
+                    &ctx.cron_context(),
+                    routine_id,
+                    project_id,
+                    &schedule,
+                    timezone.as_deref(),
+                    None,
+                )
                 .await
         }
 
@@ -333,9 +341,19 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::AgentHeartbeatEnable { agent_id, interval } => {
+        Command::AgentHeartbeatEnable {
+            agent_id,
+            interval,
+            timezone,
+        } => {
             ctx.harness
-                .handle_agent_heartbeat_enable(&ctx.heartbeat_context(), agent_id, &interval, None)
+                .handle_agent_heartbeat_enable(
+                    &ctx.heartbeat_context(),
+                    agent_id,
+                    &interval,
+                    timezone.as_deref(),
+                    None,
+                )
                 .await
         }
 
@@ -385,6 +403,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             project_id,
             payload,
             encrypted_payload,
+            encrypted_payloads: _,
         } => ctx
             .harness
             .handle_manifest_changed(

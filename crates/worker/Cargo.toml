@@ -23,7 +23,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 
 # Workspace crates
-nenjo-knowledge = { workspace = true, features = ["nenjo"] }
+nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
 nenjo-crypto-auth = { workspace = true }
 nenjo-platform = { workspace = true }

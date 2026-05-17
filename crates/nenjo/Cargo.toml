@@ -17,6 +17,7 @@ nenjo-events = { workspace = true }
 nenjo-xml = { workspace = true }
 nenjo-tool-api = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 cron = { workspace = true }
 bon = { workspace = true }
 async-trait = { workspace = true }
