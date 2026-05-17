@@ -52,8 +52,6 @@ impl ManifestStore for RecordingManifestStore {
     async fn sync_document_metadata(
         &self,
         _client: &nenjo::client::NenjoClient,
-        _manifest: &Manifest,
-        _project_id: Uuid,
         document_id: Uuid,
         _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
@@ -64,8 +62,6 @@ impl ManifestStore for RecordingManifestStore {
     async fn sync_document(
         &self,
         _client: &nenjo::client::NenjoClient,
-        _manifest: &Manifest,
-        _project_id: Uuid,
         document_id: Uuid,
         _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
@@ -73,11 +69,10 @@ impl ManifestStore for RecordingManifestStore {
         Ok(())
     }
 
-    fn remove_document(
+    async fn remove_document(
         &self,
-        _manifest: &Manifest,
-        _project_id: Uuid,
         document_id: Uuid,
+        _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
         self.removals.lock().unwrap().push(document_id);
         Ok(())
@@ -85,8 +80,8 @@ impl ManifestStore for RecordingManifestStore {
 
     fn write_document_content(
         &self,
-        _manifest: &Manifest,
-        _project_id: Uuid,
+        _pack_id: Uuid,
+        _pack_slug: Option<&str>,
         _relative_path: &str,
         _content: &str,
     ) -> Result<()> {
@@ -567,6 +562,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
 #[tokio::test]
 async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
     let project_id = Uuid::new_v4();
+    let pack_id = Uuid::new_v4();
     let document_id = Uuid::new_v4();
     let env = test_harness(Manifest {
         projects: vec![project(project_id, "project")],
@@ -582,7 +578,8 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
             Some(project_id),
             Some(serde_json::json!({
                 "id": document_id,
-                "project_id": project_id,
+                "pack_id": pack_id,
+                "pack_slug": "project",
                 "filename": "guide.md",
                 "path": "docs",
                 "title": "Guide",
@@ -607,7 +604,23 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
             document_id,
             ResourceAction::Deleted,
             Some(project_id),
-            None,
+            Some(serde_json::json!({
+                "id": document_id,
+                "pack_id": pack_id,
+                "pack_slug": "project",
+                "filename": "guide.md",
+                "path": "docs",
+                "title": "Guide",
+                "kind": "markdown",
+                "authority": null,
+                "summary": null,
+                "status": null,
+                "tags": [],
+                "aliases": [],
+                "keywords": [],
+                "size_bytes": 42,
+                "updated_at": "2026-05-10T00:00:00Z"
+            })),
             None,
         )
         .await

@@ -13,9 +13,9 @@ use super::params::{
     CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainPromptGetParams, DomainPromptUpdateParams, DomainUpdateParams,
-    DomainsGetParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams,
-    ProjectCreateParams, ProjectDeleteParams, ProjectDocumentContentUpdateParams,
-    ProjectDocumentCreateParams, ProjectDocumentDeleteParams, ProjectUpdateParams,
+    DomainsGetParams, KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams,
+    KnowledgeItemDeleteParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
+    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
     ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
     RoutinesGetParams,
 };
@@ -179,17 +179,17 @@ impl ManifestMcpContract {
                 let args: ProjectDeleteParams = serde_json::from_value(params)?;
                 to_json(backend.delete_project(args).await?)
             }
-            "create_project_document" => {
-                let args: ProjectDocumentCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_project_document(args).await?)
+            "create_knowledge_item" => {
+                let args: KnowledgeItemCreateParams = serde_json::from_value(params)?;
+                to_json(backend.create_knowledge_item(args).await?)
             }
-            "update_project_document_content" => {
-                let args: ProjectDocumentContentUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_project_document_content(args).await?)
+            "update_knowledge_item_content" => {
+                let args: KnowledgeItemContentUpdateParams = serde_json::from_value(params)?;
+                to_json(backend.update_knowledge_item_content(args).await?)
             }
-            "delete_project_document" => {
-                let args: ProjectDocumentDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_project_document(args).await?)
+            "delete_knowledge_item" => {
+                let args: KnowledgeItemDeleteParams = serde_json::from_value(params)?;
+                to_json(backend.delete_knowledge_item(args).await?)
             }
             "list_routines" => {
                 if !params.is_null() {

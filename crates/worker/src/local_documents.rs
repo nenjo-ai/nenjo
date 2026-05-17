@@ -48,6 +48,22 @@ pub fn remove_manifest_document(
     Ok(())
 }
 
+pub fn remove_manifest_document_from_pack_dir(
+    pack_dir: &Path,
+    document_id: Uuid,
+    metadata: Option<&DocumentSyncMeta>,
+) -> Result<()> {
+    let existing = library_knowledge_item_relative_path(pack_dir, document_id)
+        .or_else(|| metadata.map(library_item_relative_path));
+    remove_library_knowledge_entry(pack_dir, document_id)?;
+    if let Some(filename) = existing {
+        delete_document_file(pack_dir, &filename)?;
+    } else {
+        debug!(%document_id, "Deleted library knowledge item was not present in local knowledge manifest");
+    }
+    Ok(())
+}
+
 fn library_pack_slug(manifest: &nenjo::Manifest, project_id: Uuid) -> String {
     manifest
         .projects
@@ -568,6 +584,7 @@ mod tests {
         DocumentSyncMeta {
             id: Uuid::from_u128(id),
             pack_id: Uuid::from_u128(7),
+            pack_slug: Some("test".into()),
             slug: "test".into(),
             filename: filename.into(),
             path: None,

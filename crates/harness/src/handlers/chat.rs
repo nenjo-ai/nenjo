@@ -634,6 +634,16 @@ where
         if let Some((_, exec)) = harness.executions().remove(&key) {
             exec.cancel.cancel();
             let _ = harness
+                .append_transcript(SessionTranscriptAppend {
+                    session_id: key,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::TurnInterrupted {
+                        reason: "cancelled by user".to_string(),
+                    },
+                    transcript_state: TranscriptState::Clean,
+                })
+                .await;
+            let _ = harness
                 .transition_session(SessionTransition {
                     session_id: key,
                     worker_id: ctx.worker_id.clone(),

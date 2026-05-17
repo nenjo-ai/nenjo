@@ -25,9 +25,9 @@ pub fn all_tools() -> Vec<ToolSpec> {
                 | "create_project"
                 | "update_project"
                 | "delete_project"
-                | "create_project_document"
-                | "update_project_document_content"
-                | "delete_project_document"
+                | "create_knowledge_item"
+                | "update_knowledge_item_content"
+                | "delete_knowledge_item"
         )
     }));
     tools.extend(routine_tools());
@@ -173,12 +173,9 @@ mod tests {
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),
-                ("create_project_document".into(), ToolCategory::Write),
-                ("delete_project_document".into(), ToolCategory::Write),
-                (
-                    "update_project_document_content".into(),
-                    ToolCategory::Write
-                ),
+                ("create_knowledge_item".into(), ToolCategory::Write),
+                ("delete_knowledge_item".into(), ToolCategory::Write),
+                ("update_knowledge_item_content".into(), ToolCategory::Write),
                 ("list_routines".into(), ToolCategory::Read),
                 ("get_routine".into(), ToolCategory::Read),
                 ("create_routine".into(), ToolCategory::Write),

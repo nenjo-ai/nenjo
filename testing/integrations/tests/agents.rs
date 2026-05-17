@@ -12,7 +12,7 @@ use nenjo::manifest::{
     AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
     PromptConfig, PromptTemplates,
 };
-use nenjo::memory::{MarkdownMemory, MemoryScope};
+use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo::{Tool, ToolCategory, ToolResult};
@@ -225,13 +225,14 @@ async fn memory_store_recall_with_real_llm() {
     let ws_dir = tempfile::tempdir().unwrap();
     let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
 
-    let model = make_model();
+    let mut model = make_model();
+    model.temperature = Some(0.0);
     let project = make_project();
     let agent = make_agent(
         "memory-agent",
         model.id,
         "You are a helpful assistant with persistent memory.\n\
-         When the user tells you something to remember, use save_memory.\n\
+         When the user tells you something to remember, use save_memory with scope 'project'.\n\
          When asked what you know, use recall_memory first.\n\
          Always respond concisely.",
     );
@@ -241,7 +242,7 @@ async fn memory_store_recall_with_real_llm() {
     let manifest = Manifest {
         agents: vec![agent],
         models: vec![model],
-        projects: vec![project],
+        projects: vec![project.clone()],
         ..Default::default()
     };
 
@@ -260,6 +261,7 @@ async fn memory_store_recall_with_real_llm() {
         .agent_by_name("memory-agent")
         .await
         .unwrap()
+        .with_project_context(&project)
         .build()
         .await
         .unwrap();
@@ -278,7 +280,7 @@ async fn memory_store_recall_with_real_llm() {
 
     // Ask the agent to store something
     let output = runner
-        .chat("Remember that my favorite programming language is Rust.")
+        .chat("Remember that my favorite programming language is Rust. Category: preferences. Scope: project.")
         .await
         .expect("store chat should succeed");
 
@@ -293,7 +295,9 @@ async fn memory_store_recall_with_real_llm() {
     );
 
     // Verify the fact was actually persisted to the markdown backend
-    let scope = MemoryScope::new("memory-agent", Some("test-project"));
+    let scope = runner
+        .memory_scope()
+        .expect("runner should have memory scope");
     let backend = MarkdownMemory::new(dir.path(), ws_dir.path());
 
     use nenjo::memory::Memory;
@@ -319,7 +323,7 @@ async fn memory_store_recall_with_real_llm() {
 
     // Now ask the agent to forget it
     let output = runner
-        .chat("Forget what you stored about my favorite programming language.")
+        .chat("Forget what you stored about my favorite programming language. Scope: project.")
         .await
         .expect("forget chat should succeed");
 

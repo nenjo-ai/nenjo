@@ -82,34 +82,27 @@ pub trait ManifestStore: Send + Sync {
     async fn sync_document_metadata(
         &self,
         _client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        _project_id: Uuid,
         _document_id: Uuid,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        self.persist_resource(manifest, ResourceType::Document)
-            .await
+        Ok(())
     }
 
     /// Sync document content after a fetched manifest update.
     async fn sync_document(
         &self,
         _client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        _project_id: Uuid,
         _document_id: Uuid,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        self.persist_resource(manifest, ResourceType::Document)
-            .await
+        Ok(())
     }
 
     /// Remove document content from the host's local cache.
-    fn remove_document(
+    async fn remove_document(
         &self,
-        _manifest: &nenjo::Manifest,
-        _project_id: Uuid,
         _document_id: Uuid,
+        _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         Ok(())
     }
@@ -117,8 +110,8 @@ pub trait ManifestStore: Send + Sync {
     /// Write decrypted document content into the host's local cache.
     fn write_document_content(
         &self,
-        _manifest: &nenjo::Manifest,
-        _project_id: Uuid,
+        _pack_id: Uuid,
+        _pack_slug: Option<&str>,
         _relative_path: &str,
         _content: &str,
     ) -> Result<()> {
@@ -183,46 +176,39 @@ where
     async fn sync_document_metadata(
         &self,
         client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         (**self)
-            .sync_document_metadata(client, manifest, project_id, document_id, metadata)
+            .sync_document_metadata(client, document_id, metadata)
             .await
     }
 
     async fn sync_document(
         &self,
         client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        (**self)
-            .sync_document(client, manifest, project_id, document_id, metadata)
-            .await
+        (**self).sync_document(client, document_id, metadata).await
     }
 
-    fn remove_document(
+    async fn remove_document(
         &self,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
+        metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        (**self).remove_document(manifest, project_id, document_id)
+        (**self).remove_document(document_id, metadata).await
     }
 
     fn write_document_content(
         &self,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
+        pack_id: Uuid,
+        pack_slug: Option<&str>,
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        (**self).write_document_content(manifest, project_id, relative_path, content)
+        (**self).write_document_content(pack_id, pack_slug, relative_path, content)
     }
 }
 

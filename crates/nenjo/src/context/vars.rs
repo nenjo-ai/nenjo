@@ -209,6 +209,7 @@ impl RenderContextVars {
             // Routine step context
             ("routine.step.name", &self.routine.step.name),
             ("routine.step.type", &self.routine.step.step_type),
+            ("routine.step.instructions", &self.routine.step.instructions),
             ("routine.step.metadata", &self.routine.step.metadata),
             // Git — singular XML + fields
             ("git", git_xml.as_str()),

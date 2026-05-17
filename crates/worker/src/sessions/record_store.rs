@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use nenjo_sessions::{SessionRecord, SessionStore};
 use uuid::Uuid;
 
@@ -30,6 +30,20 @@ impl FileSessionStore {
         std::fs::rename(tmp, path)?;
         Ok(())
     }
+
+    fn read_record(path: &Path) -> Result<Option<SessionRecord>> {
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if data.trim().is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(&data)
+            .with_context(|| format!("failed to parse session record {}", path.display()))
+            .map(Some)
+    }
 }
 
 impl SessionStore for FileSessionStore {
@@ -47,20 +61,16 @@ impl SessionStore for FileSessionStore {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let data = std::fs::read_to_string(&path)?;
-            records.push(serde_json::from_str(&data)?);
+            if let Some(record) = Self::read_record(&path)? {
+                records.push(record);
+            }
         }
 
         Ok(records)
     }
 
     fn get(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
-        let path = self.path(session_id);
-        match std::fs::read_to_string(path) {
-            Ok(data) => Ok(Some(serde_json::from_str(&data)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        Self::read_record(&self.path(session_id))
     }
 
     fn put(&self, record: &SessionRecord) -> Result<()> {
@@ -153,6 +163,25 @@ mod tests {
 
         store.delete(session_id).unwrap();
         assert!(store.get(session_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_record_file_is_treated_as_missing() {
+        let dir = tempdir().unwrap();
+        let store = FileSessionStore::new(dir.path());
+        let session_id = Uuid::new_v4();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join(format!("{session_id}.json")), "").unwrap();
+
+        assert!(store.get(session_id).unwrap().is_none());
+        assert!(store.list().unwrap().is_empty());
+
+        let record = sample_record(session_id, 1);
+        store.put(&record).unwrap();
+        assert_eq!(
+            store.get(session_id).unwrap().unwrap().session_id,
+            session_id
+        );
     }
 
     #[test]

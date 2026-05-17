@@ -44,6 +44,7 @@ pub struct CronSessionRecovery {
     pub session_id: Uuid,
     pub project_id: Option<Uuid>,
     pub schedule_expr: String,
+    pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
 }
 
@@ -51,6 +52,7 @@ pub struct CronSessionRecovery {
 pub struct HeartbeatSessionRecovery {
     pub session_id: Uuid,
     pub interval: Duration,
+    pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub previous_output_ref: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
@@ -507,6 +509,7 @@ impl WorkerSessionRuntime {
                         session_id: record.session_id,
                         project_id: record.project_id,
                         schedule_expr: state.schedule_expr,
+                        timezone: state.timezone,
                         next_run_at: state.next_run_at,
                     })
                     .await?;
@@ -521,6 +524,7 @@ impl WorkerSessionRuntime {
                     .restore_heartbeat_session(HeartbeatSessionRecovery {
                         session_id: record.session_id,
                         interval: std::time::Duration::from_secs(state.interval_secs.max(1)),
+                        timezone: state.timezone,
                         next_run_at: state.next_run_at,
                         previous_output_ref: state.previous_output_ref,
                         last_run_at: state.last_run_at,

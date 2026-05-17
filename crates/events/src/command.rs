@@ -161,6 +161,8 @@ pub enum Command {
         #[serde(default)]
         project_id: Option<Uuid>,
         schedule: String,
+        #[serde(default)]
+        timezone: Option<String>,
     },
 
     /// Disable a cron schedule.
@@ -177,7 +179,12 @@ pub enum Command {
 
     /// Enable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.enable")]
-    AgentHeartbeatEnable { agent_id: Uuid, interval: String },
+    AgentHeartbeatEnable {
+        agent_id: Uuid,
+        interval: String,
+        #[serde(default)]
+        timezone: Option<String>,
+    },
 
     /// Disable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.disable")]
@@ -215,8 +222,7 @@ pub enum Command {
         resource_type: ResourceType,
         resource_id: Uuid,
         action: ResourceAction,
-        /// Parent project ID — set for project-scoped resources (documents, etc.)
-        /// so the harness can scope operations to the correct project.
+        /// Parent project ID for project-scoped resources.
         #[serde(default)]
         project_id: Option<Uuid>,
         /// Inline resource payload — avoids a round-trip fetch to the backend API.

@@ -33,6 +33,9 @@ fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessa
             SessionTranscriptEventPayload::ChatMessage { message } => {
                 Some(transcript_message_to_chat(message.clone()))
             }
+            SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(ChatMessage::system(
+                format!("Previous turn was interrupted: {reason}"),
+            )),
             _ => None,
         })
         .collect()

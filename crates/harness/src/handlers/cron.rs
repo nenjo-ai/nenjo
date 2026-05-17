@@ -31,6 +31,7 @@ struct CronSessionUpsert<'a> {
     project_id: Option<Uuid>,
     memory_namespace: Option<&'a str>,
     schedule: &'a str,
+    timezone: Option<&'a str>,
     status: SessionStatus,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -53,6 +54,7 @@ async fn upsert_cron_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
         project_id,
         memory_namespace,
         schedule,
+        timezone,
         status,
         last_run_at,
         next_run_at,
@@ -70,6 +72,7 @@ async fn upsert_cron_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
             memory_namespace: memory_namespace.map(ToString::to_string),
             scheduler: ScheduleState::Cron(CronScheduleState {
                 schedule_expr: schedule.to_string(),
+                timezone: timezone.map(ToString::to_string),
                 next_run_at,
                 last_run_at,
                 last_completion,
@@ -154,17 +157,19 @@ where
         routine_id: Uuid,
         project_id: Option<Uuid>,
         schedule: &str,
+        timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
         S: ResponseSender + Clone + 'static,
     {
-        info!(%routine_id, %schedule, "Enabling cron schedule");
+        info!(%routine_id, %schedule, timezone, "Enabling cron schedule");
 
-        let cron_schedule = nenjo::routines::types::parse_schedule(schedule).map_err(|error| {
-            error!(%routine_id, error = %error, "Invalid cron schedule");
-            error
-        })?;
+        let cron_schedule = nenjo::routines::types::parse_schedule_in_timezone(schedule, timezone)
+            .map_err(|error| {
+                error!(%routine_id, error = %error, "Invalid cron schedule");
+                error
+            })?;
 
         let cancel = CancellationToken::new();
         let executions = self.executions();
@@ -193,6 +198,7 @@ where
 
         let response_sink = ctx.response_sink.clone();
         let schedule_owned = schedule.to_string();
+        let timezone_owned = timezone.map(ToOwned::to_owned);
         let provider_cell = self.provider_handle();
         let worker_id = ctx.worker_id.clone();
         let cron_memory_namespace = resolve_cron_memory_namespace(self, routine_id, project_id);
@@ -216,6 +222,7 @@ where
                 project_id,
                 memory_namespace: cron_memory_namespace.as_deref(),
                 schedule,
+                timezone,
                 status: SessionStatus::Active,
                 last_run_at: None,
                 next_run_at: Some(initial_next_run_at),
@@ -328,6 +335,7 @@ where
                                                                     project_id: opt_project_id,
                                                                     memory_namespace: cron_memory_namespace.as_deref(),
                                                                     schedule: &schedule_owned,
+                                                                    timezone: timezone_owned.as_deref(),
                                                                     status: SessionStatus::Active,
                                                                     last_run_at,
                                                                     next_run_at: Some(next_run_at),
@@ -420,6 +428,7 @@ where
                         project_id: opt_project_id,
                         memory_namespace: cron_memory_namespace.as_deref(),
                         schedule: &schedule_owned,
+                        timezone: timezone_owned.as_deref(),
                         status: SessionStatus::Active,
                         last_run_at,
                         next_run_at: Some(next_run_at),
@@ -460,6 +469,7 @@ where
                     project_id: None,
                     memory_namespace: None,
                     schedule: "",
+                    timezone: None,
                     status: SessionStatus::Cancelled,
                     last_run_at: None,
                     next_run_at: None,

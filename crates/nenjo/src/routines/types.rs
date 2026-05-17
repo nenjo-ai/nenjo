@@ -248,6 +248,7 @@ pub(crate) struct RoutineState {
     pub current_step_type: Option<String>,
     pub current_agent_id: Option<Uuid>,
     pub gate_feedback: Option<String>,
+    pub step_instructions: Option<String>,
     pub step_metadata: Option<String>,
     pub metrics: RoutineMetrics,
 }
@@ -265,6 +266,7 @@ impl RoutineState {
             current_step_type: None,
             current_agent_id: None,
             gate_feedback: None,
+            step_instructions: None,
             step_metadata: None,
             metrics: RoutineMetrics::new(),
         }
@@ -419,7 +421,10 @@ pub enum CronSchedule {
     /// Fixed interval between cycles (e.g. "30s", "5m").
     Interval(Duration),
     /// Standard cron expression (e.g. "0 9 * * *").
-    Expression(Box<cron::Schedule>),
+    Expression {
+        schedule: Box<cron::Schedule>,
+        timezone: chrono_tz::Tz,
+    },
 }
 
 impl CronSchedule {
@@ -431,9 +436,10 @@ impl CronSchedule {
                     + chrono::Duration::from_std(*d)
                         .unwrap_or_else(|_| chrono::Duration::seconds(60))
             }
-            CronSchedule::Expression(schedule) => schedule
-                .upcoming(chrono::Utc)
+            CronSchedule::Expression { schedule, timezone } => schedule
+                .upcoming(*timezone)
                 .next()
+                .map(|value| value.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::seconds(60)),
         }
     }
@@ -453,6 +459,10 @@ impl CronSchedule {
 /// Cron expressions are detected by the presence of spaces (at least 4
 /// space-separated fields). Everything else is parsed as a duration.
 pub fn parse_schedule(s: &str) -> Result<CronSchedule> {
+    parse_schedule_in_timezone(s, None)
+}
+
+pub fn parse_schedule_in_timezone(s: &str, timezone: Option<&str>) -> Result<CronSchedule> {
     let s = s.trim();
     if s.is_empty() {
         bail!("Empty schedule string");
@@ -470,7 +480,17 @@ pub fn parse_schedule(s: &str) -> Result<CronSchedule> {
         let schedule: cron::Schedule = expr
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", s, e))?;
-        Ok(CronSchedule::Expression(Box::new(schedule)))
+        let timezone_name = timezone
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("UTC");
+        let timezone = timezone_name
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| anyhow::anyhow!("Invalid timezone '{}'", timezone_name))?;
+        Ok(CronSchedule::Expression {
+            schedule: Box::new(schedule),
+            timezone,
+        })
     } else {
         parse_duration(s).map(CronSchedule::Interval)
     }
@@ -629,14 +649,23 @@ mod tests {
     fn parse_schedule_cron_expression() {
         // Standard 5-field cron
         let s = parse_schedule("0 9 * * *").unwrap();
-        assert!(matches!(s, CronSchedule::Expression(_)));
+        assert!(matches!(s, CronSchedule::Expression { .. }));
         // Every 5 minutes
         let s = parse_schedule("*/5 * * * *").unwrap();
-        assert!(matches!(s, CronSchedule::Expression(_)));
+        assert!(matches!(s, CronSchedule::Expression { .. }));
         // Next delay should be positive and finite
         let delay = s.next_delay();
         assert!(delay.as_secs() > 0);
         assert!(delay.as_secs() <= 300);
+    }
+
+    #[test]
+    fn parse_schedule_cron_expression_timezone() {
+        let s = parse_schedule_in_timezone("0 9 * * *", Some("America/Chicago")).unwrap();
+        assert!(
+            matches!(s, CronSchedule::Expression { timezone, .. } if timezone == chrono_tz::America::Chicago)
+        );
+        assert!(parse_schedule_in_timezone("0 9 * * *", Some("Not/AZone")).is_err());
     }
 
     #[test]

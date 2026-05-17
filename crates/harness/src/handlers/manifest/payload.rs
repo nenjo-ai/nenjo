@@ -11,9 +11,9 @@ pub use nenjo_platform::{
 pub(super) struct InlineDocumentMeta {
     pub id: Uuid,
     #[serde(default)]
-    pub project_id: Option<Uuid>,
-    #[serde(default)]
     pub pack_id: Option<Uuid>,
+    #[serde(default)]
+    pub pack_slug: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,
     pub filename: String,
@@ -40,6 +40,7 @@ pub(super) struct InlineDocumentMeta {
 
 pub(super) struct DecryptedManifestPayload<'a> {
     pub object_type: &'a str,
+    pub object_id: Uuid,
     pub inline_payload: Option<&'a serde_json::Value>,
     pub decrypted_payload: &'a serde_json::Value,
 }
@@ -57,6 +58,7 @@ pub(super) fn parse_decrypted_manifest_payload(
 
     Some(DecryptedManifestPayload {
         object_type: object.get("object_type")?.as_str()?,
+        object_id: serde_json::from_value(object.get("object_id")?.clone()).ok()?,
         inline_payload: object
             .get("inline_payload")
             .filter(|value| !value.is_null()),

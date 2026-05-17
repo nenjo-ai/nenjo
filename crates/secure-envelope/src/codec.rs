@@ -427,9 +427,23 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 action,
                 project_id,
                 payload,
-                encrypted_payload: Some(encrypted_payload),
+                encrypted_payload,
             } => {
+                let Some(encrypted_payload) = encrypted_payload else {
+                    return Ok(DecodeCommandResult::Command(Box::new(
+                        Command::ManifestChanged {
+                            resource_type,
+                            resource_id,
+                            action,
+                            project_id,
+                            payload,
+                            encrypted_payload: None,
+                        },
+                    )));
+                };
+
                 let object_type = encrypted_payload.object_type.clone();
+                let object_id = encrypted_payload.object_id;
                 let decrypted = match self
                     .decrypt_enc_payload(actor_user_id, &encrypted_payload)
                     .await
@@ -446,18 +460,22 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         }));
                     }
                 };
+
+                let payload = serde_json::json!({
+                    "__nenjo_decrypted_manifest_payload": true,
+                    "object_type": object_type,
+                    "object_id": object_id,
+                    "inline_payload": payload,
+                    "decrypted_payload": decrypted,
+                });
+
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::ManifestChanged {
                         resource_type,
                         resource_id,
                         action,
                         project_id,
-                        payload: Some(serde_json::json!({
-                            "__nenjo_decrypted_manifest_payload": true,
-                            "object_type": object_type,
-                            "inline_payload": payload,
-                            "decrypted_payload": decrypted,
-                        })),
+                        payload: Some(payload),
                         encrypted_payload: None,
                     },
                 )))

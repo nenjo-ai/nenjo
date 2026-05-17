@@ -60,9 +60,9 @@ const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_project",
     "update_project",
     "delete_project",
-    "create_project_document",
-    "update_project_document_content",
-    "delete_project_document",
+    "create_knowledge_item",
+    "update_knowledge_item_content",
+    "delete_knowledge_item",
 ];
 const PROJECT_REST_WRITE_TOOLS: &[&str] = &[
     "create_project_tasks",

@@ -84,9 +84,9 @@ impl KnowledgePackManifest for LibraryKnowledgePackManifest {
 }
 
 impl LibraryKnowledgePackManifest {
-    pub fn library_pack(_pack_id: Uuid, pack_slug: &str) -> Self {
+    pub fn library_pack(pack_id: Uuid, pack_slug: &str) -> Self {
         Self {
-            pack_id: format!("library-knowledge-{pack_slug}"),
+            pack_id: pack_id.to_string(),
             pack_version: "1".to_string(),
             schema_version: 1,
             root_uri: format!("library://{pack_slug}/"),
@@ -200,7 +200,7 @@ pub fn write_library_knowledge_manifest(
 }
 
 pub fn build_library_knowledge_manifest(
-    _pack_id: Uuid,
+    pack_id: Uuid,
     pack_slug: &str,
     docs: &[DocumentSyncMeta],
     edges_by_doc: &HashMap<Uuid, Vec<DocumentSyncEdge>>,
@@ -220,7 +220,7 @@ pub fn build_library_knowledge_manifest(
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.virtual_path.cmp(&right.virtual_path));
     LibraryKnowledgePackManifest {
-        pack_id: format!("library-knowledge-{pack_slug}"),
+        pack_id: pack_id.to_string(),
         pack_version: "1".to_string(),
         schema_version: 1,
         root_uri: format!("library://{pack_slug}/"),
@@ -655,6 +655,7 @@ mod tests {
             &[DocumentSyncMeta {
                 id: item_id,
                 pack_id: Uuid::new_v4(),
+                pack_slug: Some("product".into()),
                 slug: "overview".into(),
                 filename: "overview.md".into(),
                 path: Some("docs".into()),

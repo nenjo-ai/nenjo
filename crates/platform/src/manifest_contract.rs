@@ -42,9 +42,11 @@ pub enum ManifestKind {
     /// Context block manifest resource.
     ContextBlock,
     /// Library knowledge item content resource.
-    ProjectDocument,
+    Document,
     /// Project task content resource.
     Task,
+    /// Project settings sensitive envelope.
+    ProjectSettings,
     /// Project manifest resource.
     Project,
     /// Routine manifest resource.
@@ -63,7 +65,8 @@ impl ManifestKind {
             Self::Ability => Some(ResourceType::Ability),
             Self::Domain => Some(ResourceType::Domain),
             Self::ContextBlock => Some(ResourceType::ContextBlock),
-            Self::ProjectDocument => Some(ResourceType::Document),
+            Self::Document => Some(ResourceType::Document),
+            Self::ProjectSettings => Some(ResourceType::Project),
             Self::Project => Some(ResourceType::Project),
             Self::Routine => Some(ResourceType::Routine),
             Self::Model => Some(ResourceType::Model),
@@ -79,8 +82,9 @@ impl ManifestKind {
             Self::Ability => Some("manifest.ability.prompt"),
             Self::Domain => Some("manifest.domain.prompt"),
             Self::ContextBlock => Some("manifest.context_block.content"),
-            Self::ProjectDocument => Some("manifest.document.content"),
+            Self::Document => Some("manifest.document.content"),
             Self::Task => Some("task_content"),
+            Self::ProjectSettings => Some("project.settings"),
             Self::Project | Self::Routine | Self::Model | Self::Council => None,
         }
     }
@@ -92,8 +96,9 @@ impl ManifestKind {
             | Self::Ability
             | Self::Domain
             | Self::ContextBlock
-            | Self::ProjectDocument
-            | Self::Task => Some(ContentScope::Org),
+            | Self::Document
+            | Self::Task
+            | Self::ProjectSettings => Some(ContentScope::Org),
             Self::Project | Self::Routine | Self::Model | Self::Council => None,
         }
     }
@@ -105,8 +110,9 @@ impl ManifestKind {
             "manifest.ability.prompt" => Some(Self::Ability),
             "manifest.domain.prompt" => Some(Self::Domain),
             "manifest.context_block.content" => Some(Self::ContextBlock),
-            "manifest.document.content" => Some(Self::ProjectDocument),
+            "manifest.document.content" => Some(Self::Document),
             "task_content" => Some(Self::Task),
+            "project.settings" => Some(Self::ProjectSettings),
             _ => None,
         }
     }
@@ -129,7 +135,8 @@ mod tests {
             (ManifestKind::Ability, ResourceType::Ability),
             (ManifestKind::Domain, ResourceType::Domain),
             (ManifestKind::ContextBlock, ResourceType::ContextBlock),
-            (ManifestKind::ProjectDocument, ResourceType::Document),
+            (ManifestKind::Document, ResourceType::Document),
+            (ManifestKind::ProjectSettings, ResourceType::Project),
         ] {
             let object_type = kind.encrypted_object_type().expect("encrypted object type");
             assert_eq!(kind.encrypted_scope(), Some(ContentScope::Org));

@@ -323,16 +323,16 @@ pub fn knowledge_pack_var_prefix(selector: &str) -> String {
         format!("lib.{}", normalize_var_segment(slug))
     } else if selector == "lib" {
         "lib".to_string()
-    } else if let Some(repo_selector) = selector.strip_prefix("repo://") {
-        let segments = repo_selector
+    } else if let Some(git_selector) = selector.strip_prefix("git://") {
+        let segments = git_selector
             .split('/')
             .map(normalize_var_segment)
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
         if segments.is_empty() {
-            "repo".to_string()
+            "git".to_string()
         } else {
-            format!("repo.{}", segments.join("."))
+            format!("git.{}", segments.join("."))
         }
     } else {
         selector.replace(':', ".").replace('-', "_")
@@ -453,7 +453,6 @@ fn knowledge_document_alias_var_keys(pack_prefix: &str, doc: &KnowledgeDocManife
 
 fn pack_relative_path<'a>(pack_prefix: &str, doc: &'a KnowledgeDocManifest) -> Option<&'a str> {
     match pack_prefix {
-        "builtin.nenjo" => doc.virtual_path.strip_prefix("builtin://nenjo/"),
         "lib" => doc
             .virtual_path
             .strip_prefix("library://")
@@ -462,6 +461,17 @@ fn pack_relative_path<'a>(pack_prefix: &str, doc: &'a KnowledgeDocManifest) -> O
             let slug = pack_prefix.trim_start_matches("lib.");
             let prefix = format!("library://{slug}/");
             doc.virtual_path.strip_prefix(&prefix)
+        }
+        _ if pack_prefix.starts_with("git.") => {
+            let mut path = doc.virtual_path.strip_prefix("git://")?;
+            for expected in pack_prefix.trim_start_matches("git.").split('.') {
+                let (segment, rest) = path.split_once('/').unwrap_or((path, ""));
+                if normalize_var_segment(segment) != expected {
+                    return None;
+                }
+                path = rest;
+            }
+            Some(path)
         }
         _ => None,
     }
@@ -539,7 +549,7 @@ fn prompt_doc_path(doc: &KnowledgeDocManifest) -> String {
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Knowledge pack selector such as builtin:nenjo, lib:<pack_slug>, or repo://owner/repo/package."
+        "description": "Knowledge pack selector such as lib:<pack_slug> or git://owner/repo/package."
     })
 }
 
@@ -834,7 +844,10 @@ impl Tool for KnowledgeTool {
 
 #[cfg(test)]
 mod tests {
-    use super::knowledge_pack_var_prefix;
+    use super::{knowledge_document_var_key, knowledge_pack_var_prefix};
+    use crate::{
+        KnowledgeDocAuthority, KnowledgeDocKind, KnowledgeDocManifest, KnowledgeDocStatus,
+    };
 
     #[test]
     fn library_knowledge_uses_lib_template_namespace() {
@@ -846,14 +859,40 @@ mod tests {
     }
 
     #[test]
-    fn repo_knowledge_uses_owner_qualified_template_namespace() {
+    fn git_knowledge_uses_owner_qualified_template_namespace() {
         assert_eq!(
-            knowledge_pack_var_prefix("repo://nenjo-ai/knowledge/platform"),
-            "repo.nenjo_ai.knowledge.platform"
+            knowledge_pack_var_prefix("git://nenjo-ai/packages/nenjo/platform"),
+            "git.nenjo_ai.packages.nenjo.platform"
         );
         assert_eq!(
-            knowledge_pack_var_prefix("repo://trailofbits/skills-curated/x-research"),
-            "repo.trailofbits.skills_curated.x_research"
+            knowledge_pack_var_prefix("git://trailofbits/skills-curated/x-research"),
+            "git.trailofbits.skills_curated.x_research"
+        );
+    }
+
+    #[test]
+    fn git_knowledge_document_vars_use_pack_relative_paths() {
+        let doc = KnowledgeDocManifest {
+            id: "nenjo.guide.agents".into(),
+            virtual_path: "git://nenjo-ai/packages/nenjo/platform/guide/agents.md".into(),
+            source_path: "docs/guide/agents.md".into(),
+            title: "Agents".into(),
+            summary: String::new(),
+            description: None,
+            kind: KnowledgeDocKind::Guide,
+            authority: KnowledgeDocAuthority::Canonical,
+            status: KnowledgeDocStatus::Stable,
+            tags: Vec::new(),
+            aliases: Vec::new(),
+            keywords: Vec::new(),
+            related: Vec::new(),
+            size_bytes: 0,
+            updated_at: String::new(),
+        };
+
+        assert_eq!(
+            knowledge_document_var_key("git.nenjo_ai.packages.nenjo.platform", &doc),
+            "git.nenjo_ai.packages.nenjo.platform.guide.agents"
         );
     }
 }

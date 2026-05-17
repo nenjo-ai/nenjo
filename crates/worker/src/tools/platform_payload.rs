@@ -97,7 +97,7 @@ mod tests {
         );
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::ProjectDocument
+                ManifestKind::Document
                     .encrypted_object_type()
                     .expect("document content object type"),
             ),

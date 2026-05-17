@@ -168,14 +168,7 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
-        .with_knowledge_packs(
-            [KnowledgePackEntry::new(
-                "builtin:nenjo",
-                nenjo_knowledge::builtin::nenjo_pack().clone(),
-            )]
-            .into_iter()
-            .chain(library_knowledge_packs),
-        )
+        .with_knowledge_packs(library_knowledge_packs)
         .build()
         .await
         .context("Failed to build Provider")
@@ -205,7 +198,7 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
             continue;
         };
         let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
-        if selector.starts_with("repo://") {
+        if selector.starts_with("git://") {
             packs.push(KnowledgePackEntry::new(selector, pack));
         }
     }

@@ -177,21 +177,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             ],
         },
         TemplateVarGroup {
-            name: "Knowledge",
-            variables: vec![
-                TemplateVarDef {
-                    name: "builtin.nenjo",
-                    description: "Compact XML listing of the built-in Nenjo knowledge pack",
-                    group: "Knowledge",
-                },
-                TemplateVarDef {
-                    name: "lib.<pack_slug>",
-                    description: "Compact XML listing of a workspace knowledge pack",
-                    group: "Knowledge",
-                },
-            ],
-        },
-        TemplateVarGroup {
             name: "Routine",
             variables: vec![
                 TemplateVarDef {
@@ -222,6 +207,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                 TemplateVarDef {
                     name: "routine.step.type",
                     description: "Type of the current step (agent, gate, council, lambda, terminal, cron)",
+                    group: "Routine",
+                },
+                TemplateVarDef {
+                    name: "routine.step.instructions",
+                    description: "Instructions from the currently executing routine step config",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -415,29 +405,14 @@ mod tests {
     use super::template_var_groups;
 
     #[test]
-    fn builtin_knowledge_has_own_group() {
-        let groups = template_var_groups();
-        let project = groups
-            .iter()
-            .find(|group| group.name == "Project")
-            .expect("project group");
-        let knowledge = groups
-            .iter()
-            .find(|group| group.name == "Knowledge")
-            .expect("knowledge group");
-
-        assert!(
-            !project
-                .variables
-                .iter()
-                .any(|var| var.name == "builtin.nenjo")
-        );
-        assert!(
-            knowledge
-                .variables
-                .iter()
-                .any(|var| var.name == "builtin.nenjo" && var.group == "Knowledge")
-        );
+    fn template_variables_match_parent_group() {
+        for group in template_var_groups() {
+            assert!(
+                group.variables.iter().all(|var| var.group == group.name),
+                "variables in {} group should declare that group",
+                group.name
+            );
+        }
     }
 
     #[test]

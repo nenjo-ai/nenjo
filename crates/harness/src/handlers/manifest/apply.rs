@@ -103,14 +103,7 @@ where
             if applied_inline {
                 source = ManifestApplySource::Inline;
             }
-        } else if encrypted_payload.is_some() {
-            warn!(
-                %resource_type,
-                %resource_id,
-                "Manifest command still carried encrypted payload after secure-envelope decode"
-            );
         }
-
         if !applied_inline {
             if let Err(e) = apply_upsert(&mut manifest, client, resource_type, resource_id).await {
                 warn!(
@@ -151,7 +144,6 @@ where
             apply_document_side_effects(DocumentSideEffectContext {
                 client,
                 store,
-                manifest: &manifest,
                 resource_id,
                 action,
                 project_id,
@@ -186,7 +178,6 @@ where
 {
     client: &'a NenjoClient,
     store: &'a StoreRt,
-    manifest: &'a Manifest,
     resource_id: Uuid,
     action: ResourceAction,
     project_id: Option<Uuid>,
@@ -201,7 +192,6 @@ where
     let DocumentSideEffectContext {
         client,
         store,
-        manifest,
         resource_id,
         action,
         project_id,
@@ -227,10 +217,11 @@ where
         .ok()
         .flatten()
         .map(|meta| {
-            let pack_id = meta.pack_id.or(meta.project_id).unwrap_or_else(Uuid::nil);
+            let pack_id = meta.pack_id.unwrap_or_else(Uuid::nil);
             DocumentSyncMeta {
             id: meta.id,
             pack_id,
+            pack_slug: meta.pack_slug,
             slug: meta.slug.unwrap_or_else(|| meta.filename.clone()),
             filename: meta.filename,
             path: meta.path,
@@ -247,34 +238,29 @@ where
             updated_at: meta.updated_at.to_rfc3339(),
         }});
 
-    let pid = metadata
-        .as_ref()
-        .map(|meta| meta.pack_id)
-        .filter(|id| !id.is_nil())
-        .or(project_id);
-
-    let Some(pid) = pid else {
+    let Some(metadata) = metadata.as_ref().filter(|meta| !meta.pack_id.is_nil()) else {
         warn!("Document change without knowledge pack id, skipping sync");
         return;
     };
+    let pack_id = metadata.pack_id;
 
     if action == ResourceAction::Deleted {
-        if let Err(error) = store.remove_document(manifest, pid, resource_id) {
-            warn!(%pid, %resource_id, error = %error, "Failed to update local knowledge manifest");
+        if let Err(error) = store.remove_document(resource_id, Some(metadata)).await {
+            warn!(%pack_id, %resource_id, error = %error, "Failed to update local knowledge manifest");
         }
         return;
     }
 
     let result = if applied_inline {
         store
-            .sync_document_metadata(client, manifest, pid, resource_id, metadata.as_ref())
+            .sync_document_metadata(client, resource_id, Some(metadata))
             .await
     } else {
         store
-            .sync_document(client, manifest, pid, resource_id, metadata.as_ref())
+            .sync_document(client, resource_id, Some(metadata))
             .await
     };
     if let Err(e) = result {
-        warn!(%pid, %resource_id, error = %e, "Document sync failed");
+        warn!(%pack_id, %resource_id, error = %e, "Document sync failed");
     }
 }

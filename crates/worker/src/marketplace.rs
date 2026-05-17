@@ -10,6 +10,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
 use nenjo::client::KnowledgePackSyncMeta;
 use nenjo::manifest::{AbilityManifest, AbilityPromptConfig, McpServerManifest};
+use nenjo_knowledge::{
+    KnowledgeDocAuthority, KnowledgeDocEdge, KnowledgeDocKind, KnowledgeDocManifest,
+    KnowledgeDocStatus,
+};
 use nenjo_platform::library_knowledge::{
     LIBRARY_KNOWLEDGE_MANIFEST_FILENAME, LibraryKnowledgePackManifest,
     write_library_knowledge_manifest,
@@ -24,11 +28,18 @@ const INSTALL_MARKER_FILENAME: &str = ".nenjo-install.json";
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct InstallMetadata {
     #[serde(default)]
+    install: InstallRecordMetadata,
+    #[serde(default)]
     source: SourceMetadata,
     #[serde(default)]
     version: VersionMetadata,
     #[serde(default)]
     distribution: DistributionMetadata,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct InstallRecordMetadata {
+    selector: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -56,6 +67,36 @@ struct DistributionMetadata {
     path: Option<String>,
     manifest_path: Option<String>,
     entrypoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredKnowledgePackManifest {
+    pack_id: Option<String>,
+    slug: Option<String>,
+    version: Option<String>,
+    root_uri: Option<String>,
+    docs: Vec<AuthoredKnowledgeDoc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredKnowledgeDoc {
+    id: Option<String>,
+    path: Option<String>,
+    virtual_path: Option<String>,
+    source_path: String,
+    title: Option<String>,
+    summary: Option<String>,
+    description: Option<String>,
+    kind: Option<String>,
+    authority: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    related: Vec<KnowledgeDocEdge>,
 }
 
 pub async fn hydrate_github_knowledge_pack(
@@ -479,14 +520,7 @@ fn normalize_knowledge_package(
     let manifest_path = safe_join(extracted_root, Path::new(manifest_path))?;
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest: LibraryKnowledgePackManifest =
-        if manifest_path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            serde_json::from_str(&manifest_content)
-                .with_context(|| format!("failed to parse {}", manifest_path.display()))?
-        } else {
-            serde_yaml::from_str(&manifest_content)
-                .with_context(|| format!("failed to parse {}", manifest_path.display()))?
-        };
+    let manifest = parse_knowledge_package_manifest(&manifest_content, &manifest_path, metadata)?;
 
     let next_dir = package_dir.with_extension("next");
     if next_dir.exists() {
@@ -538,6 +572,193 @@ fn normalize_knowledge_package(
         )
     })?;
     Ok(())
+}
+
+fn parse_knowledge_package_manifest(
+    content: &str,
+    manifest_path: &Path,
+    metadata: &InstallMetadata,
+) -> Result<LibraryKnowledgePackManifest> {
+    if manifest_path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        serde_json::from_str::<LibraryKnowledgePackManifest>(content)
+            .or_else(|_| {
+                serde_json::from_str::<AuthoredKnowledgePackManifest>(content)
+                    .map(|manifest| authored_knowledge_manifest(manifest, metadata))
+            })
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))
+    } else {
+        serde_yaml::from_str::<LibraryKnowledgePackManifest>(content)
+            .or_else(|_| {
+                serde_yaml::from_str::<AuthoredKnowledgePackManifest>(content)
+                    .map(|manifest| authored_knowledge_manifest(manifest, metadata))
+            })
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))
+    }
+}
+
+fn authored_knowledge_manifest(
+    manifest: AuthoredKnowledgePackManifest,
+    metadata: &InstallMetadata,
+) -> LibraryKnowledgePackManifest {
+    let slug = manifest
+        .slug
+        .clone()
+        .or_else(|| metadata.source.package.clone())
+        .or_else(|| {
+            metadata
+                .source
+                .path
+                .as_deref()
+                .and_then(|path| path.rsplit('/').next())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "package".to_string());
+    let root_uri = manifest
+        .root_uri
+        .unwrap_or_else(|| repo_root_uri(metadata, &slug));
+    let pack_id = manifest
+        .pack_id
+        .unwrap_or_else(|| format!("repo-knowledge-{slug}"));
+    let docs = manifest
+        .docs
+        .into_iter()
+        .map(|doc| authored_knowledge_doc(&root_uri, &slug, doc))
+        .collect();
+
+    LibraryKnowledgePackManifest {
+        pack_id,
+        pack_version: manifest.version.unwrap_or_else(|| "1".to_string()),
+        schema_version: 1,
+        root_uri,
+        content_hash: String::new(),
+        synced_at: chrono::Utc::now().to_rfc3339(),
+        docs,
+    }
+}
+
+fn repo_root_uri(metadata: &InstallMetadata, slug: &str) -> String {
+    if let Some(selector) = metadata.install.selector.as_deref()
+        && let Some(selector) = selector.strip_prefix("git://")
+    {
+        return format!("git://{}/", selector.trim_matches('/'));
+    }
+    match (
+        metadata.source.owner.as_deref(),
+        metadata.source.repo.as_deref(),
+    ) {
+        (Some(owner), Some(repo)) => format!("git://{owner}/{repo}/{slug}/"),
+        _ => format!("git://local/package/{slug}/"),
+    }
+}
+
+fn authored_knowledge_doc(
+    root_uri: &str,
+    slug: &str,
+    doc: AuthoredKnowledgeDoc,
+) -> KnowledgeDocManifest {
+    let path = doc
+        .virtual_path
+        .or(doc.path)
+        .unwrap_or_else(|| doc.source_path.clone());
+    let relative_path = path.trim_start_matches('/');
+    let virtual_path = if relative_path.contains("://") {
+        relative_path.to_string()
+    } else {
+        format!("{}/{relative_path}", root_uri.trim_end_matches('/'))
+    };
+    let id = doc.id.unwrap_or_else(|| {
+        let normalized = relative_path
+            .trim_end_matches(".md")
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '.'
+                }
+            })
+            .collect::<String>()
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(".");
+        if normalized.is_empty() {
+            slug.to_string()
+        } else {
+            format!("{slug}.{normalized}")
+        }
+    });
+    let title = doc.title.unwrap_or_else(|| title_from_path(relative_path));
+
+    KnowledgeDocManifest {
+        id,
+        virtual_path,
+        source_path: doc.source_path,
+        title,
+        summary: doc.summary.unwrap_or_default(),
+        description: doc.description,
+        kind: parse_doc_kind(doc.kind.as_deref()),
+        authority: parse_doc_authority(doc.authority.as_deref()),
+        status: KnowledgeDocStatus::Stable,
+        tags: doc.tags,
+        aliases: doc.aliases,
+        keywords: doc.keywords,
+        related: doc.related,
+        size_bytes: 0,
+        updated_at: String::new(),
+    }
+}
+
+fn parse_doc_kind(value: Option<&str>) -> KnowledgeDocKind {
+    match value
+        .unwrap_or("guide")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "reference" => KnowledgeDocKind::Reference,
+        "taxonomy" => KnowledgeDocKind::Taxonomy,
+        "domain" => KnowledgeDocKind::Domain,
+        "entity" => KnowledgeDocKind::Entity,
+        "policy" => KnowledgeDocKind::Policy,
+        _ => KnowledgeDocKind::Guide,
+    }
+}
+
+fn parse_doc_authority(value: Option<&str>) -> KnowledgeDocAuthority {
+    match value
+        .unwrap_or("reference")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "canonical" => KnowledgeDocAuthority::Canonical,
+        "supporting" => KnowledgeDocAuthority::Supporting,
+        "pattern" => KnowledgeDocAuthority::Pattern,
+        "advisory" => KnowledgeDocAuthority::Advisory,
+        "example" => KnowledgeDocAuthority::Example,
+        "draft" => KnowledgeDocAuthority::Draft,
+        "deprecated" => KnowledgeDocAuthority::Deprecated,
+        _ => KnowledgeDocAuthority::Reference,
+    }
+}
+
+fn title_from_path(path: &str) -> String {
+    let name = Path::new(path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    name.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn required<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str> {
@@ -782,4 +1003,60 @@ fn validate_relative_path(path: &Path) -> Result<PathBuf> {
         bail!("empty package path");
     }
     Ok(clean)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authored_knowledge_manifest_maps_repo_shape_to_library_manifest() {
+        let metadata = InstallMetadata {
+            install: InstallRecordMetadata {
+                selector: Some("git://nenjo-ai/packages/nenjo/platform".to_string()),
+            },
+            source: SourceMetadata {
+                provider: Some("github".to_string()),
+                owner: Some("nenjo-ai".to_string()),
+                repo: Some("packages".to_string()),
+                path: Some("packs/platform".to_string()),
+                package: Some("platform".to_string()),
+            },
+            version: VersionMetadata::default(),
+            distribution: DistributionMetadata {
+                kind: Some("github_directory".to_string()),
+                path: Some("packs/platform".to_string()),
+                manifest_path: Some("manifest.yaml".to_string()),
+                ..DistributionMetadata::default()
+            },
+        };
+        let yaml = r#"
+schema: nenjo.knowledge_pack.v1
+name: Platform
+slug: platform
+version: 0.1.0
+docs:
+  - path: overview.md
+    source_path: docs/overview.md
+    title: Platform Overview
+    kind: guide
+    authority: reference
+    tags: [platform]
+"#;
+
+        let manifest =
+            parse_knowledge_package_manifest(yaml, Path::new("manifest.yaml"), &metadata)
+                .expect("manifest parses");
+
+        assert_eq!(manifest.pack_id, "repo-knowledge-platform");
+        assert_eq!(manifest.pack_version, "0.1.0");
+        assert_eq!(manifest.root_uri, "git://nenjo-ai/packages/nenjo/platform/");
+        assert_eq!(manifest.docs.len(), 1);
+        assert_eq!(
+            manifest.docs[0].virtual_path,
+            "git://nenjo-ai/packages/nenjo/platform/overview.md"
+        );
+        assert_eq!(manifest.docs[0].source_path, "docs/overview.md");
+        assert_eq!(manifest.docs[0].status, KnowledgeDocStatus::Stable);
+    }
 }

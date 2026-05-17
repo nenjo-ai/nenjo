@@ -20,12 +20,8 @@ path = "tests/memory.rs"
 name = "routines"
 path = "tests/routines.rs"
 
-[[test]]
-name = "builtin_knowledge_quality"
-path = "tests/builtin_knowledge_quality.rs"
-
 [dependencies]
-nenjo-knowledge = { workspace = true, features = ["nenjo"] }
+nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
 nenjo-models = { workspace = true }
 anyhow = { workspace = true }
