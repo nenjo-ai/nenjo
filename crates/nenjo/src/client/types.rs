@@ -22,7 +22,21 @@ pub struct KnowledgePackSyncMeta {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_knowledge_pack_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub updated_at: String,
+}
+
+fn default_knowledge_pack_source_type() -> String {
+    "uploaded".to_string()
 }
 
 /// Metadata for a workspace knowledge item, used during knowledge sync.
@@ -30,6 +44,8 @@ pub struct KnowledgePackSyncMeta {
 pub struct KnowledgeItemSyncMeta {
     pub id: Uuid,
     pub pack_id: Uuid,
+    #[serde(default)]
+    pub pack_slug: Option<String>,
     pub slug: String,
     pub filename: String,
     #[serde(default)]
@@ -82,6 +98,34 @@ pub struct KnowledgeItemSyncEdge {
 pub type DocumentSyncMeta = KnowledgeItemSyncMeta;
 pub type DocumentSyncContent = KnowledgeItemSyncContent;
 pub type DocumentSyncEdge = KnowledgeItemSyncEdge;
+
+// ---------------------------------------------------------------------------
+// Project detail response (from GET /projects/{id}) -> conversion to Manifest
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectDetailResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub settings: Value,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
+}
+
+impl From<ProjectDetailResponse> for crate::manifest::ProjectManifest {
+    fn from(project: ProjectDetailResponse) -> Self {
+        Self {
+            id: project.id,
+            name: project.name,
+            slug: project.slug,
+            description: project.description,
+            settings: project.settings,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Agent detail response (from GET /agents/{id}) → conversion to Manifest
@@ -255,6 +299,8 @@ pub struct RoutineDetailResponse {
     #[serde(default)]
     pub metadata: RoutineMetadata,
     #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
+    #[serde(default)]
     pub steps: Vec<RoutineStepDetailResponse>,
     #[serde(default)]
     pub edges: Vec<RoutineEdgeDetailResponse>,
@@ -270,6 +316,8 @@ pub struct RoutineStepDetailResponse {
     pub agent_id: Option<Uuid>,
     #[serde(default)]
     pub config: serde_json::Value,
+    #[serde(default)]
+    pub encrypted_payload: Option<EncryptedPayload>,
     pub order_index: i32,
 }
 
@@ -280,6 +328,8 @@ pub struct RoutineEdgeDetailResponse {
     pub source_step_id: Uuid,
     pub target_step_id: Uuid,
     pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 impl From<RoutineDetailResponse> for RoutineManifest {
@@ -313,6 +363,7 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                     source_step_id: edge.source_step_id,
                     target_step_id: edge.target_step_id,
                     condition: edge.condition,
+                    metadata: edge.metadata,
                 })
                 .collect(),
         }

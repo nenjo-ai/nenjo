@@ -520,7 +520,7 @@ where
                     // Push an empty assistant message so the provider sees the turn,
                     // then add a nudge so the model tries again.
                     messages.push(ChatMessage::assistant(String::new()));
-                    messages.push(ChatMessage::user(
+                    messages.push(ChatMessage::developer(
                         "Your previous response was empty. Please respond to the user's request."
                             .to_string(),
                     ));

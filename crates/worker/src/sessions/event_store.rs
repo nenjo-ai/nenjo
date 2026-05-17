@@ -7,6 +7,7 @@ use nenjo_sessions::{
     CheckpointQuery, CheckpointStore, SessionCheckpoint, SessionStatus, SessionStore,
     SessionTranscriptEvent, TraceEvent, TraceQuery, TraceStore, TranscriptQuery, TranscriptStore,
 };
+use tracing::warn;
 use uuid::Uuid;
 
 use super::FileSessionStore;
@@ -255,9 +256,10 @@ where
         .create(true)
         .append(true)
         .open(path)?;
-    serde_json::to_writer(&mut file, value)?;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
     use std::io::Write;
-    file.write_all(b"\n")?;
+    file.write_all(&line)?;
     file.flush()?;
     Ok(())
 }
@@ -296,11 +298,22 @@ where
         Err(e) => return Err(e.into()),
     };
 
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str)
-        .collect::<std::result::Result<Vec<T>, _>>()
-        .map_err(Into::into)
+    let mut values = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(value) => values.push(value),
+            Err(error) => warn!(
+                path = %path.display(),
+                line = index + 1,
+                error = %error,
+                "Skipping malformed session event record"
+            ),
+        }
+    }
+    Ok(values)
 }
 
 fn remove_file_if_exists(path: impl AsRef<Path>) -> Result<()> {
@@ -313,7 +326,7 @@ fn remove_file_if_exists(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkerSessionStores;
+    use super::{WorkerSessionStores, read_jsonl};
     use chrono::{Duration, Utc};
     use nenjo_sessions::{
         SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionStore, SessionSummary,
@@ -363,6 +376,23 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "{}\n").unwrap();
         }
+    }
+
+    #[test]
+    fn read_jsonl_skips_malformed_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "{\"ok\":true}\nthis is not json\n\n{\"ok\":false}\n").unwrap();
+
+        let values = read_jsonl::<serde_json::Value>(&path).unwrap();
+
+        assert_eq!(
+            values,
+            vec![
+                serde_json::json!({ "ok": true }),
+                serde_json::json!({ "ok": false })
+            ]
+        );
     }
 
     #[test]

@@ -17,12 +17,13 @@ Agent orchestration SDK for building agentic AI workflows with tool use, memory,
 
 ```rust
 use nenjo::Provider;
+use nenjo_knowledge::tools::KnowledgePackEntry;
 
 let provider = Provider::builder()
     .with_loader(my_manifest_loader)
     .with_model_factory(my_model_factory)
     .with_tool_factory(my_tool_factory)
-    .with_knowledge_pack("docs:app", my_knowledge_pack)
+    .with_knowledge_packs([KnowledgePackEntry::new("docs:app", my_knowledge_pack)])
     .build()
     .await?;
 

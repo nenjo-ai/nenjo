@@ -23,6 +23,9 @@ use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
 use nenjo_harness::handlers::manifest::ManifestStore;
 use nenjo_platform::ManifestKind;
+use nenjo_platform::library_knowledge::{
+    library_knowledge_item_relative_path, load_library_knowledge_manifest,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -43,7 +46,7 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     domains: Vec<nenjo::manifest::DomainManifest>,
     #[serde(default)]
-    projects: Vec<nenjo::manifest::ProjectManifest>,
+    projects: Vec<BootstrapProjectManifest>,
     #[serde(default)]
     mcp_servers: Vec<nenjo::manifest::McpServerManifest>,
     #[serde(default)]
@@ -205,6 +208,18 @@ struct BootstrapContextBlockManifest {
     encrypted_payload: Option<EncryptedPayload>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BootstrapProjectManifest {
+    id: Uuid,
+    name: String,
+    slug: String,
+    description: Option<String>,
+    #[serde(default)]
+    settings: serde_json::Value,
+    #[serde(default, alias = "settings_encrypted_payload")]
+    encrypted_payload: Option<EncryptedPayload>,
+}
+
 /// Trait for manifest items that can be stored as tree files.
 pub trait TreeItem: serde::Serialize {
     fn path(&self) -> &str;
@@ -309,6 +324,7 @@ pub async fn sync(
     manifests_dir: &Path,
     workspace_dir: &Path,
     state_dir: &Path,
+    nenjo_home: &Path,
 ) -> Result<()> {
     // Ensure the data directory exists (filesystem error = hard fail)
     std::fs::create_dir_all(manifests_dir).with_context(|| {
@@ -337,7 +353,8 @@ pub async fn sync(
     )
     .await
     .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
-    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
+    let runtime_assets_home = workspace_dir.join(".nenjo");
+    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir, &runtime_assets_home).await?;
     let manifest = &data.manifest;
 
     info!(
@@ -367,8 +384,8 @@ pub async fn sync(
         &manifest.context_blocks,
     )?;
 
-    // Sync library knowledge packs to the workspace library.
-    crate::local_documents::sync_all(api, workspace_dir, state_dir, &manifest.projects).await?;
+    // Sync platform-uploaded and repo-backed library knowledge under ~/.nenjo/library.
+    crate::local_documents::sync_all(api, nenjo_home, state_dir, &manifest.projects).await?;
 
     Ok(())
 }
@@ -377,6 +394,7 @@ async fn hydrate_bootstrap_manifest(
     api: &NenjoClient,
     bootstrap: serde_json::Value,
     state_dir: &Path,
+    nenjo_home: &Path,
 ) -> Result<HydratedBootstrap> {
     let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
         Ok(value) => value,
@@ -418,6 +436,28 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let mut projects = Vec::with_capacity(bootstrap.projects.len());
+    for project in bootstrap.projects {
+        let settings = resolve_bootstrap_project_settings(&project, state_dir).await?;
+        projects.push(nenjo::manifest::ProjectManifest {
+            id: project.id,
+            name: project.name,
+            slug: project.slug,
+            description: project.description,
+            settings,
+        });
+    }
+
+    let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
+    for ability in bootstrap.abilities {
+        abilities.push(crate::marketplace::hydrate_skill_ability(ability, nenjo_home).await?);
+    }
+
+    let mut mcp_servers = Vec::with_capacity(bootstrap.mcp_servers.len());
+    for server in bootstrap.mcp_servers {
+        mcp_servers.push(crate::marketplace::hydrate_plugin_mcp_server(server, nenjo_home).await?);
+    }
+
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
         manifest: Manifest {
@@ -426,9 +466,9 @@ async fn hydrate_bootstrap_manifest(
             agents,
             councils: bootstrap.councils,
             domains: bootstrap.domains,
-            projects: bootstrap.projects,
-            mcp_servers: bootstrap.mcp_servers,
-            abilities: bootstrap.abilities,
+            projects,
+            mcp_servers,
+            abilities,
             context_blocks,
         },
         nats: bootstrap.nats,
@@ -508,6 +548,7 @@ pub struct WorkerManifestCache {
     pub manifests_dir: PathBuf,
     pub workspace_dir: PathBuf,
     pub state_dir: PathBuf,
+    pub config_dir: PathBuf,
 }
 
 impl WorkerManifestCache {
@@ -545,6 +586,7 @@ impl WorkerManifestCache {
             }
             ResourceType::Domain => sync_tree(&manifests_dir.join("domains"), &manifest.domains),
             ResourceType::Document => Ok(()),
+            ResourceType::KnowledgePack => Ok(()),
         }
     }
 
@@ -554,31 +596,84 @@ impl WorkerManifestCache {
             &self.manifests_dir,
             &self.workspace_dir,
             &self.state_dir,
+            &self.config_dir,
         )
         .await?;
         let loader = nenjo::LocalManifestStore::new(&self.manifests_dir);
         nenjo::ManifestLoader::load(&loader).await
     }
 
-    async fn knowledge_pack_dir(&self, api: &NenjoClient, pack_id: Uuid) -> Result<PathBuf> {
-        let slug = api
-            .list_knowledge_packs()
-            .await?
-            .into_iter()
-            .find(|pack| pack.id == pack_id)
-            .map(|pack| pack.slug)
-            .unwrap_or_else(|| pack_id.to_string());
-        Ok(self.workspace_dir.join("library").join(slug))
+    fn knowledge_pack_dir(&self, pack_id: Uuid, metadata: Option<&DocumentSyncMeta>) -> PathBuf {
+        self.knowledge_pack_dir_for(
+            pack_id,
+            metadata.and_then(|meta| meta.pack_slug.as_deref()),
+            metadata.map(|meta| meta.id),
+        )
     }
 
-    fn knowledge_pack_slug_dir(&self, slug: &str) -> Option<PathBuf> {
-        let slug = slug.trim();
-        (!slug.is_empty()).then(|| self.workspace_dir.join("library").join(slug))
+    fn knowledge_pack_dir_for(
+        &self,
+        pack_id: Uuid,
+        pack_slug: Option<&str>,
+        document_id: Option<Uuid>,
+    ) -> PathBuf {
+        let platform_root = self.platform_library_root();
+        if let Some(slug) = pack_slug.map(str::trim).filter(|slug| !slug.is_empty()) {
+            return platform_root.join(slug);
+        }
+        if let Some(pack_dir) = find_local_knowledge_pack_dir(&platform_root, pack_id, document_id)
+        {
+            return pack_dir;
+        }
+        platform_root.join(pack_id.to_string())
+    }
+
+    fn platform_library_root(&self) -> PathBuf {
+        self.config_dir.join("library").join("platform")
     }
 }
 
 #[async_trait::async_trait]
 impl ManifestStore for WorkerManifestCache {
+    async fn prepare_resource(
+        &self,
+        manifest: &mut nenjo::Manifest,
+        resource_type: ResourceType,
+    ) -> Result<()> {
+        match resource_type {
+            ResourceType::Ability => {
+                let abilities = std::mem::take(&mut manifest.abilities);
+                let mut hydrated = Vec::with_capacity(abilities.len());
+                for ability in abilities {
+                    hydrated.push(
+                        crate::marketplace::hydrate_skill_ability(
+                            ability,
+                            &self.workspace_dir.join(".nenjo"),
+                        )
+                        .await?,
+                    );
+                }
+                manifest.abilities = hydrated;
+            }
+            ResourceType::McpServer => {
+                let servers = std::mem::take(&mut manifest.mcp_servers);
+                let mut hydrated = Vec::with_capacity(servers.len());
+                for server in servers {
+                    hydrated.push(
+                        crate::marketplace::hydrate_plugin_mcp_server(
+                            server,
+                            &self.workspace_dir.join(".nenjo"),
+                        )
+                        .await?,
+                    );
+                }
+                manifest.mcp_servers = hydrated;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn persist_resource(
         &self,
         manifest: &nenjo::Manifest,
@@ -596,6 +691,33 @@ impl ManifestStore for WorkerManifestCache {
         WorkerManifestCache::persist_resource(self, manifest, resource_type)
     }
 
+    async fn cleanup_deleted_resource(
+        &self,
+        resource_type: ResourceType,
+        resource_id: Uuid,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let nenjo_home = self.workspace_dir.join(".nenjo");
+        match resource_type {
+            ResourceType::Ability => {
+                let Some(metadata) = deleted_resource_metadata(payload, "skill") else {
+                    return Ok(());
+                };
+                crate::marketplace::uninstall_skill_ability(resource_id, metadata, &nenjo_home)
+                    .await?;
+            }
+            ResourceType::McpServer => {
+                let Some(metadata) = deleted_resource_metadata(payload, "plugin") else {
+                    return Ok(());
+                };
+                crate::marketplace::uninstall_plugin_mcp_server(resource_id, metadata, &nenjo_home)
+                    .await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn full_refresh(&self, client: &NenjoClient) -> Result<nenjo::Manifest> {
         WorkerManifestCache::full_refresh(self, client).await
     }
@@ -603,24 +725,17 @@ impl ManifestStore for WorkerManifestCache {
     async fn sync_document_metadata(
         &self,
         client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        let pack_dir = if let Some(meta) = metadata {
-            if let Some(pack_dir) = self.knowledge_pack_slug_dir(&meta.slug) {
-                pack_dir
-            } else {
-                self.knowledge_pack_dir(client, meta.pack_id).await?
-            }
-        } else {
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id)
+        let Some(meta) = metadata else {
+            return Ok(());
         };
+        let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
         crate::local_documents::sync_document_metadata(
             client,
             &pack_dir,
-            project_id,
+            meta.pack_id,
             document_id,
             metadata,
         )
@@ -630,24 +745,17 @@ impl ManifestStore for WorkerManifestCache {
     async fn sync_document(
         &self,
         client: &NenjoClient,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        let pack_dir = if let Some(meta) = metadata {
-            if let Some(pack_dir) = self.knowledge_pack_slug_dir(&meta.slug) {
-                pack_dir
-            } else {
-                self.knowledge_pack_dir(client, meta.pack_id).await?
-            }
-        } else {
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id)
+        let Some(meta) = metadata else {
+            return Ok(());
         };
+        let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
         crate::local_documents::sync_document(
             client,
             &pack_dir,
-            project_id,
+            meta.pack_id,
             document_id,
             &self.state_dir,
             metadata,
@@ -655,31 +763,93 @@ impl ManifestStore for WorkerManifestCache {
         .await
     }
 
-    fn remove_document(
+    async fn remove_document(
         &self,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
         document_id: Uuid,
+        metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        crate::local_documents::remove_manifest_document(
-            manifest,
-            &self.workspace_dir,
-            project_id,
-            document_id,
-        )
+        if let Some(meta) = metadata {
+            let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
+            crate::local_documents::remove_manifest_document_from_pack_dir(
+                &pack_dir,
+                document_id,
+                Some(meta),
+            )
+        } else {
+            let Some(pack_dir) = find_local_knowledge_pack_dir(
+                &self.platform_library_root(),
+                Uuid::nil(),
+                Some(document_id),
+            ) else {
+                return Ok(());
+            };
+            crate::local_documents::remove_manifest_document_from_pack_dir(
+                &pack_dir,
+                document_id,
+                None,
+            )
+        }
+    }
+
+    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack_id: Uuid) -> Result<()> {
+        crate::local_documents::sync_pack_by_id(client, &self.config_dir, &self.state_dir, pack_id)
+            .await
     }
 
     fn write_document_content(
         &self,
-        manifest: &nenjo::Manifest,
-        project_id: Uuid,
+        pack_id: Uuid,
+        pack_slug: Option<&str>,
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        let pack_dir =
-            crate::local_documents::manifest_library_dir(manifest, &self.workspace_dir, project_id);
+        let pack_dir = self.knowledge_pack_dir_for(pack_id, pack_slug, None);
         crate::local_documents::write_document_content(&pack_dir, relative_path, content)
     }
+}
+
+fn find_local_knowledge_pack_dir(
+    platform_root: &Path,
+    pack_id: Uuid,
+    document_id: Option<Uuid>,
+) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(platform_root).ok()?;
+    let pack_id = pack_id.to_string();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(manifest) = load_library_knowledge_manifest(&path)
+            && manifest.pack_id == pack_id
+        {
+            return Some(path);
+        }
+        if let Some(document_id) = document_id
+            && library_knowledge_item_relative_path(&path, document_id).is_some()
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn deleted_resource_metadata(
+    payload: Option<&serde_json::Value>,
+    expected_source_type: &str,
+) -> Option<serde_json::Value> {
+    let payload = payload?;
+    if payload
+        .get("source_type")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_source_type)
+    {
+        return None;
+    }
+    payload
+        .get("metadata")
+        .cloned()
+        .or_else(|| payload.get("install_metadata").cloned())
 }
 
 async fn ensure_worker_ack(
@@ -806,6 +976,73 @@ async fn decrypt_context_block_template_payload(
             block_id
         )
     })
+}
+
+async fn resolve_bootstrap_project_settings(
+    project: &BootstrapProjectManifest,
+    state_dir: &Path,
+) -> Result<serde_json::Value> {
+    let mut settings = project.settings.clone();
+    let Some(payload) = project.encrypted_payload.as_ref() else {
+        return Ok(settings);
+    };
+
+    let decrypted = decrypt_project_settings_payload(payload, state_dir, project.id).await?;
+    merge_json_object(&mut settings, decrypted).with_context(|| {
+        format!(
+            "Failed to merge decrypted bootstrap project settings for project {}",
+            project.id
+        )
+    })?;
+    Ok(settings)
+}
+
+async fn decrypt_project_settings_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    project_id: Uuid,
+) -> Result<serde_json::Value> {
+    if payload.object_type != "project.settings" {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for project {}",
+            payload.object_type,
+            project_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap project settings decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap project settings payload for project {}",
+                project_id
+            )
+        })?;
+
+    serde_json::from_str::<serde_json::Value>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap project settings JSON for project {}",
+            project_id
+        )
+    })
+}
+
+fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) -> Result<()> {
+    if target.is_null() {
+        *target = serde_json::json!({});
+    }
+    let target = target
+        .as_object_mut()
+        .context("bootstrap JSON merge target was not an object")?;
+    let source = source
+        .as_object()
+        .context("decrypted bootstrap JSON merge source was not an object")?;
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+    Ok(())
 }
 
 /// Sync a list of tree items to a directory tree on disk.

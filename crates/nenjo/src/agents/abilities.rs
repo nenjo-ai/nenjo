@@ -13,8 +13,8 @@ use tracing::debug;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
-use super::runner::turn_loop;
 use super::runner::types::TurnEvent;
+use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, Manifest, PromptConfig, PromptTemplates};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
@@ -158,24 +158,15 @@ where
         debug!("{prompts}");
 
         // Build messages for the sub-execution.
-        let mut messages = Vec::new();
-
-        if sub_instance
+        let supports_developer_role = sub_instance
             .model
             .model_provider
-            .supports_developer_role(&sub_instance.model.model_name)
-            && !prompts.developer.is_empty()
-        {
-            messages.push(nenjo_models::ChatMessage::system(&prompts.system));
-            messages.push(nenjo_models::ChatMessage::developer(&prompts.developer));
-        } else {
-            let combined = if prompts.developer.is_empty() {
-                prompts.system
-            } else {
-                format!("{}\n\n{}", prompts.system, prompts.developer)
-            };
-            messages.push(nenjo_models::ChatMessage::system(&combined));
-        }
+            .supports_developer_role(&sub_instance.model.model_name);
+        let mut messages = build_instruction_messages(
+            &prompts.system,
+            &prompts.developer,
+            supports_developer_role,
+        );
 
         if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
             messages.extend(chat.history.iter().cloned());
@@ -380,13 +371,25 @@ where
         }
     }
 
+    let mut scoped_security = (*caller.runtime.security).clone();
+    for env_name in ability_runtime_env_names(ability) {
+        if !scoped_security
+            .forwarded_env_names
+            .iter()
+            .any(|existing| existing == &env_name)
+        {
+            scoped_security.forwarded_env_names.push(env_name);
+        }
+    }
+    let scoped_security = Arc::new(scoped_security);
+
     let mut tools = if let Some(provider) = caller.runtime.provider_runtime.as_ref() {
         let mut scoped_agent = caller.manifest.clone();
         scoped_agent.platform_scopes = merged_scopes.clone();
         scoped_agent.mcp_server_ids = merged_mcp_server_ids.clone();
         provider
             .tool_factory()
-            .create_tools_with_security(&scoped_agent, caller.runtime.security.clone())
+            .create_tools_with_security(&scoped_agent, scoped_security.clone())
             .await
     } else {
         Vec::new()
@@ -449,11 +452,32 @@ where
         },
         runtime: AgentRuntime {
             tools,
-            security: caller.runtime.security.clone(),
+            security: scoped_security,
             config: caller.runtime.config.clone(),
             provider_runtime: caller.runtime.provider_runtime.clone(),
         },
     }
+}
+
+fn ability_runtime_env_names(ability: &AbilityManifest) -> Vec<String> {
+    ability
+        .metadata
+        .pointer("/runtime/env_names")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter(|name| {
+                    let mut chars = name.chars();
+                    let first = chars.next().unwrap_or_default();
+                    (first.is_ascii_alphabetic() || first == '_')
+                        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -687,6 +711,9 @@ mod tests {
             },
             platform_scopes: vec!["agents:write".into()],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
 
         let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
@@ -739,6 +766,9 @@ mod tests {
             },
             platform_scopes: vec!["agents:write".into()],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
 
         let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
@@ -781,6 +811,9 @@ mod tests {
             },
             platform_scopes: vec!["agents:write".into()],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
 
         let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
@@ -813,6 +846,9 @@ mod tests {
             },
             platform_scopes: vec![],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
         let tool = AssignedAbilityTool::new(
             ability,

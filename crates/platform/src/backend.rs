@@ -20,9 +20,8 @@ use uuid::Uuid;
 
 use crate::client::PlatformManifestClient;
 use crate::knowledge_backend::{
-    ResolvedKnowledgePack, builtin_pack, ensure_known_pack_selector,
-    is_default_library_pack_selector, is_nenjo_pack_selector, library_pack_selector,
-    parse_library_pack_selector, unknown_pack,
+    ResolvedKnowledgePack, ensure_known_pack_selector, is_default_library_pack_selector,
+    library_pack_selector, parse_library_pack_selector, unknown_pack,
 };
 use crate::library_knowledge::LibraryKnowledgePack;
 use crate::manifest_contract::ManifestKind;
@@ -210,6 +209,9 @@ where
             prompt_config: Default::default(),
             platform_scopes: remote.platform_scopes,
             mcp_server_ids: remote.mcp_server_ids,
+            source_type: "native".to_string(),
+            read_only: false,
+            metadata: serde_json::json!({}),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Ability(hydrated.clone()))
@@ -224,7 +226,11 @@ where
     }
 
     async fn workspace_library_dir(&self, pack_slug: &str) -> Result<PathBuf> {
-        Ok(self.workspace_dir()?.join("library").join(pack_slug))
+        Ok(self
+            .workspace_dir()?
+            .join("library")
+            .join("platform")
+            .join(pack_slug))
     }
 
     async fn library_knowledge_pack(&self, pack_slug: &str) -> Result<LibraryKnowledgePack> {
@@ -235,13 +241,10 @@ where
 
     async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
         ensure_known_pack_selector(selector)?;
-        if is_nenjo_pack_selector(selector) {
-            return Ok(builtin_pack());
-        }
         if is_default_library_pack_selector(selector) {
             let pack_slug = self.current_library_slug.as_deref().ok_or_else(|| {
                 anyhow!(
-                    "knowledge pack 'workspace' requires a selected pack; use workspace:<slug> outside pack context"
+                    "knowledge pack 'lib' requires a selected pack; use lib:<slug> outside pack context"
                 )
             })?;
             return self
@@ -249,15 +252,64 @@ where
                 .await
                 .map(ResolvedKnowledgePack::Library);
         }
-        if selector.starts_with("workspace:") {
+        if selector.starts_with("lib:") {
             let pack_slug = parse_library_pack_selector(selector)?;
             return self
                 .library_knowledge_pack(pack_slug)
                 .await
                 .map(ResolvedKnowledgePack::Library);
         }
+        if selector.starts_with("git://") {
+            let library_dir = self.workspace_dir()?.join("library").join("repos");
+            return find_repo_knowledge_pack(&library_dir, selector)
+                .map(ResolvedKnowledgePack::Library)
+                .ok_or_else(|| anyhow!("knowledge pack '{selector}' is not cached locally"));
+        }
         Err(unknown_pack(selector))
     }
+}
+
+fn find_repo_knowledge_pack(root: &Path, selector: &str) -> Option<LibraryKnowledgePack> {
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if let Some(pack) = LibraryKnowledgePack::load(&path) {
+            if pack.manifest().root_uri().trim_end_matches('/') == selector {
+                return Some(pack);
+            }
+        } else if let Some(pack) = find_repo_knowledge_pack(&path, selector) {
+            return Some(pack);
+        }
+    }
+    None
+}
+
+fn list_repo_knowledge_packs(root: &Path) -> Vec<LibraryKnowledgePack> {
+    let mut packs = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return packs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if let Some(pack) = LibraryKnowledgePack::load(&path) {
+            packs.push(pack);
+        } else {
+            packs.extend(list_repo_knowledge_packs(&path));
+        }
+    }
+    packs
 }
 
 #[async_trait]
@@ -267,12 +319,9 @@ where
     E: SensitivePayloadEncoder + Send + Sync,
 {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
-        let mut packs = vec![KnowledgePackSummary::new(
-            "builtin:nenjo",
-            builtin_pack().manifest(),
-        )];
+        let mut packs = Vec::new();
         if self.workspace_dir.is_some() {
-            let library_dir = self.workspace_dir()?.join("library");
+            let library_dir = self.workspace_dir()?.join("library").join("platform");
             if let Ok(entries) = std::fs::read_dir(library_dir) {
                 for entry in entries.flatten() {
                     let Ok(file_type) = entry.file_type() else {
@@ -289,8 +338,15 @@ where
                         continue;
                     };
                     if self.current_library_slug.as_deref() == Some(slug.as_str()) {
-                        packs.push(KnowledgePackSummary::new("workspace", pack.manifest()));
+                        packs.push(KnowledgePackSummary::new("lib", pack.manifest()));
                     }
+                    packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
+                }
+            }
+            let repos_dir = self.workspace_dir()?.join("library").join("repos");
+            for pack in list_repo_knowledge_packs(&repos_dir) {
+                let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
+                if selector.starts_with("git://") {
                     packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
                 }
             }
@@ -654,6 +710,9 @@ where
             prompt_config: params.data.prompt_config.clone(),
             platform_scopes: created.platform_scopes.clone(),
             mcp_server_ids: created.mcp_server_ids.clone(),
+            source_type: "native".to_string(),
+            read_only: false,
+            metadata: serde_json::json!({}),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
@@ -715,6 +774,9 @@ where
             prompt_config: existing.prompt_config.clone(),
             platform_scopes: updated.platform_scopes.clone(),
             mcp_server_ids: updated.mcp_server_ids.clone(),
+            source_type: existing.source_type.clone(),
+            read_only: existing.read_only,
+            metadata: existing.metadata.clone(),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
@@ -762,6 +824,9 @@ where
             prompt_config: updated.prompt_config.clone(),
             platform_scopes: existing.platform_scopes,
             mcp_server_ids: existing.mcp_server_ids,
+            source_type: existing.source_type,
+            read_only: existing.read_only,
+            metadata: existing.metadata,
         };
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
@@ -1112,65 +1177,68 @@ where
         })
     }
 
-    async fn create_project_document(
+    async fn create_knowledge_item(
         &self,
-        params: ProjectDocumentCreateParams,
-    ) -> Result<ProjectDocumentMutationResult> {
+        params: KnowledgeItemCreateParams,
+    ) -> Result<KnowledgeItemMutationResult> {
+        let mut data = params.data;
+        let item_id = data.id.unwrap_or_else(Uuid::new_v4);
+        data.id = Some(item_id);
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                Uuid::new_v4(),
-                ManifestKind::ProjectDocument
+                item_id,
+                ManifestKind::Document
                     .encrypted_object_type()
                     .expect("document content object type"),
-                &serde_json::Value::String(params.data.description.clone()),
+                &serde_json::Value::String(data.content.clone()),
             )
             .await?;
-        let project_document = self
+        let knowledge_item = self
             .platform_client
-            .create_project_file_document(&params.data, encrypted_payload)
+            .create_knowledge_item(&data, encrypted_payload)
             .await?;
-        Ok(ProjectDocumentMutationResult { project_document })
+        Ok(KnowledgeItemMutationResult { knowledge_item })
     }
 
-    async fn update_project_document_content(
+    async fn update_knowledge_item_content(
         &self,
-        params: ProjectDocumentContentUpdateParams,
-    ) -> Result<ProjectDocumentContentMutationResult> {
+        params: KnowledgeItemContentUpdateParams,
+    ) -> Result<KnowledgeItemContentMutationResult> {
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                params.document_id,
-                ManifestKind::ProjectDocument
+                params.item_id,
+                ManifestKind::Document
                     .encrypted_object_type()
                     .expect("document content object type"),
-                &serde_json::Value::String(params.description.clone()),
+                &serde_json::Value::String(params.content.clone()),
             )
             .await?;
-        let project_document = self
+        let knowledge_item = self
             .platform_client
-            .update_project_document_content(
-                params.project_id,
-                params.document_id,
-                &params.description,
+            .update_knowledge_item_content(
+                params.pack_id,
+                params.item_id,
+                &params.content,
                 encrypted_payload,
             )
             .await?;
-        Ok(ProjectDocumentContentMutationResult { project_document })
+        Ok(KnowledgeItemContentMutationResult { knowledge_item })
     }
 
-    async fn delete_project_document(
+    async fn delete_knowledge_item(
         &self,
-        params: ProjectDocumentDeleteParams,
+        params: KnowledgeItemDeleteParams,
     ) -> Result<DeleteResult> {
         self.platform_client
-            .delete_project_file_document(params.project_id, params.document_id)
+            .delete_knowledge_item(params.pack_id, params.item_id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.document_id,
+            id: params.item_id,
         })
     }
 }
@@ -1722,7 +1790,10 @@ mod tests {
         let workspace_dir = temp.path().join("workspace");
         let project_id = Uuid::new_v4();
         let pack_slug = "graph-eval";
-        let library_dir = workspace_dir.join("library").join(pack_slug);
+        let library_dir = workspace_dir
+            .join("library")
+            .join("platform")
+            .join(pack_slug);
         std::fs::create_dir_all(library_dir.join("docs"))?;
 
         let store = Arc::new(LocalManifestStore::new(manifests_dir));
@@ -1847,17 +1918,17 @@ mod tests {
 
         let packs = backend.list_knowledge_packs().await.unwrap();
         let packs = packs.as_array().expect("packs array");
-        assert!(packs.iter().any(|pack| pack["pack"] == "workspace"));
+        assert!(packs.iter().any(|pack| pack["pack"] == "lib"));
 
         let value = backend
             .read_knowledge_doc_manifest(json!({
-                "pack": "workspace",
+                "pack": "lib",
                 "path": "routine"
             }))
             .await
             .unwrap();
 
-        assert_eq!(value["pack"], "workspace");
+        assert_eq!(value["pack"], "lib");
         assert_eq!(
             value["virtual_path"],
             format!("library://{pack_slug}/docs/routine.md")
@@ -1873,7 +1944,7 @@ mod tests {
 
         let value = backend
             .list_knowledge_neighbors(json!({
-                "pack": format!("workspace:{pack_slug}"),
+                "pack": format!("lib:{pack_slug}"),
                 "path": "routine"
             }))
             .await
@@ -1905,7 +1976,7 @@ mod tests {
 
         let filtered = backend
             .list_knowledge_neighbors(json!({
-                "pack": format!("workspace:{pack_slug}"),
+                "pack": format!("lib:{pack_slug}"),
                 "path": routine_path,
                 "edge_type": "depends_on"
             }))

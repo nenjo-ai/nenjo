@@ -433,6 +433,7 @@ mod tests {
             forwarded_env: vec![
                 ("GH_TOKEN".into(), "test-gh-token-xyz".into()),
                 ("GITHUB_TOKEN".into(), "test-github-token-xyz".into()),
+                ("XAI_API_KEY".into(), "test-xai-key-xyz".into()),
             ],
             ..SecurityPolicy::default()
         });
@@ -447,6 +448,10 @@ mod tests {
         assert!(
             result.output.contains("GITHUB_TOKEN=test-github-token-xyz"),
             "GITHUB_TOKEN should be forwarded to shell subprocess"
+        );
+        assert!(
+            result.output.contains("XAI_API_KEY=test-xai-key-xyz"),
+            "XAI_API_KEY should be forwarded to shell subprocess"
         );
     }
 

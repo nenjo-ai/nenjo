@@ -377,6 +377,12 @@ impl ConnectedServer {
                 for (key, val) in &credentials {
                     child_cmd.env(key.to_uppercase(), val);
                 }
+                if let Some(env) = plugin_mcp_env(&def.metadata) {
+                    child_cmd.envs(env);
+                }
+                if let Some(cwd) = plugin_mcp_cwd(&def.metadata) {
+                    child_cmd.current_dir(cwd);
+                }
 
                 let mut child = child_cmd
                     .spawn()
@@ -471,6 +477,26 @@ impl ConnectedServer {
 
         Ok(text)
     }
+}
+
+fn plugin_mcp_env(metadata: &serde_json::Value) -> Option<Vec<(String, String)>> {
+    let env = metadata
+        .pointer("/runtime/env")
+        .or_else(|| metadata.pointer("/claude/mcp/env"))?
+        .as_object()?;
+    Some(
+        env.iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+            .collect(),
+    )
+}
+
+fn plugin_mcp_cwd(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .pointer("/runtime/cwd")
+        .or_else(|| metadata.pointer("/claude/mcp/cwd"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 impl Drop for ConnectedServer {

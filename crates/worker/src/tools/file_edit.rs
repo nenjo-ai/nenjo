@@ -152,6 +152,13 @@ impl Tool for FileEditTool {
         };
 
         let resolved_target = resolved_parent.join(file_name);
+        if self.security.is_managed_runtime_path(&resolved_target) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Path is managed by Nenjo runtime installs and is read-only".into()),
+            });
+        }
 
         // ── 7. Symlink check ───────────────────────────────────────
         if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await

@@ -76,6 +76,7 @@ fn document_meta(document_id: Uuid) -> DocumentSyncMeta {
     DocumentSyncMeta {
         id: document_id,
         pack_id: Uuid::from_u128(7),
+        pack_slug: Some("alpha".to_string()),
         slug: "alpha".to_string(),
         filename: "spec.md".to_string(),
         path: Some("domain".to_string()),
@@ -110,7 +111,9 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
         manifests_dir: manifests_dir.clone(),
         workspace_dir: workspace_dir.clone(),
         state_dir: state_dir.clone(),
+        config_dir: temp.path().join("config"),
     };
+    let config_dir = cache.config_dir.clone();
 
     cache
         .persist_resource(
@@ -123,17 +126,18 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     assert!(!state_dir.join("projects.json").exists());
 
     cache
-        .sync_document_metadata(
-            &api,
-            harness.provider().manifest(),
-            project_id,
-            document_id,
-            Some(&document_meta(document_id)),
-        )
+        .sync_document_metadata(&api, document_id, Some(&document_meta(document_id)))
         .await
         .expect("sync document metadata");
-    let pack_dir = workspace_dir.join("library").join("alpha");
+    let pack_dir = config_dir.join("library").join("platform").join("alpha");
     assert!(pack_dir.join("manifest.json").exists());
+    assert!(
+        !workspace_dir
+            .join("library")
+            .join("alpha")
+            .join("manifest.json")
+            .exists()
+    );
     assert!(
         !manifests_dir
             .join("library")
@@ -151,8 +155,8 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
 
     cache
         .write_document_content(
-            harness.provider().manifest(),
-            project_id,
+            Uuid::from_u128(7),
+            Some("alpha"),
             "domain/spec.md",
             "hello world",
         )
@@ -163,7 +167,8 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     );
 
     cache
-        .remove_document(harness.provider().manifest(), project_id, document_id)
+        .remove_document(document_id, Some(&document_meta(document_id)))
+        .await
         .expect("remove document");
     assert!(
         !pack_dir

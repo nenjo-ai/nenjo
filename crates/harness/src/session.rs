@@ -64,6 +64,18 @@ pub fn transcript_message_to_chat(message: SessionTranscriptChatMessage) -> Chat
     }
 }
 
+fn domain_activated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
+    ChatMessage::developer(format!(
+        "Domain activated: {domain_command} ({domain_name}). The user explicitly activated this domain at this point in the conversation. Continue with this domain's guidance, capabilities, and permissions active."
+    ))
+}
+
+fn domain_deactivated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
+    ChatMessage::developer(format!(
+        "Domain deactivated: {domain_command} ({domain_name}). The user explicitly exited this domain at this point in the conversation. Continue without this domain's expanded permissions active."
+    ))
+}
+
 pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessage> {
     events
         .iter()
@@ -71,6 +83,19 @@ pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatM
             SessionTranscriptEventPayload::ChatMessage { message } => {
                 Some(transcript_message_to_chat(message.clone()))
             }
+            SessionTranscriptEventPayload::DomainActivated {
+                domain_command,
+                domain_name,
+                ..
+            } => Some(domain_activated_to_chat(domain_command, domain_name)),
+            SessionTranscriptEventPayload::DomainDeactivated {
+                domain_command,
+                domain_name,
+                ..
+            } => Some(domain_deactivated_to_chat(domain_command, domain_name)),
+            SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(
+                ChatMessage::developer(format!("Previous turn was interrupted: {reason}")),
+            ),
             _ => None,
         })
         .collect()
@@ -405,4 +430,33 @@ fn preview(value: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nenjo_sessions::{SessionTranscriptEvent, SessionTranscriptEventPayload};
+
+    #[test]
+    fn replay_transcript_history_surfaces_interruption_to_agent() {
+        let session_id = Uuid::new_v4();
+        let events = vec![SessionTranscriptEvent {
+            session_id,
+            seq: 1,
+            recorded_at: Utc::now(),
+            turn_id: None,
+            payload: SessionTranscriptEventPayload::TurnInterrupted {
+                reason: "cancelled by user".to_string(),
+            },
+        }];
+
+        let history = replay_transcript_history(&events);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "developer");
+        assert_eq!(
+            history[0].content,
+            "Previous turn was interrupted: cancelled by user"
+        );
+    }
 }

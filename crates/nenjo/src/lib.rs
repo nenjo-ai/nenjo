@@ -24,6 +24,7 @@ pub mod input;
 pub mod manifest;
 pub mod memory;
 pub mod provider;
+pub mod repo_manifest;
 pub mod routines;
 pub mod tools;
 pub mod types;

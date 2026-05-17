@@ -190,6 +190,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             agent_id,
             session_id,
             domain_session_id,
+            domain_activation,
             ..
         } => {
             ctx.harness
@@ -202,6 +203,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         agent_id,
                         session_id,
                         domain_session_id,
+                        domain_activation,
                     },
                 )
                 .await
@@ -226,31 +228,20 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::ChatDomainEnter {
-            project_id,
-            agent_id,
-            domain_command,
-            session_id,
-        } => {
-            ctx.harness
-                .handle_domain_enter(
-                    &domain_context(&ctx),
-                    project_id,
-                    agent_id,
-                    &domain_command,
-                    session_id,
-                )
-                .await
-        }
-
         Command::ChatDomainExit {
             project_id,
             agent_id,
             domain_session_id,
+            chat_session_id,
         } => {
             let _ = project_id;
             ctx.harness
-                .handle_domain_exit(&domain_context(&ctx), agent_id, domain_session_id)
+                .handle_domain_exit(
+                    &domain_context(&ctx),
+                    agent_id,
+                    domain_session_id,
+                    chat_session_id,
+                )
                 .await
         }
 
@@ -311,9 +302,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             routine_id,
             project_id,
             schedule,
+            timezone,
         } => {
             ctx.harness
-                .handle_cron_enable(&ctx.cron_context(), routine_id, project_id, &schedule, None)
+                .handle_cron_enable(
+                    &ctx.cron_context(),
+                    routine_id,
+                    project_id,
+                    &schedule,
+                    timezone.as_deref(),
+                    None,
+                )
                 .await
         }
 
@@ -333,9 +332,19 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::AgentHeartbeatEnable { agent_id, interval } => {
+        Command::AgentHeartbeatEnable {
+            agent_id,
+            interval,
+            timezone,
+        } => {
             ctx.harness
-                .handle_agent_heartbeat_enable(&ctx.heartbeat_context(), agent_id, &interval, None)
+                .handle_agent_heartbeat_enable(
+                    &ctx.heartbeat_context(),
+                    agent_id,
+                    &interval,
+                    timezone.as_deref(),
+                    None,
+                )
                 .await
         }
 
@@ -400,9 +409,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
     }
 }
 
-fn domain_context(ctx: &CommandContext) -> DomainCommandContext<ResponseSender> {
+fn domain_context(ctx: &CommandContext) -> DomainCommandContext {
     DomainCommandContext {
-        response_sink: ctx.response_tx.clone(),
         worker_id: ctx.worker_name.clone(),
     }
 }

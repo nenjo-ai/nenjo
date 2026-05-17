@@ -37,6 +37,25 @@ impl PayloadCodec for NoopPayloadCodec {
     }
 }
 
+fn merge_json_object(
+    target: &mut serde_json::Value,
+    source: serde_json::Value,
+) -> std::result::Result<(), &'static str> {
+    if target.is_null() {
+        *target = serde_json::json!({});
+    }
+    let Some(target) = target.as_object_mut() else {
+        return Err("target was not an object");
+    };
+    let Some(source) = source.as_object() else {
+        return Err("source was not an object");
+    };
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
 /// Typed HTTP client for the Nenjo backend.
 ///
 /// Every request automatically includes the `X-API-Key` header.
@@ -163,7 +182,10 @@ impl NenjoClient {
     }
 
     pub async fn fetch_project(&self, id: Uuid) -> Result<Option<ProjectManifest>> {
-        self.fetch_resource(&format!("/api/v1/projects/{id}")).await
+        let detail: Option<ProjectDetailResponse> = self
+            .fetch_resource(&format!("/api/v1/projects/{id}"))
+            .await?;
+        Ok(self.decode_project_settings(detail).await?.map(Into::into))
     }
 
     pub async fn fetch_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
@@ -497,6 +519,42 @@ impl NenjoClient {
         Ok(Some(response))
     }
 
+    async fn decode_project_settings(
+        &self,
+        response: Option<ProjectDetailResponse>,
+    ) -> Result<Option<ProjectDetailResponse>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt project settings: {error}"))
+            })?
+        else {
+            return Ok(Some(response));
+        };
+
+        let decrypted_settings =
+            serde_json::from_str::<serde_json::Value>(&plaintext).map_err(|error| {
+                ApiClientError::Parse(format!(
+                    "Failed to parse decrypted project settings: {error}"
+                ))
+            })?;
+        merge_json_object(&mut response.settings, decrypted_settings).map_err(|error| {
+            ApiClientError::Parse(format!(
+                "Failed to merge decrypted project settings: {error}"
+            ))
+        })?;
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
     async fn decode_context_block_content(
         &self,
         response: Option<ContextBlockContentResponse>,
@@ -558,6 +616,32 @@ impl NenjoClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result as AnyhowResult;
+
+    #[derive(Debug)]
+    struct StaticPayloadCodec {
+        plaintext: Option<String>,
+    }
+
+    #[async_trait]
+    impl PayloadCodec for StaticPayloadCodec {
+        async fn decode_text(&self, _payload: &EncryptedPayload) -> AnyhowResult<Option<String>> {
+            Ok(self.plaintext.clone())
+        }
+    }
+
+    fn encrypted_payload(object_id: Uuid) -> EncryptedPayload {
+        EncryptedPayload {
+            account_id: Uuid::new_v4(),
+            encryption_scope: Some("org".to_string()),
+            object_id,
+            object_type: "project.settings".to_string(),
+            algorithm: "AES-256-GCM".to_string(),
+            key_version: 1,
+            nonce: "nonce".to_string(),
+            ciphertext: "ciphertext".to_string(),
+        }
+    }
 
     #[test]
     fn test_client_creation() {
@@ -579,5 +663,45 @@ mod tests {
             headers.get("X-API-Key").unwrap().to_str().unwrap(),
             "my-secret"
         );
+    }
+
+    #[tokio::test]
+    async fn decode_project_settings_merges_decrypted_payload() {
+        let id = Uuid::new_v4();
+        let client =
+            NenjoClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
+                plaintext: Some(
+                    serde_json::json!({
+                        "context": "Use this private context.",
+                        "metadata": { "tier": "gold" }
+                    })
+                    .to_string(),
+                ),
+            });
+        let project = ProjectDetailResponse {
+            id,
+            name: "Project".to_string(),
+            slug: "project".to_string(),
+            description: None,
+            settings: serde_json::json!({
+                "repo_url": "https://github.com/nenjo-ai/nenjo.git",
+                "context": "stale"
+            }),
+            encrypted_payload: Some(encrypted_payload(id)),
+        };
+
+        let decoded = client
+            .decode_project_settings(Some(project))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            decoded.settings["repo_url"],
+            "https://github.com/nenjo-ai/nenjo.git"
+        );
+        assert_eq!(decoded.settings["context"], "Use this private context.");
+        assert_eq!(decoded.settings["metadata"]["tier"], "gold");
+        assert!(decoded.encrypted_payload.is_none());
     }
 }

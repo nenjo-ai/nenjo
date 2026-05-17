@@ -6,6 +6,7 @@ members = [
     "crates/knowledge",
     "crates/nenjo",
     "crates/platform",
+    "crates/packages",
     "crates/secure-envelope",
     "crates/worker",
     "crates/sessions",
@@ -29,6 +30,7 @@ repository = "https://github.com/nenjo-ai/nenjo"
 nenjo = { path = "crates/nenjo", version = "0.11.0" }
 nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.11.0" }
 nenjo-platform = { path = "crates/platform", version = "0.11.0" }
+nenjo-packages = { path = "crates/packages", version = "0.11.0" }
 nenjo-xml = { path = "crates/xml", version = "0.11.0" }
 nenjo-models = { path = "crates/models", version = "0.11.0" }
 nenjo-events = { path = "crates/events", version = "0.11.0" }
@@ -37,7 +39,7 @@ nenjo-harness = { path = "crates/harness", version = "0.11.0" }
 nenjo-knowledge = { path = "crates/knowledge", version = "0.11.0" }
 nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.11.0" }
 nenjo-sessions = { path = "crates/sessions", version = "0.11.0" }
-nenjo-worker = { path = "crates/worker" }
+nenjo-worker = { path = "crates/worker", version = "0.11.0" }
 nenjo-tool-api = { path = "crates/tool-api", version = "0.11.0" }
 
 aes-gcm = "0.10"
@@ -51,6 +53,7 @@ base64 = "0.22.1"
 bon = "3"
 bytes = "1"
 chrono = "0.4"
+chrono-tz = "0.10"
 clap = "4"
 config = "0.15"
 cron = "0.15"
@@ -59,6 +62,7 @@ directories = "5.0"
 dotenvy = "0.15"
 ed25519-dalek = "2.2"
 futures-util = "0.3"
+flate2 = "1.1"
 glob = "0.3"
 hkdf = "0.12"
 minijinja = "2"
@@ -77,6 +81,7 @@ serde_yaml = "0.9"
 sha2 = "0.10.9"
 shellexpand = "3.1"
 tempfile = "3.25.0"
+tar = "0.4"
 thiserror = "2.0"
 tokio = "1.49"
 tokio-test = "0.4"

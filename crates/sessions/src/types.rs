@@ -117,6 +117,19 @@ pub enum SessionTranscriptEventPayload {
     ChatMessage {
         message: SessionTranscriptChatMessage,
     },
+    DomainActivated {
+        domain_session_id: Uuid,
+        domain_command: String,
+        domain_name: String,
+        agent_id: Uuid,
+        user_message_preview: Option<String>,
+    },
+    DomainDeactivated {
+        domain_session_id: Uuid,
+        domain_command: String,
+        domain_name: String,
+        agent_id: Uuid,
+    },
     ToolCalls {
         parent_tool_name: Option<String>,
         tool_names: Vec<String>,
@@ -156,6 +169,9 @@ pub enum SessionTranscriptEventPayload {
     TurnCompleted {
         final_output: String,
     },
+    TurnInterrupted {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +201,8 @@ pub enum ScheduleState {
 pub struct CronScheduleState {
     pub schedule_expr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
@@ -197,6 +215,8 @@ pub struct CronScheduleState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatScheduleState {
     pub interval_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -136,6 +136,16 @@ pub struct McpServerManifest {
     pub url: Option<String>,
     #[serde(default)]
     pub env_schema: serde_json::Value,
+    #[serde(default = "default_mcp_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+fn default_mcp_source_type() -> String {
+    "native".to_string()
 }
 
 impl HasManifestId for McpServerManifest {
@@ -243,6 +253,8 @@ pub struct RoutineEdgeManifest {
     pub source_step_id: Uuid,
     pub target_step_id: Uuid,
     pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +404,16 @@ pub struct AbilityManifest {
     pub prompt_config: AbilityPromptConfig,
     pub platform_scopes: Vec<String>,
     pub mcp_server_ids: Vec<Uuid>,
+    #[serde(default = "default_ability_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+fn default_ability_source_type() -> String {
+    "native".to_string()
 }
 
 impl HasManifestId for AbilityManifest {

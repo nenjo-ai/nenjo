@@ -161,7 +161,7 @@ Provider::builder()
     .with_loader(loader)          // ManifestLoader — fetches agents, models, routines
     .with_model_factory(factory)  // ModelProviderFactory — creates LLM providers
     .with_tool_factory(tools)     // ToolFactory — creates tools per agent
-    .with_knowledge_pack("docs:app", docs_pack)
+    .with_knowledge_packs([KnowledgePackEntry::new("docs:app", docs_pack)])
     .with_memory(memory)          // Memory + artifacts — persistent agent state
     .build().await?
     -> Provider

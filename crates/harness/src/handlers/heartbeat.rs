@@ -27,6 +27,7 @@ pub struct HeartbeatCommandContext<S> {
 pub struct HeartbeatRestoreRequest {
     pub agent_id: Uuid,
     pub interval: Duration,
+    pub timezone: Option<String>,
     pub start_at: Option<chrono::DateTime<chrono::Utc>>,
     pub previous_output_ref: Option<String>,
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -75,6 +76,15 @@ struct HeartbeatRunState {
     previous_output: Option<String>,
     previous_output_ref: Option<String>,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+struct SpawnAgentHeartbeatRequest {
+    agent_id: Uuid,
+    interval: Duration,
+    timezone: Option<String>,
+    start_at: Option<chrono::DateTime<chrono::Utc>>,
+    restored_state: HeartbeatRunState,
+    start_paused: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -129,6 +139,7 @@ struct HeartbeatSessionUpsert<'a> {
     agent_id: Uuid,
     memory_namespace: Option<&'a str>,
     interval: Duration,
+    timezone: Option<&'a str>,
     status: SessionStatus,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -153,6 +164,7 @@ async fn upsert_heartbeat_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
         agent_id,
         memory_namespace,
         interval,
+        timezone,
         status,
         next_run_at,
         last_run_at,
@@ -173,6 +185,7 @@ async fn upsert_heartbeat_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
             memory_namespace: memory_namespace.map(ToString::to_string),
             scheduler: ScheduleState::Heartbeat(HeartbeatScheduleState {
                 interval_secs: interval.as_secs(),
+                timezone: timezone.map(ToString::to_string),
                 next_run_at,
                 last_run_at,
                 previous_output_ref,
@@ -206,11 +219,7 @@ fn emit_heartbeat_state<S>(
 async fn spawn_agent_heartbeat<P, SessionRt, TraceRt, StoreRt, McpRt, S>(
     harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
     ctx: &HeartbeatCommandContext<S>,
-    agent_id: Uuid,
-    interval: Duration,
-    start_at: Option<chrono::DateTime<chrono::Utc>>,
-    restored_state: HeartbeatRunState,
-    start_paused: bool,
+    request: SpawnAgentHeartbeatRequest,
 ) -> Result<()>
 where
     P: HarnessProvider,
@@ -220,6 +229,15 @@ where
     McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender + Clone + 'static,
 {
+    let SpawnAgentHeartbeatRequest {
+        agent_id,
+        interval,
+        timezone,
+        start_at,
+        restored_state,
+        start_paused,
+    } = request;
+
     if interval.is_zero() {
         anyhow::bail!("Heartbeat interval must be greater than zero");
     }
@@ -274,6 +292,7 @@ where
             agent_id,
             memory_namespace: Some(&heartbeat_memory_namespace),
             interval,
+            timezone: timezone.as_deref(),
             status: if start_paused {
                 SessionStatus::Paused
             } else {
@@ -290,6 +309,7 @@ where
     .await;
 
     let harness_for_schedule = harness.clone();
+    let timezone_for_log = timezone.clone();
     tokio::spawn(async move {
         let mut next_run_at = initial_next_run_at;
         let _ = response_tx.send(Response::AgentHeartbeatScheduled {
@@ -324,6 +344,7 @@ where
                             agent_id,
                             memory_namespace: Some(&heartbeat_memory_namespace),
                             interval,
+                            timezone: timezone.as_deref(),
                             status: SessionStatus::Active,
                             next_run_at: Some(scheduled_next_run_at),
                             last_run_at: None,
@@ -352,6 +373,7 @@ where
             let worker_id_for_run = worker_id.clone();
             let heartbeat_memory_namespace_for_run = heartbeat_memory_namespace.clone();
             let harness_for_run = harness_for_schedule.clone();
+            let timezone_for_run = timezone.clone();
             let run_next_run_at = scheduled_next_run_at;
             let state_snapshot = {
                 let state = run_state.lock().await;
@@ -364,6 +386,7 @@ where
                     agent_id,
                     memory_namespace: Some(&heartbeat_memory_namespace),
                     interval,
+                    timezone: timezone.as_deref(),
                     status: SessionStatus::Active,
                     next_run_at: Some(run_next_run_at),
                     last_run_at: state_snapshot.last_run_at,
@@ -387,6 +410,7 @@ where
                         "trigger": "agent_heartbeat",
                         "interval_secs": interval.as_secs(),
                         "agent_id": agent_id.to_string(),
+                        "timezone": timezone_for_run.as_deref(),
                     }),
                 });
                 let _ = harness_for_run
@@ -462,6 +486,7 @@ where
                                 agent_id,
                                 memory_namespace: Some(&heartbeat_memory_namespace_for_run),
                                 interval,
+                                timezone: timezone_for_run.as_deref(),
                                 status: SessionStatus::Active,
                                 next_run_at: Some(run_next_run_at),
                                 last_run_at: Some(completed_at),
@@ -505,6 +530,7 @@ where
                                 agent_id,
                                 memory_namespace: Some(&heartbeat_memory_namespace_for_run),
                                 interval,
+                                timezone: timezone_for_run.as_deref(),
                                 status: SessionStatus::Active,
                                 next_run_at: Some(run_next_run_at),
                                 last_run_at: Some(completed_at),
@@ -557,7 +583,7 @@ where
         }
     });
 
-    info!(%agent_id, interval_secs = interval.as_secs(), "Enabled agent heartbeat");
+    info!(%agent_id, interval_secs = interval.as_secs(), timezone = timezone_for_log.as_deref(), "Enabled agent heartbeat");
     Ok(())
 }
 
@@ -574,6 +600,7 @@ where
         ctx: &HeartbeatCommandContext<S>,
         agent_id: Uuid,
         interval_str: &str,
+        timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
@@ -583,11 +610,14 @@ where
         spawn_agent_heartbeat(
             self,
             ctx,
-            agent_id,
-            interval,
-            start_at,
-            HeartbeatRunState::default(),
-            false,
+            SpawnAgentHeartbeatRequest {
+                agent_id,
+                interval,
+                timezone: timezone.map(ToOwned::to_owned),
+                start_at,
+                restored_state: HeartbeatRunState::default(),
+                start_paused: false,
+            },
         )
         .await
     }
@@ -603,6 +633,7 @@ where
         let HeartbeatRestoreRequest {
             agent_id,
             interval,
+            timezone,
             start_at,
             previous_output_ref,
             last_run_at,
@@ -618,15 +649,18 @@ where
         spawn_agent_heartbeat(
             self,
             ctx,
-            agent_id,
-            interval,
-            start_at,
-            HeartbeatRunState {
-                previous_output,
-                previous_output_ref,
-                last_run_at,
+            SpawnAgentHeartbeatRequest {
+                agent_id,
+                interval,
+                timezone,
+                start_at,
+                restored_state: HeartbeatRunState {
+                    previous_output,
+                    previous_output_ref,
+                    last_run_at,
+                },
+                start_paused,
             },
-            start_paused,
         )
         .await
     }
@@ -651,6 +685,7 @@ where
                     agent_id,
                     memory_namespace: None,
                     interval: Duration::from_secs(0),
+                    timezone: None,
                     status: SessionStatus::Cancelled,
                     next_run_at: None,
                     last_run_at: None,

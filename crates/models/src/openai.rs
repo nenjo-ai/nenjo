@@ -110,6 +110,14 @@ impl OpenAiProvider {
         m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
     }
 
+    fn is_developer_role_model(model: &str) -> bool {
+        let m = model.to_lowercase();
+        Self::is_reasoning_model(&m)
+            || m.starts_with("gpt-5")
+            || m.starts_with("gpt-4.5")
+            || m.starts_with("gpt-4.1")
+    }
+
     fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
         tools.map(|items| {
             items
@@ -288,7 +296,7 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn supports_developer_role(&self, model: &str) -> bool {
-        Self::is_reasoning_model(model)
+        Self::is_developer_role_model(model)
     }
 }
 
@@ -300,6 +308,15 @@ mod tests {
     fn creates_with_key() {
         let p = OpenAiProvider::new(Some("sk-proj-abc123"));
         assert_eq!(p.api_key.as_deref(), Some("sk-proj-abc123"));
+    }
+
+    #[test]
+    fn developer_role_supported_for_newer_openai_models() {
+        let p = OpenAiProvider::new(None);
+        assert!(p.supports_developer_role("gpt-5.1"));
+        assert!(p.supports_developer_role("gpt-4.1"));
+        assert!(p.supports_developer_role("o3"));
+        assert!(!p.supports_developer_role("gpt-4o"));
     }
 
     #[test]

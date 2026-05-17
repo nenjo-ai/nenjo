@@ -4,13 +4,14 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
-    ChatSessionUpsert, ExecutionPhase, SessionKind, SessionStatus, SessionTranscriptAppend,
-    SessionTranscriptEventPayload, SessionTransition, TranscriptQuery, TranscriptState,
+    ChatSessionUpsert, DomainSessionUpsert, DomainState, ExecutionPhase, SessionKind,
+    SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
+    TranscriptQuery, TranscriptState,
 };
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use nenjo_events::{Response, StreamEvent};
+use nenjo_events::{DomainActivation, Response, StreamEvent};
 use nenjo_models::ChatMessage;
 use serde_json::json;
 
@@ -41,6 +42,7 @@ pub struct ChatRequest<'a> {
     pub agent_id: Option<Uuid>,
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
+    pub domain_activation: Option<DomainActivation>,
 }
 
 fn chat_trace_ref<P, SessionRt, TraceRt, StoreRt, McpRt>(
@@ -79,6 +81,15 @@ fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
         },
     )
     .project
+}
+
+fn domain_name_for_command(manifest: &nenjo::manifest::Manifest, domain_command: &str) -> String {
+    manifest
+        .domains
+        .iter()
+        .find(|domain| domain.command == domain_command)
+        .map(|domain| domain.name.clone())
+        .unwrap_or_else(|| domain_command.to_string())
 }
 
 struct ChatSessionRecord {
@@ -198,6 +209,85 @@ where
     Ok(true)
 }
 
+struct ActivateDomainForChat<'a> {
+    worker_id: &'a str,
+    project_id: Uuid,
+    agent_id: Uuid,
+    domain_command: &'a str,
+    domain_session_id: Uuid,
+    agent_name: &'a str,
+    project_slug: &'a str,
+}
+
+async fn activate_domain_for_chat<P, SessionRt, TraceRt, StoreRt, McpRt>(
+    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+    params: ActivateDomainForChat<'_>,
+) -> Result<String>
+where
+    P: HarnessProvider,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    TraceRt: ExecutionTraceRuntime + 'static,
+    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
+    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+{
+    let ActivateDomainForChat {
+        worker_id,
+        project_id,
+        agent_id,
+        domain_command,
+        domain_session_id,
+        agent_name,
+        project_slug,
+    } = params;
+
+    // Persist the domain session metadata here, but let the chat execution path
+    // build the domain-expanded runner once with the final chat session id.
+    let domain_name = domain_name_for_command(harness.provider().manifest(), domain_command);
+
+    let _ = harness
+        .upsert_domain_session(DomainSessionUpsert {
+            session_id: domain_session_id,
+            status: SessionStatus::Active,
+            project_id: if project_id.is_nil() {
+                None
+            } else {
+                Some(project_id)
+            },
+            agent_id,
+            worker_id: worker_id.to_string(),
+            memory_namespace: Some(chat_memory_namespace(agent_name, project_slug)),
+            domain: Some(DomainState {
+                domain_command: domain_command.to_string(),
+            }),
+        })
+        .await;
+
+    Ok(domain_name)
+}
+
+async fn active_domain_command<P, SessionRt, TraceRt, StoreRt, McpRt>(
+    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+    domain_session_id: Uuid,
+) -> Option<String>
+where
+    P: HarnessProvider,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    TraceRt: ExecutionTraceRuntime + 'static,
+    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
+    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+{
+    if let Some(session) = harness.domains().get(&domain_session_id) {
+        return Some(session.domain_command.clone());
+    }
+
+    harness
+        .get_session(domain_session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|record| record.domain.map(|domain| domain.domain_command))
+}
+
 /// Handle a chat message — with cancellation and domain session support.
 ///
 /// The execution handle is registered by `session_id` so `ChatCancel` can abort it.
@@ -266,12 +356,24 @@ where
         agent_id,
         session_id,
         domain_session_id,
+        domain_activation,
     } = request;
 
     let provider = harness.provider();
     let manifest = provider.manifest();
     let effective_project_id = project_id.unwrap_or(Uuid::nil());
-    let effective_content = content.to_string();
+    let effective_content = if content.trim().is_empty() {
+        match &domain_activation {
+            Some(activation) => activation.domain_command.clone(),
+            None => content.to_string(),
+        }
+    } else {
+        content.to_string()
+    };
+    let effective_domain_session_id = domain_activation
+        .as_ref()
+        .map(|activation| activation.domain_session_id)
+        .or(domain_session_id);
     let turn_id = Uuid::new_v4();
 
     let agent_id = agent_id.context("No agent_id provided for chat")?;
@@ -288,6 +390,46 @@ where
     let trace_ref = harness
         .execution_traces()
         .trace_ref(&trace_target, &trace_agent);
+    let activated_domain_name = if let Some(activation) = &domain_activation {
+        let domain_name = activate_domain_for_chat(
+            harness,
+            ActivateDomainForChat {
+                worker_id: &ctx.worker_id,
+                project_id: effective_project_id,
+                agent_id,
+                domain_command: &activation.domain_command,
+                domain_session_id: activation.domain_session_id,
+                agent_name: &aname,
+                project_slug: &slug,
+            },
+        )
+        .await?;
+        let _ = harness
+            .append_transcript(SessionTranscriptAppend {
+                session_id,
+                turn_id: Some(turn_id),
+                payload: SessionTranscriptEventPayload::DomainActivated {
+                    domain_session_id: activation.domain_session_id,
+                    domain_command: activation.domain_command.clone(),
+                    domain_name: domain_name.clone(),
+                    agent_id,
+                    user_message_preview: (!effective_content.trim().is_empty())
+                        .then(|| effective_content.clone()),
+                },
+                transcript_state: TranscriptState::MidTurn,
+            })
+            .await?;
+        let _ = ctx.response_sink.send(Response::AgentResponse {
+            session_id: Some(session_id),
+            payload: StreamEvent::DomainEntered {
+                session_id: activation.domain_session_id,
+                domain_name: domain_name.clone(),
+            },
+        });
+        Some(domain_name)
+    } else {
+        None
+    };
     upsert_chat_session_record(
         harness,
         ChatSessionRecord {
@@ -310,11 +452,41 @@ where
             status: SessionStatus::Active,
         })
         .await;
-    let history: Vec<ChatMessage> = replay_transcript_history(
-        &harness
-            .read_transcript(session_id, TranscriptQuery::default())
-            .await?,
-    );
+    let mut transcript_events = harness
+        .read_transcript(session_id, TranscriptQuery::default())
+        .await?;
+    if let Some(dsid) = effective_domain_session_id
+        && !transcript_events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                SessionTranscriptEventPayload::DomainActivated {
+                    domain_session_id,
+                    ..
+                } if *domain_session_id == dsid
+            )
+        })
+        && let Some(domain_command) = active_domain_command(harness, dsid).await
+    {
+        let domain_name = domain_name_for_command(manifest, &domain_command);
+        if let Some(event) = harness
+            .append_transcript(SessionTranscriptAppend {
+                session_id,
+                turn_id: Some(turn_id),
+                payload: SessionTranscriptEventPayload::DomainActivated {
+                    domain_session_id: dsid,
+                    domain_command,
+                    domain_name,
+                    agent_id,
+                    user_message_preview: None,
+                },
+                transcript_state: TranscriptState::MidTurn,
+            })
+            .await?
+        {
+            transcript_events.push(event);
+        }
+    }
+    let history: Vec<ChatMessage> = replay_transcript_history(&transcript_events);
     let _ = harness
         .append_transcript(SessionTranscriptAppend {
             session_id,
@@ -331,7 +503,8 @@ where
         agent = %aname,
         agent_id = %agent_id,
         session = %session_id,
-        domain_session = ?domain_session_id,
+        domain_session = ?effective_domain_session_id,
+        activated_domain = ?activated_domain_name,
         history_len = history.len(),
         "Chat request received"
     );
@@ -342,7 +515,7 @@ where
     }
 
     // Use domain-expanded runner if in an active domain session
-    let runner = if let Some(dsid) = domain_session_id {
+    let runner = if let Some(dsid) = effective_domain_session_id {
         if !harness.domains().contains_key(&dsid) {
             match restore_domain_session(harness, ctx, dsid).await {
                 Ok(true) => {
@@ -633,6 +806,16 @@ where
     for key in keys_to_cancel {
         if let Some((_, exec)) = harness.executions().remove(&key) {
             exec.cancel.cancel();
+            let _ = harness
+                .append_transcript(SessionTranscriptAppend {
+                    session_id: key,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::TurnInterrupted {
+                        reason: "cancelled by user".to_string(),
+                    },
+                    transcript_state: TranscriptState::Clean,
+                })
+                .await;
             let _ = harness
                 .transition_session(SessionTransition {
                     session_id: key,

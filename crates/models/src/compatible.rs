@@ -606,7 +606,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
     fn supports_developer_role(&self, model: &str) -> bool {
         let m = model.to_lowercase();
-        m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+        m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("gpt-5")
+            || m.starts_with("gpt-4.5")
+            || m.starts_with("gpt-4.1")
     }
 }
 
@@ -636,6 +641,16 @@ mod tests {
     fn strips_trailing_slash() {
         let p = make_provider("test", "https://example.com/", None);
         assert_eq!(p.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn developer_role_supported_for_openai_style_newer_models() {
+        let p = make_provider("OpenAI-compatible", "https://example.com", None);
+        assert!(p.supports_developer_role("gpt-5.1"));
+        assert!(p.supports_developer_role("gpt-4.1"));
+        assert!(p.supports_developer_role("o4-mini"));
+        assert!(!p.supports_developer_role("gpt-4o"));
+        assert!(!p.supports_developer_role("llama-3.3-70b"));
     }
 
     #[tokio::test]

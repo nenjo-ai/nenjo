@@ -94,6 +94,9 @@ async fn scoped_backend(
         platform_scopes: vec!["projects:read".into()],
         mcp_server_ids: vec![],
         tool_name: "visible_ability".into(),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     };
     let hidden_ability = AbilityManifest {
         id: Uuid::new_v4(),
@@ -108,6 +111,9 @@ async fn scoped_backend(
         platform_scopes: vec!["projects:write".into()],
         mcp_server_ids: vec![],
         tool_name: "hidden_ability".into(),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     };
 
     let visible_domain = DomainManifest {

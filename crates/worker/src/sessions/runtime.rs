@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use nenjo_sessions::{
     CheckpointQuery, CheckpointStore, DomainSessionUpsert, SchedulerSessionUpsert,
     SessionCheckpoint, SessionCheckpointUpdate, SessionCoordinator, SessionKind, SessionLease,
@@ -11,6 +12,7 @@ use nenjo_sessions::{
     SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
     SessionUpsert, TraceStore, TranscriptQuery, TranscriptStore,
 };
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -44,6 +46,7 @@ pub struct CronSessionRecovery {
     pub session_id: Uuid,
     pub project_id: Option<Uuid>,
     pub schedule_expr: String,
+    pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
 }
 
@@ -51,6 +54,7 @@ pub struct CronSessionRecovery {
 pub struct HeartbeatSessionRecovery {
     pub session_id: Uuid,
     pub interval: Duration,
+    pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub previous_output_ref: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
@@ -64,6 +68,7 @@ pub struct WorkerSessionRuntime {
     traces: Arc<dyn TraceStore>,
     checkpoints: Arc<dyn CheckpointStore>,
     coordinator: Arc<dyn SessionCoordinator>,
+    record_locks: Arc<DashMap<Uuid, Arc<Mutex<()>>>>,
     worker_id: String,
 }
 
@@ -82,12 +87,22 @@ impl WorkerSessionRuntime {
             traces: Arc::new(stores.traces),
             checkpoints: Arc::new(stores.checkpoints),
             coordinator: Arc::new(coordinator),
+            record_locks: Arc::new(DashMap::new()),
             worker_id: worker_id.into(),
         }
     }
 
     pub(crate) fn worker_name(&self) -> &str {
         &self.worker_id
+    }
+
+    async fn record_guard(&self, session_id: Uuid) -> OwnedMutexGuard<()> {
+        self.record_locks
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await
     }
 
     fn handle_session_upsert(&self, upsert: SessionUpsert) -> Result<()> {
@@ -507,6 +522,7 @@ impl WorkerSessionRuntime {
                         session_id: record.session_id,
                         project_id: record.project_id,
                         schedule_expr: state.schedule_expr,
+                        timezone: state.timezone,
                         next_run_at: state.next_run_at,
                     })
                     .await?;
@@ -521,6 +537,7 @@ impl WorkerSessionRuntime {
                     .restore_heartbeat_session(HeartbeatSessionRecovery {
                         session_id: record.session_id,
                         interval: std::time::Duration::from_secs(state.interval_secs.max(1)),
+                        timezone: state.timezone,
                         next_run_at: state.next_run_at,
                         previous_output_ref: state.previous_output_ref,
                         last_run_at: state.last_run_at,
@@ -549,10 +566,19 @@ impl WorkerSessionRuntime {
 impl SessionRuntime for WorkerSessionRuntime {
     async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
         match event {
-            SessionRuntimeEvent::SessionUpsert(upsert) => self.handle_session_upsert(upsert),
-            SessionRuntimeEvent::Transcript(record) => self.handle_transcript(record).await,
+            SessionRuntimeEvent::SessionUpsert(upsert) => {
+                let _guard = self.record_guard(upsert.session_id).await;
+                self.handle_session_upsert(upsert)
+            }
+            SessionRuntimeEvent::Transcript(record) => {
+                let _guard = self.record_guard(record.session_id).await;
+                self.handle_transcript(record).await
+            }
             SessionRuntimeEvent::Trace(event) => self.traces.append(event).await,
-            SessionRuntimeEvent::Checkpoint(record) => self.handle_checkpoint(record).await,
+            SessionRuntimeEvent::Checkpoint(record) => {
+                let _guard = self.record_guard(record.session_id).await;
+                self.handle_checkpoint(record).await
+            }
         }
     }
 
@@ -583,6 +609,7 @@ impl SessionRuntime for WorkerSessionRuntime {
         &self,
         append: SessionTranscriptAppend,
     ) -> Result<Option<SessionTranscriptEvent>> {
+        let _guard = self.record_guard(append.session_id).await;
         self.append_transcript_record(append).await
     }
 
@@ -595,14 +622,17 @@ impl SessionRuntime for WorkerSessionRuntime {
     }
 
     async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
+        let _guard = self.record_guard(update.session_id).await;
         self.update_checkpoint_record(update).await
     }
 
     async fn upsert_scheduler_session(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
+        let _guard = self.record_guard(upsert.session_id).await;
         self.upsert_scheduler_session_record(upsert).await
     }
 
     async fn upsert_domain_session(&self, upsert: DomainSessionUpsert) -> Result<bool> {
+        let _guard = self.record_guard(upsert.session_id).await;
         let now = Utc::now();
         let mut record = self
             .records
@@ -653,6 +683,7 @@ impl SessionRuntime for WorkerSessionRuntime {
     }
 
     async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
+        let _guard = self.record_guard(transition.session_id).await;
         self.transition_session_record(transition).await
     }
 }

@@ -201,6 +201,7 @@ pub enum ToolAutonomy {
 pub struct ToolSecurity {
     pub autonomy: ToolAutonomy,
     pub workspace_dir: PathBuf,
+    pub forwarded_env_names: Vec<String>,
 }
 
 impl Default for ToolSecurity {
@@ -211,6 +212,7 @@ impl Default for ToolSecurity {
         Self {
             autonomy: ToolAutonomy::Supervised,
             workspace_dir: home.join(".nenjo").join("workspace"),
+            forwarded_env_names: Vec::new(),
         }
     }
 }

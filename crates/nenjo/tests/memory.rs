@@ -627,6 +627,9 @@ async fn ability_inherits_memory_vars() {
         },
         platform_scopes: vec![],
         mcp_server_ids: vec![],
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     };
 
     let agent = nenjo::manifest::AgentManifest {

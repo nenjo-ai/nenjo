@@ -132,6 +132,9 @@ mod tests {
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: vec!["projects:read".into()],
             mcp_server_ids: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
         };
         assert!(policy.allows_agent(&agent));
         assert!(policy.allows_ability(&ability));
