@@ -1813,7 +1813,7 @@ checksum = "9d4bdc3645754d2da280343bd8f1eaa9acf56c4ed75b540c98c898b171a3d867"
 
 [[package]]
 name = "nenjo"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-crypto-auth"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-eventbus"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-events"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-harness"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-integration-tests"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-knowledge"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-models"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-packages"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-platform"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-secure-envelope"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-sessions"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-tool-api"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-worker"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "nenjo-xml"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "minijinja",
  "quick-xml",
