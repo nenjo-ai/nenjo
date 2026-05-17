@@ -236,6 +236,30 @@ pub async fn sync_all(
     Ok(())
 }
 
+/// Sync one library knowledge pack by id.
+pub async fn sync_pack_by_id(
+    api: &NenjoClient,
+    nenjo_home: &Path,
+    state_dir: &Path,
+    pack_id: Uuid,
+) -> Result<()> {
+    let packs = api
+        .list_knowledge_packs()
+        .await
+        .context("failed to list knowledge packs")?;
+    let Some(pack) = packs.into_iter().find(|pack| pack.id == pack_id) else {
+        warn!(%pack_id, "Knowledge pack not found during sync");
+        return Ok(());
+    };
+
+    if pack.source_type == "github" {
+        crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
+    } else {
+        let pack_dir = nenjo_home.join("library").join("platform").join(&pack.slug);
+        sync_pack(api, &pack_dir, pack.id, state_dir).await
+    }
+}
+
 /// Sync knowledge items for a single pack.
 pub async fn sync_pack(
     api: &NenjoClient,

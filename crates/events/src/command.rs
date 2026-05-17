@@ -349,6 +349,7 @@ pub enum ResourceType {
     McpServer,
     Domain,
     Document,
+    KnowledgePack,
 }
 
 impl std::fmt::Display for ResourceType {
@@ -364,6 +365,7 @@ impl std::fmt::Display for ResourceType {
             Self::McpServer => write!(f, "mcp_server"),
             Self::Domain => write!(f, "domain"),
             Self::Document => write!(f, "document"),
+            Self::KnowledgePack => write!(f, "knowledge_pack"),
         }
     }
 }

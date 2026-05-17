@@ -56,6 +56,7 @@ struct VersionMetadata {
     ref_: Option<String>,
     requested_ref: Option<String>,
     resolved_commit_sha: Option<String>,
+    resource_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -75,6 +76,17 @@ struct AuthoredKnowledgePackManifest {
     slug: Option<String>,
     version: Option<String>,
     root_uri: Option<String>,
+    #[serde(default)]
+    docs: Vec<AuthoredKnowledgeDoc>,
+    #[serde(default)]
+    manifest: Option<AuthoredKnowledgePackBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthoredKnowledgePackBody {
+    pack_id: Option<String>,
+    version: Option<String>,
+    #[serde(default)]
     docs: Vec<AuthoredKnowledgeDoc>,
 }
 
@@ -618,16 +630,36 @@ fn authored_knowledge_manifest(
         .unwrap_or_else(|| repo_root_uri(metadata, &slug));
     let pack_id = manifest
         .pack_id
+        .or_else(|| {
+            manifest
+                .manifest
+                .as_ref()
+                .and_then(|body| body.pack_id.clone())
+        })
         .unwrap_or_else(|| format!("repo-knowledge-{slug}"));
-    let docs = manifest
-        .docs
+    let version = manifest
+        .version
+        .or_else(|| {
+            manifest
+                .manifest
+                .as_ref()
+                .and_then(|body| body.version.clone())
+        })
+        .or_else(|| metadata.version.resource_version.clone())
+        .unwrap_or_else(|| "1".to_string());
+    let docs = if manifest.docs.is_empty() {
+        manifest.manifest.map(|body| body.docs).unwrap_or_default()
+    } else {
+        manifest.docs
+    };
+    let docs = docs
         .into_iter()
         .map(|doc| authored_knowledge_doc(&root_uri, &slug, doc))
         .collect();
 
     LibraryKnowledgePackManifest {
         pack_id,
-        pack_version: manifest.version.unwrap_or_else(|| "1".to_string()),
+        pack_version: version,
         schema_version: 1,
         root_uri,
         content_hash: String::new(),
@@ -1058,5 +1090,62 @@ docs:
         );
         assert_eq!(manifest.docs[0].source_path, "docs/overview.md");
         assert_eq!(manifest.docs[0].status, KnowledgeDocStatus::Stable);
+    }
+
+    #[test]
+    fn authored_knowledge_manifest_maps_native_package_shape_to_library_manifest() {
+        let metadata = InstallMetadata {
+            install: InstallRecordMetadata {
+                selector: Some("git://nenjo-ai/packages/nenjo/core".to_string()),
+            },
+            source: SourceMetadata {
+                provider: Some("github".to_string()),
+                owner: Some("nenjo-ai".to_string()),
+                repo: Some("packages".to_string()),
+                path: Some("nenjo/knowledge/core".to_string()),
+                package: Some("core".to_string()),
+            },
+            version: VersionMetadata {
+                resource_version: Some("0.1.0".to_string()),
+                ..VersionMetadata::default()
+            },
+            distribution: DistributionMetadata {
+                kind: Some("github_directory".to_string()),
+                path: Some("nenjo/knowledge/core".to_string()),
+                manifest_path: Some("manifest.yaml".to_string()),
+                ..DistributionMetadata::default()
+            },
+        };
+        let yaml = r#"
+schema: nenjo.knowledge.v1
+slug: core
+root_uri: git://nenjo-ai/packages/nenjo/core/
+manifest:
+  name: Nenjo Core
+  pack_id: nenjo.core
+  schema_version: 1
+  docs:
+    - id: nenjo.domain.nenjo
+      virtual_path: git://nenjo-ai/packages/nenjo/core/domain/nenjo.md
+      source_path: docs/domain/nenjo.md
+      title: Nenjo
+      kind: domain
+      authority: canonical
+      related:
+        - type: references
+          target: nenjo.domain.platform
+"#;
+
+        let manifest =
+            parse_knowledge_package_manifest(yaml, Path::new("manifest.yaml"), &metadata)
+                .expect("manifest parses");
+
+        assert_eq!(manifest.pack_id, "nenjo.core");
+        assert_eq!(manifest.pack_version, "0.1.0");
+        assert_eq!(manifest.root_uri, "git://nenjo-ai/packages/nenjo/core/");
+        assert_eq!(manifest.docs.len(), 1);
+        assert_eq!(manifest.docs[0].id, "nenjo.domain.nenjo");
+        assert_eq!(manifest.docs[0].source_path, "docs/domain/nenjo.md");
+        assert_eq!(manifest.docs[0].related.len(), 1);
     }
 }

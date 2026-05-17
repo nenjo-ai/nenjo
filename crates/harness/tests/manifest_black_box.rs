@@ -395,7 +395,7 @@ async fn manifest_inline_upserts_each_provider_resource() {
                     Some("domain prompt")
                 );
             }
-            ResourceType::Document => unreachable!(),
+            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
         }
 
         assert_eq!(
@@ -548,7 +548,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             ResourceType::Domain => {
                 assert!(!manifest.domains.iter().any(|item| item.id == resource_id))
             }
-            ResourceType::Document => unreachable!(),
+            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
         }
 
         assert!(env.store.persisted.lock().unwrap().is_empty());

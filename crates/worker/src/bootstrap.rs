@@ -586,6 +586,7 @@ impl WorkerManifestCache {
             }
             ResourceType::Domain => sync_tree(&manifests_dir.join("domains"), &manifest.domains),
             ResourceType::Document => Ok(()),
+            ResourceType::KnowledgePack => Ok(()),
         }
     }
 
@@ -788,6 +789,11 @@ impl ManifestStore for WorkerManifestCache {
                 None,
             )
         }
+    }
+
+    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack_id: Uuid) -> Result<()> {
+        crate::local_documents::sync_pack_by_id(client, &self.config_dir, &self.state_dir, pack_id)
+            .await
     }
 
     fn write_document_content(

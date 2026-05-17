@@ -103,6 +103,7 @@ pub(super) async fn apply_upsert(
         ResourceType::McpServer => upsert!(mcp_servers, fetch_mcp_server),
         ResourceType::Domain => upsert!(domains, fetch_domain),
         ResourceType::Document => return Ok(()),
+        ResourceType::KnowledgePack => return Ok(()),
     }
 
     Ok(())

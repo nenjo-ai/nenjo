@@ -107,6 +107,11 @@ pub trait ManifestStore: Send + Sync {
         Ok(())
     }
 
+    /// Sync a whole library knowledge pack into the host's local cache.
+    async fn sync_knowledge_pack(&self, _client: &NenjoClient, _pack_id: Uuid) -> Result<()> {
+        Ok(())
+    }
+
     /// Write decrypted document content into the host's local cache.
     fn write_document_content(
         &self,
@@ -199,6 +204,10 @@ where
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         (**self).remove_document(document_id, metadata).await
+    }
+
+    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack_id: Uuid) -> Result<()> {
+        (**self).sync_knowledge_pack(client, pack_id).await
     }
 
     fn write_document_content(

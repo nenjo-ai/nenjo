@@ -16,6 +16,7 @@ pub(super) fn apply_delete(manifest: &mut Manifest, rt: ResourceType, id: Uuid) 
         ResourceType::McpServer => manifest.mcp_servers.retain(|r| r.id != id),
         ResourceType::Domain => manifest.domains.retain(|r| r.id != id),
         ResourceType::Document => return,
+        ResourceType::KnowledgePack => return,
     }
 
     info!(%rt, %id, "Removed deleted resource from manifest");

@@ -336,7 +336,7 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                 },
             }
         }
-        ResourceType::Document => false,
+        ResourceType::Document | ResourceType::KnowledgePack => false,
     }
 }
 

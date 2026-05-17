@@ -152,6 +152,13 @@ where
             })
             .await;
         }
+        ResourceType::KnowledgePack => {
+            if action != ResourceAction::Deleted
+                && let Err(error) = store.sync_knowledge_pack(client, resource_id).await
+            {
+                warn!(pack_id = %resource_id, error = %error, "Knowledge pack sync failed");
+            }
+        }
         ResourceType::Project => {}
         _ => {}
     }
