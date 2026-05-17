@@ -126,8 +126,8 @@ pub trait ModelProvider: Send + Sync {
     }
 
     /// Whether the given model supports the `developer` message role (OpenAI-spec).
-    /// When true, the turn loop sends system and developer prompts as separate
-    /// messages. When false, they are combined into a single system message.
+    /// When true, app-owned instructions are sent as a developer message.
+    /// When false, they are folded into the provider's system-equivalent role.
     fn supports_developer_role(&self, _model: &str) -> bool {
         false
     }
@@ -150,7 +150,11 @@ pub async fn one_shot(
 ) -> anyhow::Result<String> {
     let mut messages = Vec::new();
     if let Some(sys) = system {
-        messages.push(ChatMessage::system(sys));
+        if provider.supports_developer_role(model) {
+            messages.push(ChatMessage::developer(sys));
+        } else {
+            messages.push(ChatMessage::system(sys));
+        }
     }
     messages.push(ChatMessage::user(message));
     let request = ChatRequest {

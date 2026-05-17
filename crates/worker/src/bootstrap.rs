@@ -815,13 +815,15 @@ fn find_local_knowledge_pack_dir(
             continue;
         }
         if let Some(manifest) = load_library_knowledge_manifest(&path)
-            && manifest.pack_id == pack_id {
-                return Some(path);
-            }
+            && manifest.pack_id == pack_id
+        {
+            return Some(path);
+        }
         if let Some(document_id) = document_id
-            && library_knowledge_item_relative_path(&path, document_id).is_some() {
-                return Some(path);
-            }
+            && library_knowledge_item_relative_path(&path, document_id).is_some()
+        {
+            return Some(path);
+        }
     }
     None
 }

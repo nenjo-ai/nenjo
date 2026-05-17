@@ -1,33 +1,20 @@
 //! Domain session handlers.
 
 use anyhow::Result;
-use nenjo::memory::MemoryScope;
-use nenjo_events::{Response, StreamEvent};
-use nenjo_sessions::{DomainSessionUpsert, DomainState, SessionStatus, SessionTransition};
+use nenjo_sessions::{
+    SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
+    TranscriptState,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::ResponseSender;
-use crate::event_bridge::{agent_name, project_slug};
+use crate::event_bridge::agent_name;
 use crate::execution_trace::ExecutionTraceRuntime;
 use crate::{DomainSession, Harness, HarnessProvider};
 
 #[derive(Clone)]
-pub struct DomainCommandContext<S> {
-    pub response_sink: S,
+pub struct DomainCommandContext {
     pub worker_id: String,
-}
-
-fn domain_memory_namespace(agent_name: &str, project_slug: &str) -> String {
-    MemoryScope::new(
-        agent_name,
-        if project_slug.is_empty() {
-            None
-        } else {
-            Some(project_slug)
-        },
-    )
-    .project
 }
 
 impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
@@ -80,116 +67,14 @@ where
         })
     }
 
-    /// Enter a domain session by creating a domain-expanded runner.
-    pub async fn handle_domain_enter<S>(
-        &self,
-        ctx: &DomainCommandContext<S>,
-        project_id: Uuid,
-        agent_id: Uuid,
-        domain_command: &str,
-        session_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
-        let provider = self.provider();
-        let manifest = provider.manifest();
-        let aname = agent_name(manifest, agent_id);
-        let pslug = project_slug(manifest, project_id);
-
-        let mut builder = provider.build_agent_by_id(agent_id).await?;
-        if !project_id.is_nil() {
-            if let Some(project) = manifest
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-            {
-                builder = builder.with_project_context(project);
-            } else {
-                warn!(%project_id, %agent_id, "Project not found in manifest for domain session");
-            }
-        }
-        let base_runner = builder.build().await?;
-
-        match base_runner.domain_expansion(domain_command).await {
-            Ok(domain_runner) => {
-                let domain_name = domain_runner
-                    .instance()
-                    .prompt_context()
-                    .active_domain
-                    .as_ref()
-                    .map(|d| d.domain_name.clone())
-                    .unwrap_or_else(|| domain_command.to_string());
-
-                self.domains().insert(
-                    session_id,
-                    DomainSession {
-                        runner: domain_runner,
-                        agent_id,
-                        project_id,
-                        domain_command: domain_command.to_string(),
-                    },
-                );
-                let _ = self
-                    .upsert_domain_session(DomainSessionUpsert {
-                        session_id,
-                        status: SessionStatus::Active,
-                        project_id: if project_id.is_nil() {
-                            None
-                        } else {
-                            Some(project_id)
-                        },
-                        agent_id,
-                        worker_id: ctx.worker_id.clone(),
-                        memory_namespace: Some(domain_memory_namespace(&aname, &pslug)),
-                        domain: Some(DomainState {
-                            domain_command: domain_command.to_string(),
-                        }),
-                    })
-                    .await;
-
-                info!(
-                    agent = %aname,
-                    agent_id = %agent_id,
-                    domain = %domain_name,
-                    %session_id,
-                    "Domain session entered"
-                );
-
-                let _ = ctx.response_sink.send(Response::AgentResponse {
-                    session_id: None,
-                    payload: StreamEvent::DomainEntered {
-                        session_id,
-                        domain_name,
-                    },
-                });
-            }
-            Err(error) => {
-                warn!(agent = %aname, error = %error, "Domain expansion failed");
-                let _ = ctx.response_sink.send(Response::AgentResponse {
-                    session_id: None,
-                    payload: StreamEvent::Error {
-                        message: format!("Domain expansion failed: {error}"),
-                        payload: None,
-                        encrypted_payload: None,
-                    },
-                });
-            }
-        }
-
-        Ok(())
-    }
-
     /// Exit a domain session by removing the stored runner.
-    pub async fn handle_domain_exit<S>(
+    pub async fn handle_domain_exit(
         &self,
-        ctx: &DomainCommandContext<S>,
+        ctx: &DomainCommandContext,
         agent_id: Uuid,
         domain_session_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
+        chat_session_id: Option<Uuid>,
+    ) -> Result<()> {
         let provider = self.provider();
         let manifest = provider.manifest();
         let aname = agent_name(manifest, agent_id);
@@ -213,7 +98,23 @@ where
                     .active_domain
                     .as_ref()
                     .map(|d| d.domain_name.clone())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| session.domain_command.clone());
+
+                if let Some(chat_session_id) = chat_session_id {
+                    let _ = self
+                        .append_transcript(SessionTranscriptAppend {
+                            session_id: chat_session_id,
+                            turn_id: None,
+                            payload: SessionTranscriptEventPayload::DomainDeactivated {
+                                domain_session_id,
+                                domain_command: session.domain_command.clone(),
+                                domain_name: domain_name.clone(),
+                                agent_id,
+                            },
+                            transcript_state: TranscriptState::Clean,
+                        })
+                        .await;
+                }
 
                 info!(
                     agent = %aname,
@@ -221,26 +122,9 @@ where
                     %domain_session_id,
                     "Domain session ended"
                 );
-
-                let _ = ctx.response_sink.send(Response::AgentResponse {
-                    session_id: None,
-                    payload: StreamEvent::DomainExited {
-                        session_id: domain_session_id,
-                        artifact_id: None,
-                        document_id: None,
-                    },
-                });
             }
             None => {
                 warn!(%domain_session_id, "Domain exit for unknown session");
-                let _ = ctx.response_sink.send(Response::AgentResponse {
-                    session_id: None,
-                    payload: StreamEvent::DomainExited {
-                        session_id: domain_session_id,
-                        artifact_id: None,
-                        document_id: None,
-                    },
-                });
             }
         }
 

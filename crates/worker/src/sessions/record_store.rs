@@ -24,11 +24,30 @@ impl FileSessionStore {
     fn write_atomic(&self, record: &SessionRecord) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.path(record.session_id);
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
         let json = serde_json::to_vec_pretty(record)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(tmp, path)?;
         Ok(())
+    }
+
+    fn parse_record(data: &str) -> serde_json::Result<SessionRecord> {
+        match serde_json::from_str(data) {
+            Ok(record) => Ok(record),
+            Err(error) => {
+                let mut trimmed = data.trim_end();
+                for _ in 0..4 {
+                    let Some(next) = trimmed.strip_suffix('}') else {
+                        break;
+                    };
+                    trimmed = next.trim_end();
+                    if let Ok(record) = serde_json::from_str(trimmed) {
+                        return Ok(record);
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     fn read_record(path: &Path) -> Result<Option<SessionRecord>> {
@@ -40,7 +59,7 @@ impl FileSessionStore {
         if data.trim().is_empty() {
             return Ok(None);
         }
-        serde_json::from_str(&data)
+        Self::parse_record(&data)
             .with_context(|| format!("failed to parse session record {}", path.display()))
             .map(Some)
     }

@@ -13,8 +13,8 @@ use tracing::debug;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
-use super::runner::turn_loop;
 use super::runner::types::TurnEvent;
+use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, Manifest, PromptConfig, PromptTemplates};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
@@ -158,24 +158,15 @@ where
         debug!("{prompts}");
 
         // Build messages for the sub-execution.
-        let mut messages = Vec::new();
-
-        if sub_instance
+        let supports_developer_role = sub_instance
             .model
             .model_provider
-            .supports_developer_role(&sub_instance.model.model_name)
-            && !prompts.developer.is_empty()
-        {
-            messages.push(nenjo_models::ChatMessage::system(&prompts.system));
-            messages.push(nenjo_models::ChatMessage::developer(&prompts.developer));
-        } else {
-            let combined = if prompts.developer.is_empty() {
-                prompts.system
-            } else {
-                format!("{}\n\n{}", prompts.system, prompts.developer)
-            };
-            messages.push(nenjo_models::ChatMessage::system(&combined));
-        }
+            .supports_developer_role(&sub_instance.model.model_name);
+        let mut messages = build_instruction_messages(
+            &prompts.system,
+            &prompts.developer,
+            supports_developer_role,
+        );
 
         if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
             messages.extend(chat.history.iter().cloned());

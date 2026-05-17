@@ -361,6 +361,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 agent_id,
                 session_id,
                 domain_session_id,
+                domain_activation,
             } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
                 Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
                     Command::ChatMessage {
@@ -373,6 +374,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         agent_id,
                         session_id,
                         domain_session_id,
+                        domain_activation,
                     },
                 ))),
                 Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
@@ -705,6 +707,7 @@ mod tests {
                     routine_id: None,
                     agent_id: None,
                     domain_session_id: None,
+                    domain_activation: None,
                     session_id: Uuid::new_v4(),
                 },
             )
@@ -737,6 +740,7 @@ mod tests {
                     routine_id: None,
                     agent_id: None,
                     domain_session_id: None,
+                    domain_activation: None,
                     session_id: Uuid::new_v4(),
                 },
             )

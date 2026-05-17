@@ -89,10 +89,33 @@ struct NativeUsage {
 struct NativeChatResponse {
     choices: Vec<NativeChoice>,
     /// The upstream provider that served this response (e.g. "SambaNova").
+    /// Older OpenRouter responses exposed this at the top level; the current
+    /// OpenAPI schema exposes it in `openrouter_metadata`.
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    openrouter_metadata: Option<NativeOpenRouterMetadata>,
+    #[serde(default)]
     usage: Option<NativeUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeOpenRouterMetadata {
+    #[serde(default)]
+    endpoints: Option<NativeEndpointsMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeEndpointsMetadata {
+    #[serde(default)]
+    available: Vec<NativeEndpointInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeEndpointInfo {
+    provider: String,
+    #[serde(default)]
+    selected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +243,22 @@ impl OpenRouterProvider {
             tool_calls,
             usage: TokenUsage::default(),
         }
+    }
+
+    fn selected_provider_name(response: &NativeChatResponse) -> Option<String> {
+        response.provider.clone().or_else(|| {
+            response
+                .openrouter_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.endpoints.as_ref())
+                .and_then(|endpoints| {
+                    endpoints
+                        .available
+                        .iter()
+                        .find(|endpoint| endpoint.selected)
+                })
+                .map(|endpoint| endpoint.provider.clone())
+        })
     }
 }
 
@@ -377,10 +416,10 @@ impl ModelProvider for OpenRouterProvider {
 
         // Track the upstream provider that served this response so we
         // can pin future requests to it.
-        if let Some(ref provider_name) = native_response.provider
+        if let Some(provider_name) = Self::selected_provider_name(&native_response)
             && let Ok(mut guard) = self.last_good_provider.lock()
         {
-            *guard = Some(provider_name.clone());
+            *guard = Some(provider_name);
         }
 
         let usage = native_response
@@ -454,9 +493,15 @@ impl ModelProvider for OpenRouterProvider {
 
     fn supports_developer_role(&self, model: &str) -> bool {
         let m = model.to_lowercase();
-        // Only OpenAI o-series models support the developer role.
+        // Only OpenAI newer models support the developer role.
         // Other providers behind OpenRouter (Anthropic, Google, Meta, etc.) do not.
-        m.contains("/o1") || m.contains("/o3") || m.contains("/o4")
+        (m.contains("openai/") || m.contains("azure/"))
+            && (m.contains("/o1")
+                || m.contains("/o3")
+                || m.contains("/o4")
+                || m.contains("/gpt-5")
+                || m.contains("/gpt-4.5")
+                || m.contains("/gpt-4.1"))
     }
 }
 
@@ -482,6 +527,81 @@ mod tests {
         let provider = OpenRouterProvider::new(None);
         let result = provider.warmup().await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn developer_role_only_for_openai_newer_models() {
+        let provider = OpenRouterProvider::new(None);
+        assert!(provider.supports_developer_role("openai/gpt-5.1"));
+        assert!(provider.supports_developer_role("openai/gpt-4.1"));
+        assert!(provider.supports_developer_role("openai/o3"));
+        assert!(!provider.supports_developer_role("openai/gpt-4o"));
+        assert!(!provider.supports_developer_role("anthropic/claude-sonnet-4"));
+        assert!(!provider.supports_developer_role("minimax/minimax-m2.5"));
+    }
+
+    #[test]
+    fn selected_provider_uses_openrouter_metadata() {
+        let response: NativeChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                }
+            }],
+            "openrouter_metadata": {
+                "endpoints": {
+                    "available": [
+                        {
+                            "model": "minimax/minimax-m2.5",
+                            "provider": "Clarifai",
+                            "selected": false
+                        },
+                        {
+                            "model": "minimax/minimax-m2.5",
+                            "provider": "Minimax",
+                            "selected": true
+                        }
+                    ],
+                    "total": 2
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            OpenRouterProvider::selected_provider_name(&response).as_deref(),
+            Some("Minimax")
+        );
+    }
+
+    #[test]
+    fn selected_provider_preserves_legacy_top_level_provider() {
+        let response: NativeChatResponse = serde_json::from_value(serde_json::json!({
+            "provider": "SambaNova",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                }
+            }],
+            "openrouter_metadata": {
+                "endpoints": {
+                    "available": [{
+                        "model": "meta-llama/llama-3",
+                        "provider": "Together",
+                        "selected": true
+                    }],
+                    "total": 1
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            OpenRouterProvider::selected_provider_name(&response).as_deref(),
+            Some("SambaNova")
+        );
     }
 
     #[tokio::test]

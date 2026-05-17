@@ -26,6 +26,18 @@ fn transcript_message_to_chat(message: SessionTranscriptChatMessage) -> ChatMess
     }
 }
 
+fn domain_activated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
+    ChatMessage::developer(format!(
+        "Domain activated: {domain_command} ({domain_name}). The user explicitly activated this domain at this point in the conversation. Continue with this domain's guidance, capabilities, and permissions active."
+    ))
+}
+
+fn domain_deactivated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
+    ChatMessage::developer(format!(
+        "Domain deactivated: {domain_command} ({domain_name}). The user explicitly exited this domain at this point in the conversation. Continue without this domain's expanded permissions active."
+    ))
+}
+
 fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessage> {
     events
         .iter()
@@ -33,9 +45,19 @@ fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessa
             SessionTranscriptEventPayload::ChatMessage { message } => {
                 Some(transcript_message_to_chat(message.clone()))
             }
-            SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(ChatMessage::system(
-                format!("Previous turn was interrupted: {reason}"),
-            )),
+            SessionTranscriptEventPayload::DomainActivated {
+                domain_command,
+                domain_name,
+                ..
+            } => Some(domain_activated_to_chat(domain_command, domain_name)),
+            SessionTranscriptEventPayload::DomainDeactivated {
+                domain_command,
+                domain_name,
+                ..
+            } => Some(domain_deactivated_to_chat(domain_command, domain_name)),
+            SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(
+                ChatMessage::developer(format!("Previous turn was interrupted: {reason}")),
+            ),
             _ => None,
         })
         .collect()

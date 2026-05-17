@@ -703,6 +703,7 @@ mod tests {
             routine_id: None,
             agent_id: Some(Uuid::nil()),
             domain_session_id: None,
+            domain_activation: None,
             session_id: Uuid::nil(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -741,6 +742,7 @@ mod tests {
             routine_id: None,
             agent_id: None,
             domain_session_id: None,
+            domain_activation: None,
             session_id: Uuid::nil(),
         };
         let json = serde_json::to_string(&cmd).unwrap();

@@ -29,6 +29,12 @@ pub struct WrappedAccountContentKey {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainActivation {
+    pub domain_session_id: Uuid,
+    pub domain_command: String,
+}
+
 /// A command dispatched to an agent harness.
 ///
 /// Discriminated by the `type` field in JSON.
@@ -64,18 +70,10 @@ pub enum Command {
         /// Active domain session context, if any.
         #[serde(default)]
         domain_session_id: Option<Uuid>,
+        /// Domain activation to apply before processing this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain_activation: Option<DomainActivation>,
         /// Chat session scope.
-        session_id: Uuid,
-    },
-
-    /// Enter a domain session (activates a structured interaction mode).
-    #[serde(rename = "chat.domain_enter")]
-    ChatDomainEnter {
-        project_id: Uuid,
-        agent_id: Uuid,
-        domain_command: String,
-        /// Session ID created by the backend API — the harness stores its
-        /// domain runner under this key so it matches the frontend's state.
         session_id: Uuid,
     },
 
@@ -85,6 +83,8 @@ pub enum Command {
         project_id: Uuid,
         agent_id: Uuid,
         domain_session_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_session_id: Option<Uuid>,
     },
 
     /// Cancel an in-flight chat response.
@@ -240,9 +240,6 @@ impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChatMessage { session_id, .. } => write!(f, "chat.message(session={session_id})"),
-            Self::ChatDomainEnter { session_id, .. } => {
-                write!(f, "chat.domain_enter(session={session_id})")
-            }
             Self::ChatDomainExit {
                 domain_session_id, ..
             } => write!(f, "chat.domain_exit(session={domain_session_id})"),
@@ -301,7 +298,6 @@ impl Command {
     pub fn capability(&self) -> Capability {
         match self {
             Command::ChatMessage { .. }
-            | Command::ChatDomainEnter { .. }
             | Command::ChatDomainExit { .. }
             | Command::ChatCancel { .. }
             | Command::ChatSessionDelete { .. } => Capability::Chat,

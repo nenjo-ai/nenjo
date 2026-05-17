@@ -96,6 +96,26 @@ pub(crate) struct DelegationSupport<P: ProviderRuntime = ErasedProvider> {
     pub(crate) delegation_ctx: Option<DelegationContext>,
 }
 
+pub(crate) fn build_instruction_messages(
+    system_prompt: &str,
+    developer_prompt: &str,
+    supports_developer_role: bool,
+) -> Vec<ChatMessage> {
+    let combined = [system_prompt, developer_prompt]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if combined.is_empty() {
+        Vec::new()
+    } else if supports_developer_role {
+        vec![ChatMessage::developer(combined)]
+    } else {
+        vec![ChatMessage::system(combined)]
+    }
+}
+
 /// Wraps an [`AgentInstance`] and provides the execution API.
 ///
 /// Created via [`AgentBuilder::build()`](super::builder::AgentBuilder::build).
@@ -427,24 +447,12 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         );
 
         // 4. Build initial messages.
-        let mut messages: Vec<ChatMessage> = Vec::new();
-
-        if inst
+        let supports_developer_role = inst
             .model
             .model_provider
-            .supports_developer_role(&inst.model.model_name)
-            && !developer_prompt.is_empty()
-        {
-            messages.push(ChatMessage::system(&system_prompt));
-            messages.push(ChatMessage::developer(&developer_prompt));
-        } else {
-            let combined = if developer_prompt.is_empty() {
-                system_prompt.clone()
-            } else {
-                format!("{}\n\n{}", system_prompt, developer_prompt)
-            };
-            messages.push(ChatMessage::system(&combined));
-        }
+            .supports_developer_role(&inst.model.model_name);
+        let mut messages: Vec<ChatMessage> =
+            build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
 
         if let AgentRunKind::Chat(ref chat) = run.kind {
             for msg in &chat.history {
@@ -577,5 +585,26 @@ fn merge_domain_mcp_servers(
                 target.push(entry);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_instruction_messages;
+
+    #[test]
+    fn instruction_messages_use_developer_when_supported() {
+        let messages = build_instruction_messages("root", "app rules", true);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "developer");
+        assert_eq!(messages[0].content, "root\n\napp rules");
+    }
+
+    #[test]
+    fn instruction_messages_fallback_to_system_when_developer_unsupported() {
+        let messages = build_instruction_messages("root", "app rules", false);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content, "root\n\napp rules");
     }
 }
