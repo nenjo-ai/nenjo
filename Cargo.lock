@@ -1957,6 +1957,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-packages"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+]
+
+[[package]]
 name = "nenjo-platform"
 version = "0.11.0"
 dependencies = [

@@ -23,6 +23,7 @@ changelog_include = [
     "nenjo-integration-tests",
     "nenjo-knowledge",
     "nenjo-platform",
+    "nenjo-packages",
     "nenjo-secure-envelope",
     "nenjo-sessions",
     "nenjo-tool-api",
@@ -31,6 +32,10 @@ changelog_include = [
 
 [[package]]
 name = "nenjo-cli"
+# The CLI is distributed as a binary artifact attached to the `nenjo` GitHub
+# release. Keep it out of cargo publish while still letting it use the
+# workspace version that drives the binary release flow.
+publish = false
 
 [[package]]
 name = "nenjo-crypto-auth"
@@ -46,6 +51,7 @@ name = "nenjo-harness"
 
 [[package]]
 name = "nenjo-integration-tests"
+publish = false
 
 [[package]]
 name = "nenjo-knowledge"
@@ -55,6 +61,9 @@ name = "nenjo-models"
 
 [[package]]
 name = "nenjo-platform"
+
+[[package]]
+name = "nenjo-packages"
 
 [[package]]
 name = "nenjo-secure-envelope"
