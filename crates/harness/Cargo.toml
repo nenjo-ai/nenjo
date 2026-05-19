@@ -5,7 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Nenjo platform harness runtime for assembled providers"
+description = "Nenjo harness runtime for assembled providers"
+
+[features]
+default = []
+local-runtime = ["dep:parking_lot"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -14,10 +18,9 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 nenjo = { workspace = true }
-nenjo-events = { workspace = true }
 nenjo-models = { workspace = true }
-nenjo-platform = { workspace = true }
 nenjo-sessions = { workspace = true }
+parking_lot = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -28,4 +31,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

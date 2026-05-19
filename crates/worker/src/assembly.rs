@@ -8,7 +8,6 @@ use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
-use nenjo_harness::execution_trace::NoopExecutionTraceRuntime;
 use nenjo_knowledge::KnowledgePack;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_platform::PlatformManifestClient;
@@ -18,7 +17,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::api_client::NenjoClient;
-use crate::bootstrap::{BootstrapAuth, WorkerManifestCache, load_cached_bootstrap_auth};
+use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth};
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
 use crate::external_mcp::ExternalMcpPool;
@@ -31,13 +30,7 @@ use crate::tools::{NativeRuntime, SecurityPolicy, WorkerToolFactory};
 pub type WorkerProvider =
     Provider<ModelProviderRegistry, WorkerToolFactory<NativeRuntime>, MarkdownMemory>;
 
-pub type WorkerHarness = Harness<
-    WorkerProvider,
-    WorkerSessionRuntime,
-    NoopExecutionTraceRuntime,
-    WorkerManifestCache,
-    Arc<ExternalMcpPool>,
->;
+pub type WorkerHarness = Harness<WorkerProvider, WorkerSessionRuntime>;
 
 /// Fully assembled worker dependencies around the execution harness.
 pub struct WorkerAssembly {
@@ -113,19 +106,14 @@ impl WorkerAssembly {
             .unwrap_or_else(|| auth_provider.identity().worker_id.to_string());
         let session_coordinator = LocalSessionCoordinator::new();
         let session_stores = WorkerSessionStores::new(&config.state_dir);
-        let session_runtime =
-            WorkerSessionRuntime::new(session_stores.clone(), session_coordinator, worker_name);
+        let session_runtime = WorkerSessionRuntime::with_coordinator(
+            session_stores.clone(),
+            session_coordinator,
+            worker_name,
+        );
 
         let harness = nenjo_harness::Harness::builder(provider)
             .with_session_runtime(session_runtime.clone())
-            .with_manifest_client(api.clone())
-            .with_manifest_store(WorkerManifestCache {
-                manifests_dir: config.manifests_dir.clone(),
-                workspace_dir: config.workspace_dir.clone(),
-                state_dir: config.state_dir.clone(),
-                config_dir: config.config_dir.clone(),
-            })
-            .with_mcp_runtime(external_mcp.clone())
             .build();
 
         Ok(Self {

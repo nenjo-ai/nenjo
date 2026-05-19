@@ -21,7 +21,6 @@ use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
-use nenjo_harness::handlers::manifest::ManifestStore;
 use nenjo_platform::ManifestKind;
 use nenjo_platform::library_knowledge::{
     library_knowledge_item_relative_path, load_library_knowledge_manifest,
@@ -29,6 +28,8 @@ use nenjo_platform::library_knowledge::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+use crate::handlers::manifest::ManifestStore;
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 

@@ -6,7 +6,7 @@ use serde::Serialize;
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use crate::preview::{summarize_preview, truncate_preview};
+use nenjo_harness::preview::{summarize_preview, truncate_preview};
 
 // ---------------------------------------------------------------------------
 // Typed step-event data payloads

@@ -15,22 +15,22 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::types::GitContext;
-use nenjo::{AgentRun, ProjectLocation, RoutineRun, TaskInput};
+use nenjo::{ProjectLocation, TaskInput};
 use nenjo_events::{Response, StepAgent};
 use serde_json::json;
 
-use super::ResponseSender;
+use nenjo_harness::events::HarnessEvent;
+use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
+use nenjo_harness::request::TaskRequest;
+use nenjo_harness::session::{TurnEventContext, session_runtime_events_from_turn_event};
+use nenjo_harness::{Harness, ProviderRuntime};
+
 use crate::event_bridge::{
     TaskTurnEventContext, agent_name, project_slug, routine_event_to_response,
     turn_event_to_task_step_response,
 };
-use crate::execution_trace::{
-    ExecutionTraceRuntime, ExecutionTraceTarget, ExecutionTraceWriter, TraceAgent,
-};
-use crate::session::{
-    TurnEventContext, session_runtime_events_from_turn_event, spawn_session_events,
-};
-use crate::{ActiveExecution, ExecutionKind, GitLocks, Harness, HarnessProvider};
+use crate::handlers::ResponseSender;
+use crate::runtime::GitLocks;
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
 
 fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
@@ -47,21 +47,19 @@ fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option
     })
 }
 
-async fn restore_task_git_context<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn restore_task_git_context<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     task_id: Uuid,
 ) -> Option<GitContext>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
-    let record = harness.get_session(task_id).await.ok().flatten()?;
+    let record = harness.sessions().get(task_id).await.ok().flatten()?;
     let _checkpoint_ref = record.refs.checkpoint_ref?;
     let checkpoint = harness
-        .load_latest_checkpoint(task_id, CheckpointQuery::default())
+        .sessions()
+        .latest_checkpoint(task_id, CheckpointQuery::default())
         .await
         .ok()
         .flatten()?;
@@ -98,19 +96,16 @@ enum SessionUpsertMode {
     Spawn,
 }
 
-async fn upsert_task_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn upsert_task_session<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     params: &TaskSessionRecord<'_>,
     routine_id: Option<Uuid>,
     project_slug: &str,
     agent_name: Option<&str>,
     mode: SessionUpsertMode,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     let upsert = TaskSessionUpsert {
         task_id: params.task_id,
@@ -130,7 +125,7 @@ async fn upsert_task_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
 
     match mode {
         SessionUpsertMode::Await => {
-            if let Err(error) = harness.upsert_task_session(upsert).await {
+            if let Err(error) = harness.sessions().upsert_task(upsert).await {
                 warn!(
                     error = %error,
                     task_id = %params.task_id,
@@ -142,7 +137,7 @@ async fn upsert_task_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
             let harness = harness.clone();
             let task_id = params.task_id;
             tokio::spawn(async move {
-                if let Err(error) = harness.upsert_task_session(upsert).await {
+                if let Err(error) = harness.sessions().upsert_task(upsert).await {
                     warn!(
                         error = %error,
                         task_id = %task_id,
@@ -154,18 +149,15 @@ async fn upsert_task_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
     }
 }
 
-fn record_task_turn_event<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+fn record_task_turn_event<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     task_id: Uuid,
     agent_id: Option<Uuid>,
     agent_name: Option<&str>,
     event: &nenjo::TurnEvent,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     let context = TurnEventContext {
         session_id: task_id,
@@ -174,27 +166,24 @@ fn record_task_turn_event<P, SessionRt, TraceRt, StoreRt, McpRt>(
         agent_name: agent_name.map(ToOwned::to_owned),
         recorded_at: Utc::now(),
     };
-    spawn_session_events(
-        harness,
+    harness.sessions().spawn_recorded_events(
         session_runtime_events_from_turn_event(&context, event),
         task_id,
     );
 }
 
-async fn update_task_checkpoint<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn update_task_checkpoint<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     task_id: Uuid,
     phase: ExecutionPhase,
     worktree: Option<WorktreeSnapshot>,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     if let Err(error) = harness
-        .update_session_checkpoint(SessionCheckpointUpdate {
+        .sessions()
+        .update_checkpoint(SessionCheckpointUpdate {
             session_id: task_id,
             phase,
             worktree,
@@ -211,23 +200,21 @@ async fn update_task_checkpoint<P, SessionRt, TraceRt, StoreRt, McpRt>(
     }
 }
 
-async fn transition_task_session<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn transition_task_session<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
     ctx: &TaskCommandContext<S, W>,
     task_id: Uuid,
     phase: Option<ExecutionPhase>,
     status: SessionStatus,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
     let _ = harness
-        .transition_session(SessionTransition {
+        .sessions()
+        .transition(SessionTransition {
             session_id: task_id,
             worker_id: ctx.worker_id.clone(),
             phase,
@@ -302,78 +289,95 @@ pub struct TaskExecuteRequest<'a> {
     pub complexity: Option<&'a str>,
 }
 
-/// Handle a task execution command.
+/// Worker integration methods for task execution platform commands.
 ///
-/// If the project has a synced git repo, creates a worktree for this task
-/// and sets the git context on the Task. Cleans up the worktree after execution.
-impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
+/// The worker owns platform task semantics such as response streaming,
+/// git-worktree lifecycle, pause/resume/cancel routing, and checkpoint updates.
+/// Actual agent/routine execution still goes through the harness/provider.
+#[async_trait::async_trait]
+pub(crate) trait WorkerTaskHarnessExt<S, W>
 where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+    S: ResponseSender,
+    W: TaskWorktreeManager,
 {
-    pub async fn handle_task_execute<S, W>(
+    /// Execute a task command and stream platform responses.
+    async fn handle_task_execute(
         &self,
         ctx: &TaskCommandContext<S, W>,
         request: TaskExecuteRequest<'_>,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-        W: TaskWorktreeManager,
-    {
+    ) -> Result<()>;
+
+    /// Cancel an active task execution by execution run id.
+    async fn handle_execution_cancel(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        execution_run_id: Uuid,
+    ) -> Result<()>;
+
+    /// Pause an active task execution by execution run id.
+    async fn handle_execution_pause(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        execution_run_id: Uuid,
+    ) -> Result<()>;
+
+    /// Resume a paused task execution by execution run id.
+    async fn handle_execution_resume(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        execution_run_id: Uuid,
+    ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<P, SessionRt, S, W> WorkerTaskHarnessExt<S, W> for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender,
+    W: TaskWorktreeManager,
+{
+    async fn handle_task_execute(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        request: TaskExecuteRequest<'_>,
+    ) -> Result<()> {
         handle_task_execute(self, ctx, request).await
     }
 
-    pub async fn handle_execution_cancel<S, W>(
+    async fn handle_execution_cancel(
         &self,
         ctx: &TaskCommandContext<S, W>,
         execution_run_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-        W: TaskWorktreeManager,
-    {
+    ) -> Result<()> {
         handle_execution_cancel(self, ctx, execution_run_id).await
     }
 
-    pub async fn handle_execution_pause<S, W>(
+    async fn handle_execution_pause(
         &self,
         ctx: &TaskCommandContext<S, W>,
         execution_run_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-        W: TaskWorktreeManager,
-    {
+    ) -> Result<()> {
         handle_execution_pause(self, ctx, execution_run_id).await
     }
 
-    pub async fn handle_execution_resume<S, W>(
+    async fn handle_execution_resume(
         &self,
         ctx: &TaskCommandContext<S, W>,
         execution_run_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-        W: TaskWorktreeManager,
-    {
+    ) -> Result<()> {
         handle_execution_resume(self, ctx, execution_run_id).await
     }
 }
 
-async fn handle_task_execute<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn handle_task_execute<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
     ctx: &TaskCommandContext<S, W>,
     request: TaskExecuteRequest<'_>,
 ) -> Result<()>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -394,8 +398,8 @@ where
         complexity,
     } = request;
     let provider = harness.provider();
-    let manifest = provider.manifest();
-    let pslug = project_slug(manifest, project_id);
+    let manifest = provider.manifest_snapshot();
+    let pslug = project_slug(&manifest, project_id);
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.worktrees.repo_dir(&pslug);
     let cancel = CancellationToken::new();
@@ -435,7 +439,7 @@ where
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    let aname = assigned_agent_id.map(|id| agent_name(manifest, id));
+    let aname = assigned_agent_id.map(|id| agent_name(&manifest, id));
     let task_memory_namespace = task_memory_namespace(aname.as_deref(), &pslug);
     let active_session = TaskSessionRecord {
         task_id,
@@ -480,7 +484,7 @@ where
     let tid = Some(task_id.to_string());
     // Per-repo mutex — git's .git/config lock doesn't support concurrent writes,
     // so parallel worktree add/remove on the same repo must be serialized.
-    let git_locks = harness.git_locks();
+    let git_locks = ctx.git_locks.clone();
     let git_lock = git_locks
         .entry(repo_dir.clone())
         .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
@@ -619,10 +623,10 @@ where
         slug: Some(task_slug.to_string()),
         complexity: complexity.map(ToOwned::to_owned),
     };
-    let location = git_ctx
-        .clone()
-        .map(ProjectLocation::from_git)
-        .unwrap_or_default();
+    let mut request = TaskRequest::from_task_input(&task).with_execution_run(execution_run_id);
+    if let Some(location) = git_ctx.clone().map(ProjectLocation::from_git) {
+        request = request.with_project_location(location);
+    }
 
     update_task_checkpoint(
         harness,
@@ -637,7 +641,6 @@ where
         command_ctx: ctx,
         execution_run_id,
         task_id,
-        project_slug: &pslug,
         task_slug,
         cancel: &cancel,
     };
@@ -645,20 +648,14 @@ where
     let result = if let Some(rid) = routine_id {
         execute_routine_task(RoutineTaskExecution {
             shared: execution,
-            routine_id: rid,
-            task: RoutineRun::task(task.clone())
-                .execution_run(execution_run_id)
-                .project_location(location.clone()),
+            request: request.clone().with_routine(rid),
         })
         .await
     } else if let Some(aid) = assigned_agent_id {
         execute_direct_task(DirectTaskExecution {
             shared: execution,
             agent_id: aid,
-            task: AgentRun::task(task.clone())
-                .execution_run(execution_run_id)
-                .project_location(location.clone()),
-            project_id,
+            request: request.clone().with_agent(aid),
         })
         .await
     } else {
@@ -817,17 +814,14 @@ where
 }
 
 /// Cancel all tasks belonging to an execution run.
-async fn handle_execution_cancel<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn handle_execution_cancel<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
     ctx: &TaskCommandContext<S, W>,
     execution_run_id: Uuid,
 ) -> Result<()>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -860,17 +854,14 @@ where
 }
 
 /// Pause all tasks belonging to an execution run.
-async fn handle_execution_pause<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn handle_execution_pause<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
     ctx: &TaskCommandContext<S, W>,
     execution_run_id: Uuid,
 ) -> Result<()>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -898,17 +889,14 @@ where
 }
 
 /// Resume all paused tasks belonging to an execution run.
-async fn handle_execution_resume<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn handle_execution_resume<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
     ctx: &TaskCommandContext<S, W>,
     execution_run_id: Uuid,
 ) -> Result<()>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -942,63 +930,48 @@ where
 #[derive(Clone, Copy)]
 struct TaskExecutionShared<
     'a,
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 > {
-    harness: &'a Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+    harness: &'a Harness<P, SessionRt>,
     command_ctx: &'a TaskCommandContext<S, W>,
     execution_run_id: Uuid,
     task_id: Uuid,
-    project_slug: &'a str,
     task_slug: &'a str,
     cancel: &'a CancellationToken,
 }
 
 struct RoutineTaskExecution<
     'a,
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 > {
-    shared: TaskExecutionShared<'a, P, SessionRt, TraceRt, StoreRt, McpRt, S, W>,
-    routine_id: Uuid,
-    task: RoutineRun,
+    shared: TaskExecutionShared<'a, P, SessionRt, S, W>,
+    request: TaskRequest,
 }
 
 struct DirectTaskExecution<
     'a,
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 > {
-    shared: TaskExecutionShared<'a, P, SessionRt, TraceRt, StoreRt, McpRt, S, W>,
+    shared: TaskExecutionShared<'a, P, SessionRt, S, W>,
     agent_id: Uuid,
-    task: AgentRun,
-    project_id: Uuid,
+    request: TaskRequest,
 }
 
-async fn execute_routine_task<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    exec: RoutineTaskExecution<'_, P, SessionRt, TraceRt, StoreRt, McpRt, S, W>,
+async fn execute_routine_task<P, SessionRt, S, W>(
+    exec: RoutineTaskExecution<'_, P, SessionRt, S, W>,
 ) -> Result<TaskExecutionOutcome>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -1007,39 +980,29 @@ where
         command_ctx: ctx,
         execution_run_id,
         task_id,
-        project_slug,
         task_slug,
         cancel,
     } = exec.shared;
-    let RoutineTaskExecution {
-        routine_id, task, ..
-    } = exec;
-    let provider = harness.provider();
-    let mut handle = harness
-        .provider()
-        .routine_by_id(routine_id)?
-        .with_session_binding(nenjo::routines::SessionBinding {
-            session_id: task_id,
-            memory_namespace: harness.session_memory_namespace(task_id).await?,
-        })
-        .run_stream(task)
-        .await?;
+    let mut request = exec.request;
+    if request.slug.is_none() {
+        request = request.with_slug(task_slug.to_string());
+    }
+    let mut stream = harness.task_stream(request).await?;
 
     // Accumulate token metrics from step events as they stream through.
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
     // Track the current agent_id so step_completed events can carry it.
     let mut current_agent_id: Option<uuid::Uuid> = None;
+    let mut routine_passed = false;
     let mut step_agents: std::collections::HashMap<uuid::Uuid, (uuid::Uuid, String)> =
-        std::collections::HashMap::new();
-    let mut trace_recorders: std::collections::HashMap<(uuid::Uuid, uuid::Uuid), TraceRt::Writer> =
         std::collections::HashMap::new();
 
     loop {
         tokio::select! {
-            event = handle.recv() => {
+            event = stream.recv() => {
                 match event {
-                    Some(ev) => {
+                    Some(HarnessEvent::Routine(ev)) => {
                         // Track agent identity across step events.
                         if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, agent_id, .. } = &ev {
                             current_agent_id = *agent_id;
@@ -1052,11 +1015,14 @@ where
                             total_input_tokens += result.input_tokens;
                             total_output_tokens += result.output_tokens;
                         }
+                        if let nenjo::RoutineEvent::Done { result, .. } = &ev {
+                            routine_passed = result.passed;
+                        }
                         if let nenjo::RoutineEvent::AgentEvent { step_id, step_run_id, event } = &ev
                             && let Some((agent_id, step_name)) = step_agents.get(step_run_id)
                         {
-                            let agent_name = provider
-                                .manifest()
+                            let agent_name = harness.provider()
+                                .manifest_snapshot()
                                 .agents
                                 .iter()
                                 .find(|agent| agent.id == *agent_id)
@@ -1069,61 +1035,40 @@ where
                                 Some(&agent_name),
                                 event,
                             );
-                            let recorder = trace_recorders.entry((*agent_id, *step_run_id)).or_insert_with(|| {
-                                harness.execution_traces().writer(
-                                    ExecutionTraceTarget::Task {
-                                        project_slug: project_slug.to_string(),
-                                        task_slug: task_slug.to_string(),
-                                        step_name: Some(step_name.clone()),
-                                        step_id: Some(*step_id),
-                                    },
-                                    TraceAgent {
-                                        id: *agent_id,
-                                        name: agent_name.clone(),
-                                    },
-                                )
-                            });
-                            recorder.record(event);
+                            let _ = (step_id, step_name);
+                            let _ = event;
                         }
-                        if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, harness.provider().manifest()) {
+                        if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, &harness.provider().manifest_snapshot()) {
                             let _ = ctx.response_sink.send(r);
                         }
                     }
+                    Some(HarnessEvent::Turn(_)) | Some(HarnessEvent::DomainEntered { .. }) => {}
                     None => break,
                 }
             }
             _ = cancel.cancelled() => {
-                handle.cancel();
-                for recorder in trace_recorders.values() {
-                    recorder.finalize_with_error("Cancelled");
-                }
+                stream.cancel();
                 break;
             }
         }
     }
-    for (_, recorder) in trace_recorders {
-        recorder.finish().await;
-    }
 
-    let result = handle.output().await?;
+    let output = stream.output().await?;
     Ok(if cancel.is_cancelled() {
         TaskExecutionOutcome::failed("Cancelled", total_input_tokens, total_output_tokens)
-    } else if result.passed {
+    } else if routine_passed {
         TaskExecutionOutcome::success(total_input_tokens, total_output_tokens)
     } else {
-        TaskExecutionOutcome::failed(result.output, total_input_tokens, total_output_tokens)
+        TaskExecutionOutcome::failed(output.text, total_input_tokens, total_output_tokens)
     })
 }
 
-async fn execute_direct_task<P, SessionRt, TraceRt, StoreRt, McpRt, S, W>(
-    exec: DirectTaskExecution<'_, P, SessionRt, TraceRt, StoreRt, McpRt, S, W>,
+async fn execute_direct_task<P, SessionRt, S, W>(
+    exec: DirectTaskExecution<'_, P, SessionRt, S, W>,
 ) -> Result<TaskExecutionOutcome>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
@@ -1132,100 +1077,26 @@ where
         command_ctx: ctx,
         execution_run_id,
         task_id,
-        project_slug,
         task_slug,
         cancel,
     } = exec.shared;
     let DirectTaskExecution {
-        agent_id,
-        task,
-        project_id: task_project_id,
-        ..
+        agent_id, request, ..
     } = exec;
-    let provider = harness.provider();
-    let manifest = provider.manifest().clone();
-    let mut builder = provider.build_agent_by_id(agent_id).await?;
-    if let Some(project) = manifest
-        .projects
-        .iter()
-        .find(|project| project.id == task_project_id)
-    {
-        builder = builder.with_project_context(project);
-    } else {
-        warn!(project_id = %task_project_id, %agent_id, "Project not found in manifest for direct task");
-    }
-    if let Some(ref location) = task.execution.project_location
-        && let Some(ref work_dir) = location.working_dir
-    {
-        builder = builder.with_work_dir(work_dir);
-    }
-    let runner = match harness
-        .session_memory_namespace(task_id)
-        .await?
-        .and_then(|namespace| MemoryScope::from_namespace(&namespace))
-    {
-        Some(scope) => builder.with_memory_scope(scope),
-        None => builder,
-    }
-    .build()
-    .await?;
+    let manifest = harness.provider().manifest_snapshot();
     let aname = agent_name(&manifest, agent_id);
-    let trace_target = ExecutionTraceTarget::Task {
-        project_slug: project_slug.to_string(),
-        task_slug: task_slug.to_string(),
-        step_name: None,
-        step_id: None,
-    };
-    let trace_agent = TraceAgent {
-        id: agent_id,
-        name: aname.clone(),
-    };
-    let trace_ref = harness
-        .execution_traces()
-        .trace_ref(&trace_target, &trace_agent);
-    let memory_namespace = task_memory_namespace(Some(&aname), project_slug);
-    let active_session = TaskSessionRecord {
-        task_id,
-        project_id: task_project_id,
-        agent_id: Some(agent_id),
-        memory_namespace: memory_namespace.as_deref(),
-        execution_run_id,
-        trace_ref,
-        status: SessionStatus::Active,
-    };
-    upsert_task_session(
-        harness,
-        &active_session,
-        None,
-        project_slug,
-        Some(&aname),
-        SessionUpsertMode::Await,
-    )
-    .await;
-    let trace_recorder = harness.execution_traces().writer(trace_target, trace_agent);
-
-    let task_started_at = std::time::Instant::now();
-    let mut handle = runner.run_stream(task).await?;
-
-    // Update the registry with the actual pause token from the execution handle
-    // so external pause/resume commands reach the turn loop.
-    if let Some(mut entry) = harness.executions().get_mut(&task_id) {
-        entry.pause = Some(handle.pause_token());
+    let mut request = request;
+    if request.slug.is_none() {
+        request = request.with_slug(task_slug.to_string());
     }
+    let task_started_at = std::time::Instant::now();
+    let mut stream = harness.task_stream(request).await?;
 
     loop {
         tokio::select! {
-            event = handle.recv() => {
+            event = stream.recv() => {
                 match event {
-                    Some(ev) => {
-                        trace_recorder.record(&ev);
-                        record_task_turn_event(
-                            harness,
-                            task_id,
-                            Some(agent_id),
-                            Some(&aname),
-                            &ev,
-                        );
+                    Some(HarnessEvent::Turn(ev)) => {
                         let agent_duration_ms = if matches!(ev, nenjo::TurnEvent::Done { .. }) {
                             Some(task_started_at.elapsed().as_millis() as u64)
                         } else {
@@ -1254,20 +1125,19 @@ where
                             let _ = ctx.response_sink.send(response);
                         }
                     }
+                    Some(HarnessEvent::DomainEntered { .. }) | Some(HarnessEvent::Routine(_)) => {}
                     None => break,
                 }
             }
             _ = cancel.cancelled() => {
-                handle.abort();
-                trace_recorder.finalize_with_error("Cancelled");
+                stream.cancel();
                 break;
             }
         }
     }
-    trace_recorder.finish().await;
 
     let outcome = if !cancel.is_cancelled() {
-        let output = handle.output().await?;
+        let output = stream.output().await?;
         TaskExecutionOutcome::success(output.input_tokens, output.output_tokens)
     } else {
         TaskExecutionOutcome::failed("Cancelled", 0, 0)

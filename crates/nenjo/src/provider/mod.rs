@@ -546,6 +546,10 @@ where
         Provider::manifest_snapshot(self)
     }
 
+    fn with_manifest(&self, manifest: Manifest) -> Self {
+        Provider::with_manifest(self, manifest)
+    }
+
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {
         self.tool_factory()
     }
@@ -583,6 +587,10 @@ where
 
     async fn build_agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError> {
         Provider::agent_by_name(self, name).await
+    }
+
+    fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError> {
+        Provider::routine_by_id(self, routine_id)
     }
 }
 

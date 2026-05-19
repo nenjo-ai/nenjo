@@ -1,35 +1,88 @@
 # nenjo-harness
 
-`nenjo-harness` is the platform-facing runtime wrapper around a typed
-`nenjo::Provider`. It owns command handlers, session runtime calls, manifest
-updates, execution trace hooks, response bridging, and preview formatting.
+`nenjo-harness` is the developer-facing runtime wrapper around a typed
+`Provider`. It runs chat, task, cron, and heartbeat requests while handling
+session runtime calls, transcripts, execution trace hooks, and scheduling.
 
-The harness does not own model provider construction. Model factories, tool
-factories, memory, event transport, auth, persistence, and process lifecycle are
-provided by the host.
+The crate re-exports the main Nenjo provider assembly types, so most embedded
+apps can import `nenjo_harness` alone for both provider construction and harness
+execution.
 
 ## Typed Runtime Assembly
 
 `Harness` keeps concrete runtime types through its builder:
 
 ```rust
-let harness = nenjo_harness::Harness::builder(provider)
+use nenjo_harness::{Harness, Provider};
+
+let provider = Provider::builder()
+    .with_manifest(manifest)
+    .with_model_factory(model_factory)
+    .with_tool_factory(tool_factory)
+    .build()
+    .await?;
+
+let harness = Harness::builder(provider)
     .with_session_runtime(session_runtime)
-    .with_execution_trace_runtime(trace_runtime)
-    .with_manifest_client(client)
-    .with_manifest_store(manifest_store)
-    .with_mcp_runtime(mcp_runtime)
     .build();
 ```
 
 Each `with_*` method transitions the builder to the concrete type passed in.
-Omitted integrations use no-op defaults.
+Omitted integrations use no-op defaults. Platform manifest synchronization,
+transport response routing, and worker lifecycle wiring live in `nenjo-worker`.
 
-## Dynamic Dispatch
+For local or embedded apps, enable `local-runtime` to use the built-in
+filesystem-backed session runtime:
 
-Production harness code is generic over provider and runtime traits. The only
-remaining `dyn nenjo::ModelProvider` references are test fakes that satisfy the
-current `nenjo` provider factory API.
+```toml
+nenjo-harness = { version = "...", features = ["local-runtime"] }
+```
 
-Tool execution remains dynamic in `nenjo`, which is intentional for open-ended
-tool sets.
+```rust
+use nenjo_harness::{FileSessionRuntime, FileSessionStores, Harness};
+
+let stores = FileSessionStores::new(".nenjo/state");
+let sessions = FileSessionRuntime::new(stores);
+let harness = Harness::builder(provider)
+    .with_session_runtime(sessions)
+    .build();
+```
+
+Session services are grouped behind `harness.sessions()`, including trace
+services:
+
+```rust
+let sessions = harness.sessions();
+let traces = sessions.traces();
+```
+
+## Requests
+
+Harness execution APIs take builder-style request values. Required arguments go
+in `new`; optional context is added with `with_*` methods:
+
+```rust
+use std::time::Duration;
+
+use nenjo_harness::{ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
+
+let output = harness
+    .chat(ChatRequest::new(session_id, "coder", "Fix the failing test")
+        .with_project(project_id))
+    .await?;
+
+let task_output = harness
+    .task(TaskRequest::new(task_id, project_id, "Fix login", "Repair OAuth callback")
+        .with_agent("coder")
+        .with_slug("fix-login"))
+    .await?;
+
+let mut cron = harness
+    .cron(CronRequest::new(routine_id, "0 */6 * * * *")
+        .with_project(project_id))
+    .await?;
+
+let mut heartbeat = harness
+    .heartbeat(HeartbeatRequest::new(agent_id, Duration::from_secs(300)))
+    .await?;
+```

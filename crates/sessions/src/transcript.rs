@@ -12,10 +12,16 @@ pub struct TranscriptQuery {
 }
 
 /// Transcript stores persist ordered evidence for a session.
+///
+/// Transcript events are the durable conversation record used for replay and
+/// user-facing history. Stores should assign monotonically increasing sequence
+/// numbers per session and return results in ascending sequence order.
 #[async_trait]
 pub trait TranscriptStore: Send + Sync {
+    /// Append one transcript event and return its assigned sequence number.
     async fn append(&self, event: SessionTranscriptEvent) -> Result<u64>;
 
+    /// Read transcript events for `session_id` using `query` filters.
     async fn read(
         &self,
         session_id: Uuid,

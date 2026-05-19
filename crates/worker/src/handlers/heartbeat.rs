@@ -14,9 +14,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use super::ResponseSender;
-use crate::execution_trace::ExecutionTraceRuntime;
-use crate::{ActiveExecution, ExecutionKind, Harness, HarnessProvider};
+use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
+use nenjo_harness::{Harness, ProviderRuntime};
+
+use crate::handlers::ResponseSender;
 
 #[derive(Clone)]
 pub struct HeartbeatCommandContext<S> {
@@ -34,36 +35,31 @@ pub struct HeartbeatRestoreRequest {
     pub start_paused: bool,
 }
 
-async fn session_memory_scope<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn session_memory_scope<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     session_id: Uuid,
 ) -> Option<nenjo::memory::MemoryScope>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     let namespace = harness
-        .session_memory_namespace(session_id)
+        .sessions()
+        .memory_namespace(session_id)
         .await
         .ok()
         .flatten()?;
     nenjo::memory::MemoryScope::from_namespace(&namespace)
 }
 
-async fn apply_session_memory_scope<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn apply_session_memory_scope<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     builder: nenjo::AgentBuilder<P>,
     session_id: Uuid,
 ) -> nenjo::AgentBuilder<P>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     match session_memory_scope(harness, session_id).await {
         Some(scope) => builder.with_memory_scope(scope),
@@ -105,19 +101,16 @@ fn heartbeat_memory_namespace(agent_name: &str) -> String {
     MemoryScope::new(agent_name, None).core
 }
 
-async fn load_heartbeat_task_state<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn load_heartbeat_task_state<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     agent_id: Uuid,
     fallback: HeartbeatTaskState,
 ) -> HeartbeatTaskState
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
-    let Some(record) = harness.get_session(agent_id).await.ok().flatten() else {
+    let Some(record) = harness.sessions().get(agent_id).await.ok().flatten() else {
         return fallback;
     };
     let scheduler = match record.scheduler {
@@ -149,16 +142,13 @@ struct HeartbeatSessionUpsert<'a> {
     last_completion: Option<RunCompletion>,
 }
 
-async fn upsert_heartbeat_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn upsert_heartbeat_session<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     worker_id: &str,
     params: HeartbeatSessionUpsert<'_>,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     let HeartbeatSessionUpsert {
         agent_id,
@@ -174,7 +164,8 @@ async fn upsert_heartbeat_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
         last_completion,
     } = params;
     if let Err(error) = harness
-        .upsert_scheduler_session(SchedulerSessionUpsert {
+        .sessions()
+        .upsert_scheduler(SchedulerSessionUpsert {
             session_id: agent_id,
             kind: SessionKind::HeartbeatSchedule,
             status,
@@ -216,17 +207,14 @@ fn emit_heartbeat_state<S>(
     });
 }
 
-async fn spawn_agent_heartbeat<P, SessionRt, TraceRt, StoreRt, McpRt, S>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn spawn_agent_heartbeat<P, SessionRt, S>(
+    harness: &Harness<P, SessionRt>,
     ctx: &HeartbeatCommandContext<S>,
     request: SpawnAgentHeartbeatRequest,
 ) -> Result<()>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
     S: ResponseSender + Clone + 'static,
 {
     let SpawnAgentHeartbeatRequest {
@@ -272,7 +260,7 @@ where
     let provider_cell = harness.provider_handle();
     let provider = harness.provider();
     let heartbeat_agent_name = provider
-        .manifest()
+        .manifest_snapshot()
         .agents
         .iter()
         .find(|agent| agent.id == agent_id)
@@ -414,7 +402,8 @@ where
                     }),
                 });
                 let _ = harness_for_run
-                    .update_session_checkpoint(SessionCheckpointUpdate {
+                    .sessions()
+                    .update_checkpoint(SessionCheckpointUpdate {
                         session_id: agent_id,
                         phase: ExecutionPhase::ExecutingTools,
                         worktree: None,
@@ -550,7 +539,8 @@ where
 
                 emit_heartbeat_state(&response_tx, agent_id, Some(completed_at), run_next_run_at);
                 let _ = harness_for_run
-                    .update_session_checkpoint(SessionCheckpointUpdate {
+                    .sessions()
+                    .update_checkpoint(SessionCheckpointUpdate {
                         session_id: agent_id,
                         phase: ExecutionPhase::Waiting,
                         worktree: None,
@@ -587,15 +577,18 @@ where
     Ok(())
 }
 
-impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
+#[async_trait::async_trait]
+/// Worker integration methods for agent heartbeat platform commands.
+///
+/// Heartbeats are scheduled by the worker because they depend on timers,
+/// recovery, response delivery, and process lifecycle. Each heartbeat run uses
+/// the harness/provider to invoke the configured agent.
+pub(crate) trait WorkerHeartbeatHarnessExt<S>
 where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+    S: ResponseSender,
 {
-    pub async fn handle_agent_heartbeat_enable<S>(
+    /// Enable or replace an interval-based heartbeat for an agent.
+    async fn handle_agent_heartbeat_enable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
         agent_id: Uuid,
@@ -604,7 +597,49 @@ where
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
-        S: ResponseSender + Clone + 'static,
+        S: Clone + 'static;
+
+    /// Restore a heartbeat from persisted scheduler session state.
+    async fn restore_agent_heartbeat(
+        &self,
+        ctx: &HeartbeatCommandContext<S>,
+        request: HeartbeatRestoreRequest,
+    ) -> Result<()>
+    where
+        S: Clone + 'static;
+
+    /// Disable an active heartbeat schedule.
+    async fn handle_agent_heartbeat_disable(
+        &self,
+        ctx: &HeartbeatCommandContext<S>,
+        agent_id: Uuid,
+    ) -> Result<()>;
+
+    /// Trigger an agent heartbeat immediately outside its regular interval.
+    async fn handle_agent_heartbeat_trigger(
+        &self,
+        ctx: &HeartbeatCommandContext<S>,
+        agent_id: Uuid,
+    ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<P, SessionRt, S> WorkerHeartbeatHarnessExt<S> for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender,
+{
+    async fn handle_agent_heartbeat_enable(
+        &self,
+        ctx: &HeartbeatCommandContext<S>,
+        agent_id: Uuid,
+        interval_str: &str,
+        timezone: Option<&str>,
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()>
+    where
+        S: Clone + 'static,
     {
         let interval = nenjo::routines::types::parse_duration(interval_str)?;
         spawn_agent_heartbeat(
@@ -622,13 +657,13 @@ where
         .await
     }
 
-    pub async fn restore_agent_heartbeat<S>(
+    async fn restore_agent_heartbeat(
         &self,
         ctx: &HeartbeatCommandContext<S>,
         request: HeartbeatRestoreRequest,
     ) -> Result<()>
     where
-        S: ResponseSender + Clone + 'static,
+        S: Clone + 'static,
     {
         let HeartbeatRestoreRequest {
             agent_id,
@@ -641,7 +676,8 @@ where
         } = request;
 
         let previous_output = self
-            .get_session(agent_id)
+            .sessions()
+            .get(agent_id)
             .await
             .ok()
             .flatten()
@@ -665,14 +701,11 @@ where
         .await
     }
 
-    pub async fn handle_agent_heartbeat_disable<S>(
+    async fn handle_agent_heartbeat_disable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
         agent_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
+    ) -> Result<()> {
         if let Some((_, exec)) = self.executions().remove(&agent_id) {
             exec.cancel.cancel();
             let _ = ctx
@@ -700,14 +733,11 @@ where
         Ok(())
     }
 
-    pub async fn handle_agent_heartbeat_trigger<S>(
+    async fn handle_agent_heartbeat_trigger(
         &self,
         ctx: &HeartbeatCommandContext<S>,
         agent_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
+    ) -> Result<()> {
         let execution_id = Uuid::new_v4();
         let _ = ctx.response_sink.send(Response::ExecutionStarted {
             id: execution_id,

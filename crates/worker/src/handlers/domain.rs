@@ -1,4 +1,4 @@
-//! Domain session handlers.
+//! Domain command integration.
 
 use anyhow::Result;
 use nenjo_sessions::{
@@ -8,67 +8,41 @@ use nenjo_sessions::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use nenjo_harness::{Harness, ProviderRuntime};
+
 use crate::event_bridge::agent_name;
-use crate::execution_trace::ExecutionTraceRuntime;
-use crate::{DomainSession, Harness, HarnessProvider};
 
 #[derive(Clone)]
 pub struct DomainCommandContext {
     pub worker_id: String,
 }
 
-impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
-where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
-{
-    /// Rebuild a persisted domain session against the current provider snapshot.
-    pub async fn rebuild_domain_session(
+#[async_trait::async_trait]
+/// Worker integration methods for domain-session platform commands.
+///
+/// Domain command handling coordinates the in-memory domain registry with
+/// persisted session/transcript state while leaving the core harness domain
+/// rebuild logic platform-neutral.
+pub(crate) trait WorkerDomainHarnessExt {
+    /// Exit an active domain session and append the appropriate chat transcript
+    /// marker when a parent chat session is known.
+    async fn handle_domain_exit(
         &self,
-        session_id: Uuid,
+        ctx: &DomainCommandContext,
         agent_id: Uuid,
-        project_id: Uuid,
-        domain_command: &str,
-    ) -> Result<DomainSession<P>> {
-        let provider = self.provider();
-        let mut builder = provider.build_agent_by_id(agent_id).await?;
-        if !project_id.is_nil() {
-            if let Some(project) = provider
-                .manifest()
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-            {
-                builder = builder.with_project_context(project);
-            } else {
-                warn!(%project_id, %agent_id, "Project not found in manifest for domain session rebuild");
-            }
-        }
-        let base_runner = builder.build().await?;
-        let domain_runner = base_runner.domain_expansion(domain_command).await?;
+        domain_session_id: Uuid,
+        chat_session_id: Option<Uuid>,
+    ) -> Result<()>;
+}
 
-        let mut instance = domain_runner.instance().clone();
-        instance.set_active_domain_session_id(session_id);
-
-        let runner = nenjo::AgentRunner::from_instance(
-            instance,
-            domain_runner.memory().cloned(),
-            domain_runner.memory_scope().cloned(),
-        );
-
-        Ok(DomainSession {
-            runner,
-            agent_id,
-            project_id,
-            domain_command: domain_command.to_string(),
-        })
-    }
-
+#[async_trait::async_trait]
+impl<P, SessionRt> WorkerDomainHarnessExt for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
     /// Exit a domain session by removing the stored runner.
-    pub async fn handle_domain_exit(
+    async fn handle_domain_exit(
         &self,
         ctx: &DomainCommandContext,
         agent_id: Uuid,
@@ -76,12 +50,13 @@ where
         chat_session_id: Option<Uuid>,
     ) -> Result<()> {
         let provider = self.provider();
-        let manifest = provider.manifest();
-        let aname = agent_name(manifest, agent_id);
+        let manifest = provider.manifest_snapshot();
+        let aname = agent_name(&manifest, agent_id);
 
         let session = self.domains().remove(&domain_session_id).map(|(_, v)| v);
         let _ = self
-            .transition_session(SessionTransition {
+            .sessions()
+            .transition(SessionTransition {
                 session_id: domain_session_id,
                 worker_id: ctx.worker_id.clone(),
                 phase: None,
@@ -102,6 +77,7 @@ where
 
                 if let Some(chat_session_id) = chat_session_id {
                     let _ = self
+                        .sessions()
                         .append_transcript(SessionTranscriptAppend {
                             session_id: chat_session_id,
                             turn_id: None,

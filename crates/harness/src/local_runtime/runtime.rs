@@ -16,18 +16,27 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::WorkerSessionStores;
+use super::event_store::FileSessionStores;
 
 #[async_trait]
-pub trait WorkerSessionRecoveryHandler: Send + Sync {
+/// Restores durable local sessions that were active when a process stopped.
+///
+/// `FileSessionRuntime` calls this hook during recovery for session kinds that
+/// require host integration, such as domain runners, cron schedules, and agent
+/// heartbeats. Embedded users can keep the default no-op methods when they only
+/// need persisted records/transcripts/traces.
+pub trait FileSessionRecoveryHandler: Send + Sync {
+    /// Recreate an in-memory domain session from a persisted domain record.
     async fn restore_domain_session(&self, _request: DomainSessionRecovery) -> Result<()> {
         Ok(())
     }
 
+    /// Re-register a persisted cron schedule with the host scheduler.
     async fn restore_cron_session(&self, _request: CronSessionRecovery) -> Result<()> {
         Ok(())
     }
 
+    /// Re-register a persisted agent heartbeat with the host scheduler.
     async fn restore_heartbeat_session(&self, _request: HeartbeatSessionRecovery) -> Result<()> {
         Ok(())
     }
@@ -62,7 +71,7 @@ pub struct HeartbeatSessionRecovery {
 }
 
 #[derive(Clone)]
-pub struct WorkerSessionRuntime {
+pub struct FileSessionRuntime {
     records: Arc<dyn SessionStore>,
     transcripts: Arc<dyn TranscriptStore>,
     traces: Arc<dyn TraceStore>,
@@ -72,11 +81,38 @@ pub struct WorkerSessionRuntime {
     worker_id: String,
 }
 
-impl WorkerSessionRuntime {
-    pub fn new<Coordinator>(
-        stores: WorkerSessionStores,
+impl FileSessionRuntime {
+    /// Create a local file-backed session runtime.
+    ///
+    /// This uses [`LocalSessionCoordinator`](super::LocalSessionCoordinator)
+    /// and the default host id `"local"`. Use [`with_host`](Self::with_host)
+    /// or [`with_coordinator`](Self::with_coordinator) when persisted leases
+    /// should identify a specific host or process.
+    pub fn new(stores: FileSessionStores) -> Self {
+        Self::with_host(stores, "local")
+    }
+
+    /// Create a local file-backed session runtime with an explicit host id.
+    ///
+    /// The host id is written into active session leases. A single-process app
+    /// can usually use [`new`](Self::new); named services and workers should
+    /// use this constructor or [`with_coordinator`](Self::with_coordinator).
+    pub fn with_host(stores: FileSessionStores, host_id: impl Into<String>) -> Self {
+        Self::with_coordinator(
+            stores,
+            super::coordinator::LocalSessionCoordinator::new(),
+            host_id,
+        )
+    }
+
+    /// Create a file-backed session runtime with an explicit coordinator.
+    ///
+    /// Worker processes use this to share the same lease identity and recovery
+    /// semantics as the rest of the runtime.
+    pub fn with_coordinator<Coordinator>(
+        stores: FileSessionStores,
         coordinator: Coordinator,
-        worker_id: impl Into<String>,
+        host_id: impl Into<String>,
     ) -> Self
     where
         Coordinator: SessionCoordinator + 'static,
@@ -88,11 +124,12 @@ impl WorkerSessionRuntime {
             checkpoints: Arc::new(stores.checkpoints),
             coordinator: Arc::new(coordinator),
             record_locks: Arc::new(DashMap::new()),
-            worker_id: worker_id.into(),
+            worker_id: host_id.into(),
         }
     }
 
-    pub(crate) fn worker_name(&self) -> &str {
+    /// Stable identifier written into active session leases.
+    pub fn host_id(&self) -> &str {
         &self.worker_id
     }
 
@@ -481,7 +518,7 @@ impl WorkerSessionRuntime {
     async fn recover_record(
         &self,
         record: SessionRecord,
-        handler: &(dyn WorkerSessionRecoveryHandler + Send + Sync),
+        handler: &(dyn FileSessionRecoveryHandler + Send + Sync),
     ) -> Result<()> {
         if !matches!(record.status, SessionStatus::Active | SessionStatus::Paused) {
             return Ok(());
@@ -551,7 +588,7 @@ impl WorkerSessionRuntime {
 
     pub async fn recover_reconcilable_sessions(
         &self,
-        handler: &(dyn WorkerSessionRecoveryHandler + Send + Sync),
+        handler: &(dyn FileSessionRecoveryHandler + Send + Sync),
     ) -> Result<()> {
         for record in self.records.list()? {
             if let Err(error) = self.recover_record(record.clone(), handler).await {
@@ -563,7 +600,7 @@ impl WorkerSessionRuntime {
 }
 
 #[async_trait]
-impl SessionRuntime for WorkerSessionRuntime {
+impl SessionRuntime for FileSessionRuntime {
     async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
         match event {
             SessionRuntimeEvent::SessionUpsert(upsert) => {
@@ -685,5 +722,249 @@ impl SessionRuntime for WorkerSessionRuntime {
     async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
         let _guard = self.record_guard(transition.session_id).await;
         self.transition_session_record(transition).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use nenjo_sessions::{
+        CheckpointStore, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionRecord,
+        SessionRefs, SessionRuntime, SessionStatus, SessionStore, SessionSummary,
+        SessionTranscriptAppend, SessionTranscriptChatMessage, SessionTranscriptEventPayload,
+        SessionTransition, TranscriptQuery, TranscriptState, WorktreeSnapshot,
+    };
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    use super::{FileSessionRecoveryHandler, FileSessionRuntime};
+    use crate::local_runtime::{FileSessionStores, LocalSessionCoordinator};
+
+    fn test_record(session_id: Uuid, status: SessionStatus) -> SessionRecord {
+        let now = Utc::now();
+        SessionRecord {
+            session_id,
+            kind: SessionKind::Task,
+            status,
+            project_id: None,
+            agent_id: None,
+            task_id: Some(session_id),
+            routine_id: None,
+            execution_run_id: None,
+            parent_session_id: None,
+            version: 0,
+            refs: SessionRefs {
+                transcript_ref: Some(format!("transcripts/{session_id}.jsonl")),
+                trace_ref: None,
+                checkpoint_ref: Some(format!("checkpoints/{session_id}.jsonl")),
+                memory_namespace: Some("agent_tester_core".to_string()),
+            },
+            lease: Default::default(),
+            scheduler: None,
+            domain: None,
+            summary: SessionSummary::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_updates_advance_sequence_and_preserve_worktree() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let checkpoints = stores.checkpoints.clone();
+        let runtime =
+            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let session_id = Uuid::new_v4();
+
+        records
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        assert!(
+            runtime
+                .update_checkpoint(SessionCheckpointUpdate {
+                    session_id,
+                    phase: ExecutionPhase::Preparing,
+                    active_tool_name: None,
+                    worktree: None,
+                    scheduler_runtime: None,
+                })
+                .await
+                .unwrap()
+        );
+
+        let worktree = WorktreeSnapshot {
+            repo_dir: "/repo".to_string(),
+            work_dir: "/repo/worktree".to_string(),
+            branch: "feature/test".to_string(),
+            target_branch: Some("main".to_string()),
+        };
+        assert!(
+            runtime
+                .update_checkpoint(SessionCheckpointUpdate {
+                    session_id,
+                    phase: ExecutionPhase::Finalizing,
+                    active_tool_name: None,
+                    worktree: Some(worktree.clone()),
+                    scheduler_runtime: None,
+                })
+                .await
+                .unwrap()
+        );
+
+        let checkpoint = checkpoints
+            .load_latest(session_id, Default::default())
+            .await
+            .unwrap()
+            .expect("checkpoint should exist");
+        assert_eq!(checkpoint.seq, 2);
+        assert_eq!(checkpoint.current_phase, Some(ExecutionPhase::Finalizing));
+        assert_eq!(checkpoint.worktree.unwrap().branch, worktree.branch);
+
+        let record = records.get(session_id).unwrap().unwrap();
+        assert_eq!(record.summary.last_checkpoint_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn transition_session_updates_phase_and_terminal_status() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let checkpoints = stores.checkpoints.clone();
+        let runtime =
+            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let session_id = Uuid::new_v4();
+
+        records
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        assert!(
+            runtime
+                .transition_session(SessionTransition {
+                    session_id,
+                    status: SessionStatus::Cancelled,
+                    worker_id: "test".to_string(),
+                    phase: Some(ExecutionPhase::Waiting),
+                })
+                .await
+                .unwrap()
+        );
+
+        let record = records.get(session_id).unwrap().unwrap();
+        assert_eq!(record.status, SessionStatus::Cancelled);
+        assert!(record.completed_at.is_some());
+        assert!(record.lease.lease_token.is_none());
+
+        let checkpoint = checkpoints
+            .load_latest(session_id, Default::default())
+            .await
+            .unwrap()
+            .expect("checkpoint should exist");
+        assert_eq!(checkpoint.current_phase, Some(ExecutionPhase::Waiting));
+    }
+
+    #[tokio::test]
+    async fn recover_reconcilable_sessions_moves_task_to_waiting() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let checkpoints = stores.checkpoints.clone();
+        let runtime =
+            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let session_id = Uuid::new_v4();
+
+        records
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+        checkpoints
+            .save(nenjo_sessions::SessionCheckpoint {
+                session_id,
+                seq: 1,
+                saved_at: Utc::now(),
+                current_phase: Some(ExecutionPhase::ExecutingTools),
+                active_tool_name: None,
+                worktree: None,
+                scheduler_runtime: None,
+            })
+            .await
+            .unwrap();
+
+        struct NoopRecovery;
+        #[async_trait::async_trait]
+        impl FileSessionRecoveryHandler for NoopRecovery {}
+
+        runtime
+            .recover_reconcilable_sessions(&NoopRecovery)
+            .await
+            .unwrap();
+
+        let updated = records.get(session_id).unwrap().unwrap();
+        assert_eq!(updated.status, SessionStatus::Waiting);
+        assert_eq!(
+            updated.summary.last_progress_message.as_deref(),
+            Some("recoverable from tool execution checkpoint")
+        );
+        assert!(updated.completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn transcript_events_persist_and_read_back() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let runtime =
+            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let session_id = Uuid::new_v4();
+
+        records
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        runtime
+            .append_transcript(SessionTranscriptAppend {
+                session_id,
+                turn_id: None,
+                payload: SessionTranscriptEventPayload::ChatMessage {
+                    message: SessionTranscriptChatMessage {
+                        role: "user".to_string(),
+                        content: "first".to_string(),
+                    },
+                },
+                transcript_state: TranscriptState::MidTurn,
+            })
+            .await
+            .unwrap();
+        runtime
+            .append_transcript(SessionTranscriptAppend {
+                session_id,
+                turn_id: None,
+                payload: SessionTranscriptEventPayload::ChatMessage {
+                    message: SessionTranscriptChatMessage {
+                        role: "assistant".to_string(),
+                        content: "second".to_string(),
+                    },
+                },
+                transcript_state: TranscriptState::Clean,
+            })
+            .await
+            .unwrap();
+
+        let events = runtime
+            .read_transcript(session_id, TranscriptQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+
+        let record = records.get(session_id).unwrap().unwrap();
+        assert_eq!(
+            record.refs.transcript_ref.as_deref(),
+            Some(format!("transcripts/{session_id}.jsonl").as_str())
+        );
+        assert_eq!(record.summary.last_transcript_seq, 2);
+        assert_eq!(record.summary.transcript_state, TranscriptState::Clean);
     }
 }

@@ -15,10 +15,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use super::ResponseSender;
+use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
+use nenjo_harness::{Harness, ProviderRuntime};
+
 use crate::event_bridge::{project_slug, routine_event_to_response};
-use crate::execution_trace::ExecutionTraceRuntime;
-use crate::{ActiveExecution, ExecutionKind, Harness, HarnessProvider};
+use crate::handlers::ResponseSender;
 
 #[derive(Clone)]
 pub struct CronCommandContext<S> {
@@ -38,16 +39,13 @@ struct CronSessionUpsert<'a> {
     last_completion: Option<RunCompletion>,
 }
 
-async fn upsert_cron_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+async fn upsert_cron_session<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     worker_id: &str,
     params: CronSessionUpsert<'_>,
 ) where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
     let CronSessionUpsert {
         routine_id,
@@ -61,7 +59,8 @@ async fn upsert_cron_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
         last_completion,
     } = params;
     if let Err(error) = harness
-        .upsert_scheduler_session(SchedulerSessionUpsert {
+        .sessions()
+        .upsert_scheduler(SchedulerSessionUpsert {
             session_id: routine_id,
             kind: SessionKind::CronSchedule,
             status,
@@ -86,19 +85,16 @@ async fn upsert_cron_session<P, SessionRt, TraceRt, StoreRt, McpRt>(
     }
 }
 
-fn resolve_cron_memory_namespace<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
+fn resolve_cron_memory_namespace<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
     routine_id: Uuid,
     project_id: Option<Uuid>,
 ) -> Option<String>
 where
-    P: HarnessProvider,
+    P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
 {
-    let manifest = harness.provider().manifest().clone();
+    let manifest = harness.provider().manifest_snapshot().clone();
     let routine = manifest
         .routines
         .iter()
@@ -142,16 +138,18 @@ fn emit_cron_heartbeat<S>(
     });
 }
 
-impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
+#[async_trait::async_trait]
+/// Worker integration methods for cron routine platform commands.
+///
+/// Cron scheduling is worker-owned because it depends on process lifecycle,
+/// timers, recovery, and platform response delivery. The worker uses the
+/// harness/provider to execute each scheduled routine run.
+pub(crate) trait WorkerCronHarnessExt<S>
 where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+    S: ResponseSender,
 {
-    /// Enable a cron schedule. Keyed by routine id for cancellation.
-    pub async fn handle_cron_enable<S>(
+    /// Enable or replace a cron schedule for a routine.
+    async fn handle_cron_enable(
         &self,
         ctx: &CronCommandContext<S>,
         routine_id: Uuid,
@@ -161,7 +159,43 @@ where
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
-        S: ResponseSender + Clone + 'static,
+        S: Clone + 'static;
+
+    /// Disable an active cron schedule.
+    async fn handle_cron_disable(
+        &self,
+        ctx: &CronCommandContext<S>,
+        routine_id: Uuid,
+    ) -> Result<()>;
+
+    /// Trigger a cron routine immediately outside its regular schedule.
+    async fn handle_cron_trigger(
+        &self,
+        ctx: &CronCommandContext<S>,
+        routine_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<P, SessionRt, S> WorkerCronHarnessExt<S> for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender,
+{
+    /// Enable a cron schedule. Keyed by routine id for cancellation.
+    async fn handle_cron_enable(
+        &self,
+        ctx: &CronCommandContext<S>,
+        routine_id: Uuid,
+        project_id: Option<Uuid>,
+        schedule: &str,
+        timezone: Option<&str>,
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()>
+    where
+        S: Clone + 'static,
     {
         info!(%routine_id, %schedule, timezone, "Enabling cron schedule");
 
@@ -205,7 +239,7 @@ where
 
         let routine_name = self
             .provider()
-            .manifest()
+            .manifest_snapshot()
             .routines
             .iter()
             .find(|routine| routine.id == routine_id)
@@ -276,7 +310,7 @@ where
                                                         let cycle_id = Uuid::new_v4();
                                                         current_cycle_id = Some(cycle_id);
                                                         current_cycle = Some(*cycle);
-                                                        let _ = harness.update_session_checkpoint(SessionCheckpointUpdate {
+                                                        let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
                                                             session_id: routine_id,
                                                             phase: ExecutionPhase::ExecutingTools,
                                                             worktree: None,
@@ -351,7 +385,7 @@ where
                                                                 },
                                                             )
                                                             .await;
-                                                            let _ = harness.update_session_checkpoint(SessionCheckpointUpdate {
+                                                            let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
                                                                 session_id: routine_id,
                                                                 phase: ExecutionPhase::Waiting,
                                                                 worktree: None,
@@ -372,7 +406,7 @@ where
                                                     execution_id,
                                                     None,
                                                     current_agent_id,
-                                                    provider.manifest(),
+                                                    &provider.manifest_snapshot(),
                                                 ) {
                                                     let _ = response_sink.send(response);
                                                 }
@@ -450,14 +484,11 @@ where
     }
 
     /// Disable a cron schedule by routine id.
-    pub async fn handle_cron_disable<S>(
+    async fn handle_cron_disable(
         &self,
         ctx: &CronCommandContext<S>,
         routine_id: Uuid,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
+    ) -> Result<()> {
         if let Some((_, exec)) = self.executions().remove(&routine_id) {
             exec.cancel.cancel();
             let _ = ctx.response_sink.send(Response::CronStopped { routine_id });
@@ -483,15 +514,12 @@ where
     }
 
     /// Trigger a routine manually.
-    pub async fn handle_cron_trigger<S>(
+    async fn handle_cron_trigger(
         &self,
         ctx: &CronCommandContext<S>,
         routine_id: Uuid,
         project_id: Option<Uuid>,
-    ) -> Result<()>
-    where
-        S: ResponseSender,
-    {
+    ) -> Result<()> {
         info!(%routine_id, "Manual cron trigger");
 
         let project_id = project_id.unwrap_or(Uuid::nil());
@@ -503,7 +531,7 @@ where
 
         let provider = self.provider();
         let routine_name = provider
-            .manifest()
+            .manifest_snapshot()
             .routines
             .iter()
             .find(|routine| routine.id == routine_id)
