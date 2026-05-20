@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 nenjo-worker = { workspace = true }
+nenjo-nenpm = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }

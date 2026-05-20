@@ -14,8 +14,10 @@ members = [
     "crates/eventbus",
     "crates/tool-api",
     "crates/models",
+    "crates/nenpm",
     "crates/xml",
     "bin",
+    "bin/nenpm",
     "testing/integrations",
 ]
 
@@ -33,6 +35,7 @@ nenjo-platform = { path = "crates/platform", version = "0.12.0" }
 nenjo-packages = { path = "crates/packages", version = "0.12.0" }
 nenjo-xml = { path = "crates/xml", version = "0.12.0" }
 nenjo-models = { path = "crates/models", version = "0.12.0" }
+nenjo-nenpm = { path = "crates/nenpm", version = "0.12.0" }
 nenjo-events = { path = "crates/events", version = "0.12.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.12.0" }
 nenjo-harness = { path = "crates/harness", version = "0.12.0" }
@@ -71,6 +74,7 @@ parking_lot = "0.12.5"
 quick-xml = "0.39.2"
 rand = "0.8.6"
 rand_core = "0.6"
+rayon = "1.11"
 regex = "1.12"
 reqwest = "0.13"
 rustls = { version = "0.23", default-features = false }

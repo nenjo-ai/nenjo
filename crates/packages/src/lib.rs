@@ -7,6 +7,8 @@
 //! platform services can share the same package parsing rules.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -326,6 +328,297 @@ impl PackageDescriptor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Repository manifest listing packages available from one source repository.
+pub struct PackageRepositoryManifest {
+    /// Repository schema string, for example `nenjo.repository.v1`.
+    pub schema: String,
+    /// Optional human-readable repository name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional repository description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Package names mapped to repository-relative package manifest paths.
+    #[serde(default)]
+    pub packages: BTreeMap<String, String>,
+}
+
+impl PackageRepositoryManifest {
+    /// Return the validated repository schema version.
+    pub fn schema_version(&self) -> Result<ManifestSchemaVersion> {
+        parse_package_file_schema(&self.schema, "repository")
+    }
+
+    /// Validate the repository schema, package names, and manifest paths.
+    pub fn validate(&self) -> Result<()> {
+        self.schema_version()?;
+        for (name, path) in &self.packages {
+            validate_package_name(name)
+                .with_context(|| format!("repository package '{name}' is invalid"))?;
+            validate_source_path(path)
+                .with_context(|| format!("repository package '{name}' has invalid path"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Multi-module package manifest used by the nenpm package model.
+pub struct ModulePackageManifest {
+    /// Package schema string, for example `nenjo.package.v1`.
+    pub schema: String,
+    /// Registry package name, for example `@nenjo/nenji`.
+    pub name: String,
+    /// Semantic version published by the package author.
+    pub version: String,
+    /// Optional human-readable package description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Package-level dependency requirements keyed by package name.
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, String>,
+    /// Manifest modules included by this package.
+    #[serde(default)]
+    pub modules: Vec<PackageModule>,
+    /// Optional public aliases for selected modules.
+    #[serde(default)]
+    pub exports: BTreeMap<String, PackageExport>,
+    /// Adapter-specific or UI-specific package metadata.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+impl ModulePackageManifest {
+    /// Return the validated package schema version.
+    pub fn schema_version(&self) -> Result<ManifestSchemaVersion> {
+        Ok(PackageFileSchema::parse_descriptor(&self.schema)?.version())
+    }
+
+    /// Validate the package manifest and package-relative module paths.
+    pub fn validate(&self, path: &str) -> Result<()> {
+        self.schema_version()
+            .with_context(|| format!("{path} has unsupported package schema"))?;
+        validate_package_name(&self.name)
+            .with_context(|| format!("{path} has invalid package name"))?;
+        if self.version.trim().is_empty() {
+            bail!("{path} has empty package version");
+        }
+        for name in self.dependencies.keys() {
+            validate_package_name(name)
+                .with_context(|| format!("{path} has invalid dependency '{name}'"))?;
+        }
+        let mut module_paths = BTreeSet::new();
+        for module in &self.modules {
+            validate_source_path(&module.path)
+                .with_context(|| format!("{path} has invalid module path '{}'", module.path))?;
+            if !module_paths.insert(module.path.clone()) {
+                bail!("{path} declares duplicate module path '{}'", module.path);
+            }
+        }
+        for (name, export) in &self.exports {
+            validate_export_name(name)
+                .with_context(|| format!("{path} has invalid export '{name}'"))?;
+            ModuleTarget::parse(&export.path)
+                .with_context(|| format!("{path} has invalid export path '{}'", export.path))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// A manifest file included by a package.
+pub struct PackageModule {
+    /// Package-relative path to a resource manifest.
+    pub path: String,
+    /// Module-specific metadata reserved for future use.
+    pub metadata: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for PackageModule {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Path(String),
+            Object {
+                path: String,
+                #[serde(default)]
+                metadata: serde_json::Value,
+            },
+        }
+
+        match Input::deserialize(deserializer)? {
+            Input::Path(path) => Ok(Self {
+                path,
+                metadata: serde_json::Value::Null,
+            }),
+            Input::Object { path, metadata } => Ok(Self { path, metadata }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// Optional stable public alias for a package module.
+pub struct PackageExport {
+    /// Package-relative path to the exported module manifest.
+    pub path: String,
+    /// Export metadata reserved for future use.
+    pub metadata: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for PackageExport {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Path(String),
+            Object {
+                path: String,
+                #[serde(default)]
+                metadata: serde_json::Value,
+            },
+        }
+
+        match Input::deserialize(deserializer)? {
+            Input::Path(path) => Ok(Self {
+                path,
+                metadata: serde_json::Value::Null,
+            }),
+            Input::Object { path, metadata } => Ok(Self { path, metadata }),
+        }
+    }
+}
+
+fn parse_module_file(content: &str, source_path: &str) -> Result<Vec<ResourceManifest>> {
+    let value = parse_json_or_yaml(content)
+        .with_context(|| format!("failed to parse module file {source_path}"))?;
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("{source_path} is missing schema"))?;
+    if schema == "nenjo.modules.v1" {
+        let bundle: ModuleBundle = serde_json::from_value(value)
+            .with_context(|| format!("failed to parse module bundle {source_path}"))?;
+        bundle.validate(source_path)?;
+        Ok(bundle.resources)
+    } else {
+        let manifest: ResourceManifest = serde_json::from_value(value)
+            .with_context(|| format!("failed to parse resource manifest {source_path}"))?;
+        Ok(vec![manifest])
+    }
+}
+
+fn extract_module_imports(manifest: &serde_json::Value) -> Vec<ModuleImport> {
+    let Some(imports) = manifest
+        .get("imports")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for (surface, value) in imports {
+        match value {
+            serde_json::Value::String(reference) => {
+                out.push(ModuleImport {
+                    surface: surface.clone(),
+                    reference: reference.clone(),
+                });
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let Some(reference) = item.as_str() {
+                        out.push(ModuleImport {
+                            surface: surface.clone(),
+                            reference: reference.to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Package-relative module target with an optional resource selector.
+pub struct ModuleTarget {
+    /// Package-relative module file path.
+    pub path: String,
+    /// Optional resource name selector inside a multi-resource module file.
+    pub resource: Option<String>,
+}
+
+impl ModuleTarget {
+    /// Parse a module target such as `agents/nenji.yaml#nenji`.
+    pub fn parse(value: &str) -> Result<Self> {
+        let raw = value.trim();
+        let (path, resource) = match raw.split_once('#') {
+            Some((path, resource)) => {
+                if resource.trim().is_empty() || resource.contains('/') {
+                    bail!("invalid module resource selector '{resource}'");
+                }
+                (path, Some(resource.trim().to_string()))
+            }
+            None => (raw, None),
+        };
+        Ok(Self {
+            path: validate_source_path(path)?,
+            resource,
+        })
+    }
+
+    /// Return the canonical module target key.
+    pub fn key(&self) -> String {
+        match &self.resource {
+            Some(resource) => format!("{}#{resource}", self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Bundle envelope for a module file that contains multiple resource manifests.
+pub struct ModuleBundle {
+    /// Bundle schema string, for example `nenjo.modules.v1`.
+    pub schema: String,
+    /// Resource manifests included in this module file.
+    #[serde(default)]
+    pub resources: Vec<ResourceManifest>,
+}
+
+impl ModuleBundle {
+    /// Return the validated bundle schema version.
+    pub fn schema_version(&self) -> Result<ManifestSchemaVersion> {
+        parse_package_file_schema(&self.schema, "modules")
+    }
+
+    /// Validate bundle schema and all included resource manifests.
+    pub fn validate(&self, path: &str) -> Result<()> {
+        self.schema_version()
+            .with_context(|| format!("{path} has unsupported module bundle schema"))?;
+        let mut names = BTreeSet::new();
+        for resource in &self.resources {
+            resource
+                .name()
+                .with_context(|| format!("failed to validate bundled resource in {path}"))?;
+            let name = resource.name().expect("resource name was just validated");
+            if !names.insert(name.to_string()) {
+                bail!("{path} declares duplicate bundled resource '{name}'");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Resource manifest envelope stored at a package descriptor's `entry`.
 pub struct ResourceManifest {
     /// Resource schema string, for example `nenjo.agent.v1`.
@@ -398,6 +691,20 @@ impl ResourceManifest {
     pub fn selector(&self) -> Option<&str> {
         self.selector.as_deref().or(self.root_uri())
     }
+
+    /// Return structured module imports declared by this resource manifest.
+    pub fn imports(&self) -> Vec<ModuleImport> {
+        extract_module_imports(&self.manifest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Structured resource-level import discovered from a manifest body.
+pub struct ModuleImport {
+    /// Import surface, such as `abilities`, `domains`, `mcp_servers`, or `context`.
+    pub surface: String,
+    /// Raw reference string supplied by the manifest author.
+    pub reference: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +732,142 @@ pub struct ResolvedResource {
     pub descriptor: PackageDescriptor,
     /// Parsed resource manifest envelope.
     pub manifest: ResourceManifest,
+}
+
+#[derive(Debug, Clone)]
+/// Resolved package module with inferred runtime information.
+pub struct ResolvedModule {
+    /// Package name that owns this module.
+    pub package_name: String,
+    /// Package version that owns this module.
+    pub package_version: String,
+    /// Package-relative module manifest path.
+    pub path: String,
+    /// Repository-relative module manifest path.
+    pub source_path: String,
+    /// SHA-256 hash of the module manifest content.
+    pub hash: String,
+    /// Resource kind inferred from the module manifest schema.
+    pub kind: PackageKind,
+    /// Parsed module manifest.
+    pub manifest: ResourceManifest,
+    /// Structured resource imports declared by this module.
+    pub imports: Vec<ModuleImport>,
+}
+
+impl ResolvedModule {
+    /// Return the validated resource name inferred from the module manifest body.
+    pub fn name(&self) -> &str {
+        self.manifest
+            .name()
+            .expect("resolved module manifest was validated")
+    }
+
+    /// Return the manifest schema string.
+    pub fn schema(&self) -> &str {
+        &self.manifest.schema
+    }
+
+    /// Return the canonical key for this resolved module resource.
+    pub fn key(&self) -> String {
+        format!("{}#{}", self.path, self.name())
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Resolved package manifest and all included modules.
+pub struct ResolvedPackage {
+    /// Repository package name.
+    pub name: String,
+    /// Repository-relative package manifest path.
+    pub path: String,
+    /// Package version.
+    pub version: String,
+    /// SHA-256 hash of the package manifest content.
+    pub hash: String,
+    /// Parsed package manifest.
+    pub manifest: ModulePackageManifest,
+    /// Resolved modules keyed by package-relative module path.
+    pub modules: BTreeMap<String, ResolvedModule>,
+}
+
+impl ResolvedPackage {
+    /// Return package dependencies as a name-to-version-requirement map.
+    pub fn dependencies(&self) -> &BTreeMap<String, String> {
+        &self.manifest.dependencies
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Dependency graph for a root package and all resolved package dependencies.
+pub struct ResolvedPackageGraph {
+    /// Package name requested by the installer.
+    pub root_package: String,
+    /// Resolved packages keyed by package name.
+    pub packages: BTreeMap<String, ResolvedPackage>,
+}
+
+impl ResolvedPackageGraph {
+    /// Return dependency-first package install order with the root package last.
+    pub fn topo_order(&self) -> Result<Vec<String>> {
+        fn visit(
+            name: &str,
+            graph: &BTreeMap<String, ResolvedPackage>,
+            temp: &mut BTreeSet<String>,
+            perm: &mut BTreeSet<String>,
+            out: &mut Vec<String>,
+        ) -> Result<()> {
+            if perm.contains(name) {
+                return Ok(());
+            }
+            if !temp.insert(name.to_string()) {
+                bail!("dependency cycle includes {name}");
+            }
+            let package = graph
+                .get(name)
+                .ok_or_else(|| anyhow!("dependency {name} was not resolved"))?;
+            for dependency in package.dependencies().keys() {
+                visit(dependency, graph, temp, perm, out)?;
+            }
+            temp.remove(name);
+            perm.insert(name.to_string());
+            out.push(name.to_string());
+            Ok(())
+        }
+
+        let mut out = Vec::new();
+        visit(
+            &self.root_package,
+            &self.packages,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            &mut out,
+        )?;
+        if let Some(pos) = out.iter().position(|name| name == &self.root_package) {
+            let root = out.remove(pos);
+            out.push(root);
+        }
+        Ok(out)
+    }
+
+    /// Validate package dependency version requirements against resolved versions.
+    pub fn validate_versions(&self) -> Result<()> {
+        for (name, package) in &self.packages {
+            for (dependency, required) in package.dependencies() {
+                let resolved = self
+                    .packages
+                    .get(dependency)
+                    .ok_or_else(|| anyhow!("{name} depends on unresolved {dependency}"))?;
+                if !version_satisfies(&resolved.version, required) {
+                    bail!(
+                        "{name} requires {dependency} version {required}, got {}",
+                        resolved.version
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ResolvedResource {
@@ -700,6 +1143,180 @@ impl GitHubFetcher {
     }
 }
 
+#[derive(Debug, Clone)]
+/// Filesystem-backed package resolver for local package development and tests.
+pub struct LocalPackageResolver {
+    root: PathBuf,
+    repository_path: String,
+}
+
+impl LocalPackageResolver {
+    /// Create a local resolver rooted at a package repository directory.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            repository_path: "packages.yaml".to_string(),
+        }
+    }
+
+    /// Create a local resolver with an explicit repository manifest path.
+    pub fn with_repository_path(
+        root: impl Into<PathBuf>,
+        repository_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            repository_path: repository_path.into(),
+        }
+    }
+
+    /// Return the local repository root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Return the configured repository manifest path.
+    pub fn repository_path(&self) -> &str {
+        &self.repository_path
+    }
+
+    /// Read a repository-relative text file from the local package repository.
+    pub fn read_text(&self, path: &str) -> Result<String> {
+        let path = validate_source_path(path)?;
+        fs::read_to_string(self.root.join(&path))
+            .with_context(|| format!("failed to read local package file {path}"))
+    }
+
+    /// Load and validate the local repository manifest.
+    pub fn load_repository(&self) -> Result<PackageRepositoryManifest> {
+        let content = self.read_text(&self.repository_path)?;
+        let repository: PackageRepositoryManifest =
+            parse_json_or_yaml_as(&content).context("failed to parse package repository")?;
+        repository
+            .validate()
+            .context("failed to validate package repository")?;
+        Ok(repository)
+    }
+
+    /// Resolve a package and its dependencies from the local repository.
+    pub fn resolve_package_graph(&self, root_package: &str) -> Result<ResolvedPackageGraph> {
+        validate_package_name(root_package)?;
+        let repository = self.load_repository()?;
+        let mut packages = BTreeMap::new();
+        let mut stack = vec![root_package.to_string()];
+
+        while let Some(name) = stack.pop() {
+            if packages.contains_key(&name) {
+                continue;
+            }
+            let path = repository
+                .packages
+                .get(&name)
+                .ok_or_else(|| anyhow!("package {name} is not listed in repository"))?;
+            let package = self.resolve_package_manifest(path)?;
+            if package.name != name {
+                bail!(
+                    "repository maps {name} to {path}, but package manifest declares {}",
+                    package.name
+                );
+            }
+            for dependency in package.dependencies().keys() {
+                stack.push(dependency.clone());
+            }
+            packages.insert(name, package);
+        }
+
+        let graph = ResolvedPackageGraph {
+            root_package: root_package.to_string(),
+            packages,
+        };
+        graph.validate_versions()?;
+        Ok(graph)
+    }
+
+    /// Resolve one package manifest and its included modules without following dependencies.
+    pub fn resolve_package_manifest(&self, package_path: &str) -> Result<ResolvedPackage> {
+        let package_path = validate_source_path(package_path)?;
+        let package_content = self.read_text(&package_path)?;
+        let manifest: ModulePackageManifest = parse_json_or_yaml_as(&package_content)
+            .with_context(|| format!("failed to parse package manifest {package_path}"))?;
+        manifest.validate(&package_path)?;
+
+        let mut modules = BTreeMap::new();
+        for module in &manifest.modules {
+            let source_path = package_module_source_path(&package_path, &module.path)?;
+            let module_content = self.read_text(&source_path)?;
+            let resources = parse_module_file(&module_content, &source_path)?;
+            let multiple_resources = resources.len() > 1;
+            for resource_manifest in resources {
+                let kind = resource_manifest.kind()?;
+                resource_manifest
+                    .name()
+                    .with_context(|| format!("failed to validate module manifest {source_path}"))?;
+                let resource_name = resource_manifest
+                    .name()
+                    .expect("resource name was just validated")
+                    .to_string();
+                let imports = resource_manifest.imports();
+                let resolved = ResolvedModule {
+                    package_name: manifest.name.clone(),
+                    package_version: manifest.version.clone(),
+                    path: module.path.clone(),
+                    source_path: source_path.clone(),
+                    hash: sha256_hex(module_content.as_bytes()),
+                    kind,
+                    manifest: resource_manifest,
+                    imports,
+                };
+                let resource_key = format!("{}#{resource_name}", module.path);
+                if modules
+                    .insert(resource_key.clone(), resolved.clone())
+                    .is_some()
+                {
+                    bail!("{source_path} declares duplicate resolved module '{resource_key}'");
+                }
+                if !multiple_resources && modules.insert(module.path.clone(), resolved).is_some() {
+                    bail!(
+                        "{source_path} declares duplicate resolved module '{}'",
+                        module.path
+                    );
+                }
+            }
+        }
+
+        for (name, export) in &manifest.exports {
+            let target = ModuleTarget::parse(&export.path)?;
+            if target.resource.is_some() {
+                if !modules.contains_key(&target.key()) {
+                    bail!(
+                        "{package_path} export {name} points at '{}' which is not listed in modules",
+                        export.path
+                    );
+                }
+            } else if !modules.contains_key(&target.path)
+                && !modules.contains_key(&target.key())
+                && !modules
+                    .keys()
+                    .any(|key| key.starts_with(&format!("{}#", target.path)))
+            {
+                bail!(
+                    "{package_path} export {name} points at '{}' which is not listed in modules",
+                    export.path
+                );
+            }
+        }
+
+        Ok(ResolvedPackage {
+            name: manifest.name.clone(),
+            path: package_path,
+            version: manifest.version.clone(),
+            hash: sha256_hex(package_content.as_bytes()),
+            manifest,
+            modules,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Lockfile for an installed package graph.
 pub struct PackageLock {
@@ -747,6 +1364,44 @@ pub fn validate_source_path(path: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Validate a registry package name.
+pub fn validate_package_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        bail!("invalid package name '{name}'");
+    }
+    if trimmed.contains("..") || trimmed.contains('#') || trimmed.contains(':') {
+        bail!("invalid package name '{name}'");
+    }
+    if trimmed.starts_with('@') {
+        let Some((scope, package)) = trimmed.split_once('/') else {
+            bail!("scoped package name '{name}' must include a package segment");
+        };
+        if scope.len() <= 1 || package.is_empty() || package.contains('/') {
+            bail!("invalid scoped package name '{name}'");
+        }
+    } else if trimmed.contains('/') {
+        bail!("unscoped package name '{name}' must not include '/'");
+    }
+    Ok(())
+}
+
+/// Validate a package export name.
+pub fn validate_export_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed == "." {
+        return Ok(());
+    }
+    if !trimmed.starts_with("./")
+        || trimmed.contains("..")
+        || trimmed.ends_with('/')
+        || trimmed.trim_start_matches("./").is_empty()
+    {
+        bail!("invalid export name '{name}'");
+    }
+    Ok(())
+}
+
 /// Resolve a package descriptor's entry filename to a repository-relative path.
 pub fn package_entry_path(package_path: &str, entry: &str) -> Result<String> {
     let package_path = validate_source_path(package_path)?;
@@ -758,6 +1413,16 @@ pub fn package_entry_path(package_path: &str, entry: &str) -> Result<String> {
         bail!("package descriptor path '{package_path}' must include a directory");
     };
     validate_source_path(&format!("{dir}/{entry}"))
+}
+
+/// Resolve a package-relative module path to a repository-relative source path.
+pub fn package_module_source_path(package_path: &str, module_path: &str) -> Result<String> {
+    let package_path = validate_source_path(package_path)?;
+    let module_path = validate_source_path(module_path)?;
+    let Some((dir, _)) = package_path.rsplit_once('/') else {
+        return Ok(module_path);
+    };
+    validate_source_path(&format!("{dir}/{module_path}"))
 }
 
 /// Return whether a package version satisfies an exact or caret major requirement.
@@ -797,6 +1462,24 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_repo(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("nenjo-packages-{name}-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_file(root: &Path, path: &str, content: &str) {
+        let full_path = root.join(path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(full_path, content).unwrap();
+    }
 
     fn resolved_resource(
         path: &str,
@@ -946,6 +1629,78 @@ entry: ability.yaml
     }
 
     #[test]
+    fn validates_repository_manifest_schema() {
+        let repository: PackageRepositoryManifest = parse_json_or_yaml_as(
+            r#"
+schema: nenjo.repository.v1
+packages:
+  "@nenjo/core": packages/core/nenjo.package.yaml
+  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            repository.schema_version().unwrap(),
+            ManifestSchemaVersion::V1
+        );
+        repository.validate().unwrap();
+    }
+
+    #[test]
+    fn parses_module_package_manifest_with_string_modules_and_exports() {
+        let package: ModulePackageManifest = parse_json_or_yaml_as(
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/nenji"
+version: "0.1.0"
+dependencies:
+  "@nenjo/core": "^0.1.0"
+modules:
+  - agents/nenji.yaml
+  - path: abilities/design_agent.yaml
+    metadata:
+      optional: false
+exports:
+  ".": agents/nenji.yaml
+  "./design-agent":
+    path: abilities/design_agent.yaml
+"#,
+        )
+        .unwrap();
+        package
+            .validate("packages/nenji/nenjo.package.yaml")
+            .unwrap();
+        assert_eq!(package.modules[0].path, "agents/nenji.yaml");
+        assert_eq!(package.modules[1].path, "abilities/design_agent.yaml");
+        assert_eq!(package.exports["."].path, "agents/nenji.yaml");
+        assert_eq!(
+            package.exports["./design-agent"].path,
+            "abilities/design_agent.yaml"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_export_names() {
+        let package: ModulePackageManifest = parse_json_or_yaml_as(
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/bad"
+version: "0.1.0"
+modules:
+  - agents/bad.yaml
+exports:
+  "agent": agents/bad.yaml
+"#,
+        )
+        .unwrap();
+        let err = package
+            .validate("packages/bad/nenjo.package.yaml")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid export"));
+    }
+
+    #[test]
     fn reads_resource_manifest_body_name() {
         let manifest: ResourceManifest = parse_json_or_yaml_as(
             r#"
@@ -1066,6 +1821,19 @@ manifest:
     }
 
     #[test]
+    fn package_module_source_path_resolves_package_relative_paths() {
+        assert_eq!(
+            package_module_source_path("packages/nenji/nenjo.package.yaml", "agents/nenji.yaml")
+                .unwrap(),
+            "packages/nenji/agents/nenji.yaml"
+        );
+        assert!(
+            package_module_source_path("packages/nenji/nenjo.package.yaml", "../agent.yaml")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn graph_topo_order_places_dependencies_before_root() {
         let root_path = "packages/root/package.yaml".to_string();
         let dependency_path = "packages/dependency/package.yaml".to_string();
@@ -1164,5 +1932,205 @@ manifest:
         };
         let err = graph.validate_versions().unwrap_err().to_string();
         assert!(err.contains("requires packages/dependency/package.yaml version ^2.0.0"));
+    }
+
+    #[test]
+    fn local_resolver_resolves_package_modules_and_dependencies() {
+        let root = temp_repo("local-resolver");
+        write_file(
+            &root,
+            "packages.yaml",
+            r#"
+schema: nenjo.repository.v1
+packages:
+  "@nenjo/core": packages/core/nenjo.package.yaml
+  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/core/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/core"
+version: "0.1.0"
+modules:
+  - context_blocks/methodology.yaml
+exports:
+  "./methodology": context_blocks/methodology.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/core/context_blocks/methodology.yaml",
+            r#"
+schema: nenjo.context_block.v1
+manifest:
+  name: methodology
+  template: think clearly
+"#,
+        );
+        write_file(
+            &root,
+            "packages/nenji/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/nenji"
+version: "0.1.0"
+dependencies:
+  "@nenjo/core": "^0.1.0"
+modules:
+  - agents/nenji.yaml
+  - abilities/design_agent.yaml
+exports:
+  ".": agents/nenji.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/nenji/agents/nenji.yaml",
+            r#"
+schema: nenjo.agent.v1
+manifest:
+  name: nenji
+"#,
+        );
+        write_file(
+            &root,
+            "packages/nenji/abilities/design_agent.yaml",
+            r#"
+schema: nenjo.ability.v1
+manifest:
+  name: design_agent
+"#,
+        );
+
+        let graph = LocalPackageResolver::new(&root)
+            .resolve_package_graph("@nenjo/nenji")
+            .unwrap();
+        assert_eq!(
+            graph.topo_order().unwrap(),
+            vec!["@nenjo/core".to_string(), "@nenjo/nenji".to_string()]
+        );
+        let nenji = &graph.packages["@nenjo/nenji"];
+        assert_eq!(nenji.modules.len(), 4);
+        assert_eq!(
+            nenji.modules["agents/nenji.yaml"].source_path,
+            "packages/nenji/agents/nenji.yaml"
+        );
+        assert_eq!(nenji.modules["agents/nenji.yaml"].kind, PackageKind::Agent);
+        assert_eq!(nenji.modules["agents/nenji.yaml"].name(), "nenji");
+        assert_eq!(
+            graph.packages["@nenjo/core"].modules["context_blocks/methodology.yaml"].kind,
+            PackageKind::ContextBlock
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_resolver_rejects_export_to_unlisted_module() {
+        let root = temp_repo("bad-export");
+        write_file(
+            &root,
+            "packages.yaml",
+            r#"
+schema: nenjo.repository.v1
+packages:
+  "@nenjo/bad": packages/bad/nenjo.package.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/bad/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/bad"
+version: "0.1.0"
+modules:
+  - agents/bad.yaml
+exports:
+  ".": agents/other.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/bad/agents/bad.yaml",
+            r#"
+schema: nenjo.agent.v1
+manifest:
+  name: bad
+"#,
+        );
+
+        let err = LocalPackageResolver::new(&root)
+            .resolve_package_graph("@nenjo/bad")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("which is not listed in modules"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_resolver_rejects_unsatisfied_package_dependency() {
+        let root = temp_repo("bad-version");
+        write_file(
+            &root,
+            "packages.yaml",
+            r#"
+schema: nenjo.repository.v1
+packages:
+  "@nenjo/core": packages/core/nenjo.package.yaml
+  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/core/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/core"
+version: "1.0.0"
+modules:
+  - context_blocks/core.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/core/context_blocks/core.yaml",
+            r#"
+schema: nenjo.context_block.v1
+manifest:
+  name: core
+"#,
+        );
+        write_file(
+            &root,
+            "packages/nenji/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo/nenji"
+version: "0.1.0"
+dependencies:
+  "@nenjo/core": "^2.0.0"
+modules:
+  - agents/nenji.yaml
+"#,
+        );
+        write_file(
+            &root,
+            "packages/nenji/agents/nenji.yaml",
+            r#"
+schema: nenjo.agent.v1
+manifest:
+  name: nenji
+"#,
+        );
+
+        let err = LocalPackageResolver::new(&root)
+            .resolve_package_graph("@nenjo/nenji")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires @nenjo/core version ^2.0.0"));
+        fs::remove_dir_all(root).unwrap();
     }
 }
