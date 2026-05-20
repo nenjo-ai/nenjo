@@ -1,0 +1,9 @@
+schema: nenjo.package.v1
+name: "@acme/agent"
+version: "0.2.0"
+dependencies:
+  "@acme/core": "^0.2.0"
+modules:
+  - agents/support.yaml
+exports:
+  ".": agents/support.yaml#support_agent

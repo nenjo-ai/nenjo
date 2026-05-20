@@ -1,0 +1,8 @@
+schema: nenjo.package.v1
+name: "@acme/core"
+version: "0.1.0"
+modules:
+  - context/core.yaml
+exports:
+  "./methodology": context/core.yaml#methodology
+  "./tool-usage": context/core.yaml#tool_usage

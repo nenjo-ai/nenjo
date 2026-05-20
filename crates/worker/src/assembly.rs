@@ -187,10 +187,29 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
         };
         let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
         if selector.starts_with("git://") {
-            packs.push(KnowledgePackEntry::new(selector, pack));
+            if let Some(package_selector) = package_knowledge_selector(&selector) {
+                packs.push(KnowledgePackEntry::new(package_selector, pack));
+            } else {
+                packs.push(KnowledgePackEntry::new(selector, pack));
+            }
         }
     }
     packs
+}
+
+fn package_knowledge_selector(selector: &str) -> Option<String> {
+    let path = selector.strip_prefix("git://")?;
+    let mut parts = path.split('/');
+    parts.next()?;
+    let repo = parts.next()?;
+    let package = parts.collect::<Vec<_>>();
+    if repo != "packages" || package.len() < 2 {
+        return None;
+    }
+    let (scope, name) = (package[0], package[1]);
+    let scope = scope.trim_start_matches('@').replace('-', "_");
+    let name = name.trim_start_matches('@').replace('-', "_");
+    Some(format!("pkg.{scope}.{name}.knowledge"))
 }
 
 fn find_library_pack_dirs(root: &Path) -> Vec<PathBuf> {
@@ -239,4 +258,30 @@ fn build_platform_tool_services(
         cached_org_id,
         config.config_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_knowledge_selector;
+
+    #[test]
+    fn package_knowledge_selector_uses_pkg_namespace_for_package_repo() {
+        assert_eq!(
+            package_knowledge_selector("git://nenjo-ai/packages/nenjo/core"),
+            Some("pkg.nenjo.core.knowledge".to_string())
+        );
+    }
+
+    #[test]
+    fn package_knowledge_selector_normalizes_template_segments() {
+        assert_eq!(
+            package_knowledge_selector("git://nenjo-ai/packages/nenjo-ai/core-pack"),
+            Some("pkg.nenjo_ai.core_pack.knowledge".to_string())
+        );
+    }
+
+    #[test]
+    fn package_knowledge_selector_ignores_non_package_git_packs() {
+        assert_eq!(package_knowledge_selector("git://acme/docs/team"), None);
+    }
 }

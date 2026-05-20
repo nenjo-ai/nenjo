@@ -1,0 +1,5 @@
+schema: nenjo.package.v1
+name: "@acme/broken"
+version: "0.1.0"
+modules:
+  - abilities/design.yaml

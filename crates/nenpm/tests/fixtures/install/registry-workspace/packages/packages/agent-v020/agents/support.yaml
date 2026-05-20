@@ -1,0 +1,9 @@
+schema: nenjo.agent.v1
+manifest:
+  name: support_agent
+  imports:
+    context:
+      - "@acme/core/methodology"
+  prompt_config:
+    system_prompt: |
+      {{ @acme/core/methodology }}

@@ -1,0 +1,7 @@
+schema: nenjo.package.v1
+name: "@acme/coding"
+version: "0.1.0"
+dependencies:
+  "@acme/core": "^0.1.0"
+modules:
+  - context_blocks/git.yaml

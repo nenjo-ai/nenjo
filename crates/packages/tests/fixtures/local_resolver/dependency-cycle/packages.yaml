@@ -1,0 +1,4 @@
+schema: nenjo.repository.v1
+packages:
+  "@acme/a": packages/a/nenjo.package.yaml
+  "@acme/b": packages/b/nenjo.package.yaml

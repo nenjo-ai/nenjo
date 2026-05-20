@@ -1,0 +1,18 @@
+schema: nenjo.modules.v1
+resources:
+  - schema: nenjo.ability.v1
+    manifest:
+      name: design_agent
+      tool_name: design_agent
+      imports:
+        context:
+          - "@acme/core/methodology"
+      prompt_config:
+        developer_prompt: |
+          {{ @acme/core/methodology }}
+  - schema: nenjo.ability.v1
+    manifest:
+      name: diagnose_failure
+      tool_name: diagnose_failure
+      prompt_config:
+        developer_prompt: Diagnose the failure.

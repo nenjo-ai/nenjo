@@ -1,0 +1,3 @@
+schema: nenjo.repository.v1
+packages:
+  "@acme/core": packages/core/nenjo.package.yaml

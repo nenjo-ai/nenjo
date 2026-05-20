@@ -1,0 +1,11 @@
+schema: nenjo.domain.v1
+manifest:
+  name: support
+  imports:
+    abilities:
+      - "./abilities/design.yaml#diagnose_failure"
+    context:
+      - "@acme/core/tool-usage"
+  prompt_config:
+    developer_prompt_addon: |
+      {{ @acme/core/tool-usage }}

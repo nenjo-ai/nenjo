@@ -1,0 +1,17 @@
+[package]
+name = "nenpm-cli"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI for the Nenjo package manager"
+
+[[bin]]
+name = "nenpm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+nenjo-nenpm = { workspace = true }

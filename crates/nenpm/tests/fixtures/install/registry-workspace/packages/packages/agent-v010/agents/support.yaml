@@ -1,0 +1,3 @@
+schema: nenjo.agent.v1
+manifest:
+  name: legacy_support

@@ -1,0 +1,4 @@
+schema: nenjo.context_block.v1
+manifest:
+  name: git_discipline
+  template: Keep git changes scoped.

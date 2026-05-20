@@ -1,0 +1,18 @@
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@nenjo/nenji": "^0.1.0"
+  "@nenjo/coding": "^0.1.0"
+
+dev_dependencies:
+  "@acme/test-agent": "^0.3.0"
+
+registries:
+  default: https://registry.nenjo.ai
+
+overrides:
+  "@nenjo/core": file:../packages#nenjo/core.package.yaml
+  "@acme/test-agent":
+    kind: local
+    root: ../test-packages
+    manifest_path: packages/test-agent/nenjo.package.yaml

@@ -1,0 +1,4 @@
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@acme/agent": "^0.1.0"

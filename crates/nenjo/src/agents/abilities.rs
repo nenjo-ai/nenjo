@@ -740,16 +740,16 @@ mod tests {
     #[tokio::test]
     async fn ability_sub_instance_renders_context_blocks_and_user_message() {
         let mut caller = test_instance_with_active_domain();
-        caller.manifest.prompt_config.system_prompt = "{{ nenjo.core.methodology }}".into();
+        caller.manifest.prompt_config.system_prompt = "{{ pkg.nenjo.core.methodology }}".into();
         caller.prompt.renderer = ContextRenderer::from_blocks(&[
             RenderContextBlock {
                 name: "methodology".into(),
-                path: "nenjo/core".into(),
+                path: "pkg/nenjo/core".into(),
                 template: "<methodology>{{ agent.role }}</methodology>".into(),
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
-                path: "nenjo/core".into(),
+                path: "pkg/nenjo/core".into(),
                 template: "<tool_usage>{{ agent.role }}</tool_usage>".into(),
             },
         ]);
@@ -762,7 +762,7 @@ mod tests {
             description: Some("Builds agents".into()),
             activation_condition: "When building agents".into(),
             prompt_config: AbilityPromptConfig {
-                developer_prompt: "{{ nenjo.core.tool_usage }}".into(),
+                developer_prompt: "{{ pkg.nenjo.core.tool_usage }}".into(),
             },
             platform_scopes: vec!["agents:write".into()],
             mcp_server_ids: vec![],
