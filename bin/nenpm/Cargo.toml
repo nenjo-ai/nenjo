@@ -12,6 +12,8 @@ name = "nenpm"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+console = { workspace = true }
+eyre = { workspace = true }
+indicatif = { workspace = true }
 nenjo-nenpm = { workspace = true }

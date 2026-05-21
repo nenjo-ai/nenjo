@@ -1,7 +1,7 @@
 schema: nenjo.package.v1
-name: "@acme/agent"
+name: "agent"
 version: "0.1.0"
 dependencies:
-  "@acme/core": "^2.0.0"
+  "core": "^2.0.0"
 modules:
   - agent.yaml

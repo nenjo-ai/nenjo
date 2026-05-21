@@ -1,11 +1,9 @@
 schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ../abilities/design.yaml#design_agent
 manifest:
   name: support_agent
-  imports:
-    abilities:
-      - ./abilities/design.yaml#design_agent
-    context:
-      - "@acme/core/methodology"
   prompt_config:
     system_prompt: |
-      {{ @acme/core/methodology }}
+      {{ pkg.acme.core.methodology }}

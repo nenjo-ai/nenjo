@@ -1,6 +1,6 @@
 schema: nenjo.registry.v1
 packages:
-  "@acme/core":
+  "core":
     - version: "0.1.0"
       source:
         kind: local
@@ -11,18 +11,18 @@ packages:
         kind: local
         root: ../packages
         manifest_path: packages/core-v020/nenjo.package.yaml
-  "@acme/agent":
+  "agent":
     - version: "0.1.0"
       source:
         kind: local
         root: ../packages
         manifest_path: packages/agent-v010/nenjo.package.yaml
       dependencies:
-        "@acme/core": "^0.1.0"
+        "core": "^0.1.0"
     - version: "0.2.0"
       source:
         kind: local
         root: ../packages
         manifest_path: packages/agent-v020/nenjo.package.yaml
       dependencies:
-        "@acme/core": "^0.2.0"
+        "core": "^0.2.0"

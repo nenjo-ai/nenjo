@@ -33,10 +33,10 @@ fn create_fixture_package_repo(name: &str) -> PathBuf {
         &root,
         "packages.yaml",
         r#"
-schema: nenjo.repository.v1
+schema: nenjo.registry.v1
 packages:
-  "@nenjo/core": packages/core/nenjo.package.yaml
-  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+  "core": packages/core/nenjo.package.yaml
+  "nenji": packages/nenji/nenjo.package.yaml
 "#,
     );
     write_file(
@@ -44,7 +44,7 @@ packages:
         "packages/core/nenjo.package.yaml",
         r#"
 schema: nenjo.package.v1
-name: "@nenjo/core"
+name: "core"
 version: "0.1.0"
 modules:
   - context_blocks/methodology.yaml
@@ -64,10 +64,10 @@ manifest:
         "packages/nenji/nenjo.package.yaml",
         r#"
 schema: nenjo.package.v1
-name: "@nenjo/nenji"
+name: "nenji"
 version: "0.1.0"
 dependencies:
-  "@nenjo/core": "^0.1.0"
+  "core": "^0.1.0"
 modules:
   - agents/nenji.yaml
 "#,
@@ -87,17 +87,17 @@ manifest:
 fn registry_for_fixture(source: impl Fn(&str) -> PackageSource) -> InMemoryRegistry {
     InMemoryRegistry::new()
         .with_version(RegistryPackageVersion {
-            name: "@nenjo/core".to_string(),
+            name: "core".to_string(),
             version: "0.1.0".to_string(),
             source: source("packages/core/nenjo.package.yaml"),
             dependencies: BTreeMap::new(),
             checksum: None,
         })
         .with_version(RegistryPackageVersion {
-            name: "@nenjo/nenji".to_string(),
+            name: "nenji".to_string(),
             version: "0.1.0".to_string(),
             source: source("packages/nenji/nenjo.package.yaml"),
-            dependencies: BTreeMap::from([("@nenjo/core".to_string(), "^0.1.0".to_string())]),
+            dependencies: BTreeMap::from([("core".to_string(), "^0.1.0".to_string())]),
             checksum: None,
         })
 }
@@ -106,10 +106,10 @@ fn registry_for_fixture(source: impl Fn(&str) -> PackageSource) -> InMemoryRegis
 fn local_install_plan_orders_packages_and_modules() {
     let root = create_fixture_package_repo("install-plan");
 
-    let plan = InstallPlan::from_local_repository(&root, "@nenjo/nenji").unwrap();
+    let plan = InstallPlan::from_local_repository(&root, "nenji").unwrap();
     let packages: Vec<_> = plan.packages().collect();
-    assert_eq!(packages[0].name, "@nenjo/core");
-    assert_eq!(packages[1].name, "@nenjo/nenji");
+    assert_eq!(packages[0].name, "core");
+    assert_eq!(packages[1].name, "nenji");
     assert_eq!(packages[0].modules[0].kind, PackageKind::ContextBlock);
     assert_eq!(packages[1].modules[0].kind, PackageKind::Agent);
     assert_eq!(packages[1].modules[0].name, "nenji");
@@ -122,14 +122,14 @@ fn registry_local_source_plan_uses_registry_version_contract() {
     let registry = registry_for_fixture(|manifest_path| PackageSource::Local {
         root: root.clone(),
         manifest_path: manifest_path.to_string(),
+        scope: None,
     });
 
     let resolver = RegistryPackageResolver::new(registry);
-    let plan =
-        InstallPlan::from_registry_local_sources(&resolver, "@nenjo/nenji", "^0.1.0").unwrap();
+    let plan = InstallPlan::from_registry_local_sources(&resolver, "nenji", "^0.1.0").unwrap();
     let packages: Vec<_> = plan.packages().collect();
-    assert_eq!(packages[0].name, "@nenjo/core");
-    assert_eq!(packages[1].name, "@nenjo/nenji");
+    assert_eq!(packages[0].name, "core");
+    assert_eq!(packages[1].name, "nenji");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -236,9 +236,9 @@ fn registry_resolves_from_git_source() {
         manifest_path: manifest_path.to_string(),
     });
     let resolver = RegistryPackageResolver::new(registry);
-    let plan = InstallPlan::from_registry(&resolver, "@nenjo/nenji", "0.1.0").unwrap();
+    let plan = InstallPlan::from_registry(&resolver, "nenji", "0.1.0").unwrap();
     let packages: Vec<_> = plan.packages().collect();
-    assert_eq!(packages[0].name, "@nenjo/core");
+    assert_eq!(packages[0].name, "core");
     assert_eq!(packages[1].modules[0].kind, PackageKind::Agent);
     fs::remove_dir_all(source_repo).unwrap();
 }
@@ -260,10 +260,10 @@ fn registry_resolves_from_artifact_source() {
         manifest_path: manifest_path.to_string(),
     });
     let resolver = RegistryPackageResolver::new(registry);
-    let plan = InstallPlan::from_registry(&resolver, "@nenjo/nenji", "0.1.0").unwrap();
+    let plan = InstallPlan::from_registry(&resolver, "nenji", "0.1.0").unwrap();
     let packages: Vec<_> = plan.packages().collect();
-    assert_eq!(packages[0].name, "@nenjo/core");
-    assert_eq!(packages[1].name, "@nenjo/nenji");
+    assert_eq!(packages[0].name, "core");
+    assert_eq!(packages[1].name, "nenji");
     fs::remove_dir_all(source).unwrap();
     fs::remove_dir_all(artifact.parent().unwrap()).unwrap();
 }
@@ -276,14 +276,14 @@ fn registry_resolves_from_remote_manifest_source() {
         "remote.package.yaml",
         r#"
 schema: nenjo.package.v1
-name: "@nenjo/remote"
+name: "remote"
 version: "0.1.0"
 "#,
     );
     let manifest = root.join("remote.package.yaml");
     let checksum = sha256_hex(&fs::read(&manifest).unwrap());
     let registry = InMemoryRegistry::new().with_version(RegistryPackageVersion {
-        name: "@nenjo/remote".to_string(),
+        name: "remote".to_string(),
         version: "0.1.0".to_string(),
         source: PackageSource::Remote {
             url: manifest.to_string_lossy().to_string(),
@@ -293,9 +293,9 @@ version: "0.1.0"
         checksum: None,
     });
     let resolver = RegistryPackageResolver::new(registry);
-    let plan = InstallPlan::from_registry(&resolver, "@nenjo/remote", "0.1.0").unwrap();
+    let plan = InstallPlan::from_registry(&resolver, "remote", "0.1.0").unwrap();
     let packages: Vec<_> = plan.packages().collect();
-    assert_eq!(packages[0].name, "@nenjo/remote");
+    assert_eq!(packages[0].name, "remote");
     assert!(packages[0].modules.is_empty());
     fs::remove_dir_all(root).unwrap();
 }

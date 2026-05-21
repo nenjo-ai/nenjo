@@ -3,7 +3,8 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use crate::Result;
+use anyhow::Context;
 use flate2::read::GzDecoder;
 use nenjo_packages::sha256_hex;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,9 @@ pub enum PackageSource {
         root: PathBuf,
         /// Repository-relative package manifest path.
         manifest_path: String,
+        /// Package scope used when the local source points at a registry manifest.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
 }
 
@@ -111,6 +115,7 @@ impl PackageSourceFetcher for DefaultPackageSourceFetcher {
             PackageSource::Local {
                 root,
                 manifest_path,
+                ..
             } => Ok(FetchedPackageSource::local(
                 root.clone(),
                 manifest_path.clone(),
@@ -135,6 +140,7 @@ pub(crate) fn normalize_source_paths(source: PackageSource, manifest_dir: &Path)
         PackageSource::Local {
             root,
             manifest_path,
+            scope,
         } => {
             let root = if root.is_absolute() {
                 root
@@ -144,6 +150,7 @@ pub(crate) fn normalize_source_paths(source: PackageSource, manifest_dir: &Path)
             PackageSource::Local {
                 root,
                 manifest_path,
+                scope,
             }
         }
         other => other,
@@ -188,9 +195,12 @@ pub(crate) fn validate_package_source(source: &PackageSource) -> Result<()> {
                 bail!("remote source url cannot be empty");
             }
         }
-        PackageSource::Local { root, .. } => {
+        PackageSource::Local { root, scope, .. } => {
             if root.as_os_str().is_empty() {
                 bail!("local source root cannot be empty");
+            }
+            if let Some(scope) = scope {
+                validate_local_scope(scope)?;
             }
         }
     }
@@ -208,21 +218,62 @@ pub(crate) fn source_fetch_key(source: &PackageSource) -> String {
     }
 }
 
+pub fn package_source_scope(source: &PackageSource) -> Option<String> {
+    match source {
+        PackageSource::Git { url, .. } => github_org_from_url(url).map(github_org_to_scope),
+        PackageSource::Artifact { .. } | PackageSource::Remote { .. } => None,
+        PackageSource::Local { scope, .. } => scope.clone(),
+    }
+}
+
+fn validate_local_scope(scope: &str) -> Result<()> {
+    if !scope.starts_with('@') || scope.contains('/') {
+        bail!("local registry scope must look like @scope");
+    }
+    nenjo_packages::validate_package_name(&format!("{scope}/package"))
+        .context("local registry scope is invalid")?;
+    Ok(())
+}
+
+fn github_org_to_scope(org: String) -> String {
+    format!("@{org}")
+}
+
+fn github_org_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        return None;
+    };
+    let org = path.split('/').next()?.trim();
+    if org.is_empty() || org == "." || org == ".." {
+        return None;
+    }
+    Some(org.to_string())
+}
+
 pub(crate) fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
-        return fs::read(path).with_context(|| format!("failed to read {url}"));
+        return Ok(fs::read(path).with_context(|| format!("failed to read {url}"))?);
     }
     if !url.contains("://") {
-        return fs::read(url).with_context(|| format!("failed to read {url}"));
+        return Ok(fs::read(url).with_context(|| format!("failed to read {url}"))?);
     }
     let response = reqwest::blocking::get(url)
         .with_context(|| format!("failed to request {url}"))?
         .error_for_status()
         .with_context(|| format!("failed to fetch {url}"))?;
-    response
+    Ok(response
         .bytes()
         .map(|bytes| bytes.to_vec())
-        .with_context(|| format!("failed to read response body for {url}"))
+        .with_context(|| format!("failed to read response body for {url}"))?)
 }
 
 fn is_relative_file_reference(value: &str) -> bool {
@@ -329,4 +380,38 @@ fn fetch_remote_manifest(url: &str, checksum: &Option<String>) -> Result<Fetched
         "remote.package.yaml".to_string(),
         temp_dir,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_source(url: &str) -> PackageSource {
+        PackageSource::Git {
+            url: url.to_string(),
+            reference: "main".to_string(),
+            manifest_path: "packages.yaml".to_string(),
+        }
+    }
+
+    #[test]
+    fn derives_scope_from_github_org() {
+        assert_eq!(
+            package_source_scope(&git_source("https://github.com/nenjo-ai/packages.git")),
+            Some("@nenjo-ai".to_string())
+        );
+        assert_eq!(
+            package_source_scope(&git_source("git@github.com:acme/packages.git")),
+            Some("@acme".to_string())
+        );
+    }
+
+    #[test]
+    fn non_github_git_sources_do_not_have_scope() {
+        assert_eq!(package_source_scope(&git_source("../packages")), None);
+        assert_eq!(
+            package_source_scope(&git_source("https://gitlab.com/acme/packages.git")),
+            None
+        );
+    }
 }

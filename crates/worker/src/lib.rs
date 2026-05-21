@@ -19,6 +19,7 @@ pub mod external_mcp;
 pub mod handlers;
 pub mod local_documents;
 pub mod marketplace;
+pub mod package_manifests;
 pub mod providers;
 pub mod runtime;
 pub mod security;

@@ -1,11 +1,8 @@
 schema: nenjo.package.v1
-name: "@acme/agent"
+name: "agent"
 version: "0.1.0"
 dependencies:
-  "@acme/core": "^0.1.0"
+  "core": "^0.1.0"
 modules:
   - agents/support.yaml
   - abilities/design.yaml
-exports:
-  ".": agents/support.yaml#support_agent
-  "./design-agent": abilities/design.yaml#design_agent

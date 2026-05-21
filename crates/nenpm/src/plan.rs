@@ -1,7 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use nenjo_packages::{LocalPackageResolver, PackageKind, ResolvedPackageGraph};
+use crate::Result;
+use anyhow::{Context, anyhow};
+use nenjo_packages::{LocalPackageResolver, PackageKind, ResolvedPackage, ResolvedPackageGraph};
 
 use crate::registry::{PackageRegistry, RegistryPackageResolver};
 use crate::source::DefaultPackageSourceFetcher;
@@ -25,11 +27,7 @@ impl InstallPlan {
 
     /// Build an install plan from an already-resolved package graph.
     pub fn from_graph(graph: ResolvedPackageGraph) -> Result<Self> {
-        let package_order = if graph.root_package.is_empty() {
-            Vec::new()
-        } else {
-            graph.topo_order()?
-        };
+        let package_order = topo_order_all(&graph)?;
         Ok(Self {
             graph,
             package_order,
@@ -93,6 +91,55 @@ impl InstallPlan {
     pub fn graph(&self) -> &ResolvedPackageGraph {
         &self.graph
     }
+}
+
+fn topo_order_all(graph: &ResolvedPackageGraph) -> Result<Vec<String>> {
+    fn visit(
+        name: &str,
+        packages: &BTreeMap<String, ResolvedPackage>,
+        temp: &mut BTreeSet<String>,
+        perm: &mut BTreeSet<String>,
+        out: &mut Vec<String>,
+    ) -> Result<()> {
+        if perm.contains(name) {
+            return Ok(());
+        }
+        if !temp.insert(name.to_string()) {
+            bail!("dependency cycle includes {name}");
+        }
+
+        let package = packages
+            .get(name)
+            .ok_or_else(|| anyhow!("dependency {name} was not resolved"))?;
+        for dependency in package.dependencies().keys() {
+            visit(dependency, packages, temp, perm, out)?;
+        }
+
+        temp.remove(name);
+        perm.insert(name.to_string());
+        out.push(name.to_string());
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    let mut temp = BTreeSet::new();
+    let mut perm = BTreeSet::new();
+
+    if !graph.root_package.is_empty() {
+        visit(
+            &graph.root_package,
+            &graph.packages,
+            &mut temp,
+            &mut perm,
+            &mut out,
+        )?;
+    }
+
+    for name in graph.packages.keys() {
+        visit(name, &graph.packages, &mut temp, &mut perm, &mut out)?;
+    }
+
+    Ok(out)
 }
 
 /// Package entry in an install plan.

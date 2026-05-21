@@ -12,7 +12,7 @@ yet; that boundary belongs to the future installer/importer layer.
 use nenjo_nenpm::InstallPlan;
 
 # fn example() -> anyhow::Result<()> {
-let plan = InstallPlan::from_local_repository("../packages", "@nenjo/nenji")?;
+let plan = InstallPlan::from_local_repository("../packages", "@nenjo-ai/nenji")?;
 
 for package in plan.packages() {
     println!("{}@{}", package.name, package.version);
@@ -34,17 +34,15 @@ same directory, loading fails so resolution is never ambiguous.
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "@nenjo/nenji": "^0.1.0"
-  "@nenjo/coding": "^0.1.0"
-
-dev_dependencies:
+  "@nenjo-ai/nenji": "^0.1.0"
+  "@nenjo-ai/coding": "^0.1.0"
   "@acme/test-agent": "^0.3.0"
 
 registries:
-  default: https://registry.nenjo.ai/index.yaml
+  - https://registry.nenjo.ai/index.yaml
 
 overrides:
-  "@nenjo/core": file:../packages#nenjo/core.package.yaml
+  "@nenjo-ai/core": file:../packages#nenjo/core.package.yaml
   "@acme/test-agent":
     kind: local
     root: ../test-packages
@@ -56,18 +54,72 @@ shorthand:
 
 ```yaml
 overrides:
-  "@nenjo/core": file:../packages
-  "@nenjo/nenji": file:../packages#nenjo/nenji.package.yaml
+  "@nenjo-ai/core": file:../packages
+  "@nenjo-ai/nenji": file:../packages#nenjo/nenji.package.yaml
 ```
 
 Without a `#manifest_path`, `file:` defaults to `packages.yaml`, which treats
-the path as a local package repository root.
+the path as a local package registry root.
 
-The CLI installs the manifest by resolving package sources and writing
-`nenpm.lock.yml`:
+Registries are an ordered list. The first registry containing a requested
+package wins. GitHub-backed repository registries expose unscoped
+`packages.yaml` entries under the package scope derived from the GitHub org.
+For example, `https://github.com/nenjo-ai/packages.git` exposes `nenji` as
+`@nenjo-ai/nenji`. Repository manifests must not author scoped package names.
+Local registry sources may declare a `scope` because they do not have a remote
+owner to derive from:
+
+```yaml
+registries:
+  - kind: local
+    scope: "@acme"
+    root: ../packages
+    manifest_path: packages.yaml
+```
+
+Add a GitHub-backed package registry:
+
+```bash
+nenpm add @nenjo-ai --root .
+```
+
+Add and install one package, registering the registry when needed:
+
+```bash
+nenpm add @nenjo-ai/nenji --root .
+```
+
+Add and install every package exposed by a registry:
+
+```bash
+nenpm add @nenjo-ai/* --root .
+```
+
+List packages available from configured registries:
+
+```bash
+nenpm list --root .
+```
+
+Pass a registry scope to list only one configured registry:
+
+```bash
+nenpm list @nenjo-ai --root .
+```
+
+The CLI installs the manifest by resolving package sources, writing
+`nenpm.lock.yml`, and materializing the resolved package sources under
+`.nenjo/packages/<scope>/<name>@<version>`:
 
 ```bash
 cargo run --bin nenpm -- install --root .
+```
+
+Use `--packages-dir` to place the installed package tree and
+`.nenpm-index.json` somewhere other than `<root>/.nenjo/packages`:
+
+```bash
+cargo run --bin nenpm -- install --root . --packages-dir ~/.nenjo/packages
 ```
 
 `install` preserves package versions already pinned in `nenpm.lock.yml` when
@@ -78,67 +130,111 @@ the registry and rewrite those pins:
 cargo run --bin nenpm -- update --root .
 ```
 
-The lockfile records package source metadata, package manifest hashes, and
-module hashes. Normal `install` verifies non-local locked packages whose pinned
-versions are reused; if registry/artifact/git/remote package contents drift
-without a version update, install fails. Local sources remain mutable
-development inputs and are not integrity-enforced across installs.
+The lockfile records package source metadata, requested dependency ranges,
+exact resolved dependency versions, package manifest hashes, and module hashes.
+`install` also writes `.nenjo/packages/.nenpm-index.json` so the worker can map a
+locked `name@version` to its local package root without fetching at runtime.
+Normal `install` verifies non-local locked packages whose pinned versions are
+reused; if registry/artifact/git/remote package contents drift without a
+version update, install fails. Local sources remain mutable development inputs
+and are not integrity-enforced across installs.
+
+Use `clean` to remove derived package install artifacts without touching
+`nenpm.yml` or `nenpm.lock.yml`:
+
+```bash
+cargo run --bin nenpm -- clean --root .
+cargo run --bin nenpm -- clean --root . --packages-dir ~/.nenjo/packages
+```
 
 Use `--dry-run` to resolve and print the install plan without writing the
-lockfile:
+lockfile or package tree:
 
 ```bash
 cargo run --bin nenpm -- install --root . --dry-run
 ```
 
-Registry installs resolve the full version graph from registry metadata before
-fetching sources. Selected registry sources are fetched concurrently, with a
-default limit of eight concurrent source fetches:
+Use `--locked` when a caller supplies `nenpm.lock.yml` and installation must
+fail if the dependency file and lockfile no longer describe the same graph:
 
 ```bash
-cargo run --bin nenpm -- install --root . --max-concurrency 16
+cargo run --bin nenpm -- install --root . --locked
 ```
+
+Registry installs resolve the full version graph from registry metadata before
+fetching sources. Selected registry sources are fetched concurrently using the
+host CPU count.
+
 
 Common dependency commands:
 
 ```bash
-cargo run --bin nenpm -- add @nenjo/nenji@^0.1.0 --root .
-cargo run --bin nenpm -- remove @nenjo/nenji --root .
+cargo run --bin nenpm -- init --root .
+cargo run --bin nenpm -- add @nenjo-ai/nenji@^0.1.0 --root .
+cargo run --bin nenpm -- remove @nenjo-ai/nenji --root .
+cargo run --bin nenpm -- clean --root .
 cargo run --bin nenpm -- list --root .
-cargo run --bin nenpm -- info @nenjo/nenji --root .
-```
-
-The main `nenjo` CLI exposes the same package manager flow under `pm`:
-
-```bash
-cargo run --bin nenjo -- pm install --root . --dry-run
+cargo run --bin nenpm -- info @nenjo-ai/nenji --root .
 ```
 
 Install resolution uses overrides first. Dependencies without overrides are
-resolved from `registries.default`. For registry packages, dependency metadata
-from the registry is used to compute the full package graph before download;
-downloaded package manifests must match the registry name, version, and
-dependency metadata. Platform/worker resource import execution is still a
-future layer.
+resolved from the ordered `registries` list. For registry packages, dependency
+metadata from the registry is used to compute the full package graph before
+download; downloaded package manifests must match the projected registry name,
+version, and dependency metadata. Platform/worker resource import execution is
+still a future layer.
+
+## Publisher Validation
+
+Publisher-side validation starts from a `nenjo.registry.v1` file, usually
+`packages.yaml`:
+
+```bash
+cargo run --bin nenpm -- validate --root .
+cargo run --bin nenpm -- prepare --root .
+```
+
+`validate` checks registry, package, module, wrapper import, and prompt
+selector rules. Module imports are wrapper-level local refs only:
+
+```yaml
+schema: nenjo.context_block.v1
+imports:
+  context:
+    - ./methodology.yml
+manifest:
+  name: tool_usage
+  template: |
+    {{ context.methodology }}
+```
+
+Package dependencies are declared only in `nenjo.package.v1`. Prompt selectors
+such as `{{ pkg.nenjo.knowledge.knowledge }}` are valid only when the
+referenced package is the current package or a declared package dependency.
+
+`prepare` runs the same validation and writes `.nenpm/registry-compiled.json`
+with package versions, modules, wrapper imports, context selectors, and
+package selector usages for publisher/runtime tooling.
 
 ## Registry Resolution Contract
 
-The registry is the discovery and version authority. `registries.default` can
-point at an HTTP(S) YAML index, `file:/path/to/index.yaml`, or a relative local
-path. A registry record resolves a package name and version requirement to one
-concrete source:
+The registry is the discovery and version authority. `registries` is an ordered
+list of registry sources; the first source containing a requested package wins.
+Repository-backed registries keep package keys unscoped and derive the package
+scope from the registry source. A registry record resolves a package name and
+version requirement to one concrete source:
 
 ```yaml
 schema: nenjo.registry.v1
 packages:
-  "@nenjo/core":
+  core:
     - version: "0.1.0"
       source:
         kind: artifact
         url: artifacts/nenjo-core-0.1.0.tar.gz
         checksum: "<sha256>"
         manifest_path: nenjo/core.package.yaml
-  "@nenjo/nenji":
+  nenji:
     - version: "0.1.0"
       source:
         kind: git
@@ -146,7 +242,7 @@ packages:
         reference: v0.1.0
         manifest_path: nenjo/nenji.package.yaml
       dependencies:
-        "@nenjo/core": "^0.1.0"
+        core: "^0.1.0"
 ```
 
 For file-backed registry indexes, relative `local.root`, `artifact.url`, and
@@ -162,7 +258,7 @@ Supported source kinds in the data model:
 - `git`: remote git repo, ref, and package manifest path.
 - `artifact`: immutable registry-cached tarball or zip plus checksum.
 - `remote`: direct HTTPS manifest source, mainly for future escape hatches.
-- `local`: local repository checkout for tests and development.
+- `local`: local registry checkout for tests and development.
 
 Platform package sources use the same shape under `metadata.source` for Nenjo
 packages:

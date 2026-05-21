@@ -1,4 +1,4 @@
-schema: nenjo.repository.v1
+schema: nenjo.registry.v1
 packages:
-  "@acme/core": packages/core/nenjo.package.yaml
-  "@acme/agent": packages/agent/nenjo.package.yaml
+  "core": packages/core/nenjo.package.yaml
+  "agent": packages/agent/nenjo.package.yaml

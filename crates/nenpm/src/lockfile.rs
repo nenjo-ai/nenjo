@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use crate::Result;
+use anyhow::Context;
 use nenjo_packages::{ModuleImport, PackageKind, ResolvedModule};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,53 @@ pub struct NenpmLock {
     pub schema: String,
     /// Locked packages in dependency-first install order.
     pub packages: Vec<LockedPackage>,
+}
+
+/// Return the local install directory for a package version.
+pub fn package_install_path(root: impl AsRef<Path>, name: &str, version: &str) -> PathBuf {
+    package_install_path_in_packages_dir(
+        root.as_ref().join(".nenjo").join("packages"),
+        name,
+        version,
+    )
+}
+
+/// Return the local install directory for a package version under a packages dir.
+pub fn package_install_path_in_packages_dir(
+    packages_dir: impl AsRef<Path>,
+    name: &str,
+    version: &str,
+) -> PathBuf {
+    let packages_dir = packages_dir.as_ref();
+    if let Some((scope, package)) = name.split_once('/') {
+        packages_dir
+            .join(sanitize_path_component(scope))
+            .join(sanitize_path_component(&package_instance_key(
+                package, version,
+            )))
+    } else {
+        packages_dir.join(sanitize_path_component(&package_instance_key(
+            name, version,
+        )))
+    }
+}
+
+/// Return the stable index key for a package instance.
+pub fn package_instance_key(name: &str, version: &str) -> String {
+    format!("{name}@{version}")
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '@' | '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Locked package record.
@@ -38,8 +86,63 @@ pub struct LockedPackage {
     /// Resolved package dependencies.
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    /// Exact package versions used to satisfy dependencies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resolved_dependencies: BTreeMap<String, String>,
     /// Locked modules.
     pub modules: Vec<LockedModule>,
+}
+
+/// Generated index for the materialized package install tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageInstallIndex {
+    /// Index schema.
+    pub schema: String,
+    /// Materialized packages keyed by `name@version`.
+    pub packages: BTreeMap<String, PackageInstallIndexEntry>,
+}
+
+/// Materialized package location metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageInstallIndexEntry {
+    /// Package name.
+    pub name: String,
+    /// Package version.
+    pub version: String,
+    /// Package root relative to the project/global install root.
+    pub root: String,
+    /// Package manifest path relative to the materialized package root.
+    pub manifest_path: String,
+}
+
+impl PackageInstallIndex {
+    /// Load a materialized package index from disk.
+    pub fn load_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let index: Self = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        index.validate()?;
+        Ok(index)
+    }
+
+    /// Validate the package install index schema and package names.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != "nenjo.package-index.v1" {
+            bail!("unsupported package install index schema '{}'", self.schema);
+        }
+        for package in self.packages.values() {
+            nenjo_packages::validate_package_name(&package.name)
+                .with_context(|| format!("invalid indexed package name '{}'", package.name))?;
+        }
+        Ok(())
+    }
+
+    /// Find a materialized package entry by name and version.
+    pub fn get_package(&self, name: &str, version: &str) -> Option<&PackageInstallIndexEntry> {
+        self.packages.get(&package_instance_key(name, version))
+    }
 }
 
 /// Locked module resource record.
@@ -133,6 +236,16 @@ pub(crate) fn lockfile_from_plan(
                 .get(package_name)
                 .and_then(|source| source.checksum.clone()),
             dependencies: package.dependencies().clone(),
+            resolved_dependencies: package
+                .dependencies()
+                .keys()
+                .filter_map(|dependency| {
+                    plan.graph
+                        .packages
+                        .get(dependency)
+                        .map(|resolved| (dependency.clone(), resolved.version.clone()))
+                })
+                .collect(),
             modules,
         });
     }
@@ -152,5 +265,36 @@ fn lock_module(module: &ResolvedModule) -> LockedModule {
         name: module.name().to_string(),
         hash: module.hash.clone(),
         imports: module.imports.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{package_install_path, package_install_path_in_packages_dir};
+
+    #[test]
+    fn package_install_path_uses_name_version_instance_dir() {
+        assert_eq!(
+            package_install_path("/workspace", "@nenjo/nenji", "0.1.0")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "/workspace/.nenjo/packages/@nenjo/nenji@0.1.0"
+        );
+        assert_eq!(
+            package_install_path("/workspace", "agent", "0.1.0")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "/workspace/.nenjo/packages/agent@0.1.0"
+        );
+    }
+
+    #[test]
+    fn custom_packages_dir_package_install_path_uses_same_layout() {
+        assert_eq!(
+            package_install_path_in_packages_dir("/home/me/.nenjo/packages", "@acme/core", "1.2.3")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "/home/me/.nenjo/packages/@acme/core@1.2.3"
+        );
     }
 }

@@ -2,28 +2,27 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use crate::{NenpmError, Result};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::source::{PackageSource, validate_package_source};
 
 /// User-authored nenpm dependency manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DependencyManifest {
     /// Manifest schema, currently `nenjo.dependencies.v1`.
     pub schema: String,
-    /// Runtime package dependencies.
+    /// Package dependencies.
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
-    /// Development-only package dependencies.
-    #[serde(default)]
-    pub dev_dependencies: BTreeMap<String, String>,
     /// Package source overrides keyed by package name.
     #[serde(default)]
     pub overrides: BTreeMap<String, DependencyOverride>,
-    /// Optional registry aliases or URLs.
+    /// Ordered package registries. Earlier registries win when more than one contains a package.
     #[serde(default)]
-    pub registries: BTreeMap<String, String>,
+    pub registries: Vec<RegistryReference>,
 }
 
 impl DependencyManifest {
@@ -43,10 +42,12 @@ impl DependencyManifest {
         let yml_exists = yml.exists();
         let yaml_exists = yaml.exists();
         match (yml_exists, yaml_exists) {
-            (true, true) => {
-                bail!("found both nenpm.yml and nenpm.yaml; keep only one dependency file")
-            }
-            (false, false) => bail!("missing nenpm.yml or nenpm.yaml"),
+            (true, true) => Err(NenpmError::dependency_manifest(
+                "found both nenpm.yml and nenpm.yaml; keep only one dependency file",
+            )),
+            (false, false) => Err(NenpmError::dependency_manifest(
+                "missing nenpm.yml or nenpm.yaml",
+            )),
             (true, false) => Self::load_file(yml),
             (false, true) => Self::load_file(yaml),
         }
@@ -68,14 +69,12 @@ impl DependencyManifest {
     /// Validate schema, package names, and override values.
     pub fn validate(&self) -> Result<()> {
         if self.schema != "nenjo.dependencies.v1" {
-            bail!("unsupported dependency manifest schema '{}'", self.schema);
+            return Err(NenpmError::dependency_manifest(format!(
+                "unsupported dependency manifest schema '{}'",
+                self.schema
+            )));
         }
-        for name in self
-            .dependencies
-            .keys()
-            .chain(self.dev_dependencies.keys())
-            .chain(self.overrides.keys())
-        {
+        for name in self.dependencies.keys().chain(self.overrides.keys()) {
             nenjo_packages::validate_package_name(name)
                 .with_context(|| format!("invalid dependency package name '{name}'"))?;
         }
@@ -84,13 +83,8 @@ impl DependencyManifest {
                 .to_package_source()
                 .with_context(|| format!("invalid override for {name}"))?;
         }
-        for (alias, reference) in &self.registries {
-            if alias.trim().is_empty() {
-                bail!("registry alias cannot be empty");
-            }
-            if reference.trim().is_empty() {
-                bail!("registry reference for {alias} cannot be empty");
-            }
+        for reference in &self.registries {
+            reference.validate().context("invalid registry")?;
         }
         Ok(())
     }
@@ -103,6 +97,31 @@ pub struct LoadedDependencyManifest {
     pub path: PathBuf,
     /// Parsed manifest.
     pub manifest: DependencyManifest,
+}
+
+/// Registry reference in a dependency manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RegistryReference {
+    /// Legacy registry index reference, such as `registry.yml` or an HTTPS URL.
+    Index(String),
+    /// Repository-style registry source, usually a git source pointing at `packages.yaml`.
+    Source(PackageSource),
+}
+
+impl RegistryReference {
+    /// Validate that this reference is usable.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Index(reference) => {
+                if reference.trim().is_empty() {
+                    bail!("registry reference cannot be empty");
+                }
+            }
+            Self::Source(source) => validate_package_source(source)?,
+        }
+        Ok(())
+    }
 }
 
 /// Source override in a dependency manifest.
@@ -144,5 +163,6 @@ fn parse_override_shorthand(value: &str) -> Result<PackageSource> {
     Ok(PackageSource::Local {
         root: PathBuf::from(root),
         manifest_path,
+        scope: None,
     })
 }

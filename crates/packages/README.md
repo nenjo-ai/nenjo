@@ -1,19 +1,19 @@
 # nenjo-packages
 
-`nenjo-packages` defines the repository manifest, package manifest, module
+`nenjo-packages` defines the registry manifest, package manifest, module
 manifest, dependency graph, GitHub fetch, local resolver, and lockfile
 primitives used by Nenjo package install flows.
 
-The crate is intentionally format-focused. It validates package repository
+The crate is intentionally format-focused. It validates package registry
 files and resolves dependency metadata, but it does not write resources to the
 Nenjo platform or worker manifest store. Callers decide how a resolved module is
 imported.
 
-## Package Repository Shape
+## Package Registry Shape
 
 The current package model has three layers:
 
-- A repository file with schema `nenjo.repository.v1`.
+- A registry file with schema `nenjo.registry.v1`.
 - One package manifest per versioned dependency unit with schema
   `nenjo.package.v1`.
 - One or more module manifests per package with schema
@@ -39,34 +39,41 @@ Supported resource schemas are:
 ## Catalog Example
 
 ```yaml
-schema: nenjo.repository.v1
+schema: nenjo.registry.v1
 packages:
-  "@nenjo/core": packages/core/nenjo.package.yaml
-  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+  core: packages/core/nenjo.package.yaml
+  nenji: packages/nenji/nenjo.package.yaml
 ```
 
-The legacy `nenjo.packages.v1` catalog shape is still parsed for compatibility
-while descriptor-per-resource package files are migrated.
+Repo-backed registries author unscoped package names. A registry host supplies
+the scope. For example, a GitHub registry at `github.com/nenjo-ai/packages`
+exposes `nenji` as `@nenjo-ai/nenji` to consumers.
 
 ## Package Manifest Example
 
 ```yaml
 schema: nenjo.package.v1
-name: "@nenjo/nenji"
+name: nenji
 version: 1.0.0
 dependencies:
-  "@nenjo/core": ^1.0.0
+  core: ^1.0.0
 modules:
-  - agents/nenji.yaml
-  - abilities/design_agent.yaml
-exports:
-  ".": agents/nenji.yaml
-  "./design-agent": abilities/design_agent.yaml
+  - agent.yaml
 ```
 
-Dependencies are package-level. `modules` are package-relative manifest paths.
-`exports` are optional public aliases and are not required for modules to be
-installed.
+Dependencies are package-level. `modules` are package-relative root entrypoints:
+manifest paths or directory references that start package resolution. Resource
+wrapper imports are then followed transitively, so a package does not need to
+list every internal file when its entrypoints import them. Directory references
+require an explicit `index.yml` or `index.yaml`; directory contents are never
+imported by implicit file listing.
+
+```yaml
+schema: nenjo.module_index.v1
+modules:
+  - design_agent.yaml
+  - diagnose_failure.yaml
+```
 
 ## Module Manifest Example
 
@@ -104,42 +111,44 @@ resources:
       tool_name: diagnose_failure
 ```
 
-Bundled resources are addressed with `#resource_name` selectors:
-
-```yaml
-exports:
-  "./design-agent": abilities/design.yaml#design_agent
-```
-
 Single-resource module files are addressable by both their file path and their
 canonical `path#name` key. Multi-resource bundle files require the
 `path#resource_name` form.
 
 ## Resource Imports
 
-Resource manifests can declare structured runtime imports inside their
-`manifest` body:
+Resource manifests declare structured runtime imports at the wrapper level,
+outside the pure resource `manifest` body:
 
 ```yaml
 schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ./capabilities/design/
+  domains:
+    - ./domains/support.yaml
+  context:
+    - ./shared/context/methodology.yml
 manifest:
   name: support_agent
-  imports:
-    abilities:
-      - ./abilities/design.yaml#design_agent
-    domains:
-      - ./domains/support.yaml#support
-    context:
-      - "@nenjo/core/methodology"
 ```
 
-The package resolver records these imports on resolved modules. Package
-resolution still happens at the package level; imports describe runtime
-composition between resolved resources.
+The package resolver records these imports on resolved modules and follows
+local file or directory imports into the package graph. Package resolution still
+happens at the package level; imports describe runtime composition between
+resolved resources. Module imports are local refs only; cross-package
+dependencies belong in `nenjo.package.v1` `dependencies`.
+
+Package-authored manifests are a publishable subset of the runtime manifest
+shape. Resource identity and platform organization fields are derived by
+resolution/import instead of authored in YAML. In particular,
+`nenjo.ability.v1`, `nenjo.domain.v1`, and `nenjo.context_block.v1` modules
+must not define `manifest.path`; importers derive the dashboard path from the
+module's package-relative directory.
 
 ## Local Resolution
 
-`LocalPackageResolver` resolves `nenjo.repository.v1` package graphs from a
+`LocalPackageResolver` resolves `nenjo.registry.v1` package graphs from a
 local filesystem checkout. It is intended for tests and local package authoring.
 
 ```rust
@@ -147,7 +156,7 @@ use nenjo_packages::LocalPackageResolver;
 
 # fn example() -> anyhow::Result<()> {
 let graph = LocalPackageResolver::new("../packages")
-    .resolve_package_graph("@nenjo/nenji")?;
+    .resolve_package_graph("nenji")?;
 
 for package in graph.topo_order()? {
     let package = &graph.packages[&package];

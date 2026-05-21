@@ -38,32 +38,20 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Merge another manifest into this one (additive).
+    /// Merge another manifest into this one.
     ///
-    /// Collections are extended. For context blocks, if a name collides
-    /// the incoming entry wins (last-write-wins).
+    /// Collections are last-write-wins by resource ID so package, platform,
+    /// global, and local loaders can model normal dependency precedence.
     pub fn merge(&mut self, other: Manifest) {
-        self.routines.extend(other.routines);
-        self.models.extend(other.models);
-        self.agents.extend(other.agents);
-        self.councils.extend(other.councils);
-        self.domains.extend(other.domains);
-        self.projects.extend(other.projects);
-        self.mcp_servers.extend(other.mcp_servers);
-        self.abilities.extend(other.abilities);
-
-        // Context blocks: last-write-wins on name collision.
-        for block in other.context_blocks {
-            if let Some(existing) = self
-                .context_blocks
-                .iter_mut()
-                .find(|b| b.name == block.name)
-            {
-                *existing = block;
-            } else {
-                self.context_blocks.push(block);
-            }
-        }
+        merge_by_id(&mut self.routines, other.routines);
+        merge_by_id(&mut self.models, other.models);
+        merge_by_id(&mut self.agents, other.agents);
+        merge_by_id(&mut self.councils, other.councils);
+        merge_by_id(&mut self.domains, other.domains);
+        merge_by_id(&mut self.projects, other.projects);
+        merge_by_id(&mut self.mcp_servers, other.mcp_servers);
+        merge_by_id(&mut self.abilities, other.abilities);
+        merge_by_id(&mut self.context_blocks, other.context_blocks);
     }
 
     /// Insert or replace a single resource in this manifest.
@@ -112,6 +100,12 @@ fn upsert_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: T) {
         *existing = incoming;
     } else {
         items.push(incoming);
+    }
+}
+
+fn merge_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: Vec<T>) {
+    for item in incoming {
+        upsert_by_id(items, item);
     }
 }
 

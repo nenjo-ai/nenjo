@@ -21,6 +21,7 @@ use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth};
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
 use crate::external_mcp::ExternalMcpPool;
+use crate::package_manifests::PackageManifestLoader;
 use crate::providers::registry::ModelProviderRegistry;
 use crate::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
 use crate::tools::platform_payload::PlatformPayloadEncoder;
@@ -152,6 +153,15 @@ pub(crate) async fn build_provider(
 
     Provider::builder()
         .with_loader(loader)
+        .with_loader(PackageManifestLoader::with_packages_dir(
+            config.config_dir.clone(),
+            config.config_dir.join("packages"),
+        ))
+        .with_loader(PackageManifestLoader::with_packages_dir(
+            config.config_dir.join("platform_pkgs"),
+            config.config_dir.join("platform_pkgs"),
+        ))
+        .with_loader(PackageManifestLoader::new(config.workspace_dir.clone()))
         .with_model_factory(provider_registry)
         .with_tool_factory(tool_factory)
         .with_memory(mem)
@@ -187,29 +197,10 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
         };
         let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
         if selector.starts_with("git://") {
-            if let Some(package_selector) = package_knowledge_selector(&selector) {
-                packs.push(KnowledgePackEntry::new(package_selector, pack));
-            } else {
-                packs.push(KnowledgePackEntry::new(selector, pack));
-            }
+            packs.push(KnowledgePackEntry::new(selector, pack));
         }
     }
     packs
-}
-
-fn package_knowledge_selector(selector: &str) -> Option<String> {
-    let path = selector.strip_prefix("git://")?;
-    let mut parts = path.split('/');
-    parts.next()?;
-    let repo = parts.next()?;
-    let package = parts.collect::<Vec<_>>();
-    if repo != "packages" || package.len() < 2 {
-        return None;
-    }
-    let (scope, name) = (package[0], package[1]);
-    let scope = scope.trim_start_matches('@').replace('-', "_");
-    let name = name.trim_start_matches('@').replace('-', "_");
-    Some(format!("pkg.{scope}.{name}.knowledge"))
 }
 
 fn find_library_pack_dirs(root: &Path) -> Vec<PathBuf> {
@@ -258,30 +249,4 @@ fn build_platform_tool_services(
         cached_org_id,
         config.config_dir.clone(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::package_knowledge_selector;
-
-    #[test]
-    fn package_knowledge_selector_uses_pkg_namespace_for_package_repo() {
-        assert_eq!(
-            package_knowledge_selector("git://nenjo-ai/packages/nenjo/core"),
-            Some("pkg.nenjo.core.knowledge".to_string())
-        );
-    }
-
-    #[test]
-    fn package_knowledge_selector_normalizes_template_segments() {
-        assert_eq!(
-            package_knowledge_selector("git://nenjo-ai/packages/nenjo-ai/core-pack"),
-            Some("pkg.nenjo_ai.core_pack.knowledge".to_string())
-        );
-    }
-
-    #[test]
-    fn package_knowledge_selector_ignores_non_package_git_packs() {
-        assert_eq!(package_knowledge_selector("git://acme/docs/team"), None);
-    }
 }

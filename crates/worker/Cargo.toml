@@ -32,6 +32,8 @@ nenjo-models = { workspace = true }
 nenjo-events = { workspace = true }
 nenjo-eventbus = { workspace = true, features = ["nats"] }
 nenjo-harness = { workspace = true, features = ["local-runtime"] }
+nenjo-nenpm = { workspace = true }
+nenjo-packages = { workspace = true }
 nenjo-secure-envelope = { workspace = true }
 nenjo-sessions = { workspace = true }
 

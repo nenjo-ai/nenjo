@@ -1,7 +1,7 @@
 schema: nenjo.package.v1
-name: "@acme/b"
+name: "b"
 version: "0.1.0"
 dependencies:
-  "@acme/a": "^0.1.0"
+  "a": "^0.1.0"
 modules:
   - context.yaml

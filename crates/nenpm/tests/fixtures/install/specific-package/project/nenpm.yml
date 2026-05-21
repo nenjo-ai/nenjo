@@ -1,8 +1,8 @@
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "@acme/agent": "0.1.0"
+  "agent": "0.1.0"
 
 overrides:
-  "@acme/core": file:../packages#packages/core/nenjo.package.yaml
-  "@acme/agent": file:../packages#packages/agent/nenjo.package.yaml
+  "core": file:../packages#packages/core/nenjo.package.yaml
+  "agent": file:../packages#packages/agent/nenjo.package.yaml

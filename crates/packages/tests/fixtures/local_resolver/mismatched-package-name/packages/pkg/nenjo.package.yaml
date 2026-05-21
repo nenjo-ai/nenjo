@@ -1,4 +1,4 @@
 schema: nenjo.package.v1
-name: "@acme/actual"
+name: "actual"
 version: "0.1.0"
 modules: []

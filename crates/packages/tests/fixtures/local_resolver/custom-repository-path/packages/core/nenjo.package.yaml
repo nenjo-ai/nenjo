@@ -1,12 +1,8 @@
 schema: nenjo.package.v1
-name: "@acme/core"
+name: "core"
 version: "0.1.0"
 description: Core prompt context and knowledge.
 modules:
   - knowledge/core.yaml
   - context_blocks/methodology.yaml
   - context_blocks/remembrance.yaml
-exports:
-  "./knowledge": knowledge/core.yaml
-  "./methodology": context_blocks/methodology.yaml
-  "./remembrance": context_blocks/remembrance.yaml

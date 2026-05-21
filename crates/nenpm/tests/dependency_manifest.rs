@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use nenjo_nenpm::{DependencyManifest, DependencyOverride, PackageSource};
+use nenjo_nenpm::{
+    DependencyManifest, DependencyOverride, NenpmError, PackageSource, RegistryReference,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -17,13 +19,10 @@ fn loads_preferred_yml_dependency_manifest() {
     assert_eq!(loaded.path.file_name().unwrap(), "nenpm.yml");
     assert_eq!(loaded.manifest.schema, "nenjo.dependencies.v1");
     assert_eq!(loaded.manifest.dependencies["@nenjo/nenji"], "^0.1.0");
+    assert_eq!(loaded.manifest.dependencies["@acme/test-agent"], "^0.3.0");
     assert_eq!(
-        loaded.manifest.dev_dependencies["@acme/test-agent"],
-        "^0.3.0"
-    );
-    assert_eq!(
-        loaded.manifest.registries["default"],
-        "https://registry.nenjo.ai"
+        loaded.manifest.registries[0],
+        RegistryReference::Index("https://registry.nenjo.ai".to_string())
     );
 
     let source = loaded.manifest.overrides["@nenjo/core"]
@@ -34,6 +33,7 @@ fn loads_preferred_yml_dependency_manifest() {
         PackageSource::Local {
             root: PathBuf::from("../packages"),
             manifest_path: "nenjo/core.package.yaml".to_string(),
+            scope: None,
         }
     );
 
@@ -45,8 +45,68 @@ fn loads_preferred_yml_dependency_manifest() {
         PackageSource::Local {
             root: PathBuf::from("../test-packages"),
             manifest_path: "packages/test-agent/nenjo.package.yaml".to_string(),
+            scope: None,
         }
     );
+}
+
+#[test]
+fn rejects_dev_dependencies() {
+    let err = DependencyManifest::parse_yaml(
+        r#"
+schema: nenjo.dependencies.v1
+dependencies: {}
+dev_dependencies:
+  "@acme/test-agent": "^0.3.0"
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("failed to parse nenpm dependency manifest"));
+}
+
+#[test]
+fn parses_scoped_repository_registry_source() {
+    let manifest = DependencyManifest::parse_yaml(
+        r#"
+schema: nenjo.dependencies.v1
+registries:
+  - kind: git
+    url: https://github.com/nenjo-ai/packages.git
+    reference: main
+    manifest_path: packages.yaml
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        manifest.registries[0],
+        RegistryReference::Source(PackageSource::Git {
+            url: "https://github.com/nenjo-ai/packages.git".to_string(),
+            reference: "main".to_string(),
+            manifest_path: "packages.yaml".to_string(),
+        })
+    );
+}
+
+#[test]
+fn rejects_named_registry_map() {
+    let err = DependencyManifest::parse_yaml(
+        r#"
+schema: nenjo.dependencies.v1
+registries:
+  "@nenjo":
+    kind: git
+    url: https://github.com/nenjo-ai/packages.git
+    reference: main
+    manifest_path: packages.yaml
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("failed to parse nenpm dependency manifest"));
 }
 
 #[test]
@@ -59,11 +119,13 @@ fn loads_yaml_dependency_manifest() {
 
 #[test]
 fn rejects_directory_with_both_yml_and_yaml() {
-    let err = DependencyManifest::load_from_dir(fixture("both"))
-        .unwrap_err()
-        .to_string();
+    let err = DependencyManifest::load_from_dir(fixture("both")).unwrap_err();
 
-    assert!(err.contains("found both nenpm.yml and nenpm.yaml"));
+    assert!(matches!(err, NenpmError::DependencyManifest { .. }));
+    assert!(
+        err.to_string()
+            .contains("found both nenpm.yml and nenpm.yaml")
+    );
 }
 
 #[test]
@@ -117,6 +179,7 @@ overrides:
         PackageSource::Local {
             root: PathBuf::from("../packages"),
             manifest_path: "packages.yaml".to_string(),
+            scope: None,
         }
     );
 }

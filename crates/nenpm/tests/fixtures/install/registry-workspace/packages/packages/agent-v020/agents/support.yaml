@@ -1,9 +1,7 @@
 schema: nenjo.agent.v1
 manifest:
   name: support_agent
-  imports:
-    context:
-      - "@acme/core/methodology"
+  description: Handles support requests.
   prompt_config:
     system_prompt: |
-      {{ @acme/core/methodology }}
+      {{ pkg.acme.core.methodology }}

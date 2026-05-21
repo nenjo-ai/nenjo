@@ -1,5 +1,5 @@
 schema: nenjo.package.v1
-name: "@acme/agent"
+name: "agent"
 version: "0.1.0"
 modules:
   - agent.yaml

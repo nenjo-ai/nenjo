@@ -5,11 +5,11 @@ resources:
       name: methodology
       template: Think through the work carefully.
   - schema: nenjo.context_block.v1
+    imports:
+      context:
+        - "#methodology"
     manifest:
       name: tool_usage
-      imports:
-        context:
-          - "#methodology"
       template: |
-        {{ @acme/core/methodology }}
+        {{ context.methodology }}
         Use tools when they provide current evidence.

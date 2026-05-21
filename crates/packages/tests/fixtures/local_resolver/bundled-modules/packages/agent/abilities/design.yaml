@@ -1,15 +1,19 @@
 schema: nenjo.modules.v1
 resources:
   - schema: nenjo.ability.v1
+    imports:
+      context:
+        - "#design_guidance"
     manifest:
       name: design_agent
       tool_name: design_agent
-      imports:
-        context:
-          - "@acme/core/methodology"
       prompt_config:
         developer_prompt: |
-          {{ @acme/core/methodology }}
+          {{ context.design_guidance }}
+  - schema: nenjo.context_block.v1
+    manifest:
+      name: design_guidance
+      template: Use local design guidance.
   - schema: nenjo.ability.v1
     manifest:
       name: diagnose_failure

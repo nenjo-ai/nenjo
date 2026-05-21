@@ -2,19 +2,22 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use crate::Result;
+use anyhow::{Context, anyhow};
 use nenjo_packages::{LocalPackageResolver, ResolvedPackage, ResolvedPackageGraph};
 use serde::{Deserialize, Serialize};
 
+use crate::dependency::RegistryReference;
 use crate::source::{
     DefaultPackageSourceFetcher, FetchedPackageSource, PackageSource, PackageSourceFetcher,
-    fetch_bytes, normalize_fetch_url, normalize_source_paths, validate_package_source,
+    fetch_bytes, normalize_fetch_url, normalize_source_paths, package_source_scope,
+    validate_package_source,
 };
 
 /// Registry metadata for one concrete package version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryPackageVersion {
-    /// Package name, for example `@nenjo/nenji`.
+    /// Fully resolved package name, for example `@nenjo-ai/nenji`.
     pub name: String,
     /// Concrete package version.
     pub version: String,
@@ -39,7 +42,9 @@ pub trait PackageRegistry {
 pub struct RegistryIndex {
     /// Registry schema, currently `nenjo.registry.v1`.
     pub schema: String,
-    /// Package versions keyed by package name.
+    /// Package versions keyed by package name. Repo-backed registry indexes use
+    /// unscoped keys; scoped consumer names are derived from the registry
+    /// source.
     #[serde(default)]
     pub packages: BTreeMap<String, Vec<RegistryIndexVersion>>,
 }
@@ -72,11 +77,86 @@ impl RegistryIndex {
     pub fn load(reference: &str, base_dir: impl AsRef<Path>) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         let (content, source_base) = load_registry_content(reference, base_dir)?;
-        let mut registry = Self::parse_yaml(&content)?;
+        let mut registry = match Self::parse_yaml(&content) {
+            Ok(registry) => registry,
+            Err(error) => {
+                let Some(source_base) = source_base.as_ref() else {
+                    return Err(error);
+                };
+                let source = PackageSource::Local {
+                    root: source_base.root.clone(),
+                    manifest_path: source_base.manifest_path.clone(),
+                    scope: None,
+                };
+                Self::load_registry_source(&source, base_dir)
+                    .with_context(|| "failed to load repository-style registry source")?
+            }
+        };
         if let Some(source_base) = source_base {
-            registry.normalize_relative_sources(&source_base);
+            registry.normalize_relative_sources(&source_base.root);
         }
         Ok(registry)
+    }
+
+    /// Load a registry from a typed registry reference.
+    pub fn load_reference(
+        reference: &RegistryReference,
+        base_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let base_dir = base_dir.as_ref();
+        match reference {
+            RegistryReference::Index(reference) => Self::load(reference, base_dir),
+            RegistryReference::Source(source) => Self::load_registry_source(source, base_dir),
+        }
+    }
+
+    fn load_registry_source(source: &PackageSource, base_dir: &Path) -> Result<Self> {
+        let source = normalize_source_paths(source.clone(), base_dir);
+        let fetched = DefaultPackageSourceFetcher::new()
+            .fetch(&source)
+            .context("failed to fetch package registry source")?;
+        if !crate::install::is_registry_manifest_path(&fetched.manifest_path) {
+            bail!(
+                "package registry source must point at packages.yaml, *.registry.yaml, or *.registry.yml, got {}",
+                fetched.manifest_path
+            );
+        }
+        if matches!(source, PackageSource::Local { scope: None, .. }) {
+            bail!("local registry source must declare scope");
+        }
+        let resolver =
+            LocalPackageResolver::with_registry_path(&fetched.root, &fetched.manifest_path);
+        let registry = resolver.load_registry()?;
+        let mut packages = BTreeMap::new();
+        let repo_scope = package_source_scope(&source);
+        for (name, manifest_path) in registry.packages {
+            let resolved = resolver
+                .resolve_package_manifest(&manifest_path)
+                .with_context(|| format!("failed to resolve registry package {name}"))?;
+            if resolved.name != name {
+                bail!(
+                    "registry maps {name} to {manifest_path}, but package manifest declares {}",
+                    resolved.name
+                );
+            }
+            let registry_name = scoped_package_name(repo_scope.as_deref(), &name);
+            packages
+                .entry(registry_name)
+                .or_insert_with(Vec::new)
+                .push(RegistryIndexVersion {
+                    version: resolved.version.clone(),
+                    source: source_with_manifest_path(&source, manifest_path),
+                    dependencies: scoped_dependencies(
+                        repo_scope.as_deref(),
+                        resolved.dependencies(),
+                    ),
+                    checksum: None,
+                });
+        }
+        Ok(Self {
+            schema: "nenjo.registry.v1".to_string(),
+            packages,
+        })
     }
 
     /// Validate schema and package records.
@@ -113,13 +193,54 @@ impl RegistryIndex {
     }
 }
 
+fn scoped_package_name(scope: Option<&str>, name: &str) -> String {
+    match scope {
+        Some(scope) => format!("{scope}/{name}"),
+        None => name.to_string(),
+    }
+}
+
+fn scoped_dependencies(
+    scope: Option<&str>,
+    dependencies: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    dependencies
+        .iter()
+        .map(|(name, requirement)| (scoped_package_name(scope, name), requirement.clone()))
+        .collect()
+}
+
+fn source_with_manifest_path(source: &PackageSource, manifest_path: String) -> PackageSource {
+    match source {
+        PackageSource::Git { url, reference, .. } => PackageSource::Git {
+            url: url.clone(),
+            reference: reference.clone(),
+            manifest_path,
+        },
+        PackageSource::Artifact { url, checksum, .. } => PackageSource::Artifact {
+            url: url.clone(),
+            checksum: checksum.clone(),
+            manifest_path,
+        },
+        PackageSource::Local { root, scope, .. } => PackageSource::Local {
+            root: root.clone(),
+            manifest_path,
+            scope: scope.clone(),
+        },
+        PackageSource::Remote { url, checksum } => PackageSource::Remote {
+            url: url.clone(),
+            checksum: checksum.clone(),
+        },
+    }
+}
+
 impl PackageRegistry for RegistryIndex {
     fn resolve_version(&self, package: &str, requirement: &str) -> Result<RegistryPackageVersion> {
         let versions = self
             .packages
             .get(package)
             .ok_or_else(|| anyhow!("registry has no package {package}"))?;
-        versions
+        Ok(versions
             .iter()
             .filter(|candidate| nenjo_packages::version_satisfies(&candidate.version, requirement))
             .max_by(|left, right| left.version.cmp(&right.version))
@@ -130,7 +251,7 @@ impl PackageRegistry for RegistryIndex {
                 dependencies: candidate.dependencies.clone(),
                 checksum: candidate.checksum.clone(),
             })
-            .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))
+            .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))?)
     }
 }
 
@@ -162,12 +283,12 @@ impl PackageRegistry for InMemoryRegistry {
             .versions
             .get(package)
             .ok_or_else(|| anyhow!("registry has no package {package}"))?;
-        versions
+        Ok(versions
             .iter()
             .filter(|candidate| nenjo_packages::version_satisfies(&candidate.version, requirement))
             .max_by(|left, right| left.version.cmp(&right.version))
             .cloned()
-            .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))
+            .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))?)
     }
 }
 
@@ -226,9 +347,9 @@ where
                 .with_context(|| format!("failed to fetch {}@{}", record.name, record.version))?;
             let resolver = LocalPackageResolver::new(&fetched.root);
             let manifest_path = registry_record_manifest_path(&record, &fetched);
-            if crate::install::is_repository_manifest_path(manifest_path) {
+            if crate::install::is_registry_manifest_path(manifest_path) {
                 bail!(
-                    "registry source for {}@{} must point at a package manifest, not {}",
+                    "registry source for {}@{} must point at a package manifest, not registry index {}",
                     record.name,
                     record.version,
                     manifest_path
@@ -278,7 +399,9 @@ pub(crate) fn verify_registry_package(
     record: &RegistryPackageVersion,
     package: &ResolvedPackage,
 ) -> Result<()> {
-    if package.name != record.name {
+    let source_scope = package_source_scope(&record.source);
+    let source_name = scoped_package_name(source_scope.as_deref(), &package.name);
+    if source_name != record.name {
         bail!(
             "registry resolved {}, but source manifest declares {}",
             record.name,
@@ -293,7 +416,8 @@ pub(crate) fn verify_registry_package(
             package.version
         );
     }
-    if package.dependencies() != &record.dependencies {
+    let source_dependencies = scoped_dependencies(source_scope.as_deref(), package.dependencies());
+    if source_dependencies != record.dependencies {
         bail!(
             "registry metadata for {}@{} does not match source manifest dependencies",
             record.name,
@@ -314,7 +438,16 @@ pub(crate) fn verify_registry_package(
     Ok(())
 }
 
-fn load_registry_content(reference: &str, base_dir: &Path) -> Result<(String, Option<PathBuf>)> {
+#[derive(Debug, Clone)]
+struct RegistryContentSource {
+    root: PathBuf,
+    manifest_path: String,
+}
+
+fn load_registry_content(
+    reference: &str,
+    base_dir: &Path,
+) -> Result<(String, Option<RegistryContentSource>)> {
     let raw = reference.trim();
     if raw.is_empty() {
         bail!("registry reference cannot be empty");
@@ -341,9 +474,20 @@ fn load_registry_content(reference: &str, base_dir: &Path) -> Result<(String, Op
     };
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read registry {}", path.display()))?;
-    let source_base = path
+    let root = path
         .parent()
         .ok_or_else(|| anyhow!("registry path has no parent directory"))?
         .to_path_buf();
-    Ok((content, Some(source_base)))
+    let manifest_path = path
+        .file_name()
+        .and_then(|file| file.to_str())
+        .ok_or_else(|| anyhow!("registry path has no filename"))?
+        .to_string();
+    Ok((
+        content,
+        Some(RegistryContentSource {
+            root,
+            manifest_path,
+        }),
+    ))
 }

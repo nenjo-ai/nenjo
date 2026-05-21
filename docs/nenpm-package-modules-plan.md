@@ -20,8 +20,8 @@ Module
 Resource/source behavior
   inferred from each module's schema
 
-Exports
-  optional stable public aliases
+Imports
+  local runtime composition between modules
 ```
 
 Packages are generic in v1. There are no separate package types for resources,
@@ -31,43 +31,50 @@ dispatches by manifest schema.
 ## Repository Manifest
 
 ```yaml
-schema: nenjo.repository.v1
+schema: nenjo.registry.v1
 packages:
-  "@nenjo/core": packages/core/nenjo.package.yaml
-  "@nenjo/nenji": packages/nenji/nenjo.package.yaml
+  "@nenjo-ai/core": packages/core/nenjo.package.yaml
+  "@nenjo-ai/nenji": packages/nenji/nenjo.package.yaml
 ```
 
 ## Package Manifest
 
 ```yaml
 schema: nenjo.package.v1
-name: "@nenjo/nenji"
+name: "@nenjo-ai/nenji"
 version: "0.1.0"
 description: Nenjo platform guide agent.
 
 dependencies:
-  "@nenjo/core": "^0.1.0"
+  "@nenjo-ai/core": "^0.1.0"
 
 modules:
-  - agents/nenji.yaml
-  - abilities/design_agent.yaml
-  - domains/creator.yaml
-
-exports:
-  ".": agents/nenji.yaml
-  "./creator-domain": domains/creator.yaml
+  - agent.yaml
 ```
 
 Rules:
 
 - `dependencies` are package-level only.
-- `modules` are package-relative manifest paths.
-- `exports` are optional public aliases.
+- `modules` are package-relative root entrypoints. The resolver follows local
+  wrapper-level imports transitively from those roots.
+- Directory references must contain `index.yml` or `index.yaml`; the resolver
+  expands that explicit index and never imports a directory by implicit file
+  listing.
 - Runtime kind is inferred from module manifest `schema`.
 - Runtime name is inferred from `manifest.name`.
 
 Module files may contain a single resource manifest or a `nenjo.modules.v1`
 bundle:
+
+```yaml
+schema: nenjo.module_index.v1
+modules:
+  - design_agent.yaml
+  - diagnose_failure.yaml
+```
+
+Index entries are relative to the index file directory and can point at nested
+directories that also contain an index. Index cycles are rejected.
 
 ```yaml
 schema: nenjo.modules.v1
@@ -80,26 +87,21 @@ resources:
       name: diagnose_failure
 ```
 
-Bundled resources use `path#resource_name` selectors in imports and exports:
-
-```yaml
-exports:
-  "./design-agent": abilities/design.yaml#design_agent
-```
-
 Resources can declare structured runtime imports:
 
 ```yaml
+schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ./capabilities/design/
+  context:
+    - ./shared/context/methodology.yml
 manifest:
-  imports:
-    abilities:
-      - ./abilities/design.yaml#design_agent
-    context:
-      - "@nenjo/core/methodology"
+  name: nenji
 ```
 
-Prompt template scanning can be added later as validation, but explicit imports
-are the module graph source of truth.
+Imports are local module refs only. Package dependencies are declared once at
+the package level in `dependencies`.
 
 ## Prompt Selectors
 
@@ -115,9 +117,9 @@ In v1, package prompt selectors are used for:
   `{{ pkg.nenjo.core.knowledge.guide.agents }}`
 
 Agents, abilities, domains, routines, MCP servers, and future runtime resources
-are resolved through package dependencies, module paths, exports, and explicit
-manifest imports. They do not become prompt variables just because they were
-installed from a package.
+are resolved through package dependencies, module paths, and explicit wrapper
+imports. They do not become prompt variables just because they were installed
+from a package.
 
 ## Runtime Dispatch
 
@@ -141,8 +143,8 @@ Only the importer/registrar layer needs to learn how to handle the new schema.
 
 `nenjo-packages` owns pure format and resolution primitives:
 
-- parse package and repository manifests
-- validate module paths and exports
+- parse package and registry manifests
+- validate module paths and imports
 - infer module schema, kind, and runtime name
 - build dependency-first package/module graphs
 - expose lockfile records
@@ -169,17 +171,21 @@ Projects declare install roots in `nenpm.yml` or `nenpm.yaml`:
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "@nenjo/nenji": "^0.1.0"
+  "@nenjo-ai/nenji": "^0.1.0"
 
 registries:
-  default: https://registry.nenjo.ai/index.yaml
+  - https://registry.nenjo.ai/index.yaml
 
 overrides:
-  "@nenjo/core": file:../packages#nenjo/core.package.yaml
+  "@nenjo-ai/core": file:../packages#nenjo/core.package.yaml
 ```
 
 `nenpm.yml` is preferred, but both extensions are supported. If both files exist
 in the same directory, the loader fails with a clear ambiguity error.
+
+Registries are ordered. The first registry containing a requested package wins.
+GitHub-backed repository registries expose unscoped `packages.yaml` entries
+under the package scope derived from the GitHub org.
 
 Overrides support structured package sources and `file:` shorthand. The
 shorthand form is:
@@ -189,13 +195,21 @@ file:<root>#<manifest_path>
 ```
 
 When `#<manifest_path>` is omitted, it defaults to `packages.yaml`, treating the
-root as a local repository.
+root as a local registry.
 
 `nenpm install` resolves the dependency manifest, fetches package sources,
-builds the package/module graph, and writes `nenpm.lock.yml`. `--dry-run`
-performs the same resolution without writing the lockfile. Overrides take
-precedence for local development. Dependencies without overrides resolve from
-`registries.default`.
+builds the package/module graph, writes `nenpm.lock.yml`, and materializes the
+resolved package sources under `.nenjo/packages/<scope>/<name>@<version>` by
+default. It also writes `.nenjo/packages/.nenpm-index.json`, which maps each
+locked `name@version` to its installed package root. `--packages-dir` overrides
+the final package install directory when callers need global or platform-managed
+package trees. `--dry-run` performs the same resolution without writing the lockfile or
+package tree. Overrides take precedence for local development. Dependencies
+without overrides resolve from the ordered `registries` list; the first registry
+containing the requested package wins.
+`--locked` requires `nenpm.lock.yml` to exist and match the resolved graph; it is
+the mode used by worker bootstrap when the platform supplies both dependency and
+lock files.
 
 Registry packages use registry metadata to compute the full dependency graph
 before download. Selected registry sources are fetched concurrently with a
@@ -208,11 +222,12 @@ re-resolves from the registry. `add` and `remove` edit the dependency manifest
 and then install; `list` reads the lockfile; `info` reads package metadata from
 the configured default registry.
 
-The lockfile is also an integrity input. It records source metadata, package
-manifest hashes, and module hashes. Normal `install` verifies reused non-local
-pins; local sources remain mutable development inputs. Artifact source
-checksums verify archive bytes, remote source checksums verify manifest bytes,
-and the version-level registry checksum verifies the package manifest hash.
+The lockfile is also an integrity input. It records source metadata, requested
+dependency ranges, exact resolved dependency versions, package manifest hashes,
+and module hashes. Normal `install` verifies reused non-local pins; local
+sources remain mutable development inputs. Artifact source checksums verify
+archive bytes, remote source checksums verify manifest bytes, and the
+version-level registry checksum verifies the package manifest hash.
 
 ## Registry Sources
 
@@ -222,7 +237,7 @@ resolved package version at different source kinds:
 ```yaml
 schema: nenjo.registry.v1
 packages:
-  "@nenjo/nenji":
+  "@nenjo-ai/nenji":
     - version: "0.1.0"
       source:
         kind: git
@@ -230,7 +245,7 @@ packages:
         reference: v0.1.0
         manifest_path: nenjo/nenji.package.yaml
       dependencies:
-        "@nenjo/core": "^0.1.0"
+        "@nenjo-ai/core": "^0.1.0"
 ```
 
 ```text

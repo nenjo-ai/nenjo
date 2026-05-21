@@ -1,64 +1,13 @@
+mod support;
+
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use nenjo_nenpm::{
-    AddOptions, DependencyManifest, InfoOptions, InstallOptions, ListOptions, NenpmLock,
-    PackageSpec, RemoveOptions, add, info, install, list, remove, update,
+    InstallOptions, NenpmLock, PackageInstallIndex, PackageSource, install, package_install_path,
+    package_instance_key,
 };
-use nenjo_packages::sha256_hex;
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("install")
-        .join(name)
-}
-
-fn temp_workspace(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("nenpm-install-{name}-{}", std::process::id()));
-    if root.exists() {
-        fs::remove_dir_all(&root).unwrap();
-    }
-    fs::create_dir_all(&root).unwrap();
-    root
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let source = entry.path();
-        let target = to.join(entry.file_name());
-        if source.is_dir() {
-            copy_dir(&source, &target);
-        } else {
-            fs::copy(&source, &target).unwrap();
-        }
-    }
-}
-
-fn write_file(root: &Path, path: &str, content: &str) {
-    let full_path = root.join(path);
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(full_path, content).unwrap();
-}
-
-fn write_artifact(source: &Path, artifact: &Path) -> String {
-    if let Some(parent) = artifact.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    let file = fs::File::create(artifact).unwrap();
-    let encoder = GzEncoder::new(file, Compression::default());
-    let mut builder = tar::Builder::new(encoder);
-    builder.append_dir_all(".", source).unwrap();
-    builder.into_inner().unwrap().finish().unwrap();
-    sha256_hex(&fs::read(artifact).unwrap())
-}
+use support::{copy_dir, fixture, temp_workspace, write_file};
 
 #[test]
 fn install_resolves_local_repository_override_and_writes_lockfile() {
@@ -69,6 +18,9 @@ fn install_resolves_local_repository_override_and_writes_lockfile() {
     let report = install(InstallOptions::new(&project)).unwrap();
 
     assert!(report.wrote_lockfile);
+    assert_eq!(report.materialization.installed, 2);
+    assert_eq!(report.materialization.reused, 0);
+    assert_eq!(report.materialization.pruned, 0);
     assert_eq!(report.lockfile_path, project.join("nenpm.lock.yml"));
     assert!(report.lockfile_path.exists());
     assert_eq!(
@@ -77,15 +29,15 @@ fn install_resolves_local_repository_override_and_writes_lockfile() {
             .packages()
             .map(|package| package.name.to_string())
             .collect::<Vec<_>>(),
-        vec!["@acme/core".to_string(), "@acme/agent".to_string()]
+        vec!["core".to_string(), "agent".to_string()]
     );
 
     let lock: NenpmLock =
         serde_yaml::from_str(&fs::read_to_string(&report.lockfile_path).unwrap()).unwrap();
     assert_eq!(lock.schema, "nenjo.lock.v1");
     assert_eq!(lock.packages.len(), 2);
-    assert_eq!(lock.packages[0].name, "@acme/core");
-    assert_eq!(lock.packages[1].name, "@acme/agent");
+    assert_eq!(lock.packages[0].name, "core");
+    assert_eq!(lock.packages[1].name, "agent");
     assert_eq!(lock.packages[0].modules.len(), 2);
     assert_eq!(lock.packages[1].modules.len(), 3);
     assert!(
@@ -94,8 +46,205 @@ fn install_resolves_local_repository_override_and_writes_lockfile() {
             .iter()
             .any(|module| module.path == "agents/support.yaml"
                 && module.resource.as_deref() == Some("support_agent")
-                && module.imports.len() == 2)
+                && module.imports.len() == 1)
     );
+    let agent_install = package_install_path(&project, "agent", "0.1.0");
+    assert!(agent_install.join("nenjo.package.yaml").exists());
+    assert!(agent_install.join("agents/support.yaml").exists());
+    assert!(agent_install.join("abilities/design.yaml").exists());
+    assert!(!agent_install.join("packages.yaml").exists());
+    assert!(
+        !agent_install
+            .join("packages/core/nenjo.package.yaml")
+            .exists()
+    );
+
+    let index =
+        PackageInstallIndex::load_file(project.join(".nenjo/packages/.nenpm-index.json")).unwrap();
+    let entry = index.get_package("agent", "0.1.0").unwrap();
+    assert_eq!(entry.manifest_path, "nenjo.package.yaml");
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_reuses_verified_package_tree_on_second_run() {
+    let workspace = temp_workspace("reuse-package-tree");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+
+    let first = install(InstallOptions::new(&project)).unwrap();
+    assert_eq!(first.materialization.installed, 2);
+    assert_eq!(first.materialization.reused, 0);
+
+    let agent_install = package_install_path(&project, "agent", "0.1.0");
+    write_file(&agent_install, "cache-sentinel.txt", "kept when reused");
+
+    let second = install(InstallOptions::new(&project)).unwrap();
+
+    assert_eq!(second.materialization.installed, 0);
+    assert_eq!(second.materialization.reused, 2);
+    assert_eq!(second.materialization.pruned, 0);
+    assert!(agent_install.join("cache-sentinel.txt").exists());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_replaces_corrupt_cached_package_tree() {
+    let workspace = temp_workspace("replace-corrupt-cache");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+    install(InstallOptions::new(&project)).unwrap();
+
+    let agent_install = package_install_path(&project, "agent", "0.1.0");
+    write_file(
+        &agent_install,
+        "cache-sentinel.txt",
+        "removed when replaced",
+    );
+    write_file(
+        &agent_install,
+        "agents/support.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: support_agent
+  prompt_config:
+    system_prompt: corrupted
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project)).unwrap();
+
+    assert_eq!(report.materialization.installed, 1);
+    assert_eq!(report.materialization.reused, 1);
+    assert_eq!(report.materialization.pruned, 0);
+    assert!(!agent_install.join("cache-sentinel.txt").exists());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_resolves_file_repository_manifest_registry() {
+    let workspace = temp_workspace("file-repository-registry");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "@acme/agent": "^0.1.0"
+
+registries:
+  - kind: local
+    scope: "@acme"
+    root: ../packages
+    manifest_path: packages.yaml
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project)).unwrap();
+
+    assert!(report.wrote_lockfile);
+    assert_eq!(
+        report
+            .plan
+            .packages()
+            .map(|package| package.name.to_string())
+            .collect::<Vec<_>>(),
+        vec!["@acme/core".to_string(), "@acme/agent".to_string()]
+    );
+    assert!(package_install_path(&project, "@acme/agent", "0.1.0").exists());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_can_materialize_into_custom_packages_dir() {
+    let workspace = temp_workspace("custom-packages-dir");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+    let packages_dir = workspace.join("custom-packages");
+
+    let report = install(InstallOptions::new(&project).packages_dir(&packages_dir)).unwrap();
+
+    assert_eq!(report.materialization.installed, 2);
+    assert!(packages_dir.join("agent@0.1.0/nenjo.package.yaml").exists());
+    assert!(packages_dir.join(".nenpm-index.json").exists());
+    assert!(!project.join(".nenjo").exists());
+
+    let second = install(InstallOptions::new(&project).packages_dir(&packages_dir)).unwrap();
+
+    assert_eq!(second.materialization.installed, 0);
+    assert_eq!(second.materialization.reused, 2);
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_includes_multiple_direct_dependencies() {
+    let workspace = temp_workspace("multiple-direct-dependencies");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+
+    write_file(
+        &workspace,
+        "packages/packages/tools/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "tools"
+version: "0.1.0"
+modules:
+  - context/tools.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/packages/tools/context/tools.yaml",
+        r#"schema: nenjo.context_block.v1
+manifest:
+  name: tools
+  template: Use project tools carefully.
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "core": packages/core/nenjo.package.yaml
+  "agent": packages/agent/nenjo.package.yaml
+  "tools": packages/tools/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "agent": "^0.1.0"
+  "tools": "^0.1.0"
+
+overrides:
+  "agent": file:../packages
+  "tools": file:../packages
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project)).unwrap();
+
+    assert_eq!(
+        report
+            .plan
+            .packages()
+            .map(|package| package.name.to_string())
+            .collect::<Vec<_>>(),
+        vec!["core".to_string(), "agent".to_string(), "tools".to_string()]
+    );
+    assert!(package_install_path(&project, "agent", "0.1.0").exists());
+    assert!(package_install_path(&project, "tools", "0.1.0").exists());
 
     fs::remove_dir_all(workspace).unwrap();
 }
@@ -110,6 +259,8 @@ fn install_dry_run_does_not_write_lockfile() {
 
     assert!(!report.wrote_lockfile);
     assert!(!project.join("nenpm.lock.yml").exists());
+    assert!(!project.join("packages").exists());
+    assert!(!project.join(".nenjo").exists());
     assert_eq!(report.lockfile.packages.len(), 2);
 
     fs::remove_dir_all(workspace).unwrap();
@@ -124,12 +275,9 @@ fn install_resolves_specific_package_manifest_overrides() {
     let report = install(InstallOptions::new(&project)).unwrap();
 
     assert_eq!(report.lockfile.packages.len(), 2);
-    assert_eq!(report.lockfile.packages[0].name, "@acme/core");
-    assert_eq!(report.lockfile.packages[1].name, "@acme/agent");
-    assert_eq!(
-        report.lockfile.packages[1].dependencies["@acme/core"],
-        "^0.1.0"
-    );
+    assert_eq!(report.lockfile.packages[0].name, "core");
+    assert_eq!(report.lockfile.packages[1].name, "agent");
+    assert_eq!(report.lockfile.packages[1].dependencies["core"], "^0.1.0");
 
     fs::remove_dir_all(workspace).unwrap();
 }
@@ -150,27 +298,51 @@ fn install_resolves_registry_dependency_and_writes_lockfile() {
             .iter()
             .map(|package| format!("{}@{}", package.name, package.version))
             .collect::<Vec<_>>(),
-        vec!["@acme/core@0.2.0", "@acme/agent@0.2.0"]
+        vec!["core@0.2.0", "agent@0.2.0"]
     );
+    assert_eq!(report.lockfile.packages[1].dependencies["core"], "^0.2.0");
     assert_eq!(
-        report.lockfile.packages[1].dependencies["@acme/core"],
-        "^0.2.0"
+        report.lockfile.packages[1].resolved_dependencies["core"],
+        "0.2.0"
     );
     assert!(
         report.lockfile.packages[1]
             .modules
             .iter()
-            .any(|module| module.name == "support_agent" && module.imports.len() == 1)
+            .any(|module| module.name == "support_agent" && module.imports.is_empty())
     );
+    let package_root = package_install_path(&project, "agent", "0.2.0");
+    assert!(package_root.join("nenjo.package.yaml").exists());
+    assert!(package_root.join("agents/support.yaml").exists());
+    assert!(!package_root.join("packages/agent-v020").exists());
+    assert!(!package_root.join(".git").exists());
+    let index =
+        PackageInstallIndex::load_file(project.join(".nenjo/packages/.nenpm-index.json")).unwrap();
+    let entry = index
+        .packages
+        .get(&package_instance_key("agent", "0.2.0"))
+        .unwrap();
+    assert_eq!(entry.root, ".nenjo/packages/agent@0.2.0");
+    assert_eq!(entry.manifest_path, "nenjo.package.yaml");
 
     fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]
-fn install_preserves_existing_lockfile_version_pin() {
-    let workspace = temp_workspace("preserve-lock");
+fn install_routes_scoped_packages_to_repository_registry_source() {
+    let workspace = temp_workspace("scoped-repository-registry");
     copy_dir(&fixture("registry-workspace"), &workspace);
     let project = workspace.join("project");
+    write_file(
+        &workspace,
+        "packages/packages.yaml",
+        r#"
+schema: nenjo.registry.v1
+packages:
+  "core": packages/core-v020/nenjo.package.yaml
+  "agent": packages/agent-v020/nenjo.package.yaml
+"#,
+    );
     write_file(
         &project,
         "nenpm.yml",
@@ -178,83 +350,17 @@ fn install_preserves_existing_lockfile_version_pin() {
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "@acme/agent": "^0.1.0"
+  "@acme/agent": "^0.2.0"
 
 registries:
-  default: ../registry/registry.yaml
-"#,
-    );
-    write_file(
-        &project,
-        "nenpm.lock.yml",
-        r#"
-schema: nenjo.lock.v1
-packages:
-  - name: "@acme/core"
-    version: "0.1.0"
-    manifest_path: packages/core-v010/nenjo.package.yaml
-    hash: old
-    dependencies: {}
-    modules: []
-  - name: "@acme/agent"
-    version: "0.1.0"
-    manifest_path: packages/agent-v010/nenjo.package.yaml
-    hash: old
-    dependencies:
-      "@acme/core": "^0.1.0"
-    modules: []
+  - kind: local
+    scope: "@acme"
+    root: ../packages
+    manifest_path: packages.yaml
 "#,
     );
 
     let report = install(InstallOptions::new(&project)).unwrap();
-
-    assert_eq!(report.lockfile.packages.len(), 2);
-    assert_eq!(report.lockfile.packages[0].version, "0.1.0");
-    assert_eq!(report.lockfile.packages[1].version, "0.1.0");
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn update_ignores_existing_lockfile_version_pin() {
-    let workspace = temp_workspace("update-lock");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &project,
-        "nenpm.yml",
-        r#"
-schema: nenjo.dependencies.v1
-
-dependencies:
-  "@acme/agent": "^0.1.0"
-
-registries:
-  default: ../registry/registry.yaml
-"#,
-    );
-    write_file(
-        &project,
-        "nenpm.lock.yml",
-        r#"
-schema: nenjo.lock.v1
-packages:
-  - name: "@acme/core"
-    version: "0.1.0"
-    manifest_path: packages/core-v010/nenjo.package.yaml
-    hash: old
-    dependencies: {}
-    modules: []
-  - name: "@acme/agent"
-    version: "0.1.0"
-    manifest_path: packages/agent-v010/nenjo.package.yaml
-    hash: old
-    dependencies:
-      "@acme/core": "^0.1.0"
-    modules: []
-"#,
-    );
-
-    let report = update(InstallOptions::new(&project)).unwrap();
 
     assert_eq!(
         report
@@ -265,199 +371,14 @@ packages:
             .collect::<Vec<_>>(),
         vec!["@acme/core@0.2.0", "@acme/agent@0.2.0"]
     );
-    fs::remove_dir_all(workspace).unwrap();
-}
+    assert!(matches!(
+        report.lockfile.packages[1].source.as_ref().unwrap(),
+        PackageSource::Local { manifest_path, .. } if manifest_path == "packages/agent-v020/nenjo.package.yaml"
+    ));
 
-#[test]
-fn update_replaces_same_module_path_with_new_version_content() {
-    let workspace = temp_workspace("update-same-module-path");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &project,
-        "nenpm.yml",
-        r#"
-schema: nenjo.dependencies.v1
+    let locked = install(InstallOptions::new(&project).locked(true)).unwrap();
+    assert_eq!(locked.lockfile, report.lockfile);
 
-dependencies:
-  "@acme/core": "^0.1.0"
-
-registries:
-  default: ../registry/registry.yaml
-"#,
-    );
-    write_file(
-        &project,
-        "nenpm.lock.yml",
-        r#"
-schema: nenjo.lock.v1
-packages:
-  - name: "@acme/core"
-    version: "0.1.0"
-    manifest_path: packages/core-v010/nenjo.package.yaml
-    hash: old-package-hash
-    dependencies: {}
-    modules:
-      - path: context/core.yaml
-        source_path: packages/core-v010/context/core.yaml
-        schema: nenjo.context_block.v1
-        kind: context_block
-        name: old_methodology
-        hash: old-module-hash
-"#,
-    );
-
-    let report = update(InstallOptions::new(&project)).unwrap();
-    let package = report
-        .lockfile
-        .packages
-        .iter()
-        .find(|package| package.name == "@acme/core")
-        .expect("core package is locked");
-    let module = package
-        .modules
-        .iter()
-        .find(|module| module.path == "context/core.yaml")
-        .expect("core module is locked");
-
-    assert_eq!(package.version, "0.2.0");
-    assert_eq!(
-        package.manifest_path,
-        "packages/core-v020/nenjo.package.yaml"
-    );
-    assert_eq!(module.source_path, "packages/core-v020/context/core.yaml");
-    assert_eq!(module.name, "methodology");
-    assert_ne!(module.hash, "old-module-hash");
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn add_updates_dependency_manifest_and_lockfile() {
-    let workspace = temp_workspace("add-command");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &project,
-        "nenpm.yml",
-        r#"
-schema: nenjo.dependencies.v1
-
-dependencies: {}
-
-registries:
-  default: ../registry/registry.yaml
-"#,
-    );
-
-    let report = add(AddOptions::new(
-        &project,
-        PackageSpec::parse("@acme/agent@^0.2.0").unwrap(),
-    ))
-    .unwrap();
-
-    let manifest = DependencyManifest::load_from_dir(&project)
-        .unwrap()
-        .manifest;
-    assert_eq!(manifest.dependencies["@acme/agent"], "^0.2.0");
-    assert_eq!(report.install.lockfile.packages[1].name, "@acme/agent");
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn add_dry_run_resolves_without_persisting_manifest_change() {
-    let workspace = temp_workspace("add-dry-run");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &project,
-        "nenpm.yml",
-        r#"
-schema: nenjo.dependencies.v1
-
-dependencies: {}
-
-registries:
-  default: ../registry/registry.yaml
-"#,
-    );
-    let original = fs::read_to_string(project.join("nenpm.yml")).unwrap();
-
-    let report = add(
-        AddOptions::new(&project, PackageSpec::parse("@acme/agent@^0.2.0").unwrap()).dry_run(true),
-    )
-    .unwrap();
-
-    assert_eq!(
-        fs::read_to_string(project.join("nenpm.yml")).unwrap(),
-        original
-    );
-    assert!(!project.join("nenpm.lock.yml").exists());
-    assert_eq!(report.install.lockfile.packages[1].name, "@acme/agent");
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn remove_updates_dependency_manifest_and_prunes_lockfile() {
-    let workspace = temp_workspace("remove-command");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    install(InstallOptions::new(&project)).unwrap();
-
-    let report = remove(RemoveOptions::new(&project, "@acme/agent")).unwrap();
-
-    let manifest = fs::read_to_string(project.join("nenpm.yml")).unwrap();
-    assert!(!manifest.contains("@acme/agent"));
-    assert!(report.install.lockfile.packages.is_empty());
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn remove_dry_run_resolves_without_persisting_manifest_change() {
-    let workspace = temp_workspace("remove-dry-run");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    install(InstallOptions::new(&project)).unwrap();
-    let original = fs::read_to_string(project.join("nenpm.yml")).unwrap();
-
-    let report = remove(RemoveOptions::new(&project, "@acme/agent").dry_run(true)).unwrap();
-
-    assert_eq!(
-        fs::read_to_string(project.join("nenpm.yml")).unwrap(),
-        original
-    );
-    assert!(report.install.lockfile.packages.is_empty());
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn list_reads_current_lockfile() {
-    let workspace = temp_workspace("list-command");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    install(InstallOptions::new(&project)).unwrap();
-
-    let lockfile = list(ListOptions::new(&project)).unwrap();
-
-    assert_eq!(lockfile.packages.len(), 2);
-    assert_eq!(lockfile.packages[1].name, "@acme/agent");
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn info_reads_package_versions_from_default_registry() {
-    let workspace = temp_workspace("info-command");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-
-    let package_info = info(InfoOptions::new(&project, "@acme/agent")).unwrap();
-
-    assert_eq!(package_info.versions.len(), 2);
-    assert_eq!(package_info.versions[0].version, "0.1.0");
-    assert_eq!(package_info.versions[1].version, "0.2.0");
-    assert_eq!(
-        package_info.versions[1].dependencies["@acme/core"],
-        "^0.2.0"
-    );
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -477,14 +398,14 @@ fn install_uses_override_before_registry() {
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "@acme/agent": "^0.1.0"
+  "agent": "^0.1.0"
 
 registries:
-  default: ../registry/registry.yaml
+  - ../registry/registry.yaml
 
 overrides:
-  "@acme/agent": file:../override-packages#packages/agent/nenjo.package.yaml
-  "@acme/core": file:../override-packages#packages/core/nenjo.package.yaml
+  "agent": file:../override-packages#packages/agent/nenjo.package.yaml
+  "core": file:../override-packages#packages/core/nenjo.package.yaml
 "#,
     );
 
@@ -497,207 +418,9 @@ overrides:
             .iter()
             .map(|package| format!("{}@{}", package.name, package.version))
             .collect::<Vec<_>>(),
-        vec!["@acme/core@0.1.0", "@acme/agent@0.1.0"]
+        vec!["core@0.1.0", "agent@0.1.0"]
     );
 
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn install_fetches_registry_artifact_sources() {
-    let workspace = temp_workspace("registry-artifact");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let packages = workspace.join("packages");
-    let artifact = workspace.join("registry").join("packages.tar.gz");
-    let checksum = write_artifact(&packages, &artifact);
-    let project = workspace.join("project");
-    write_file(
-        &workspace.join("registry"),
-        "registry.yaml",
-        &format!(
-            r#"
-schema: nenjo.registry.v1
-packages:
-  "@acme/core":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{checksum}"
-        manifest_path: packages/core-v020/nenjo.package.yaml
-  "@acme/agent":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{checksum}"
-        manifest_path: packages/agent-v020/nenjo.package.yaml
-      dependencies:
-        "@acme/core": "^0.2.0"
-"#
-        ),
-    );
-
-    let report = install(InstallOptions::new(&project)).unwrap();
-
-    assert_eq!(report.lockfile.packages[0].name, "@acme/core");
-    assert_eq!(report.lockfile.packages[1].name, "@acme/agent");
-    assert_eq!(report.lockfile.packages[1].modules[0].name, "support_agent");
-    assert!(report.lockfile.packages[1].source.is_some());
-
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn install_rejects_changed_locked_artifact_contents() {
-    let workspace = temp_workspace("locked-artifact-integrity");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let packages = workspace.join("packages");
-    let artifact = workspace.join("registry").join("packages.tar.gz");
-    let checksum = write_artifact(&packages, &artifact);
-    write_file(
-        &workspace.join("registry"),
-        "registry.yaml",
-        &format!(
-            r#"
-schema: nenjo.registry.v1
-packages:
-  "@acme/core":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{checksum}"
-        manifest_path: packages/core-v020/nenjo.package.yaml
-  "@acme/agent":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{checksum}"
-        manifest_path: packages/agent-v020/nenjo.package.yaml
-      dependencies:
-        "@acme/core": "^0.2.0"
-"#
-        ),
-    );
-    let project = workspace.join("project");
-    install(InstallOptions::new(&project)).unwrap();
-
-    write_file(
-        &packages,
-        "packages/agent-v020/agents/support.yaml",
-        r#"
-schema: nenjo.agent.v1
-manifest:
-  name: support_agent
-  imports:
-    context:
-      - "@acme/core/methodology"
-  prompt_config:
-    system_prompt: |
-      {{ @acme/core/methodology }}
-      changed
-"#,
-    );
-    let changed_checksum = write_artifact(&packages, &artifact);
-    write_file(
-        &workspace.join("registry"),
-        "registry.yaml",
-        &format!(
-            r#"
-schema: nenjo.registry.v1
-packages:
-  "@acme/core":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{changed_checksum}"
-        manifest_path: packages/core-v020/nenjo.package.yaml
-  "@acme/agent":
-    - version: "0.2.0"
-      source:
-        kind: artifact
-        url: packages.tar.gz
-        checksum: "{changed_checksum}"
-        manifest_path: packages/agent-v020/nenjo.package.yaml
-      dependencies:
-        "@acme/core": "^0.2.0"
-"#
-        ),
-    );
-
-    let err = install(InstallOptions::new(&project))
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains("hash changed"));
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn install_rejects_registry_metadata_that_differs_from_package_manifest() {
-    let workspace = temp_workspace("registry-metadata-mismatch");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &workspace.join("registry"),
-        "registry.yaml",
-        r#"
-schema: nenjo.registry.v1
-packages:
-  "@acme/agent":
-    - version: "0.2.0"
-      source:
-        kind: local
-        root: ../packages
-        manifest_path: packages/agent-v020/nenjo.package.yaml
-"#,
-    );
-
-    let err = install(InstallOptions::new(&project))
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains("does not match source manifest dependencies"));
-    fs::remove_dir_all(workspace).unwrap();
-}
-
-#[test]
-fn install_rejects_registry_package_checksum_mismatch() {
-    let workspace = temp_workspace("registry-checksum-mismatch");
-    copy_dir(&fixture("registry-workspace"), &workspace);
-    let project = workspace.join("project");
-    write_file(
-        &workspace.join("registry"),
-        "registry.yaml",
-        r#"
-schema: nenjo.registry.v1
-packages:
-  "@acme/agent":
-    - version: "0.2.0"
-      checksum: "sha256:not-the-package-manifest-hash"
-      source:
-        kind: local
-        root: ../packages
-        manifest_path: packages/agent-v020/nenjo.package.yaml
-      dependencies:
-        "@acme/core": "^0.2.0"
-  "@acme/core":
-    - version: "0.2.0"
-      source:
-        kind: local
-        root: ../packages
-        manifest_path: packages/core-v020/nenjo.package.yaml
-"#,
-    );
-
-    let err = install(InstallOptions::new(&project))
-        .unwrap_err()
-        .to_string();
-
-    assert!(err.contains("registry checksum"));
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -730,7 +453,7 @@ dependencies:
   "@acme/missing": "^0.1.0"
 
 registries:
-  default: ../registry/registry.yaml
+  - ../registry/registry.yaml
 "#,
     );
 
@@ -738,7 +461,7 @@ registries:
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("failed to resolve @acme/missing from registry"));
+    assert!(err.contains("no configured registry contains it"));
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -752,7 +475,7 @@ fn install_rejects_unsatisfied_root_requirement() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("@acme/agent resolved to 0.1.0"));
+    assert!(err.contains("agent resolved to 0.1.0"));
     assert!(err.contains("does not satisfy ^2.0.0"));
     fs::remove_dir_all(workspace).unwrap();
 }
