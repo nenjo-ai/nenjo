@@ -1,0 +1,3 @@
+schema: nenjo.registry.v1
+packages:
+  "core": packages/core/nenjo.package.yaml

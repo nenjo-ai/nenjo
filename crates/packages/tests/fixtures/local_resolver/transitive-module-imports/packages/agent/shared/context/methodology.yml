@@ -1,0 +1,4 @@
+schema: nenjo.context_block.v1
+manifest:
+  name: methodology
+  template: Think clearly.

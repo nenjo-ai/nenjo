@@ -1,0 +1,6 @@
+schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ./missing.yaml
+manifest:
+  name: acme_agent

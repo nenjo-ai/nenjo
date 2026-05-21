@@ -1,0 +1,11 @@
+schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ./capabilities/design/
+  domains:
+    - ./domains/creator.yaml
+  context:
+    - ./shared/context/methodology.yml
+manifest:
+  name: acme_agent
+  instructions: Use {{ context.methodology }} when planning.

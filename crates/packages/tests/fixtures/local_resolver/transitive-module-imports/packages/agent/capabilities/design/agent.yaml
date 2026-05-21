@@ -1,0 +1,8 @@
+schema: nenjo.ability.v1
+imports:
+  context:
+    - ../../surfaces/discipline/failure_modes.yml
+manifest:
+  name: design_agent
+  description: Design a focused agent.
+  prompt: Consider {{ context.failure_modes }}.

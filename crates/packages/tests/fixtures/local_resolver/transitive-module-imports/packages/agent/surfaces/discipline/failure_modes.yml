@@ -1,0 +1,4 @@
+schema: nenjo.context_block.v1
+manifest:
+  name: failure_modes
+  template: Watch for common failure modes.
