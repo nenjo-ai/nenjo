@@ -8,10 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use nenjo_crypto_auth::WrappedAccountContentKey as AuthWrappedAccountContentKey;
 use nenjo_events::WrappedAccountContentKey as EventWrappedAccountContentKey;
-use nenjo_harness::handlers::crypto::AccountKeyStore;
-use nenjo_harness::handlers::heartbeat::HeartbeatRestoreRequest;
 use nenjo_secure_envelope::SecureEnvelopeBus;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -22,6 +21,10 @@ use crate::assembly::{WorkerAssembly, WorkerHarness, WorkerProvider};
 use crate::config::{Config, SessionConfig};
 use crate::crypto::WorkerAuthProvider;
 use crate::event_loop::{self, ResponseSender, SeenMessageIds, WorkerEventLoopContext};
+use crate::external_mcp::ExternalMcpPool;
+use crate::handlers::cron::WorkerCronHarnessExt;
+use crate::handlers::crypto::AccountKeyStore;
+use crate::handlers::heartbeat::{HeartbeatRestoreRequest, WorkerHeartbeatHarnessExt};
 use crate::sessions::{
     CronSessionRecovery, DomainSessionRecovery, HeartbeatSessionRecovery,
     WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
@@ -59,9 +62,11 @@ impl AccountKeyStore for WorkerAccountKeyStore {
 // Shared types used by handlers
 // ---------------------------------------------------------------------------
 
-pub use nenjo_harness::{
-    ActiveExecution, DomainRegistry, DomainSession, ExecutionKind, ExecutionRegistry, GitLocks,
-};
+pub use nenjo_harness::domain::{DomainRegistry, DomainSession};
+pub use nenjo_harness::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
+
+/// Per-repo mutexes used to serialize worker git operations.
+pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>>;
 
 /// Shared context passed to each command handler.
 ///
@@ -69,9 +74,11 @@ pub use nenjo_harness::{
 /// Responses are sent via `response_tx` (never touch the bus directly).
 pub struct CommandContext {
     pub harness: WorkerHarness,
+    pub api: Arc<NenjoClient>,
     pub actor_user_id: Uuid,
     pub response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
+    pub external_mcp: Arc<ExternalMcpPool>,
     pub worker_name: String,
     pub config: Config,
     pub domains: DomainRegistry<WorkerProvider>,
@@ -88,8 +95,10 @@ pub struct WorkerRuntime {
     config: Config,
     api: Arc<NenjoClient>,
     auth_provider: Arc<WorkerAuthProvider>,
+    external_mcp: Arc<ExternalMcpPool>,
     worker_name: String,
     session_runtime: WorkerSessionRuntime,
+    git_locks: GitLocks,
     seen_message_ids: SeenMessageIds,
     shutdown: CancellationToken,
 }
@@ -155,7 +164,7 @@ impl WorkerRuntime {
     pub(crate) async fn from_assembly(assembly: WorkerAssembly, config: Config) -> Result<Self> {
         let seen_message_ids = event_loop::new_seen_message_ids();
         let shutdown = CancellationToken::new();
-        let worker_name = assembly.session_runtime.worker_name().to_string();
+        let worker_name = assembly.session_runtime.host_id().to_string();
         configure_session_cleanup(
             config.sessions.clone(),
             assembly.session_stores.clone(),
@@ -167,8 +176,10 @@ impl WorkerRuntime {
             config,
             api: Arc::new(assembly.api),
             auth_provider: assembly.auth_provider,
+            external_mcp: assembly.external_mcp,
             worker_name,
             session_runtime: assembly.session_runtime,
+            git_locks: Arc::new(DashMap::new()),
             seen_message_ids,
             shutdown,
         })
@@ -181,13 +192,15 @@ impl WorkerRuntime {
     ) -> CommandContext {
         CommandContext {
             harness: self.harness.clone(),
+            api: self.api.clone(),
             actor_user_id,
             response_tx,
             auth_provider: self.auth_provider.clone(),
+            external_mcp: self.external_mcp.clone(),
             worker_name: self.worker_name.clone(),
             config: self.config.clone(),
             domains: self.harness.domains(),
-            git_locks: self.harness.git_locks(),
+            git_locks: self.git_locks.clone(),
         }
     }
 
@@ -299,7 +312,6 @@ fn run_session_cleanup(stores: &WorkerSessionStores, retention_days: u64, reason
 #[cfg(test)]
 mod tests {
     use crate::assembly::{WorkerAssembly, build_provider};
-    use crate::bootstrap::WorkerManifestCache;
     use crate::config::Config;
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
@@ -335,21 +347,13 @@ mod tests {
         .await
         .unwrap();
         let session_stores = WorkerSessionStores::new(&config.state_dir);
-        let session_runtime = WorkerSessionRuntime::new(
+        let session_runtime = WorkerSessionRuntime::with_coordinator(
             session_stores.clone(),
             LocalSessionCoordinator::new(),
             "embedded-worker",
         );
         let harness = nenjo_harness::Harness::builder(provider)
             .with_session_runtime(session_runtime.clone())
-            .with_manifest_client(api.clone())
-            .with_manifest_store(WorkerManifestCache {
-                manifests_dir: config.manifests_dir.clone(),
-                workspace_dir: config.workspace_dir.clone(),
-                state_dir: config.state_dir.clone(),
-                config_dir: config.config_dir.clone(),
-            })
-            .with_mcp_runtime(external_mcp.clone())
             .build();
 
         let runtime = WorkerRuntime::from_assembly(

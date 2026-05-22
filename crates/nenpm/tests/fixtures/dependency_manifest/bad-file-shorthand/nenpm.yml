@@ -1,0 +1,5 @@
+schema: nenjo.dependencies.v1
+dependencies:
+  "@nenjo/core": "^0.1.0"
+overrides:
+  "@nenjo/core": file:#nenjo/core.package.yaml

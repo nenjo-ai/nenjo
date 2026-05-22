@@ -1,0 +1,5 @@
+schema: nenjo.package.v1
+name: "core"
+version: "0.1.0"
+modules:
+  - context.yaml

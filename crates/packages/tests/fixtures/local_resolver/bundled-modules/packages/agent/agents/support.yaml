@@ -1,0 +1,13 @@
+schema: nenjo.agent.v1
+imports:
+  abilities:
+    - "../abilities/design.yaml#design_agent"
+  domains:
+    - "../domains/support.yaml#support"
+manifest:
+  name: support_agent
+  prompt_config:
+    system_prompt: |
+      {{ pkg.acme.core.methodology }}
+    developer_prompt: |
+      {{ pkg.acme.core.tool_usage }}

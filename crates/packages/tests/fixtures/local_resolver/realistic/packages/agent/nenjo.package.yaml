@@ -1,0 +1,10 @@
+schema: nenjo.package.v1
+name: "agent"
+version: "0.1.0"
+description: Agent package with runtime resources.
+dependencies:
+  "core": "^0.1.0"
+modules:
+  - agents/support.yaml
+  - abilities/triage.yaml
+  - domains/support.yaml

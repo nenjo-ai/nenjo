@@ -386,19 +386,7 @@ where
         &self,
         agent: &AgentManifest,
     ) -> Result<AgentBuilder<Self>, ProviderError> {
-        let model = self.resolve_model(agent)?;
-
-        let provider = self
-            .inner
-            .services
-            .model_factory
-            .create_typed_with_base_url(&model.model_provider, model.base_url.as_deref())
-            .map_err(|e| {
-                ProviderError::FactoryFailed(e.context(format!(
-                    "failed to create LLM provider '{}' for agent '{}'",
-                    model.model_provider, agent.name
-                )))
-            })?;
+        let model_manifest = self.resolve_model(agent)?;
 
         // Memory backend is passed to the builder; scope and tools are
         // constructed in build() based on the project context set at that point.
@@ -416,13 +404,13 @@ where
         let prompt_context = self.build_prompt_context(agent);
 
         let mut builder = AgentBuilder::new(super::agents::builder::AgentBuilderParams {
-            agent: agent.clone(),
-            model,
-            model_provider: provider,
+            agent_manifest: agent.clone(),
+            model_manifest,
             tools: Vec::new(),
             prompt_context,
             agent_config,
             context_renderer: self.inner.context_renderer.clone(),
+            provider_runtime: self.clone(),
         });
 
         if let Some(memory) = Mem::clone_runtime(self.inner.services.memory.as_ref()) {
@@ -546,6 +534,10 @@ where
         Provider::manifest_snapshot(self)
     }
 
+    fn with_manifest(&self, manifest: Manifest) -> Self {
+        Provider::with_manifest(self, manifest)
+    }
+
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {
         self.tool_factory()
     }
@@ -583,6 +575,10 @@ where
 
     async fn build_agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError> {
         Provider::agent_by_name(self, name).await
+    }
+
+    fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError> {
+        Provider::routine_by_id(self, routine_id)
     }
 }
 

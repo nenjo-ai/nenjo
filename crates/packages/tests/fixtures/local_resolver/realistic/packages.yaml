@@ -1,0 +1,6 @@
+schema: nenjo.registry.v1
+name: Local Fixture Registry
+packages:
+  "core": packages/core/nenjo.package.yaml
+  "agent": packages/agent/nenjo.package.yaml
+  "coding": packages/coding/nenjo.package.yaml

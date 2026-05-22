@@ -195,9 +195,6 @@ where
                         TurnEvent::AbilityStarted { .. } => {
                             let _ = parent_tx.send(event);
                         }
-                        TurnEvent::DelegationStarted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
                         TurnEvent::ToolCallStart {
                             parent_tool_name,
                             calls,
@@ -225,9 +222,6 @@ where
                             });
                         }
                         TurnEvent::AbilityCompleted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
-                        TurnEvent::DelegationCompleted { .. } => {
                             let _ = parent_tx.send(event);
                         }
                         TurnEvent::MessageCompacted { .. } => {
@@ -443,6 +437,7 @@ where
 
     AgentInstance {
         manifest: scoped_manifest,
+        model_manifest: caller.model_manifest.clone(),
         model: caller.model.clone(),
         prompt: AgentPromptState {
             context: prompt_context,
@@ -455,6 +450,8 @@ where
             security: scoped_security,
             config: caller.runtime.config.clone(),
             provider_runtime: caller.runtime.provider_runtime.clone(),
+            sub_agent_ctx: caller.runtime.sub_agent_ctx.clone(),
+            execution_mode: caller.runtime.execution_mode,
         },
     }
 }
@@ -483,6 +480,7 @@ fn ability_runtime_env_names(ability: &AbilityManifest) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentExecutionMode;
     use crate::agents::instance::AgentModel;
     use crate::agents::prompts::PromptContext;
     use crate::config::AgentConfig;
@@ -636,6 +634,15 @@ mod tests {
                 prompt_locked: false,
                 heartbeat: None,
             },
+            model_manifest: crate::manifest::ModelManifest {
+                id: uuid::Uuid::new_v4(),
+                name: "mock".into(),
+                description: None,
+                model: "mock".into(),
+                model_provider: "mock".into(),
+                temperature: Some(0.2),
+                base_url: None,
+            },
             model: AgentModel {
                 model_name: "mock".into(),
                 id: uuid::Uuid::new_v4(),
@@ -691,6 +698,8 @@ mod tests {
                 security: Arc::new(ToolSecurity::default()),
                 config: AgentConfig::default(),
                 provider_runtime: Some(test_sdk_provider()),
+                sub_agent_ctx: None,
+                execution_mode: AgentExecutionMode::Parent,
             },
         }
     }
@@ -740,16 +749,16 @@ mod tests {
     #[tokio::test]
     async fn ability_sub_instance_renders_context_blocks_and_user_message() {
         let mut caller = test_instance_with_active_domain();
-        caller.manifest.prompt_config.system_prompt = "{{ nenjo.core.methodology }}".into();
+        caller.manifest.prompt_config.system_prompt = "{{ pkg.nenjo.core.methodology }}".into();
         caller.prompt.renderer = ContextRenderer::from_blocks(&[
             RenderContextBlock {
                 name: "methodology".into(),
-                path: "nenjo/core".into(),
+                path: "pkg/nenjo/core".into(),
                 template: "<methodology>{{ agent.role }}</methodology>".into(),
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
-                path: "nenjo/core".into(),
+                path: "pkg/nenjo/core".into(),
                 template: "<tool_usage>{{ agent.role }}</tool_usage>".into(),
             },
         ]);
@@ -762,7 +771,7 @@ mod tests {
             description: Some("Builds agents".into()),
             activation_condition: "When building agents".into(),
             prompt_config: AbilityPromptConfig {
-                developer_prompt: "{{ nenjo.core.tool_usage }}".into(),
+                developer_prompt: "{{ pkg.nenjo.core.tool_usage }}".into(),
             },
             platform_scopes: vec!["agents:write".into()],
             mcp_server_ids: vec![],

@@ -1,0 +1,4 @@
+schema: nenjo.ability.v1
+manifest:
+  name: diagnose_failure
+  description: Diagnose design failures.

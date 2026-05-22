@@ -1,0 +1,3 @@
+schema: nenjo.registry.v1
+packages:
+  "expected": packages/pkg/nenjo.package.yaml

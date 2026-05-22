@@ -1,0 +1,7 @@
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "agent": "^2.0.0"
+
+overrides:
+  "agent": file:../packages

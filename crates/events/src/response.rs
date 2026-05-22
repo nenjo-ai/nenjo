@@ -374,6 +374,20 @@ pub enum StreamEvent {
         encrypted_payload: Option<EncryptedPayload>,
     },
 
+    /// A sub-agent lifecycle or signal event.
+    SubAgentEvent {
+        agent: String,
+        slug: String,
+        sub_agent: String,
+        kind: String,
+        summary: String,
+        model_visible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
     /// A delegation to another agent was started.
     DelegationStarted {
         agent: String,
@@ -485,6 +499,9 @@ impl std::fmt::Display for StreamEvent {
                 f,
                 "ability_completed({ability}, agent={agent}, success={success})"
             ),
+            Self::SubAgentEvent {
+                agent, slug, kind, ..
+            } => write!(f, "sub_agent_event({kind}, slug={slug}, agent={agent})"),
             Self::DelegationStarted {
                 agent,
                 target_agent,

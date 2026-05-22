@@ -473,6 +473,27 @@ fn pack_relative_path<'a>(pack_prefix: &str, doc: &'a KnowledgeDocManifest) -> O
             }
             Some(path)
         }
+        _ if pack_prefix.starts_with("pkg.") => {
+            let mut pkg_segments = pack_prefix.trim_start_matches("pkg.").split('.');
+            let scope = pkg_segments.next()?;
+            let name = pkg_segments.next()?;
+            let mut path = doc.virtual_path.strip_prefix("git://")?;
+            let (_owner, rest) = path.split_once('/')?;
+            path = rest;
+            let (repo, rest) = path.split_once('/')?;
+            if repo != "packages" {
+                return None;
+            }
+            path = rest;
+            for expected in [scope, name] {
+                let (segment, rest) = path.split_once('/').unwrap_or((path, ""));
+                if normalize_var_segment(segment) != expected {
+                    return None;
+                }
+                path = rest;
+            }
+            Some(path)
+        }
         _ => None,
     }
 }
@@ -861,8 +882,8 @@ mod tests {
     #[test]
     fn git_knowledge_uses_owner_qualified_template_namespace() {
         assert_eq!(
-            knowledge_pack_var_prefix("git://nenjo-ai/packages/nenjo/platform"),
-            "git.nenjo_ai.packages.nenjo.platform"
+            knowledge_pack_var_prefix("git://acme/docs/platform"),
+            "git.acme.docs.platform"
         );
         assert_eq!(
             knowledge_pack_var_prefix("git://trailofbits/skills-curated/x-research"),
@@ -871,10 +892,18 @@ mod tests {
     }
 
     #[test]
+    fn pkg_knowledge_uses_package_template_namespace() {
+        assert_eq!(
+            knowledge_pack_var_prefix("pkg.nenjo.core.knowledge"),
+            "pkg.nenjo.core.knowledge"
+        );
+    }
+
+    #[test]
     fn git_knowledge_document_vars_use_pack_relative_paths() {
         let doc = KnowledgeDocManifest {
-            id: "nenjo.guide.agents".into(),
-            virtual_path: "git://nenjo-ai/packages/nenjo/platform/guide/agents.md".into(),
+            id: "acme.guide.agents".into(),
+            virtual_path: "git://acme/docs/platform/guide/agents.md".into(),
             source_path: "docs/guide/agents.md".into(),
             title: "Agents".into(),
             summary: String::new(),
@@ -891,8 +920,34 @@ mod tests {
         };
 
         assert_eq!(
-            knowledge_document_var_key("git.nenjo_ai.packages.nenjo.platform", &doc),
-            "git.nenjo_ai.packages.nenjo.platform.guide.agents"
+            knowledge_document_var_key("git.acme.docs.platform", &doc),
+            "git.acme.docs.platform.guide.agents"
+        );
+    }
+
+    #[test]
+    fn pkg_knowledge_document_vars_use_package_relative_paths() {
+        let doc = KnowledgeDocManifest {
+            id: "nenjo.guide.agents".into(),
+            virtual_path: "git://nenjo-ai/packages/nenjo/core/guide/agents.md".into(),
+            source_path: "docs/guide/agents.md".into(),
+            title: "Agents".into(),
+            summary: String::new(),
+            description: None,
+            kind: KnowledgeDocKind::Guide,
+            authority: KnowledgeDocAuthority::Canonical,
+            status: KnowledgeDocStatus::Stable,
+            tags: Vec::new(),
+            aliases: Vec::new(),
+            keywords: Vec::new(),
+            related: Vec::new(),
+            size_bytes: 0,
+            updated_at: String::new(),
+        };
+
+        assert_eq!(
+            knowledge_document_var_key("pkg.nenjo.core.knowledge", &doc),
+            "pkg.nenjo.core.knowledge.guide.agents"
         );
     }
 }

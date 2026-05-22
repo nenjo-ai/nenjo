@@ -1,0 +1,28 @@
+schema: nenjo.registry.v1
+packages:
+  "core":
+    - version: "0.1.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/core-v010/nenjo.package.yaml
+    - version: "0.2.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/core-v020/nenjo.package.yaml
+  "agent":
+    - version: "0.1.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/agent-v010/nenjo.package.yaml
+      dependencies:
+        "core": "^0.1.0"
+    - version: "0.2.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/agent-v020/nenjo.package.yaml
+      dependencies:
+        "core": "^0.2.0"

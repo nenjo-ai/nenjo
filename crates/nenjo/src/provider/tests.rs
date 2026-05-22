@@ -287,29 +287,7 @@ async fn blank_provider_builds_without_manifest_or_factories() {
 }
 
 #[tokio::test]
-async fn blank_provider_can_build_new_agent_with_explicit_model_provider() {
-    let manifest = test_manifest();
-    let agent = manifest.agents[0].clone();
-    let model = manifest.models[0].clone();
-    let model_provider: Arc<dyn nenjo_models::ModelProvider> = Arc::new(MockProvider);
-
-    let runner = Provider::builder()
-        .build()
-        .await
-        .unwrap()
-        .new_agent()
-        .with_agent_manifest(agent)
-        .with_model_provider(model, model_provider)
-        .build()
-        .await
-        .unwrap();
-
-    assert_eq!(runner.agent_name(), "agent");
-    assert!(runner.instance().tools().is_empty());
-}
-
-#[tokio::test]
-async fn new_agent_uses_provider_model_factory_when_model_provider_is_not_explicit() {
+async fn new_agent_uses_provider_model_factory() {
     let manifest = test_manifest();
     let agent = manifest.agents[0].clone();
     let model = manifest.models[0].clone();

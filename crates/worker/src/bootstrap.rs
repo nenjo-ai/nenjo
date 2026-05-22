@@ -10,6 +10,7 @@
 //! Other resource types remain as flat JSON arrays.
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +22,6 @@ use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
-use nenjo_harness::handlers::manifest::ManifestStore;
 use nenjo_platform::ManifestKind;
 use nenjo_platform::library_knowledge::{
     library_knowledge_item_relative_path, load_library_knowledge_manifest,
@@ -29,6 +29,8 @@ use nenjo_platform::library_knowledge::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
+
+use crate::handlers::manifest::ManifestStore;
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -55,12 +57,15 @@ struct BootstrapManifestResponse {
     context_blocks: Vec<BootstrapContextBlockManifest>,
     #[serde(default)]
     nats: BootstrapNatsConfig,
+    #[serde(default)]
+    packages: Option<BootstrapPackages>,
 }
 
 struct HydratedBootstrap {
     auth: BootstrapAuth,
     manifest: Manifest,
     nats: BootstrapNatsConfig,
+    packages: Option<BootstrapPackages>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +94,14 @@ pub struct BootstrapNatsConfig {
     pub stream: BootstrapNatsStream,
     #[serde(default)]
     pub reconnect: BootstrapNatsReconnect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapPackages {
+    pub schema: String,
+    pub nenpm_yml: String,
+    pub nenpm_lock_yml: String,
+    pub checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +396,11 @@ pub async fn sync(
         &manifests_dir.join("context_blocks"),
         &manifest.context_blocks,
     )?;
+    if let Some(packages) = &data.packages
+        && let Err(error) = sync_platform_packages(nenjo_home, packages).await
+    {
+        warn!(%error, "Platform package install failed; cached manifest resources remain available");
+    }
 
     // Sync platform-uploaded and repo-backed library knowledge under ~/.nenjo/library.
     crate::local_documents::sync_all(api, nenjo_home, state_dir, &manifest.projects).await?;
@@ -472,7 +490,69 @@ async fn hydrate_bootstrap_manifest(
             context_blocks,
         },
         nats: bootstrap.nats,
+        packages: bootstrap.packages,
     })
+}
+
+async fn sync_platform_packages(nenjo_home: &Path, packages: &BootstrapPackages) -> Result<()> {
+    if packages.schema != "nenjo.platform_packages.v1" {
+        warn!(
+            schema = %packages.schema,
+            "Ignoring unsupported platform package bootstrap schema"
+        );
+        return Ok(());
+    }
+    verify_platform_package_checksum(packages)?;
+    let root = nenjo_home.join("platform_pkgs");
+    write_text_if_changed(&root, "nenpm.yml", &packages.nenpm_yml)?;
+    write_text_if_changed(&root, "nenpm.lock.yml", &packages.nenpm_lock_yml)?;
+    let install_root = root.clone();
+    tokio::task::spawn_blocking(move || {
+        nenjo_nenpm::install(
+            nenjo_nenpm::InstallOptions::new(&install_root)
+                .packages_dir(&install_root)
+                .locked(true),
+        )
+    })
+    .await
+    .context("platform package install task failed")?
+    .context("failed to install platform packages")?;
+    Ok(())
+}
+
+fn verify_platform_package_checksum(packages: &BootstrapPackages) -> Result<()> {
+    let checksum = platform_package_checksum(&packages.nenpm_yml, &packages.nenpm_lock_yml);
+    if checksum != packages.checksum {
+        anyhow::bail!("platform package manifest checksum mismatch");
+    }
+    Ok(())
+}
+
+fn platform_package_checksum(nenpm_yml: &str, nenpm_lock_yml: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"nenpm.yml\0");
+    hasher.update(nenpm_yml.as_bytes());
+    hasher.update(b"\0nenpm.lock.yml\0");
+    hasher.update(nenpm_lock_yml.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn write_text_if_changed(dir: &Path, filename: &str, content: &str) -> Result<()> {
+    let target = dir.join(filename);
+    if std::fs::read_to_string(&target)
+        .map(|current| current == content)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let tmp = unique_cache_tmp_path(&target, filename);
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create package cache dir {}", dir.display()))?;
+    std::fs::write(&tmp, content.as_bytes())
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &target)
+        .with_context(|| format!("Failed to rename {} → {}", tmp.display(), target.display()))?;
+    Ok(())
 }
 
 pub fn load_cached_bootstrap_auth(manifests_dir: &Path) -> Option<BootstrapAuth> {
@@ -1152,4 +1232,115 @@ fn unique_cache_tmp_path(target: &Path, filename: &str) -> PathBuf {
     let nonce = CACHE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     target.with_file_name(format!(".{filename}.{pid}.{nonce}.tmp"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn platform_package_checksum_covers_lockfile() {
+        let first = platform_package_checksum("dependencies: {}\n", "packages: []\n");
+        let second = platform_package_checksum("dependencies: {}\n", "packages: [changed]\n");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn sync_platform_packages_writes_lockfile_and_installs_locked_tree() {
+        let package_root = tempfile::tempdir().unwrap();
+        write_test_package(package_root.path());
+        let nenpm_yml = test_nenpm_yml(package_root.path());
+        let nenpm_lock_yml = build_test_lockfile(&nenpm_yml);
+        let nenjo_home = tempfile::tempdir().unwrap();
+        let packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            checksum: platform_package_checksum(&nenpm_yml, &nenpm_lock_yml),
+            nenpm_yml,
+            nenpm_lock_yml,
+        };
+
+        sync_platform_packages(nenjo_home.path(), &packages)
+            .await
+            .unwrap();
+
+        let root = nenjo_home.path().join("platform_pkgs");
+        assert!(root.join("nenpm.yml").exists());
+        assert!(root.join("nenpm.lock.yml").exists());
+        assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
+        assert!(root.join(".nenpm-index.json").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_platform_packages_rejects_lockfile_checksum_mismatch() {
+        let packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_yml: "schema: nenjo.dependencies.v1\ndependencies: {}\n".to_string(),
+            nenpm_lock_yml: "schema: nenjo.lock.v1\npackages: []\n".to_string(),
+            checksum: platform_package_checksum(
+                "schema: nenjo.dependencies.v1\ndependencies: {}\n",
+                "schema: nenjo.lock.v1\npackages: [tampered]\n",
+            ),
+        };
+        let nenjo_home = tempfile::tempdir().unwrap();
+
+        let err = sync_platform_packages(nenjo_home.path(), &packages)
+            .await
+            .expect_err("checksum mismatch should be rejected")
+            .to_string();
+
+        assert!(err.contains("checksum mismatch"));
+    }
+
+    fn write_test_package(root: &Path) {
+        fs::write(
+            root.join("nenjo.package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: "@acme/core"
+version: "0.1.0"
+modules:
+  - context.yaml
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("context.yaml"),
+            r#"
+schema: nenjo.context_block.v1
+manifest:
+  name: core_context
+  template: Use the core context.
+"#,
+        )
+        .unwrap();
+    }
+
+    fn test_nenpm_yml(package_root: &Path) -> String {
+        format!(
+            r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@acme/core": "0.1.0"
+
+overrides:
+  "@acme/core":
+    kind: local
+    root: {}
+    manifest_path: nenjo.package.yaml
+"#,
+            package_root.display()
+        )
+    }
+
+    fn build_test_lockfile(nenpm_yml: &str) -> String {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("nenpm.yml"), nenpm_yml).unwrap();
+        let report = nenjo_nenpm::install(nenjo_nenpm::InstallOptions::new(project.path()))
+            .expect("test lockfile should install");
+        serde_yaml::to_string(&report.lockfile).unwrap()
+    }
 }

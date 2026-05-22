@@ -5,6 +5,7 @@
 //! sources (API backend, local `.nenjo/` folder) and merged.
 
 use anyhow::Result;
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -38,32 +39,20 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Merge another manifest into this one (additive).
+    /// Merge another manifest into this one.
     ///
-    /// Collections are extended. For context blocks, if a name collides
-    /// the incoming entry wins (last-write-wins).
+    /// Collections are last-write-wins by resource ID so package, platform,
+    /// global, and local loaders can model normal dependency precedence.
     pub fn merge(&mut self, other: Manifest) {
-        self.routines.extend(other.routines);
-        self.models.extend(other.models);
-        self.agents.extend(other.agents);
-        self.councils.extend(other.councils);
-        self.domains.extend(other.domains);
-        self.projects.extend(other.projects);
-        self.mcp_servers.extend(other.mcp_servers);
-        self.abilities.extend(other.abilities);
-
-        // Context blocks: last-write-wins on name collision.
-        for block in other.context_blocks {
-            if let Some(existing) = self
-                .context_blocks
-                .iter_mut()
-                .find(|b| b.name == block.name)
-            {
-                *existing = block;
-            } else {
-                self.context_blocks.push(block);
-            }
-        }
+        merge_by_id(&mut self.routines, other.routines);
+        merge_by_id(&mut self.models, other.models);
+        merge_by_id(&mut self.agents, other.agents);
+        merge_by_id(&mut self.councils, other.councils);
+        merge_by_id(&mut self.domains, other.domains);
+        merge_by_id(&mut self.projects, other.projects);
+        merge_by_id(&mut self.mcp_servers, other.mcp_servers);
+        merge_by_id(&mut self.abilities, other.abilities);
+        merge_by_id(&mut self.context_blocks, other.context_blocks);
     }
 
     /// Insert or replace a single resource in this manifest.
@@ -112,6 +101,12 @@ fn upsert_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: T) {
         *existing = incoming;
     } else {
         items.push(incoming);
+    }
+}
+
+fn merge_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: Vec<T>) {
+    for item in incoming {
+        upsert_by_id(items, item);
     }
 }
 
@@ -288,12 +283,18 @@ impl RoutineEdgeCondition {
 /// An LLM model configuration (provider, model name, temperature).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelManifest {
+    /// Stable manifest ID for this model configuration.
     pub id: Uuid,
+    /// Human-readable model configuration name.
     pub name: String,
     pub description: Option<String>,
+    /// Provider-specific model identifier, for example `openai/gpt-4.1`.
     pub model: String,
+    /// Provider registry key, for example `openrouter`, `openai`, or `anthropic`.
     pub model_provider: String,
+    /// Optional sampling temperature for calls using this model.
     pub temperature: Option<f64>,
+    /// Optional provider base URL override.
     pub base_url: Option<String>,
 }
 
@@ -346,22 +347,84 @@ impl MemoryProfile {
 }
 
 /// An agent definition — prompt config, assigned model, domains, and tools.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Runtime-created agents, including ephemeral sub-agents, can use the builder
+/// with only a name and prompt:
+///
+/// ```
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nenjo::manifest::AgentManifest;
+///
+/// let agent = AgentManifest::builder()
+///     .with_name("reviewer")
+///     .with_system_prompt("Act as a focused review worker.")
+///     .with_developer_prompt("Be concise and evidence-driven.")
+///     .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
+///     .build()?;
+/// # let _ = agent;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AgentManifest {
+    #[builder(default = "Uuid::new_v4()")]
     pub id: Uuid,
     pub name: String,
+    #[builder(default, setter(strip_option))]
     pub description: Option<String>,
     pub prompt_config: PromptConfig,
+    #[builder(default, setter(strip_option))]
     pub color: Option<String>,
+    #[builder(default, setter(strip_option))]
     pub model_id: Option<Uuid>,
+    #[builder(default)]
     pub domain_ids: Vec<Uuid>,
+    #[builder(default)]
     pub platform_scopes: Vec<String>,
+    #[builder(default)]
     pub mcp_server_ids: Vec<Uuid>,
+    #[builder(default)]
     pub ability_ids: Vec<Uuid>,
     /// When true, prompt_config updates are blocked.
+    #[builder(default)]
     pub prompt_locked: bool,
     #[serde(default)]
+    #[builder(default, setter(strip_option))]
     pub heartbeat: Option<AgentHeartbeatManifest>,
+}
+
+impl AgentManifest {
+    /// Create a builder for an agent manifest.
+    pub fn builder() -> AgentManifestBuilder {
+        AgentManifestBuilder::default()
+    }
+}
+
+impl AgentManifestBuilder {
+    /// Set the system prompt without manually constructing [`PromptConfig`].
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.system_prompt = prompt.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
+
+    /// Set the developer prompt without manually constructing [`PromptConfig`].
+    pub fn with_developer_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.developer_prompt = prompt.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
+
+    /// Set the task execution template without manually constructing [`PromptConfig`].
+    pub fn with_task_template(mut self, template: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.templates.task_execution = template.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
 }
 
 impl HasManifestId for AgentManifest {

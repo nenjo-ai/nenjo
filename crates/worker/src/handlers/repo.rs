@@ -5,10 +5,140 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tracing::{info, warn};
+use nenjo_events::Response;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use nenjo_harness::GitLocks;
+use nenjo_harness::{Harness, ProviderRuntime};
+
+use crate::event_bridge::project_slug;
+use crate::handlers::ResponseSender;
+use crate::runtime::GitLocks;
+
+#[async_trait]
+/// Worker-owned repository synchronization backend.
+///
+/// Repo sync is intentionally outside `nenjo-harness`: it is platform and host
+/// policy specific. Implementors decide how remote repositories are cloned,
+/// updated, locked, and removed on the local filesystem.
+pub trait RepoRuntime: Send + Sync {
+    /// Sync or update the repository configured for a project.
+    async fn sync_repo(
+        &self,
+        project_id: Uuid,
+        project_slug: &str,
+        repo_url: &str,
+        target_branch: &str,
+    ) -> Result<()>;
+
+    /// Remove the local repository state for a project.
+    async fn unsync_repo(&self, project_id: Uuid, project_slug: &str) -> Result<()>;
+}
+
+#[derive(Clone)]
+pub struct RepoCommandContext<S, R> {
+    pub response_sink: S,
+    pub repo_runtime: R,
+}
+
+#[async_trait::async_trait]
+/// Worker integration methods for repository platform commands.
+pub(crate) trait WorkerRepoHarnessExt<S, R>
+where
+    S: ResponseSender,
+    R: RepoRuntime,
+{
+    /// Handle a request to sync a project repository.
+    async fn handle_repo_sync(
+        &self,
+        ctx: &RepoCommandContext<S, R>,
+        project_id: Uuid,
+        repo_url: &str,
+        target_branch: &str,
+    ) -> Result<()>;
+
+    /// Handle a request to remove a project repository sync.
+    async fn handle_repo_unsync(
+        &self,
+        ctx: &RepoCommandContext<S, R>,
+        project_id: Uuid,
+    ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<P, SessionRt, S, R> WorkerRepoHarnessExt<S, R> for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender,
+    R: RepoRuntime,
+{
+    async fn handle_repo_sync(
+        &self,
+        ctx: &RepoCommandContext<S, R>,
+        project_id: Uuid,
+        repo_url: &str,
+        target_branch: &str,
+    ) -> Result<()> {
+        let provider = self.provider();
+        let manifest = provider.manifest_snapshot();
+        let slug = project_slug(&manifest, project_id);
+
+        info!(
+            %project_id,
+            slug = %slug,
+            %repo_url,
+            %target_branch,
+            "Syncing repo"
+        );
+
+        let result = ctx
+            .repo_runtime
+            .sync_repo(project_id, &slug, repo_url, target_branch)
+            .await;
+
+        match &result {
+            Ok(()) => {
+                info!(%project_id, slug = %slug, "Repo sync complete");
+                let _ = ctx.response_sink.send(Response::RepoSyncComplete {
+                    project_id,
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                error!(%project_id, slug = %slug, error = %error, "Repo sync failed");
+                let _ = ctx.response_sink.send(Response::RepoSyncComplete {
+                    project_id,
+                    success: false,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+
+        result
+    }
+
+    async fn handle_repo_unsync(
+        &self,
+        ctx: &RepoCommandContext<S, R>,
+        project_id: Uuid,
+    ) -> Result<()> {
+        let provider = self.provider();
+        let manifest = provider.manifest_snapshot();
+        let slug = project_slug(&manifest, project_id);
+        let result = ctx.repo_runtime.unsync_repo(project_id, &slug).await;
+        match &result {
+            Ok(()) => {
+                info!(%project_id, slug = %slug, "Repo unsynced");
+            }
+            Err(error) => {
+                error!(%project_id, slug = %slug, error = %error, "Repo unsync failed");
+            }
+        }
+        result
+    }
+}
 
 #[derive(Clone)]
 pub struct WorkerRepoRuntime {
@@ -17,7 +147,7 @@ pub struct WorkerRepoRuntime {
 }
 
 #[async_trait]
-impl nenjo_harness::handlers::repo::RepoRuntime for WorkerRepoRuntime {
+impl RepoRuntime for WorkerRepoRuntime {
     async fn sync_repo(
         &self,
         project_id: Uuid,
@@ -104,6 +234,28 @@ impl nenjo_harness::handlers::repo::RepoRuntime for WorkerRepoRuntime {
 
         evict_git_lock(&self.git_locks, &repo_dir, &git_lock);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<T> RepoRuntime for Arc<T>
+where
+    T: RepoRuntime + ?Sized,
+{
+    async fn sync_repo(
+        &self,
+        project_id: Uuid,
+        project_slug: &str,
+        repo_url: &str,
+        target_branch: &str,
+    ) -> Result<()> {
+        self.as_ref()
+            .sync_repo(project_id, project_slug, repo_url, target_branch)
+            .await
+    }
+
+    async fn unsync_repo(&self, project_id: Uuid, project_slug: &str) -> Result<()> {
+        self.as_ref().unsync_repo(project_id, project_slug).await
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use super::{ProviderError, ToolFactory, builder};
+use super::{ProviderError, RoutineRunner, ToolFactory, builder};
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
@@ -90,6 +90,9 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     /// Return an owned snapshot of the manifest used by this runtime.
     fn manifest_snapshot(&self) -> Arc<Manifest>;
 
+    /// Return a runtime with the same services and a new manifest.
+    fn with_manifest(&self, manifest: Manifest) -> Self;
+
     /// Borrow the runtime's tool factory.
     fn tool_factory(&self) -> &Self::ToolFactory<'_>;
 
@@ -119,4 +122,9 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
 
     /// Build an agent from the provider manifest by name.
     async fn build_agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError>;
+
+    /// Build a routine runner from the provider manifest by routine ID.
+    fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError>
+    where
+        Self: Sized;
 }

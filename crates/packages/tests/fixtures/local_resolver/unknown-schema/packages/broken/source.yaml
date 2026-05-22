@@ -1,0 +1,3 @@
+schema: nenjo.source.v1
+manifest:
+  name: dynamic_source

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use clap::{Parser, Subcommand};
+use eyre::{Result, eyre};
 use nenjo_worker::RunArgs;
 use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -55,8 +55,8 @@ async fn main() -> Result<()> {
                 .with(tracing_subscriber::fmt::layer().with_target(args.log_target))
                 .try_init();
 
-            nenjo_worker::run(args).await
+            nenjo_worker::run(args).await.map_err(|error| eyre!(error))
         }
-        None => anyhow::bail!("Command not provided"),
+        None => Err(eyre!("Command not provided")),
     }
 }

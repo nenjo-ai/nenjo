@@ -62,11 +62,9 @@ impl ResponseSender {
     }
 }
 
-impl nenjo_harness::handlers::ResponseSender for ResponseSender {
-    fn send(&self, response: Response) -> nenjo_harness::Result<()> {
-        ResponseSender::send(self, response).map_err(|error| {
-            nenjo_harness::HarnessError::response_transport(anyhow::anyhow!(error))
-        })?;
+impl crate::handlers::ResponseSender for ResponseSender {
+    fn send(&self, response: Response) -> Result<()> {
+        ResponseSender::send(self, response).map_err(anyhow::Error::from)?;
         Ok(())
     }
 }

@@ -720,7 +720,7 @@ impl ExternalMcpPool {
 }
 
 #[async_trait]
-impl nenjo_harness::handlers::manifest::McpRuntime for ExternalMcpPool {
+impl crate::handlers::manifest::McpRuntime for ExternalMcpPool {
     async fn reconcile_mcp(&self, servers: &[McpServerManifest]) {
         self.reconcile(servers).await;
     }

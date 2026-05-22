@@ -2102,10 +2102,10 @@ async fn cron_cancellation() {
 }
 
 // ===========================================================================
-// Delegation tests
+// Sub-agent tool injection tests
 // ===========================================================================
 
-/// Agent with delegate_to available can delegate to another agent.
+/// The legacy delegate_to tool is no longer injected at build time.
 #[tokio::test]
 async fn delegation_basic() {
     let model_id = Uuid::new_v4();
@@ -2130,7 +2130,8 @@ async fn delegation_basic() {
         .await
         .unwrap();
 
-    // Build the coder agent — it should have delegate_to since reviewer exists.
+    // Parent sub-agent tools are injected into the per-run clone, not the
+    // stored runner instance. The legacy delegate_to tool should never appear.
     let runner = provider
         .agent_by_name("coder")
         .await
@@ -2143,13 +2144,13 @@ async fn delegation_basic() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"delegate_to"),
-        "delegate_to should be auto-injected when other agents exist. Tools: {:?}",
+        !tool_names.contains(&"delegate_to"),
+        "delegate_to should not be injected. Tools: {:?}",
         tool_names
     );
 }
 
-/// Single agent should NOT get delegate_to (no one to delegate to).
+/// Single agent should not get legacy delegate_to.
 #[tokio::test]
 async fn delegation_not_injected_for_single_agent() {
     let model_id = Uuid::new_v4();
