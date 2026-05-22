@@ -10,6 +10,7 @@ use nenjo_sessions::{
     SessionTranscriptEventPayload, SessionTranscriptRecord, SessionTransition, TaskSessionUpsert,
     TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
 };
+use tokio::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -17,16 +18,69 @@ use crate::{HarnessError, Result};
 
 const PREVIEW_CHAR_LIMIT: usize = 2_000;
 
-/// Per-session mutexes used to preserve runtime event ordering in detached writers.
+/// Compatibility alias for older harness builders.
 pub type SessionEventLocks = Arc<DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>;
 
-/// Facade around the configured session runtime and ordering locks.
+struct SessionEventBatch {
+    session_id: Uuid,
+    events: Vec<SessionRuntimeEvent>,
+}
+
+/// Handle for the harness-owned session event writer task.
+#[derive(Clone)]
+pub(crate) struct SessionEventWriter {
+    tx: mpsc::UnboundedSender<SessionEventBatch>,
+}
+
+impl SessionEventWriter {
+    pub(crate) fn spawn<Runtime>(runtime: Arc<Runtime>) -> Self
+    where
+        Runtime: SessionRuntime + 'static,
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SessionEventBatch>();
+
+        tokio::spawn(async move {
+            while let Some(batch) = rx.recv().await {
+                for event in batch.events {
+                    if let Err(error) = runtime.record(event).await {
+                        warn!(
+                            error = %error,
+                            session_id = %batch.session_id,
+                            "Failed to record session event"
+                        );
+                    }
+                }
+            }
+        });
+
+        Self { tx }
+    }
+
+    pub(crate) fn record_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
+        if events.is_empty() {
+            return;
+        }
+
+        if self
+            .tx
+            .send(SessionEventBatch { session_id, events })
+            .is_err()
+        {
+            warn!(
+                session_id = %session_id,
+                "Failed to enqueue session events because the writer task stopped"
+            );
+        }
+    }
+}
+
+/// Facade around the configured session runtime and queued event writer.
 pub struct HarnessSessions<Runtime>
 where
     Runtime: SessionRuntime,
 {
     runtime: Arc<Runtime>,
-    event_locks: SessionEventLocks,
+    event_writer: SessionEventWriter,
 }
 
 impl<Runtime> Clone for HarnessSessions<Runtime>
@@ -36,7 +90,7 @@ where
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            event_locks: self.event_locks.clone(),
+            event_writer: self.event_writer.clone(),
         }
     }
 }
@@ -45,10 +99,10 @@ impl<Runtime> HarnessSessions<Runtime>
 where
     Runtime: SessionRuntime,
 {
-    pub(crate) fn new(runtime: Arc<Runtime>, event_locks: SessionEventLocks) -> Self {
+    pub(crate) fn new(runtime: Arc<Runtime>, event_writer: SessionEventWriter) -> Self {
         Self {
             runtime,
-            event_locks,
+            event_writer,
         }
     }
 
@@ -160,43 +214,10 @@ where
             .await
             .map_err(HarnessError::session_runtime)
     }
-}
 
-impl<Runtime> HarnessSessions<Runtime>
-where
-    Runtime: SessionRuntime + 'static,
-{
-    pub fn spawn_recorded_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
-        if events.is_empty() {
-            return;
-        }
-        let sessions = self.clone();
-        tokio::spawn(async move {
-            let lock = sessions
-                .event_locks
-                .entry(session_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone();
-            let _guard = lock.lock().await;
-            for event in events {
-                if let Err(error) = sessions.record(event).await {
-                    warn!(
-                        error = %error,
-                        session_id = %session_id,
-                        "Failed to record session event"
-                    );
-                }
-            }
-        });
+    pub fn record_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
+        self.event_writer.record_events(events, session_id);
     }
-}
-
-pub fn transcript_ref(session_id: Uuid) -> String {
-    format!("transcripts/{session_id}.jsonl")
-}
-
-pub fn trace_ref(session_id: Uuid) -> String {
-    format!("traces/{session_id}.jsonl")
 }
 
 pub fn chat_message_to_transcript(message: &ChatMessage) -> SessionTranscriptChatMessage {

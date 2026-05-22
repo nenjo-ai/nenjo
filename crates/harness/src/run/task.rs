@@ -15,7 +15,7 @@ use crate::execution_context::{agent_name, project_slug, summarize_turn_event};
 use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::{AgentRef, TaskRequest};
-use crate::session::{TurnEventContext, session_runtime_events_from_turn_event, trace_ref};
+use crate::session::{TurnEventContext, session_runtime_events_from_turn_event};
 use crate::{Harness, ProviderRuntime};
 
 pub(crate) async fn task_stream<P, SessionRt>(
@@ -94,7 +94,6 @@ where
             routine_id: Some(routine_id),
             execution_run_id,
             memory_namespace: memory_namespace.clone(),
-            trace_ref: Some(trace_ref(request.task_id)),
             metadata: json!({
                 "source": "harness_task",
                 "project_slug": pslug,
@@ -241,7 +240,6 @@ where
     if let Some(location) = request.project_location {
         run = run.project_location(location);
     }
-    let trace_ref = Some(trace_ref(request.task_id));
     let memory_namespace = task_memory_namespace(Some(&aname), &pslug);
     harness
         .sessions()
@@ -253,7 +251,6 @@ where
             routine_id: None,
             execution_run_id,
             memory_namespace,
-            trace_ref,
             metadata: json!({
                 "source": "harness_task",
                 "project_slug": pslug,
@@ -379,11 +376,12 @@ where
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };
-                            harness.sessions().spawn_recorded_events(
-                                session_runtime_events_from_turn_event(&session_event_context, &ev),
-                                task_id,
-                            );
+                            let runtime_events =
+                                session_runtime_events_from_turn_event(&session_event_context, &ev);
                             let _ = events_tx.send(HarnessEvent::Turn(ev));
+                            harness
+                                .sessions()
+                                .record_events(runtime_events, task_id);
                         }
                         None => break,
                     }

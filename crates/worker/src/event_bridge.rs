@@ -109,24 +109,7 @@ pub fn turn_event_to_stream_event(
             })),
             encrypted_payload: None,
         }),
-        nenjo::TurnEvent::SubAgentEvent {
-            slug,
-            agent_name: sub_agent_name,
-            kind,
-            summary,
-            model_visible,
-        } => Some(StreamEvent::SubAgentEvent {
-            agent: agent_name.to_string(),
-            slug: slug.clone(),
-            sub_agent: sub_agent_name.clone(),
-            kind: kind.clone(),
-            summary: summary.clone(),
-            model_visible: *model_visible,
-            payload: Some(serde_json::json!({
-                "summary": summary,
-            })),
-            encrypted_payload: None,
-        }),
+        nenjo::TurnEvent::SubAgentEvent { .. } => None,
         nenjo::TurnEvent::SubAgentTranscript { .. } => None,
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
@@ -609,27 +592,7 @@ pub fn turn_event_to_task_step_response(
             encrypted_payload: None,
             agent,
         }),
-        nenjo::TurnEvent::SubAgentEvent {
-            slug,
-            agent_name: sub_agent_name,
-            kind,
-            summary,
-            ..
-        } => Some(Response::TaskStepEvent {
-            execution_run_id,
-            task_id,
-            event_type: format!("sub_agent_{kind}"),
-            step_name: slug.clone(),
-            step_type: "sub_agent".to_string(),
-            duration_ms: None,
-            data: task_data(context.routine_step, serde_json::Map::new()),
-            payload: Some(serde_json::json!({
-                "sub_agent": sub_agent_name,
-                "summary": summary,
-            })),
-            encrypted_payload: None,
-            agent,
-        }),
+        nenjo::TurnEvent::SubAgentEvent { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => Some(Response::TaskStepEvent {
             execution_run_id,
             task_id,
@@ -851,40 +814,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridges_sub_agent_lifecycle_to_stream_events() {
-        let event = turn_event_to_stream_event(
-            &nenjo::TurnEvent::SubAgentEvent {
-                slug: "review".to_string(),
-                agent_name: "specialist".to_string(),
-                kind: "completed".to_string(),
-                summary: "done".to_string(),
-                model_visible: false,
-            },
-            "leader",
-        )
-        .expect("sub-agent event should bridge");
+    fn sub_agent_lifecycle_is_not_sent_as_stream_event() {
+        let event = nenjo::TurnEvent::SubAgentEvent {
+            slug: "review".to_string(),
+            agent_name: "specialist".to_string(),
+            kind: "completed".to_string(),
+            summary: "done".to_string(),
+            model_visible: false,
+        };
 
-        match event {
-            StreamEvent::SubAgentEvent {
-                agent,
-                slug,
-                sub_agent,
-                kind,
-                summary,
-                model_visible,
-                payload,
-                ..
-            } => {
-                assert_eq!(agent, "leader");
-                assert_eq!(slug, "review");
-                assert_eq!(sub_agent, "specialist");
-                assert_eq!(kind, "completed");
-                assert_eq!(summary, "done");
-                assert!(!model_visible);
-                assert_eq!(payload.unwrap()["summary"], "done");
-            }
-            other => panic!("unexpected stream event: {other:?}"),
-        }
+        assert!(turn_event_to_stream_event(&event, "leader").is_none());
+    }
+
+    #[test]
+    fn sub_agent_lifecycle_is_not_sent_as_task_step_response() {
+        let event = nenjo::TurnEvent::SubAgentEvent {
+            slug: "review".to_string(),
+            agent_name: "specialist".to_string(),
+            kind: "completed".to_string(),
+            summary: "done".to_string(),
+            model_visible: false,
+        };
+
+        let response = turn_event_to_task_step_response(
+            &event,
+            &TaskTurnEventContext {
+                execution_run_id: Uuid::new_v4(),
+                task_id: Some(Uuid::new_v4()),
+                agent: None,
+                routine_step: None,
+                agent_duration_ms: None,
+                emit_done: true,
+                summarize_outputs: false,
+            },
+        );
+
+        assert!(response.is_none());
     }
 
     #[test]

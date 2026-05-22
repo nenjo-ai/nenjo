@@ -20,13 +20,13 @@ use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
-    pub agent: AgentManifest,
-    pub model: ModelManifest,
-    pub model_provider: Arc<P::Model<'static>>,
+    pub agent_manifest: AgentManifest,
+    pub model_manifest: ModelManifest,
     pub tools: Vec<Arc<dyn Tool>>,
     pub prompt_context: PromptContext,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
+    pub provider_runtime: P,
 }
 
 /// Builder for constructing an [`AgentRunner`].
@@ -35,8 +35,7 @@ pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
 /// manifest data. Callers can override individual fields before building.
 pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     agent: Option<AgentManifest>,
-    model: Option<ModelManifest>,
-    model_provider: Option<Arc<P::Model<'static>>>,
+    model_manifest: Option<ModelManifest>,
     tools: Vec<Arc<dyn Tool>>,
     prompt_context: Option<PromptContext>,
     agent_config: AgentConfig,
@@ -60,9 +59,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Create a new builder with required fields (called by Provider).
     pub(crate) fn new(params: AgentBuilderParams<P>) -> Self {
         Self {
-            agent: Some(params.agent),
-            model: Some(params.model),
-            model_provider: Some(params.model_provider),
+            agent: Some(params.agent_manifest),
+            model_manifest: Some(params.model_manifest),
             tools: params.tools,
             prompt_context: Some(params.prompt_context),
             agent_config: params.agent_config,
@@ -73,7 +71,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_project_context: None,
             pending_routine_context: None,
             pending_step_context: None,
-            provider_runtime: None,
+            provider_runtime: Some(params.provider_runtime),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
@@ -88,8 +86,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     ) -> Self {
         Self {
             agent: None,
-            model: None,
-            model_provider: None,
+            model_manifest: None,
             tools: Vec::new(),
             prompt_context: None,
             agent_config,
@@ -119,18 +116,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
     /// Set the model manifest for this builder.
     pub fn with_model_manifest(mut self, model: ModelManifest) -> Self {
-        self.model = Some(model);
-        self
-    }
-
-    /// Set both the model manifest and the concrete model provider to use.
-    pub fn with_model_provider(
-        mut self,
-        model: ModelManifest,
-        provider: Arc<P::Model<'static>>,
-    ) -> Self {
-        self.model = Some(model);
-        self.model_provider = Some(provider);
+        self.model_manifest = Some(model);
         self
     }
 
@@ -248,16 +234,20 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Build the [`AgentRunner`].
     pub async fn build(mut self) -> Result<AgentRunner<P>, super::error::AgentError> {
         let agent = self.agent.take().ok_or(AgentError::MissingAgentManifest)?;
-        let model = self.model.take().ok_or(AgentError::MissingModelManifest)?;
-        let model_provider = match self.model_provider.take() {
-            Some(provider) => provider,
-            None => {
-                let provider = self
-                    .provider_runtime
-                    .as_ref()
-                    .ok_or(AgentError::MissingModelProvider)?;
-                provider.create_model_provider(&model).await?
-            }
+        let model_manifest = self
+            .model_manifest
+            .take()
+            .ok_or(AgentError::MissingModelManifest)?;
+        let provider = self
+            .provider_runtime
+            .as_ref()
+            .ok_or(AgentError::MissingModelProvider)?;
+        let model_provider = provider.create_model_provider(&model_manifest).await?;
+        let model = AgentModel {
+            model_name: model_manifest.model.clone(),
+            id: model_manifest.id,
+            temperature: model_manifest.temperature.unwrap_or(0.7),
+            model_provider,
         };
         let mut prompt_context = match self.prompt_context.take() {
             Some(prompt_context) => prompt_context,
@@ -353,12 +343,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
         let instance = AgentInstance {
             manifest: agent,
-            model: AgentModel {
-                model_name: model.model.clone(),
-                id: model.id,
-                temperature: model.temperature.unwrap_or(0.7),
-                model_provider,
-            },
+            model_manifest,
+            model,
             prompt: AgentPromptState {
                 context: prompt_context,
                 renderer: self.context_renderer,

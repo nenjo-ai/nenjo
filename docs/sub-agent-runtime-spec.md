@@ -120,7 +120,7 @@ agents:
 Fields:
 
 ```text
-agent          required, target agent manifest name
+agent          required, ephemeral child agent name
 slug           optional, caller-facing child handle
 prompt         optional child identity/guidance supplied by the parent
 task           required object with description, goal, and optional acceptance_criteria
@@ -129,8 +129,21 @@ result_format  optional lightweight final result contract
 ```
 
 The child prompt is built only from `prompt`, `task`, `context`, and
-`result_format`. The target agent manifest is used for execution selection, not
-for prompt identity or capability expansion.
+`result_format`. The child is an ephemeral agent created at spawn time; it does
+not need a persisted agent manifest.
+
+SDK hosts can create the same kind of minimal runtime agent manifest with:
+
+```rust
+use nenjo::manifest::AgentManifest;
+
+let agent = AgentManifest::builder()
+    .with_name("security_reviewer")
+    .with_system_prompt("Act as a focused security review worker.")
+    .with_developer_prompt("Be concise and evidence-driven.")
+    .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
+    .build()?;
+```
 
 The `result_format` is intentionally not full JSON Schema. It is a compact
 contract the parent can author easily. The runtime turns it into child prompt
@@ -537,18 +550,19 @@ When spawning a child:
 
 ```text
 1. parse and reserve the slug
-2. resolve target agent by name
-3. reject cycles and enforce max depth
-4. build child runner through provider.build_agent_by_name in `Child` execution mode
+2. create an ephemeral child `AgentManifest` from name and prompt
+3. enforce max depth
+4. build child runner through `provider.new_agent()` in `Child` execution mode
 5. inject child tools: update_parent_agent, ask_parent_agent
-6. build child prompt only from spawn_sub_agents `prompt`, structured `task`,
-   `context`, and `result_format`
+6. execute the child through its configured task template using structured
+   `task`, `context`, and `result_format` fields
 7. start child execution as a Tokio task
 8. bridge child TurnEvent values into the child transcript buffer and parent trace stream
 9. store final output and emit Completed or Failed
 ```
 
-The target agent manifest selects execution target/model. It is not child
+The child uses the parent run's model unless the runtime host supplies a
+different model policy. Persisted agent manifests are not required for child
 identity, prompt context, scope, ability, memory, or platform tool expansion.
 
 Execution modes:

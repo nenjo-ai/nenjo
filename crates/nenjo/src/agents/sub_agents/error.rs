@@ -6,10 +6,10 @@ pub(crate) enum SubAgentError {
     InvalidSlug(String),
     #[error("invalid result field name: {0}")]
     InvalidResultFieldName(String),
-    #[error("agent '{0}' not found")]
-    AgentNotFound(String),
-    #[error("cannot spawn '{0}': would create a sub-agent cycle")]
-    Cycle(String),
     #[error("cannot spawn '{0}': maximum sub-agent depth reached")]
     DepthLimit(String),
+    #[error("cannot reserve sub-agent slug for '{0}': all suffixes are in use")]
+    SlugExhausted(String),
+    #[error("cannot build ephemeral sub-agent manifest for '{agent}': {reason}")]
+    ManifestBuild { agent: String, reason: String },
 }

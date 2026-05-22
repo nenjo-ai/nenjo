@@ -123,7 +123,7 @@ where
     P: ProviderRuntime,
 {
     let agent_name = agent.name();
-    let provider = &*agent.model.model_provider;
+    let model_provider = &*agent.model.model_provider;
     let model = &agent.model.model_name;
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
@@ -179,7 +179,7 @@ where
                 // Resolve the context budget: provider-reported context window with
                 // an 80% safety margin. Falls back to 100K if the provider doesn't
                 // know the model. Agent config can override.
-                let raw_window = provider
+                let raw_window = model_provider
                     .context_window(model)
                     .unwrap_or(DEFAULT_CONTEXT_WINDOW);
                 let context_budget = raw_window * 4 / 5;
@@ -197,7 +197,7 @@ where
                 // Compact conversation if token estimate still exceeds budget
                 // after argument truncation.
                 compact_messages_with_summary(
-                    provider,
+                    model_provider,
                     model,
                     temperature,
                     &mut messages,
@@ -228,7 +228,7 @@ where
                     tools: tools_ref,
                 };
 
-                let mut response = provider.chat(request, model, temperature).await?;
+                let mut response = model_provider.chat(request, model, temperature).await?;
                 let original_tool_call_count = response.tool_calls.len();
                 if response.tool_calls.len() != original_tool_call_count {
                     warn!(

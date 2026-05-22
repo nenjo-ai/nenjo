@@ -8,7 +8,7 @@ pub enum AgentError {
     MissingAgentManifest,
 
     /// The builder was asked to build before model metadata was provided.
-    #[error("model manifest is required")]
+    #[error("model is required")]
     MissingModelManifest,
 
     /// The builder was asked to build without an explicit model provider and

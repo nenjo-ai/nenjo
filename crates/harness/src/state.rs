@@ -8,7 +8,7 @@ use nenjo_sessions::SessionRuntime;
 use crate::ProviderRuntime;
 use crate::domain::DomainRegistry;
 use crate::registry::ExecutionRegistry;
-use crate::session::SessionEventLocks;
+use crate::session::SessionEventWriter;
 
 pub(crate) struct HarnessInner<
     P: ProviderRuntime = nenjo::provider::ErasedProvider,
@@ -18,5 +18,5 @@ pub(crate) struct HarnessInner<
     pub(crate) session_runtime: Arc<SessionRt>,
     pub(crate) executions: ExecutionRegistry,
     pub(crate) domains: DomainRegistry<P>,
-    pub(crate) session_event_locks: SessionEventLocks,
+    pub(crate) session_event_writer: SessionEventWriter,
 }

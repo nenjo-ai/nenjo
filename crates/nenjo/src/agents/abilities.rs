@@ -437,6 +437,7 @@ where
 
     AgentInstance {
         manifest: scoped_manifest,
+        model_manifest: caller.model_manifest.clone(),
         model: caller.model.clone(),
         prompt: AgentPromptState {
             context: prompt_context,
@@ -632,6 +633,15 @@ mod tests {
                 ability_ids: vec![],
                 prompt_locked: false,
                 heartbeat: None,
+            },
+            model_manifest: crate::manifest::ModelManifest {
+                id: uuid::Uuid::new_v4(),
+                name: "mock".into(),
+                description: None,
+                model: "mock".into(),
+                model_provider: "mock".into(),
+                temperature: Some(0.2),
+                base_url: None,
             },
             model: AgentModel {
                 model_name: "mock".into(),

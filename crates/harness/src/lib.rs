@@ -178,7 +178,7 @@ where
     pub fn sessions(&self) -> HarnessSessions<SessionRt> {
         HarnessSessions::new(
             self.inner.session_runtime.clone(),
-            self.inner.session_event_locks.clone(),
+            self.inner.session_event_writer.clone(),
         )
     }
 

@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::agents::AgentExecutionMode;
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
-use crate::input::{AgentRun, ChatInput};
+use crate::input::TaskInput;
+use crate::manifest::{AgentManifest, ModelManifest};
 use crate::provider::ProviderRuntime;
 use crate::types::DelegationContext;
 
@@ -27,6 +28,16 @@ const SIGNAL_QUEUE_CAP: usize = 128;
 const TRANSCRIPT_CAP: usize = 256;
 const WAIT_EVENTS_PER_AGENT: usize = 12;
 const INSPECT_LIMIT_CAP: usize = 50;
+const SUB_AGENT_TASK_TEMPLATE: &str = r#"Task:
+Description:
+{{ task.description }}
+
+Goal:
+{{ task.title }}
+
+Acceptance criteria and output instructions:
+{{ task.acceptance_criteria }}
+"#;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SubAgentLimits {
@@ -96,6 +107,7 @@ pub(crate) struct SubAgentRuntime<P: ProviderRuntime> {
 struct RuntimeInner<P: ProviderRuntime> {
     provider: P,
     parent_agent_id: Uuid,
+    parent_model_manifest: ModelManifest,
     delegation_ctx: DelegationContext,
     runs: Mutex<HashMap<SubAgentSlug, Arc<SubAgentRun>>>,
     notify: Notify,
@@ -145,6 +157,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
     pub(crate) fn new(
         provider: P,
         parent_agent_id: Uuid,
+        parent_model_manifest: ModelManifest,
         limits: SubAgentLimits,
         delegation_ctx: Option<DelegationContext>,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -155,6 +168,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
             inner: Arc::new(RuntimeInner {
                 provider,
                 parent_agent_id,
+                parent_model_manifest,
                 delegation_ctx,
                 runs: Mutex::new(HashMap::new()),
                 notify: Notify::new(),
@@ -198,24 +212,14 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
     }
 
     async fn spawn_one(&self, request: SpawnRequest) -> Result<SpawnedSubAgent, SubAgentError> {
-        let target = self
-            .inner
-            .provider
-            .find_agent_manifest(&request.agent_name)
-            .cloned()
-            .ok_or_else(|| SubAgentError::AgentNotFound(request.agent_name.clone()))?;
-        if self.inner.delegation_ctx.would_cycle(target.id)
-            || target.id == self.inner.parent_agent_id
-        {
-            return Err(SubAgentError::Cycle(request.agent_name));
-        }
+        let child_agent = ephemeral_agent_manifest(&request, self.inner.parent_model_manifest.id)?;
         let child_ctx = self
             .inner
             .delegation_ctx
             .child(self.inner.parent_agent_id)
             .ok_or_else(|| SubAgentError::DepthLimit(request.agent_name.clone()))?;
 
-        let slug = self.reserve_slug(&request).await;
+        let slug = self.reserve_slug(&request).await?;
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         let run = Arc::new(SubAgentRun {
             slug: slug.clone(),
@@ -249,8 +253,8 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             inbox_rx: Arc::new(Mutex::new(inbox_rx)),
         };
         let provider = inner.provider.clone();
-        let agent_name = request.agent_name.clone();
-        let task = build_child_task(&request);
+        let child_model_manifest = inner.parent_model_manifest.clone();
+        let task = build_child_task_input(&request);
         let result_format = request.result_format.clone();
         let completion_format = result_format.clone();
         let cancel = run.cancel.clone();
@@ -258,11 +262,11 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let join = tokio::spawn(async move {
             let result = run_child_agent(
                 provider,
-                agent_name.clone(),
+                child_agent,
+                child_model_manifest,
                 task,
                 child_ctx,
                 child_handle.clone(),
-                result_format,
                 cancel,
             )
             .await;
@@ -304,22 +308,26 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         })
     }
 
-    async fn reserve_slug(&self, request: &SpawnRequest) -> SubAgentSlug {
+    async fn reserve_slug(&self, request: &SpawnRequest) -> Result<SubAgentSlug, SubAgentError> {
         let base = request
             .slug
             .clone()
             .unwrap_or_else(|| SubAgentSlug::derive(&request.agent_name));
         let runs = self.inner.runs.lock().await;
         if !runs.contains_key(&base) {
-            return base;
+            return Ok(base);
         }
-        for suffix in 2.. {
+
+        let mut suffix = 2usize;
+        loop {
             let candidate = base.with_suffix(suffix);
             if !runs.contains_key(&candidate) {
-                return candidate;
+                return Ok(candidate);
             }
+            suffix = suffix
+                .checked_add(1)
+                .ok_or_else(|| SubAgentError::SlugExhausted(base.to_string()))?;
         }
-        unreachable!("unbounded suffix search must find an available slug")
     }
 
     pub(crate) async fn send(&self, messages: Vec<(SubAgentSlug, String)>) -> Vec<DeliveryResult> {
@@ -611,22 +619,22 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
 
 async fn run_child_agent<P: ProviderRuntime>(
     provider: P,
-    agent_name: String,
-    task: String,
+    agent: AgentManifest,
+    model_manifest: ModelManifest,
+    task: TaskInput,
     child_ctx: DelegationContext,
     child_handle: ChildRuntimeHandle<P>,
-    _result_format: Option<ResultFormat>,
     cancel: CancellationToken,
 ) -> Result<TurnOutput> {
     let builder = provider
-        .build_agent_by_name(&agent_name)
-        .await
-        .map_err(|err| anyhow::anyhow!("{err}"))?
+        .new_agent()
+        .with_agent_manifest(agent)
+        .with_model_manifest(model_manifest)
         .with_child_delegation_ctx(child_ctx)
         .with_execution_mode(AgentExecutionMode::Child);
     let runner = builder.build().await?;
     let mut handle = runner
-        .chat_stream_as_sub_agent(&task, child_handle.clone())
+        .task_stream_as_sub_agent(task, child_handle.clone())
         .await?;
 
     loop {
@@ -644,6 +652,32 @@ async fn run_child_agent<P: ProviderRuntime>(
         }
     }
     handle.output().await
+}
+
+fn ephemeral_agent_manifest(
+    request: &SpawnRequest,
+    model_id: Uuid,
+) -> Result<AgentManifest, SubAgentError> {
+    let prompt = request
+        .prompt
+        .as_ref()
+        .filter(|prompt| !prompt.trim().is_empty())
+        .map(|prompt| prompt.trim().to_string())
+        .unwrap_or_else(|| format!("You are {}.", request.agent_name));
+
+    AgentManifest::builder()
+        .with_name(request.agent_name.clone())
+        .with_model_id(model_id)
+        .with_system_prompt(prompt)
+        .with_developer_prompt(
+            "You are an isolated sub-agent worker. Work only on the assigned task, report progress to the parent when useful, and return a focused final result.",
+        )
+        .with_task_template(SUB_AGENT_TASK_TEMPLATE)
+        .build()
+        .map_err(|err| SubAgentError::ManifestBuild {
+            agent: request.agent_name.clone(),
+            reason: err.to_string(),
+        })
 }
 
 async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, event: TurnEvent) {
@@ -699,43 +733,40 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
     }
 }
 
-fn build_child_task(request: &SpawnRequest) -> String {
-    let mut task = String::new();
-    if let Some(prompt) = request
-        .prompt
-        .as_ref()
-        .filter(|prompt| !prompt.trim().is_empty())
-    {
-        task.push_str("Prompt:\n");
-        task.push_str(prompt.trim());
-        task.push_str("\n\n");
-    }
-
-    task.push_str("Task:\n");
-    task.push_str("Description:\n");
-    task.push_str(request.task.description.trim());
-    task.push_str("\n\nGoal:\n");
-    task.push_str(request.task.goal.trim());
-
-    if !request.task.acceptance_criteria.is_empty() {
-        task.push_str("\n\nAcceptance criteria:\n");
-        for criterion in &request.task.acceptance_criteria {
-            task.push_str("- ");
-            task.push_str(criterion.trim());
-            task.push('\n');
-        }
-    }
-
+fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
+    let mut description = request.task.description.trim().to_string();
     if let Some(context) = &request.context {
-        task.push_str("\n\nContext metadata:\n");
-        task.push_str(
+        description.push_str("\n\nContext metadata:\n");
+        description.push_str(
             &serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string()),
         );
     }
-    if let Some(format) = &request.result_format {
-        task.push_str(&format.instructions());
+
+    let mut acceptance_criteria = String::new();
+    if !request.task.acceptance_criteria.is_empty() {
+        for criterion in &request.task.acceptance_criteria {
+            acceptance_criteria.push_str("- ");
+            acceptance_criteria.push_str(criterion.trim());
+            acceptance_criteria.push('\n');
+        }
     }
-    task
+    if let Some(format) = &request.result_format {
+        acceptance_criteria.push_str(&format.instructions());
+    }
+
+    let task = TaskInput::new(
+        Uuid::nil(),
+        Uuid::new_v4(),
+        request.task.goal.trim(),
+        description,
+    )
+    .source("sub_agent");
+
+    if acceptance_criteria.trim().is_empty() {
+        task
+    } else {
+        task.acceptance_criteria(acceptance_criteria)
+    }
 }
 
 fn classify_wake(updates: &[SignalDigest]) -> &'static str {
@@ -777,14 +808,4 @@ fn truncate(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     out.push('…');
     out
-}
-
-impl From<SpawnRequest> for AgentRun {
-    fn from(value: SpawnRequest) -> Self {
-        AgentRun::chat(ChatInput {
-            message: build_child_task(&value),
-            history: Vec::new(),
-            project_id: None,
-        })
-    }
 }

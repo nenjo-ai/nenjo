@@ -157,10 +157,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
 
     /// Set the LLM model factory.
     ///
-    /// Manifest-backed agent resolution requires a model factory. Blank
-    /// agents created with [`Provider::new_agent`](crate::provider::Provider::new_agent)
-    /// may instead provide a concrete model provider through
-    /// [`AgentBuilder::with_model_provider`](crate::agents::AgentBuilder::with_model_provider).
+    /// Agent builders resolve their configured model manifest through this
+    /// factory when they are built.
     pub fn with_model_factory<Factory>(
         self,
         factory: Factory,

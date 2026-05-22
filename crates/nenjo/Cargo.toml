@@ -20,6 +20,7 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 cron = { workspace = true }
 bon = { workspace = true }
+derive_builder = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
-use crate::manifest::{AgentManifest, PromptConfig};
+use crate::manifest::{AgentManifest, ModelManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime};
 use crate::tools::{Tool, ToolSecurity, ToolSpec};
 use crate::types::DelegationContext;
@@ -42,6 +42,7 @@ impl Display for BuiltPrompts {
 /// A fully configured agent instance ready for task execution.
 pub struct AgentInstance<P: ProviderRuntime = ErasedProvider> {
     pub(crate) manifest: AgentManifest,
+    pub(crate) model_manifest: ModelManifest,
     pub(crate) model: AgentModel<P>,
     pub(crate) prompt: AgentPromptState,
     pub(crate) runtime: AgentRuntime<P>,
@@ -108,6 +109,7 @@ impl<P: ProviderRuntime> Clone for AgentInstance<P> {
     fn clone(&self) -> Self {
         Self {
             manifest: self.manifest.clone(),
+            model_manifest: self.model_manifest.clone(),
             model: self.model.clone(),
             prompt: self.prompt.clone(),
             runtime: self.runtime.clone(),

@@ -374,20 +374,13 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.execute_stream_with_sub_agent(run, None).await
     }
 
-    pub(crate) async fn chat_stream_as_sub_agent(
+    pub(crate) async fn task_stream_as_sub_agent(
         &self,
-        message: &str,
+        task: TaskInput,
         child_handle: ChildRuntimeHandle<P>,
     ) -> Result<ExecutionHandle> {
-        self.execute_stream_with_sub_agent(
-            AgentRun::chat(ChatInput {
-                message: message.to_string(),
-                history: Vec::new(),
-                project_id: None,
-            }),
-            Some(child_handle),
-        )
-        .await
+        self.execute_stream_with_sub_agent(AgentRun::task(task), Some(child_handle))
+            .await
     }
 
     async fn execute_stream_with_sub_agent(
@@ -410,7 +403,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             None
         };
 
-        let is_child_execution = child_handle.is_some();
         // 5. Spawn the turn loop.
         let (events_tx, events_rx) = mpsc::unbounded_channel::<TurnEvent>();
         let pause_token = types::PauseToken::new();
@@ -421,25 +413,19 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             inst.runtime.tools.extend(child_tools(child_handle));
         } else if inst.runtime.execution_mode == AgentExecutionMode::Parent
             && let Some(provider) = inst.runtime.provider_runtime.clone()
+            && inst.runtime.config.max_delegation_depth > 0
         {
-            let other_agents = inst
-                .prompt
-                .context
-                .available_agents
-                .iter()
-                .any(|agent| agent.id != inst.agent_id());
-            if other_agents && inst.runtime.config.max_delegation_depth > 0 {
-                let runtime = SubAgentRuntime::new(
-                    provider,
-                    inst.agent_id(),
-                    SubAgentLimits {
-                        max_depth: inst.runtime.config.max_delegation_depth,
-                    },
-                    inst.runtime.sub_agent_ctx.clone(),
-                    Some(events_tx.clone()),
-                );
-                inst.runtime.tools.extend(parent_tools(runtime.handle()));
-            }
+            let runtime = SubAgentRuntime::new(
+                provider,
+                inst.agent_id(),
+                inst.model_manifest.clone(),
+                SubAgentLimits {
+                    max_depth: inst.runtime.config.max_delegation_depth,
+                },
+                inst.runtime.sub_agent_ctx.clone(),
+                Some(events_tx.clone()),
+            );
+            inst.runtime.tools.extend(parent_tools(runtime.handle()));
         }
         let inst = Arc::new(inst);
 
@@ -467,50 +453,42 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             "Executing agent"
         );
 
-        let messages = if is_child_execution {
-            vec![ChatMessage::user(raw_user_message(&run))]
-        } else {
-            // 3. Build prompts.
-            let prompts =
-                inst.build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref());
+        // 3. Build prompts.
+        let prompts =
+            inst.build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref());
 
-            let system_prompt = prompts.system;
-            let developer_prompt = prompts.developer;
-            let templated_user_message = prompts.user_message;
-            trace!(
-                agent = inst.name(),
-                "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
-                inst.name(),
-                system_prompt,
-                developer_prompt,
-                templated_user_message,
-            );
+        let system_prompt = prompts.system;
+        let developer_prompt = prompts.developer;
+        let templated_user_message = prompts.user_message;
+        trace!(
+            agent = inst.name(),
+            "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
+            inst.name(),
+            system_prompt,
+            developer_prompt,
+            templated_user_message,
+        );
 
-            // 4. Build initial messages.
-            let supports_developer_role = inst
-                .model
-                .model_provider
-                .supports_developer_role(&inst.model.model_name);
-            let mut messages: Vec<ChatMessage> = build_instruction_messages(
-                &system_prompt,
-                &developer_prompt,
-                supports_developer_role,
-            );
+        // 4. Build initial messages.
+        let supports_developer_role = inst
+            .model
+            .model_provider
+            .supports_developer_role(&inst.model.model_name);
+        let mut messages: Vec<ChatMessage> =
+            build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
 
-            if let AgentRunKind::Chat(ref chat) = run.kind {
-                for msg in &chat.history {
-                    messages.push(msg.clone());
-                }
+        if let AgentRunKind::Chat(ref chat) = run.kind {
+            for msg in &chat.history {
+                messages.push(msg.clone());
             }
+        }
 
-            let user_message = if !templated_user_message.is_empty() {
-                templated_user_message
-            } else {
-                raw_user_message(&run)
-            };
-            messages.push(ChatMessage::user(&user_message));
-            messages
+        let user_message = if !templated_user_message.is_empty() {
+            templated_user_message
+        } else {
+            raw_user_message(&run)
         };
+        messages.push(ChatMessage::user(&user_message));
 
         let join = tokio::spawn(async move {
             turn_loop::run(&inst, messages, Some(events_tx), Some(loop_pause)).await

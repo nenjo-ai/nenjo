@@ -452,10 +452,7 @@ async fn parent_tools_are_available_during_execution() {
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let manifest = Manifest {
-        agents: vec![
-            agent(Uuid::new_v4(), "coder", model_id),
-            agent(Uuid::new_v4(), "reviewer", model_id),
-        ],
+        agents: vec![agent(Uuid::new_v4(), "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
         ..Default::default()
@@ -502,7 +499,7 @@ async fn parent_tools_are_available_during_execution() {
 }
 
 #[tokio::test]
-async fn parent_tools_are_not_injected_for_single_agent() {
+async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let manifest = Manifest {
@@ -528,7 +525,19 @@ async fn parent_tools_are_not_injected_for_single_agent() {
         .unwrap();
 
     runner.chat("work").await.unwrap();
-    assert!(captured.tool_names().remove(0).is_empty());
+    let first_tools = captured.tool_names().remove(0);
+    for expected in [
+        "spawn_sub_agents",
+        "send_sub_agents",
+        "inspect_sub_agents",
+        "stop_sub_agents",
+        "wait",
+    ] {
+        assert!(
+            first_tools.iter().any(|name| name == expected),
+            "{first_tools:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -536,18 +545,16 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let manifest = Manifest {
-        agents: vec![
-            agent(Uuid::new_v4(), "coder", model_id),
-            agent(Uuid::new_v4(), "reviewer", model_id),
-        ],
+        agents: vec![agent(Uuid::new_v4(), "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
         ..Default::default()
     };
+    let factory = SubAgentScriptFactory::new(captured.clone());
 
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SubAgentScriptFactory::new(captured.clone()))
+        .with_model_factory(factory)
         .with_tool_factory(PlatformToolFactory)
         .build()
         .await
@@ -617,15 +624,26 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
         assert!(!names.iter().any(|name| name == "wait"), "{names:?}");
     }
 
-    let child_prompt_seen = captured.messages().into_iter().flatten().any(|message| {
+    let child_messages = captured
+        .messages()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let child_prompt_seen = child_messages
+        .iter()
+        .any(|message| message.contains("Act as a focused security review worker."));
+    let child_task_seen = child_messages.iter().any(|message| {
         message.contains("Return your final answer as a single JSON object")
             && message.contains("confidence")
-            && message.contains("Act as a focused security review worker.")
-            && message.contains("Acceptance criteria:")
+            && message.contains("Acceptance criteria and output instructions:")
     });
     assert!(
         child_prompt_seen,
-        "child result_format instructions missing"
+        "child prompt instructions missing: {child_messages:?}"
+    );
+    assert!(
+        child_task_seen,
+        "child task/result instructions missing: {child_messages:?}"
     );
     assert!(
         !captured

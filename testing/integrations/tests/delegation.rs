@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use nenjo::AgentConfig;
 use uuid::Uuid;
 
 use nenjo::manifest::{
@@ -39,9 +40,9 @@ fn get_api_key() -> Option<String> {
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
-        name: "openrouter-nemotron".into(),
+        name: "openrouter".into(),
         description: None,
-        model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
+        model: "deepseek/deepseek-v4-flash".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
         base_url: None,
@@ -85,6 +86,77 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
     }
 }
 
+fn tool_call_names(output: &nenjo::TurnOutput) -> Vec<String> {
+    output
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
+        .filter_map(|value| {
+            value
+                .get("tool_calls")
+                .and_then(|calls| calls.as_array())
+                .cloned()
+        })
+        .flatten()
+        .filter_map(|call| {
+            call.get("name")
+                .and_then(|name| name.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn transcript_text(output: &nenjo::TurnOutput) -> String {
+    output
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tool_result_payloads(output: &nenjo::TurnOutput) -> Vec<serde_json::Value> {
+    output
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
+        .filter_map(|message| {
+            message
+                .get("content")
+                .and_then(|content| content.as_str())
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+        })
+        .collect()
+}
+
+fn delivered_to_slug(payloads: &[serde_json::Value], slug: &str) -> bool {
+    payloads
+        .iter()
+        .filter_map(|payload| payload.get("sent").and_then(|sent| sent.as_array()))
+        .flatten()
+        .any(|item| {
+            item.get("slug").and_then(|value| value.as_str()) == Some(slug)
+                && item.get("status").and_then(|value| value.as_str()) == Some("delivered")
+        })
+}
+
+fn stopped_slug(payloads: &[serde_json::Value], slug: &str) -> bool {
+    payloads
+        .iter()
+        .filter_map(|payload| {
+            payload
+                .get("stopped")
+                .and_then(|stopped| stopped.as_array())
+        })
+        .flatten()
+        .any(|item| {
+            item.get("slug").and_then(|value| value.as_str()) == Some(slug)
+                && item.get("status").and_then(|value| value.as_str()) == Some("stopped")
+        })
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -106,9 +178,18 @@ async fn sub_agent_real_llm() {
     let leader = make_agent(
         "leader",
         model.id,
-        "You are a team leader. When you receive a task, you MUST call \
-         spawn_sub_agents for the 'specialist' agent, then call wait to collect \
-         the result, then summarize it briefly.",
+        r#"You are a deterministic native sub-agent smoke-test coordinator.
+
+You MUST use native tool calls, not prose, to follow this exact protocol:
+1. Call spawn_sub_agents with one sub-agent:
+   - agent "specialist", slug "basic_specialist", prompt:
+     "You are specialist. Return exactly SPECIALIST_BASIC_DONE."
+   - task description "Return the required sentinel", goal "Produce SPECIALIST_BASIC_DONE",
+     acceptance criteria ["Return exactly SPECIALIST_BASIC_DONE"]
+2. Call wait for up to 20 seconds.
+3. Final answer exactly: SUB_AGENT_BASIC_OK
+
+Do not answer directly. Do not skip tool calls."#,
     );
 
     let specialist = make_agent(
@@ -143,7 +224,7 @@ async fn sub_agent_real_llm() {
         .unwrap();
 
     let output = runner
-        .chat("What is the capital of France?")
+        .chat("Run the native sub-agent smoke-test protocol now.")
         .await
         .expect("chat should succeed");
 
@@ -153,16 +234,160 @@ async fn sub_agent_real_llm() {
     println!("Input tokens: {}", output.input_tokens);
     println!("Output tokens: {}", output.output_tokens);
 
-    // The leader should have delegated (at least 1 tool call)
+    let tool_names = tool_call_names(&output);
     assert!(
-        output.tool_calls >= 1,
-        "leader should have called sub-agent tools, got {} tool calls",
-        output.tool_calls
+        tool_names.iter().any(|name| name == "spawn_sub_agents"),
+        "leader should have called spawn_sub_agents; saw {tool_names:?}"
+    );
+    assert!(
+        tool_names.iter().any(|name| name == "wait"),
+        "leader should have called wait; saw {tool_names:?}"
     );
 
-    // The response should contain something from the specialist
-    // (the specialist always includes "SPECIALIST" in its response)
-    assert!(!output.text.is_empty(), "response should not be empty");
+    let transcript = transcript_text(&output);
+    assert!(
+        transcript.contains("basic_specialist"),
+        "sub-agent slug should appear in transcript: {transcript}"
+    );
+    assert!(
+        output.text.contains("SUB_AGENT_BASIC_OK"),
+        "final response should confirm protocol completion: {}",
+        output.text
+    );
+}
+
+/// Exercise the full native sub-agent tool surface with a real LLM provider:
+///
+/// - parent tools: spawn_sub_agents, wait, inspect_sub_agents,
+///   send_sub_agents, stop_sub_agents
+/// - child tools: update_parent_agent, ask_parent_agent
+#[tokio::test]
+async fn sub_agent_all_tools_real_llm() {
+    let api_key = match get_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("OPENROUTER_API_KEY not set — skipping");
+            return;
+        }
+    };
+
+    let model = make_model();
+    let leader = make_agent(
+        "leader",
+        model.id,
+        r#"You are a deterministic integration-test coordinator.
+
+You MUST use native tool calls, not prose, to follow this exact protocol:
+1. Call spawn_sub_agents with two sub-agents:
+   - agent "communicator", slug "needs_input", prompt:
+     "You are communicator. First call update_parent_agent with summary READY_FOR_SEND.
+      Then call ask_parent_agent asking for the unlock token.
+      After the parent replies, call update_parent_agent with summary RECEIVED_TOKEN and
+      include the exact parent reply in details. Then finish with COMMUNICATOR_DONE."
+     task description "Exercise child update and ask tools", goal "Ask parent for token",
+     acceptance criteria ["Use update_parent_agent", "Use ask_parent_agent"]
+   - agent "sleeper", slug "stop_target", prompt:
+     "You are sleeper. Immediately call ask_parent_agent asking whether to continue.
+      Do not finish unless the parent replies."
+     task description "Remain waiting until stopped", goal "Wait for parent input",
+     acceptance criteria ["Use ask_parent_agent and wait"]
+2. Call wait for up to 20 seconds.
+3. Call inspect_sub_agents for ["needs_input", "stop_target"] with include_transcript true.
+4. Call send_sub_agents with one message to slug "needs_input": "BLUE-ORCHID".
+5. Call wait for up to 20 seconds.
+6. Call inspect_sub_agents for ["needs_input"] with include_transcript true.
+7. Call stop_sub_agents for ["stop_target"] with reason "integration test complete".
+8. Final answer exactly: SUB_AGENT_ALL_TOOLS_OK
+
+Do not skip any step."#,
+    );
+
+    let manifest = Manifest {
+        agents: vec![leader],
+        models: vec![model],
+        projects: vec![make_project()],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(OpenRouterFactory { api_key })
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent_by_name("leader")
+        .await
+        .unwrap()
+        .with_config(AgentConfig {
+            max_turns: 30,
+            parallel_tools: false,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        runner.chat("Run the native sub-agent tool integration protocol now."),
+    )
+    .await
+    .expect("sub-agent all-tools scenario timed out")
+    .expect("chat should succeed");
+
+    println!("--- Sub-Agent All Tools Test ---");
+    println!("Response: {}", output.text);
+    println!("Tool calls: {}", output.tool_calls);
+    println!("Messages:\n{}", transcript_text(&output));
+
+    let tool_names = tool_call_names(&output);
+    for expected in [
+        "spawn_sub_agents",
+        "wait",
+        "inspect_sub_agents",
+        "send_sub_agents",
+        "stop_sub_agents",
+    ] {
+        assert!(
+            tool_names.iter().any(|name| name == expected),
+            "expected parent tool {expected}; saw {tool_names:?}"
+        );
+    }
+
+    let transcript = transcript_text(&output);
+    for expected in [
+        "needs_input",
+        "stop_target",
+        "READY_FOR_SEND",
+        "BLUE-ORCHID",
+        "RECEIVED_TOKEN",
+        "update_parent_agent",
+        "ask_parent_agent",
+    ] {
+        assert!(
+            transcript.contains(expected),
+            "expected transcript to contain {expected}; transcript:\n{transcript}"
+        );
+    }
+
+    let payloads = tool_result_payloads(&output);
+    assert!(
+        delivered_to_slug(&payloads, "needs_input"),
+        "send_sub_agents should deliver to needs_input; payloads: {payloads:?}"
+    );
+    assert!(
+        stopped_slug(&payloads, "stop_target"),
+        "stop_sub_agents should stop stop_target; payloads: {payloads:?}"
+    );
+
+    assert!(
+        output.text.contains("SUB_AGENT_ALL_TOOLS_OK"),
+        "final response should confirm protocol completion: {}",
+        output.text
+    );
 }
 
 /// Verify the canonical runtime no longer exposes legacy delegate_to on the
