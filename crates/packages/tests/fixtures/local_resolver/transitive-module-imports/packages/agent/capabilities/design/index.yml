@@ -1,0 +1,4 @@
+schema: nenjo.module_index.v1
+modules:
+  - agent.yaml
+  - diagnose_failure.yaml

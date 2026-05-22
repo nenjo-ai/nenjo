@@ -1,0 +1,8 @@
+schema: nenjo.package.v1
+name: "agent"
+version: "0.1.0"
+dependencies:
+  "core": "^0.1.0"
+modules:
+  - agents/support.yaml
+  - abilities/design.yaml

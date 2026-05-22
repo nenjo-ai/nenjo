@@ -1,0 +1,5 @@
+schema: nenjo.knowledge.v1
+manifest:
+  name: core_knowledge
+  pack_id: acme.core
+  docs: []

@@ -1,0 +1,7 @@
+schema: nenjo.domain.v1
+imports:
+  abilities:
+    - ../capabilities/design/diagnose_failure.yaml
+manifest:
+  name: creator
+  description: Creator domain.

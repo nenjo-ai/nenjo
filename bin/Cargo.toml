@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "CLI for the Nenjo agent platform"
+description = "CLI for the Nenjo Worker"
 
 [[bin]]
 name = "nenjo"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 nenjo-worker = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
-anyhow = { workspace = true }
+eyre = { workspace = true }
 dotenvy = { workspace = true }
 rustls = { workspace = true, default-features = false, features = ["ring"] }
 tracing = { workspace = true }

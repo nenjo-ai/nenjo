@@ -1,0 +1,10 @@
+schema: nenjo.modules.v1
+resources:
+  - schema: nenjo.ability.v1
+    manifest:
+      name: design_agent
+      tool_name: design_agent
+  - schema: nenjo.ability.v1
+    manifest:
+      name: design_agent
+      tool_name: design_agent_again

@@ -21,6 +21,7 @@ use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth};
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
 use crate::external_mcp::ExternalMcpPool;
+use crate::package_manifests::PackageManifestLoader;
 use crate::providers::registry::ModelProviderRegistry;
 use crate::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
 use crate::tools::platform_payload::PlatformPayloadEncoder;
@@ -152,6 +153,15 @@ pub(crate) async fn build_provider(
 
     Provider::builder()
         .with_loader(loader)
+        .with_loader(PackageManifestLoader::with_packages_dir(
+            config.config_dir.clone(),
+            config.config_dir.join("packages"),
+        ))
+        .with_loader(PackageManifestLoader::with_packages_dir(
+            config.config_dir.join("platform_pkgs"),
+            config.config_dir.join("platform_pkgs"),
+        ))
+        .with_loader(PackageManifestLoader::new(config.workspace_dir.clone()))
         .with_model_factory(provider_registry)
         .with_tool_factory(tool_factory)
         .with_memory(mem)

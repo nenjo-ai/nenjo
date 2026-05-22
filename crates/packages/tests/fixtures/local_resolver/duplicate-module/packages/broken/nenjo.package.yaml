@@ -1,0 +1,6 @@
+schema: nenjo.package.v1
+name: "broken"
+version: "0.1.0"
+modules:
+  - agent.yaml
+  - agent.yaml

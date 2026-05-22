@@ -1,0 +1,4 @@
+schema: nenjo.registry.v1
+packages:
+  "a": packages/a/nenjo.package.yaml
+  "b": packages/b/nenjo.package.yaml

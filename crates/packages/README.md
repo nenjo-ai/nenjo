@@ -1,21 +1,27 @@
 # nenjo-packages
 
-`nenjo-packages` defines the package catalog, descriptor, resource manifest,
-dependency graph, GitHub fetch, and lockfile primitives used by Nenjo package
-install flows.
+`nenjo-packages` defines the registry manifest, package manifest, module
+manifest, dependency graph, GitHub fetch, local resolver, and lockfile
+primitives used by Nenjo package install flows.
 
-The crate is intentionally format-focused. It validates package repository
+The crate is intentionally format-focused. It validates package registry
 files and resolves dependency metadata, but it does not write resources to the
-Nenjo platform or worker manifest store. Callers decide how a resolved resource
-is imported.
+Nenjo platform or worker manifest store. Callers decide how a resolved module is
+imported.
 
-## Package Repository Shape
+## Package Registry Shape
 
-A native Nenjo package repository has three layers:
+The current package model has three layers:
 
-- A catalog file with schema `nenjo.packages.v1`.
-- One package descriptor per installable resource with schema `nenjo.package.v1`.
-- One resource manifest per descriptor with schema `nenjo.<resource>.v1`.
+- A registry file with schema `nenjo.registry.v1`.
+- One package manifest per versioned dependency unit with schema
+  `nenjo.package.v1`.
+- One or more module manifests per package with schema
+  `nenjo.<resource>.v1`.
+
+Packages are the versioned dependency and distribution unit. Modules are
+package-relative manifest files. Runtime behavior is inferred from each module's
+manifest schema and manifest body.
 
 Supported resource schemas are:
 
@@ -33,34 +39,43 @@ Supported resource schemas are:
 ## Catalog Example
 
 ```yaml
-schema: nenjo.packages.v1
-name: Nenjo examples
-description: Example packages for Nenjo workers.
+schema: nenjo.registry.v1
 packages:
-  - type: agent
-    slug: reviewer
-    name: Reviewer
-    path: packages/reviewer/package.yaml
+  core: packages/core/nenjo.package.yaml
+  nenji: packages/nenji/nenjo.package.yaml
 ```
 
-## Package Descriptor Example
+Repo-backed registries author unscoped package names. A registry host supplies
+the scope. For example, a GitHub registry at `github.com/nenjo-ai/packages`
+exposes `nenji` as `@nenjo-ai/nenji` to consumers.
+
+## Package Manifest Example
 
 ```yaml
 schema: nenjo.package.v1
-type: agent
-slug: reviewer
-name: Reviewer
+name: nenji
 version: 1.0.0
-entry: agent.yaml
-depends_on:
-  - path: packages/review-ability/package.yaml
-    version: ^1.0.0
+dependencies:
+  core: ^1.0.0
+modules:
+  - agent.yaml
 ```
 
-`entry` must be a filename next to the descriptor. Dependency paths are
-repository-relative descriptor paths.
+Dependencies are package-level. `modules` are package-relative root entrypoints:
+manifest paths or directory references that start package resolution. Resource
+wrapper imports are then followed transitively, so a package does not need to
+list every internal file when its entrypoints import them. Directory references
+require an explicit `index.yml` or `index.yaml`; directory contents are never
+imported by implicit file listing.
 
-## Resource Manifest Example
+```yaml
+schema: nenjo.module_index.v1
+modules:
+  - design_agent.yaml
+  - diagnose_failure.yaml
+```
+
+## Module Manifest Example
 
 ```yaml
 schema: nenjo.agent.v1
@@ -77,7 +92,88 @@ be an object with a non-empty `name`. `selector` and `root_uri` are optional
 source-management identifiers that downstream importers can use when replacing
 previously installed resources.
 
+## Multi-Resource Module Files
+
+A module path can point to one resource manifest or to a bundle envelope with
+schema `nenjo.modules.v1`:
+
+```yaml
+schema: nenjo.modules.v1
+resources:
+  - schema: nenjo.ability.v1
+    manifest:
+      name: design_agent
+      tool_name: design_agent
+
+  - schema: nenjo.ability.v1
+    manifest:
+      name: diagnose_failure
+      tool_name: diagnose_failure
+```
+
+Single-resource module files are addressable by both their file path and their
+canonical `path#name` key. Multi-resource bundle files require the
+`path#resource_name` form.
+
+## Resource Imports
+
+Resource manifests declare structured runtime imports at the wrapper level,
+outside the pure resource `manifest` body:
+
+```yaml
+schema: nenjo.agent.v1
+imports:
+  abilities:
+    - ./capabilities/design/
+  domains:
+    - ./domains/support.yaml
+  context:
+    - ./shared/context/methodology.yml
+manifest:
+  name: support_agent
+```
+
+The package resolver records these imports on resolved modules and follows
+local file or directory imports into the package graph. Package resolution still
+happens at the package level; imports describe runtime composition between
+resolved resources. Module imports are local refs only; cross-package
+dependencies belong in `nenjo.package.v1` `dependencies`.
+
+Package-authored manifests are a publishable subset of the runtime manifest
+shape. Resource identity and platform organization fields are derived by
+resolution/import instead of authored in YAML. In particular,
+`nenjo.ability.v1`, `nenjo.domain.v1`, and `nenjo.context_block.v1` modules
+must not define `manifest.path`; importers derive the dashboard path from the
+module's package-relative directory.
+
+## Local Resolution
+
+`LocalPackageResolver` resolves `nenjo.registry.v1` package graphs from a
+local filesystem checkout. It is intended for tests and local package authoring.
+
+```rust
+use nenjo_packages::LocalPackageResolver;
+
+# fn example() -> anyhow::Result<()> {
+let graph = LocalPackageResolver::new("../packages")
+    .resolve_package_graph("nenji")?;
+
+for package in graph.topo_order()? {
+    let package = &graph.packages[&package];
+    for module in package.modules.values() {
+        println!("install {} {}", module.kind.as_str(), module.name());
+    }
+}
+# Ok(())
+# }
+```
+
 ## Fetching And Resolving
+
+`GitHubFetcher::resolve_resource_graph` currently supports the legacy
+descriptor-per-resource model. The new package/module model is available through
+the shared manifest types and local resolver while the registry-backed resolver
+is introduced.
 
 ```rust
 use nenjo_packages::{GitHubFetcher, GitHubSource};

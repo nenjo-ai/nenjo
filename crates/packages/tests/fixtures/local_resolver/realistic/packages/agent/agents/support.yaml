@@ -1,0 +1,4 @@
+schema: nenjo.agent.v1
+manifest:
+  name: support_agent
+  display_name: Support Agent

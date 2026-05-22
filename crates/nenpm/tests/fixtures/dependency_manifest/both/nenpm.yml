@@ -1,0 +1,3 @@
+schema: nenjo.dependencies.v1
+dependencies:
+  "@nenjo/nenji": "^0.1.0"

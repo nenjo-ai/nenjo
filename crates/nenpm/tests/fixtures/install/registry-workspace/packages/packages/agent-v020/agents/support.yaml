@@ -1,0 +1,7 @@
+schema: nenjo.agent.v1
+manifest:
+  name: support_agent
+  description: Handles support requests.
+  prompt_config:
+    system_prompt: |
+      {{ pkg.acme.core.methodology }}

@@ -1,0 +1,7 @@
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@nenjo/nenji": "^0.1.0"
+
+overrides:
+  "@nenjo/nenji": file:../packages#nenjo/nenji.package.yaml

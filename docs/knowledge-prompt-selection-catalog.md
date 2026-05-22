@@ -9,7 +9,7 @@ knowledge tools.
 Prompt injection here means template expansion such as:
 
 ```text
-{{ git.nenjo_ai.packages.nenjo.platform }}
+{{ pkg.nenjo.core.knowledge }}
 {{ lib.product_docs }}
 ```
 
@@ -38,25 +38,25 @@ Primary implementation points:
 
 ## Registered Pack Sources
 
-### Nenjo Platform Package
+### Nenjo Package Knowledge
 
-Nenjo platform docs are seeded as a repo-backed system knowledge pack. Worker
-registers:
+Official package knowledge is seeded as a repo-backed system knowledge pack.
+Worker registers package repo packs under the `pkg` namespace:
 
 ```text
-selector = git://nenjo-ai/packages/nenjo/platform
+selector = pkg.nenjo.core.knowledge
 ```
 
 Prompt variable:
 
 ```text
-{{ git.nenjo_ai.packages.nenjo.platform }}
+{{ pkg.nenjo.core.knowledge }}
 ```
 
 Tool selector:
 
 ```json
-{ "pack": "git://nenjo-ai/packages/nenjo/platform" }
+{ "pack": "pkg.nenjo.core.knowledge" }
 ```
 
 ### Platform Uploaded Packs
@@ -102,8 +102,9 @@ Worker hydrates GitHub-backed packs under:
 <workspace>/.nenjo/library/repos/github/<owner>/<repo>/<package>/<version>
 ```
 
-Worker loads repo-backed packs by reading their library manifest root URI. If
-the root URI starts with `git://`, that root URI becomes the pack selector.
+Worker loads repo-backed packs by reading their library manifest root URI.
+Official `nenjo-ai/packages` packs are normalized to `pkg.<scope>.<name>.knowledge`.
+Other repo-backed packs keep their `git://` selector.
 
 Target selector shape:
 
@@ -120,18 +121,18 @@ Target prompt variable shape:
 with every segment normalized to lowercase alphanumeric plus underscores:
 
 ```text
-git://nenjo-ai/packages/nenjo/platform -> {{ git.nenjo_ai.packages.nenjo.platform }}
+git://acme/docs/platform -> {{ git.acme.docs.platform }}
 ```
 
 Tool selector:
 
 ```json
-{ "pack": "git://nenjo-ai/packages/nenjo/platform" }
+{ "pack": "git://acme/docs/platform" }
 ```
 
 Implementation note: `knowledge_pack_var_prefix` parses `git://` selectors
 into dotted owner/repo/package segments. Repo-backed seeded prompts should use
-this owner-qualified shape.
+this owner-qualified shape when they are not package registry entries.
 
 ## Document-Level Prompt Variables
 
@@ -147,7 +148,7 @@ The general form is:
 Examples:
 
 ```text
-{{ git.nenjo_ai.packages.nenjo.platform.reference.template_vars }}
+{{ pkg.nenjo.core.knowledge.reference.template_vars }}
 {{ lib.product_docs.guides.agents }}
 ```
 
@@ -168,7 +169,7 @@ selector to the agent. They do not bind tool calls automatically.
 
 Correct agent pattern:
 
-1. Prompt includes the relevant pack index, such as `{{ git.nenjo_ai.packages.nenjo.platform }}`.
+1. Prompt includes the relevant pack index, such as `{{ pkg.nenjo.core.knowledge }}`.
 2. Agent sees the pack selector and document summaries in rendered XML.
 3. Agent calls `search_knowledge_paths` or `search_knowledge_docs` with the
    selector.
@@ -180,7 +181,7 @@ Example:
 
 ```json
 {
-  "pack": "git://nenjo-ai/packages/nenjo/platform",
+  "pack": "pkg.nenjo.core.knowledge",
   "query": "agent abilities and MCP assignment"
 }
 ```
@@ -191,13 +192,23 @@ Example:
 | --- | --- | --- |
 | `lib` | `{{ lib }}` | Implemented default |
 | `lib:<slug>` | `{{ lib.<slug> }}` | Implemented |
+| `pkg.<scope>.<name>.knowledge` | `{{ pkg.<scope>.<name>.knowledge }}` | Implemented for package repo knowledge |
 | `git://<owner>/<repo>/<package>` | `{{ git.<owner>.<repo>.<package> }}` | Implemented |
 
 ## Guardrails
 
 - Do not inject full document bodies through prompt variables.
 - Do not use short git variables like `{{ git.platform }}`; they collide.
-- Keep canonical git selectors owner-qualified.
+- `pkg.*` is a prompt/template namespace, not a general resource import
+  namespace. In v1 it is used for package-installed context blocks and package
+  knowledge variables.
+- Agents, abilities, domains, routines, MCP servers, and other runtime
+  resources are resolved through package modules/imports and their installed
+  manifests, not by writing `{{ pkg.* }}` prompt selectors for those resources.
+- Package-authored prompts should use `pkg.*` only when referencing packaged
+  context blocks such as `{{ pkg.nenjo.core.methodology }}` or packaged
+  knowledge such as `{{ pkg.nenjo.core.knowledge }}`.
+- Keep non-package git selectors owner-qualified.
 - Treat prompt variables as retrieval hints, not authority. Tool calls must use
   the canonical pack selector.
 - Prefer metadata-first retrieval before reading full documents.
@@ -208,5 +219,6 @@ Example:
 
 - `lib:<slug>`
 - `lib`
-- `git://nenjo-ai/packages/nenjo/platform`
+- `pkg.nenjo.core.knowledge`
+- `git://acme/docs/platform`
 - `git://trailofbits/skills-curated/x-research`
