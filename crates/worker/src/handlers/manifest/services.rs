@@ -6,36 +6,14 @@ use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo_events::ResourceType;
 use uuid::Uuid;
 
-/// Platform services used by the manifest change handler.
-///
-/// The harness stores concrete service types so host integrations can avoid
-/// trait-object dispatch.
-pub struct ManifestServices<StoreRt, McpRt>
-where
-    StoreRt: ManifestStore,
-    McpRt: McpRuntime,
-{
-    pub client: Arc<NenjoClient>,
-    pub store: Arc<StoreRt>,
-    pub mcp: Option<Arc<McpRt>>,
-}
-
-impl<StoreRt, McpRt> Clone for ManifestServices<StoreRt, McpRt>
-where
-    StoreRt: ManifestStore,
-    McpRt: McpRuntime,
-{
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            store: self.store.clone(),
-            mcp: self.mcp.clone(),
-        }
-    }
-}
-
-#[async_trait]
 /// Host-owned manifest persistence and document side-effect hooks.
+///
+/// Manifest change handling is worker-owned because local caches, document
+/// files, decrypted payload materialization, and knowledge-pack sync are host
+/// policy. Implementors persist the local manifest representation and perform
+/// any filesystem or API side effects needed before the harness swaps provider
+/// snapshots.
+#[async_trait]
 pub trait ManifestStore: Send + Sync {
     /// Let the host normalize or materialize resource data before the manifest
     /// is swapped into the running provider and persisted.
@@ -221,8 +199,11 @@ where
     }
 }
 
-#[async_trait]
 /// Host-owned MCP reconciliation hook.
+///
+/// The worker calls this after manifest updates so external MCP server pools can
+/// be started, stopped, or refreshed independently of harness execution.
+#[async_trait]
 pub trait McpRuntime: Send + Sync {
     /// Reconcile active MCP servers after manifest changes.
     async fn reconcile_mcp(&self, servers: &[nenjo::manifest::McpServerManifest]);

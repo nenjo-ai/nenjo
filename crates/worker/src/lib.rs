@@ -13,6 +13,7 @@ pub mod assembly;
 pub mod bootstrap;
 pub mod config;
 pub mod crypto;
+pub mod event_bridge;
 pub mod event_loop;
 pub mod external_mcp;
 pub mod handlers;

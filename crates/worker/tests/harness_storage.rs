@@ -12,9 +12,9 @@ use serde_json::json;
 use tempfile::tempdir;
 use uuid::Uuid;
 
-use nenjo_harness::handlers::manifest::ManifestStore;
 use nenjo_worker::api_client::{DocumentSyncMeta, NenjoClient};
 use nenjo_worker::bootstrap::WorkerManifestCache;
+use nenjo_worker::handlers::manifest::ManifestStore;
 use nenjo_worker::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
 
 struct TestModelProvider;
@@ -190,7 +190,7 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
 
     let session_stores = WorkerSessionStores::new(&state_dir);
     let records = session_stores.records.clone();
-    let runtime = WorkerSessionRuntime::new(
+    let runtime = WorkerSessionRuntime::with_coordinator(
         session_stores,
         LocalSessionCoordinator::new(),
         "worker-test",
@@ -201,7 +201,8 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
         .build();
 
     harness
-        .upsert_chat_session(nenjo_sessions::ChatSessionUpsert {
+        .sessions()
+        .upsert_chat(nenjo_sessions::ChatSessionUpsert {
             session_id,
             status: SessionStatus::Active,
             project_id: Some(project_id),
@@ -214,7 +215,8 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
         .expect("upsert chat session");
 
     harness
-        .record_session_event(SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
+        .sessions()
+        .record(SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
             session_id,
             turn_id: Some(turn_id),
             payload: SessionTranscriptEventPayload::ChatMessage {
@@ -228,7 +230,8 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
         .expect("record transcript event");
 
     harness
-        .record_session_event(SessionRuntimeEvent::Trace(TraceEvent {
+        .sessions()
+        .record(SessionRuntimeEvent::Trace(TraceEvent {
             session_id,
             turn_id: Some(turn_id),
             recorded_at: Utc::now(),
@@ -236,16 +239,25 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
             agent_id: Some(agent_id),
             agent_name: Some("test-agent".to_string()),
             tool_name: None,
+            parent_tool_name: None,
+            ability_name: None,
+            target_agent_id: None,
+            target_agent_name: None,
             success: Some(true),
             usage: Default::default(),
             preview: Some("done".to_string()),
+            task_input: None,
+            final_output: None,
+            tool_args: None,
+            error_preview: None,
             metadata: json!({}),
         }))
         .await
         .expect("record trace event");
 
     harness
-        .record_session_event(SessionRuntimeEvent::Checkpoint(CheckpointRecord {
+        .sessions()
+        .record(SessionRuntimeEvent::Checkpoint(CheckpointRecord {
             session_id,
             turn_id: Some(turn_id),
             checkpoint: SessionCheckpoint {

@@ -11,8 +11,11 @@ use nenjo::manifest::{
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider};
 use nenjo_events::{ResourceAction, ResourceType};
-use nenjo_harness::handlers::manifest::{ManifestStore, McpRuntime};
-use nenjo_harness::{Harness, HarnessError};
+use nenjo_harness::Harness;
+use nenjo_worker::handlers::manifest::{
+    ManifestChangedCommand, ManifestCommandContext, ManifestStore, McpRuntime,
+    WorkerManifestHarnessExt,
+};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -140,13 +143,7 @@ async fn provider_with_manifest(manifest: Manifest) -> TestProvider {
 }
 
 struct TestHarness {
-    harness: Harness<
-        TestProvider,
-        nenjo_sessions::NoopSessionRuntime,
-        nenjo_harness::execution_trace::NoopExecutionTraceRuntime,
-        Arc<RecordingManifestStore>,
-        Arc<RecordingMcpRuntime>,
-    >,
+    harness: Harness<TestProvider, nenjo_sessions::NoopSessionRuntime>,
     store: Arc<RecordingManifestStore>,
     mcp: Arc<RecordingMcpRuntime>,
 }
@@ -154,20 +151,27 @@ struct TestHarness {
 async fn test_harness(manifest: Manifest) -> TestHarness {
     let store = Arc::new(RecordingManifestStore::default());
     let mcp = Arc::new(RecordingMcpRuntime::default());
-    let client = Arc::new(nenjo::client::NenjoClient::new(
-        "http://127.0.0.1:9",
-        "test",
-    ));
-    let harness = Harness::builder(provider_with_manifest(manifest).await)
-        .with_manifest_client(client)
-        .with_manifest_store(store.clone())
-        .with_mcp_runtime(mcp.clone())
-        .build();
+    let harness = Harness::builder(provider_with_manifest(manifest).await).build();
 
     TestHarness {
         harness,
         store,
         mcp,
+    }
+}
+
+impl TestHarness {
+    fn manifest_context(
+        &self,
+    ) -> ManifestCommandContext<Arc<RecordingManifestStore>, Arc<RecordingMcpRuntime>> {
+        ManifestCommandContext {
+            client: Arc::new(nenjo::client::NenjoClient::new(
+                "http://127.0.0.1:9",
+                "test",
+            )),
+            store: self.store.clone(),
+            mcp: Some(self.mcp.clone()),
+        }
     }
 }
 
@@ -347,18 +351,21 @@ async fn manifest_inline_upserts_each_provider_resource() {
         let env = test_harness(Manifest::default()).await;
         env.harness
             .handle_manifest_changed(
-                resource_type,
-                id,
-                ResourceAction::Created,
-                None,
-                Some(payload),
-                None,
+                &env.manifest_context(),
+                ManifestChangedCommand {
+                    resource_type,
+                    resource_id: id,
+                    action: ResourceAction::Created,
+                    project_id: None,
+                    payload: Some(payload),
+                    encrypted_payload: None,
+                },
             )
             .await
             .unwrap();
 
         let manifest = env.harness.provider();
-        let manifest = manifest.manifest();
+        let manifest = manifest.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
                 let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
@@ -407,24 +414,6 @@ async fn manifest_inline_upserts_each_provider_resource() {
 }
 
 #[tokio::test]
-async fn manifest_handler_reports_missing_services_as_typed_harness_error() {
-    let harness = Harness::builder(provider_with_manifest(Manifest::default()).await).build();
-    let error = harness
-        .handle_manifest_changed(
-            ResourceType::Agent,
-            Uuid::new_v4(),
-            ResourceAction::Created,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, HarnessError::ManifestServicesNotConfigured));
-}
-
-#[tokio::test]
 async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
     let id = Uuid::new_v4();
     let env = test_harness(Manifest {
@@ -448,23 +437,22 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
 
     env.harness
         .handle_manifest_changed(
-            ResourceType::Agent,
-            id,
-            ResourceAction::Updated,
-            None,
-            Some(metadata_payload),
-            None,
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_type: ResourceType::Agent,
+                resource_id: id,
+                action: ResourceAction::Updated,
+                project_id: None,
+                payload: Some(metadata_payload),
+                encrypted_payload: None,
+            },
         )
         .await
         .unwrap();
 
     let provider = env.harness.provider();
-    let item = provider
-        .manifest()
-        .agents
-        .iter()
-        .find(|item| item.id == id)
-        .unwrap();
+    let manifest = provider.manifest_snapshot();
+    let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
     assert_eq!(item.name, "renamed");
     assert_eq!(item.prompt_config.developer_prompt, "cached prompt");
 }
@@ -498,18 +486,21 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         let env = test_harness(manifest.clone()).await;
         env.harness
             .handle_manifest_changed(
-                resource_type,
-                resource_id,
-                ResourceAction::Deleted,
-                None,
-                None,
-                None,
+                &env.manifest_context(),
+                ManifestChangedCommand {
+                    resource_type,
+                    resource_id,
+                    action: ResourceAction::Deleted,
+                    project_id: None,
+                    payload: None,
+                    encrypted_payload: None,
+                },
             )
             .await
             .unwrap();
 
         let provider = env.harness.provider();
-        let manifest = provider.manifest();
+        let manifest = provider.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
                 assert!(!manifest.agents.iter().any(|item| item.id == resource_id))
@@ -572,11 +563,13 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
 
     env.harness
         .handle_manifest_changed(
-            ResourceType::Document,
-            document_id,
-            ResourceAction::Updated,
-            Some(project_id),
-            Some(serde_json::json!({
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_type: ResourceType::Document,
+                resource_id: document_id,
+                action: ResourceAction::Updated,
+                project_id: Some(project_id),
+                payload: Some(serde_json::json!({
                 "id": document_id,
                 "pack_id": pack_id,
                 "pack_slug": "project",
@@ -592,19 +585,22 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 "keywords": [],
                 "size_bytes": 42,
                 "updated_at": "2026-05-10T00:00:00Z"
-            })),
-            None,
+                })),
+                encrypted_payload: None,
+            },
         )
         .await
         .unwrap();
 
     env.harness
         .handle_manifest_changed(
-            ResourceType::Document,
-            document_id,
-            ResourceAction::Deleted,
-            Some(project_id),
-            Some(serde_json::json!({
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_type: ResourceType::Document,
+                resource_id: document_id,
+                action: ResourceAction::Deleted,
+                project_id: Some(project_id),
+                payload: Some(serde_json::json!({
                 "id": document_id,
                 "pack_id": pack_id,
                 "pack_slug": "project",
@@ -620,8 +616,9 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 "keywords": [],
                 "size_bytes": 42,
                 "updated_at": "2026-05-10T00:00:00Z"
-            })),
-            None,
+                })),
+                encrypted_payload: None,
+            },
         )
         .await
         .unwrap();
@@ -652,12 +649,15 @@ async fn manifest_mcp_changes_reconcile_mcp_runtime() {
 
     env.harness
         .handle_manifest_changed(
-            ResourceType::McpServer,
-            id,
-            ResourceAction::Created,
-            None,
-            Some(serde_json::to_value(mcp_server(id, "mcp")).unwrap()),
-            None,
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_type: ResourceType::McpServer,
+                resource_id: id,
+                action: ResourceAction::Created,
+                project_id: None,
+                payload: Some(serde_json::to_value(mcp_server(id, "mcp")).unwrap()),
+                encrypted_payload: None,
+            },
         )
         .await
         .unwrap();

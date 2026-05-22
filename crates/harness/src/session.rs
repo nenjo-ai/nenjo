@@ -1,53 +1,202 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use nenjo_models::ChatMessage;
 use nenjo_sessions::{
-    SessionRuntimeEvent, SessionTranscriptChatMessage, SessionTranscriptEvent,
-    SessionTranscriptEventPayload, SessionTranscriptRecord, TokenUsage, TraceEvent, TracePhase,
+    ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SchedulerSessionUpsert,
+    SessionCheckpoint, SessionCheckpointUpdate, SessionRecord, SessionRuntime, SessionRuntimeEvent,
+    SessionTranscriptAppend, SessionTranscriptChatMessage, SessionTranscriptEvent,
+    SessionTranscriptEventPayload, SessionTranscriptRecord, SessionTransition, TaskSessionUpsert,
+    TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
 };
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::execution_trace::ExecutionTraceRuntime;
-use crate::{Harness, HarnessProvider};
+use crate::{HarnessError, Result};
 
 const PREVIEW_CHAR_LIMIT: usize = 2_000;
 
-pub fn spawn_session_events<P, SessionRt, TraceRt, StoreRt, McpRt>(
-    harness: &Harness<P, SessionRt, TraceRt, StoreRt, McpRt>,
-    events: Vec<SessionRuntimeEvent>,
-    session_id: Uuid,
-) where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+/// Per-session mutexes used to preserve runtime event ordering in detached writers.
+pub type SessionEventLocks = Arc<DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>;
+
+/// Facade around the configured session runtime and ordering locks.
+pub struct HarnessSessions<Runtime>
+where
+    Runtime: SessionRuntime,
 {
-    if events.is_empty() {
-        return;
-    }
-    let harness = harness.clone();
-    tokio::spawn(async move {
-        let locks = harness.session_event_locks();
-        let lock = locks
-            .entry(session_id)
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = lock.lock().await;
-        for event in events {
-            if let Err(error) = harness.record_session_event(event).await {
-                warn!(
-                    error = %error,
-                    session_id = %session_id,
-                    "Failed to record session event"
-                );
-            }
+    runtime: Arc<Runtime>,
+    event_locks: SessionEventLocks,
+}
+
+impl<Runtime> Clone for HarnessSessions<Runtime>
+where
+    Runtime: SessionRuntime,
+{
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            event_locks: self.event_locks.clone(),
         }
-    });
+    }
+}
+
+impl<Runtime> HarnessSessions<Runtime>
+where
+    Runtime: SessionRuntime,
+{
+    pub(crate) fn new(runtime: Arc<Runtime>, event_locks: SessionEventLocks) -> Self {
+        Self {
+            runtime,
+            event_locks,
+        }
+    }
+
+    pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
+        self.runtime
+            .record(event)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn get(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
+        self.runtime
+            .get_session(session_id)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn list(&self) -> Result<Vec<SessionRecord>> {
+        self.runtime
+            .list_sessions()
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn delete(&self, session_id: Uuid) -> Result<()> {
+        self.runtime
+            .delete_session(session_id)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn read_transcript(
+        &self,
+        session_id: Uuid,
+        query: TranscriptQuery,
+    ) -> Result<Vec<SessionTranscriptEvent>> {
+        self.runtime
+            .read_transcript(session_id, query)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn append_transcript(
+        &self,
+        append: SessionTranscriptAppend,
+    ) -> Result<Option<SessionTranscriptEvent>> {
+        self.runtime
+            .append_transcript(append)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn latest_checkpoint(
+        &self,
+        session_id: Uuid,
+        query: CheckpointQuery,
+    ) -> Result<Option<SessionCheckpoint>> {
+        self.runtime
+            .load_latest_checkpoint(session_id, query)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
+        self.runtime
+            .update_checkpoint(update)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn transition(&self, transition: SessionTransition) -> Result<bool> {
+        self.runtime
+            .transition_session(transition)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn upsert_scheduler(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
+        self.runtime
+            .upsert_scheduler_session(upsert)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn upsert_chat(&self, upsert: ChatSessionUpsert) -> Result<bool> {
+        self.runtime
+            .upsert_chat_session(upsert)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn upsert_task(&self, upsert: TaskSessionUpsert) -> Result<bool> {
+        self.runtime
+            .upsert_task_session(upsert)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn upsert_domain(&self, upsert: DomainSessionUpsert) -> Result<bool> {
+        self.runtime
+            .upsert_domain_session(upsert)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn memory_namespace(&self, session_id: Uuid) -> Result<Option<String>> {
+        self.runtime
+            .session_memory_namespace(session_id)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+}
+
+impl<Runtime> HarnessSessions<Runtime>
+where
+    Runtime: SessionRuntime + 'static,
+{
+    pub fn spawn_recorded_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
+        if events.is_empty() {
+            return;
+        }
+        let sessions = self.clone();
+        tokio::spawn(async move {
+            let lock = sessions
+                .event_locks
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            let _guard = lock.lock().await;
+            for event in events {
+                if let Err(error) = sessions.record(event).await {
+                    warn!(
+                        error = %error,
+                        session_id = %session_id,
+                        "Failed to record session event"
+                    );
+                }
+            }
+        });
+    }
 }
 
 pub fn transcript_ref(session_id: Uuid) -> String {
     format!("transcripts/{session_id}.jsonl")
+}
+
+pub fn trace_ref(session_id: Uuid) -> String {
+    format!("traces/{session_id}.jsonl")
 }
 
 pub fn chat_message_to_transcript(message: &ChatMessage) -> SessionTranscriptChatMessage {
@@ -242,33 +391,39 @@ pub fn trace_events_from_turn_event(
             ability_tool_name,
             ability_name,
             task_input,
-            ..
+            caller_history,
         } => vec![trace_event(
             context,
             TracePhase::AbilityStarted,
             Some(ability_tool_name.clone()),
             None,
             Some(preview(task_input)),
-            serde_json::json!({ "ability_name": ability_name }),
-            TokenUsage::default(),
+            serde_json::json!({ "caller_history_snapshot": caller_history }),
+            TraceEventFields {
+                ability_name: Some(ability_name.clone()),
+                task_input: Some(task_input.clone()),
+                ..TraceEventFields::default()
+            },
         )],
         nenjo::TurnEvent::DelegationStarted {
             delegate_tool_name,
             target_agent_name,
             target_agent_id,
             task_input,
-            ..
+            caller_history,
         } => vec![trace_event(
             context,
             TracePhase::DelegationStarted,
             Some(delegate_tool_name.clone()),
             None,
             Some(preview(task_input)),
-            serde_json::json!({
-                "target_agent_name": target_agent_name,
-                "target_agent_id": target_agent_id,
-            }),
-            TokenUsage::default(),
+            serde_json::json!({ "caller_history_snapshot": caller_history }),
+            TraceEventFields {
+                target_agent_id: Some(*target_agent_id),
+                target_agent_name: Some(target_agent_name.clone()),
+                task_input: Some(task_input.clone()),
+                ..TraceEventFields::default()
+            },
         )],
         nenjo::TurnEvent::ToolCallStart {
             parent_tool_name,
@@ -283,11 +438,14 @@ pub fn trace_events_from_turn_event(
                     None,
                     Some(preview(&call.tool_args)),
                     serde_json::json!({
-                        "parent_tool_name": parent_tool_name,
                         "tool_call_id": call.tool_call_id,
                         "text_preview": call.text_preview,
                     }),
-                    TokenUsage::default(),
+                    TraceEventFields {
+                        parent_tool_name: parent_tool_name.clone(),
+                        tool_args: Some(call.tool_args.clone()),
+                        ..TraceEventFields::default()
+                    },
                 )
             })
             .collect(),
@@ -304,12 +462,14 @@ pub fn trace_events_from_turn_event(
             Some(result.success),
             Some(preview(&result.output)),
             serde_json::json!({
-                "parent_tool_name": parent_tool_name,
                 "tool_call_id": tool_call_id,
-                "tool_args_preview": preview(tool_args),
-                "error_preview": result.error.as_deref().map(preview),
             }),
-            TokenUsage::default(),
+            TraceEventFields {
+                parent_tool_name: parent_tool_name.clone(),
+                tool_args: Some(tool_args.clone()),
+                error_preview: result.error.as_deref().map(preview),
+                ..TraceEventFields::default()
+            },
         )],
         nenjo::TurnEvent::AbilityCompleted {
             ability_tool_name,
@@ -322,8 +482,12 @@ pub fn trace_events_from_turn_event(
             Some(ability_tool_name.clone()),
             Some(*success),
             Some(preview(final_output)),
-            serde_json::json!({ "ability_name": ability_name }),
-            TokenUsage::default(),
+            serde_json::Value::Null,
+            TraceEventFields {
+                ability_name: Some(ability_name.clone()),
+                final_output: Some(final_output.clone()),
+                ..TraceEventFields::default()
+            },
         )],
         nenjo::TurnEvent::DelegationCompleted {
             delegate_tool_name,
@@ -337,11 +501,13 @@ pub fn trace_events_from_turn_event(
             Some(delegate_tool_name.clone()),
             Some(*success),
             Some(preview(final_output)),
-            serde_json::json!({
-                "target_agent_name": target_agent_name,
-                "target_agent_id": target_agent_id,
-            }),
-            TokenUsage::default(),
+            serde_json::Value::Null,
+            TraceEventFields {
+                target_agent_id: Some(*target_agent_id),
+                target_agent_name: Some(target_agent_name.clone()),
+                final_output: Some(final_output.clone()),
+                ..TraceEventFields::default()
+            },
         )],
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
@@ -356,7 +522,7 @@ pub fn trace_events_from_turn_event(
                 "messages_before": messages_before,
                 "messages_after": messages_after,
             }),
-            TokenUsage::default(),
+            TraceEventFields::default(),
         )],
         nenjo::TurnEvent::TranscriptMessage { message } => vec![trace_event(
             context,
@@ -365,7 +531,7 @@ pub fn trace_events_from_turn_event(
             None,
             Some(preview(&message.content)),
             serde_json::json!({ "message_role": message.role }),
-            TokenUsage::default(),
+            TraceEventFields::default(),
         )],
         nenjo::TurnEvent::Paused => vec![trace_event(
             context,
@@ -374,7 +540,7 @@ pub fn trace_events_from_turn_event(
             None,
             None,
             serde_json::Value::Null,
-            TokenUsage::default(),
+            TraceEventFields::default(),
         )],
         nenjo::TurnEvent::Resumed => vec![trace_event(
             context,
@@ -383,7 +549,7 @@ pub fn trace_events_from_turn_event(
             None,
             None,
             serde_json::Value::Null,
-            TokenUsage::default(),
+            TraceEventFields::default(),
         )],
         nenjo::TurnEvent::Done { output } => vec![trace_event(
             context,
@@ -392,9 +558,13 @@ pub fn trace_events_from_turn_event(
             Some(true),
             Some(preview(&output.text)),
             serde_json::json!({ "tool_calls": output.tool_calls }),
-            TokenUsage {
-                input_tokens: output.input_tokens,
-                output_tokens: output.output_tokens,
+            TraceEventFields {
+                final_output: Some(output.text.clone()),
+                usage: TokenUsage {
+                    input_tokens: output.input_tokens,
+                    output_tokens: output.output_tokens,
+                },
+                ..TraceEventFields::default()
             },
         )],
     }
@@ -407,7 +577,7 @@ fn trace_event(
     success: Option<bool>,
     preview: Option<String>,
     metadata: serde_json::Value,
-    usage: TokenUsage,
+    rich: TraceEventFields,
 ) -> TraceEvent {
     TraceEvent {
         session_id: context.session_id,
@@ -417,11 +587,32 @@ fn trace_event(
         agent_id: context.agent_id,
         agent_name: context.agent_name.clone(),
         tool_name,
+        parent_tool_name: rich.parent_tool_name,
+        ability_name: rich.ability_name,
+        target_agent_id: rich.target_agent_id,
+        target_agent_name: rich.target_agent_name,
         success,
-        usage,
+        usage: rich.usage,
         preview,
+        task_input: rich.task_input,
+        final_output: rich.final_output,
+        tool_args: rich.tool_args,
+        error_preview: rich.error_preview,
         metadata,
     }
+}
+
+#[derive(Default)]
+struct TraceEventFields {
+    parent_tool_name: Option<String>,
+    ability_name: Option<String>,
+    target_agent_id: Option<Uuid>,
+    target_agent_name: Option<String>,
+    task_input: Option<String>,
+    final_output: Option<String>,
+    tool_args: Option<String>,
+    error_preview: Option<String>,
+    usage: TokenUsage,
 }
 
 fn preview(value: &str) -> String {
@@ -458,5 +649,73 @@ mod tests {
             history[0].content,
             "Previous turn was interrupted: cancelled by user"
         );
+    }
+
+    #[test]
+    fn trace_events_preserve_rich_execution_fields() {
+        let session_id = Uuid::new_v4();
+        let target_agent_id = Uuid::new_v4();
+        let context = TurnEventContext::new(session_id);
+
+        let ability = trace_events_from_turn_event(
+            &context,
+            &nenjo::TurnEvent::AbilityStarted {
+                ability_tool_name: "ability.review".to_string(),
+                ability_name: "Review".to_string(),
+                task_input: "inspect this".to_string(),
+                caller_history: vec![ChatMessage::user("please inspect")],
+            },
+        )
+        .remove(0);
+        assert_eq!(ability.ability_name.as_deref(), Some("Review"));
+        assert_eq!(ability.task_input.as_deref(), Some("inspect this"));
+        assert!(ability.metadata["caller_history_snapshot"].is_array());
+
+        let delegation = trace_events_from_turn_event(
+            &context,
+            &nenjo::TurnEvent::DelegationStarted {
+                delegate_tool_name: "delegate_to".to_string(),
+                target_agent_name: "specialist".to_string(),
+                target_agent_id,
+                task_input: "solve this".to_string(),
+                caller_history: Vec::new(),
+            },
+        )
+        .remove(0);
+        assert_eq!(delegation.target_agent_id, Some(target_agent_id));
+        assert_eq!(delegation.target_agent_name.as_deref(), Some("specialist"));
+
+        let tool = trace_events_from_turn_event(
+            &context,
+            &nenjo::TurnEvent::ToolCallStart {
+                parent_tool_name: Some("ability.review".to_string()),
+                calls: vec![nenjo::agents::ToolCall {
+                    tool_call_id: Some("call-1".to_string()),
+                    tool_name: "search".to_string(),
+                    tool_args: "{\"q\":\"rust\"}".to_string(),
+                    text_preview: Some("rust".to_string()),
+                }],
+            },
+        )
+        .remove(0);
+        assert_eq!(tool.parent_tool_name.as_deref(), Some("ability.review"));
+        assert_eq!(tool.tool_args.as_deref(), Some("{\"q\":\"rust\"}"));
+
+        let done = trace_events_from_turn_event(
+            &context,
+            &nenjo::TurnEvent::Done {
+                output: nenjo::TurnOutput {
+                    text: "finished".to_string(),
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    tool_calls: 1,
+                    messages: Vec::new(),
+                },
+            },
+        )
+        .remove(0);
+        assert_eq!(done.final_output.as_deref(), Some("finished"));
+        assert_eq!(done.usage.input_tokens, 3);
+        assert_eq!(done.usage.output_tokens, 4);
     }
 }

@@ -1,6 +1,15 @@
 //! Command handlers — one module per command category.
 
+pub mod chat;
+pub mod cron;
+pub mod crypto;
+pub mod domain;
+pub mod heartbeat;
+pub mod manifest;
 pub mod repo;
+pub mod task;
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,19 +18,41 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use nenjo_events::{Command, Response};
-use nenjo_harness::handlers::{
-    chat::{ChatCommandContext, ChatRequest},
-    cron::CronCommandContext,
-    crypto::CryptoCommandContext,
-    domain::DomainCommandContext,
-    heartbeat::HeartbeatCommandContext,
-    repo::RepoCommandContext,
-    task::{TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager},
-};
 
-use crate::event_loop::ResponseSender;
+use crate::event_loop::ResponseSender as EventLoopResponseSender;
+use crate::handlers::chat::{ChatCommandContext, ChatCommandRequest, WorkerChatHarnessExt};
+use crate::handlers::cron::{CronCommandContext, WorkerCronHarnessExt};
+use crate::handlers::crypto::{CryptoCommandContext, WorkerCryptoHarnessExt};
+use crate::handlers::domain::{DomainCommandContext, WorkerDomainHarnessExt};
+use crate::handlers::heartbeat::{HeartbeatCommandContext, WorkerHeartbeatHarnessExt};
+use crate::handlers::manifest::{
+    ManifestChangedCommand, ManifestCommandContext, WorkerManifestHarnessExt,
+};
+use crate::handlers::repo::{RepoCommandContext, WorkerRepoHarnessExt};
+use crate::handlers::task::{
+    TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager, WorkerTaskHarnessExt,
+};
 pub use crate::runtime::CommandContext;
 use crate::runtime::WorkerAccountKeyStore;
+
+/// Sends platform responses produced by worker command handlers.
+///
+/// The worker keeps this trait small so tests, event-bus adapters, and secure
+/// envelope senders can plug into the same handler code without pulling
+/// transport details into the harness or command logic.
+pub trait ResponseSender: Send + Sync {
+    /// Deliver one typed platform response to the configured transport.
+    fn send(&self, response: Response) -> Result<()>;
+}
+
+impl<T> ResponseSender for Arc<T>
+where
+    T: ResponseSender + ?Sized,
+{
+    fn send(&self, response: Response) -> Result<()> {
+        self.as_ref().send(response)
+    }
+}
 
 pub(crate) struct WorkerTaskWorktrees {
     workspace_dir: PathBuf,
@@ -196,7 +227,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             ctx.harness
                 .handle_chat(
                     &ctx.chat_context(),
-                    ChatRequest {
+                    ChatCommandRequest {
                         message_id: id.as_deref(),
                         content: &content,
                         project_id,
@@ -397,12 +428,15 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         } => ctx
             .harness
             .handle_manifest_changed(
-                resource_type,
-                resource_id,
-                action,
-                project_id,
-                payload,
-                encrypted_payload,
+                &ctx.manifest_context(),
+                ManifestChangedCommand {
+                    resource_type,
+                    resource_id,
+                    action,
+                    project_id,
+                    payload,
+                    encrypted_payload,
+                },
             )
             .await
             .map_err(Into::into),
@@ -416,31 +450,34 @@ fn domain_context(ctx: &CommandContext) -> DomainCommandContext {
 }
 
 impl CommandContext {
-    pub(crate) fn chat_context(&self) -> ChatCommandContext<ResponseSender> {
+    pub(crate) fn chat_context(&self) -> ChatCommandContext<EventLoopResponseSender> {
         ChatCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
         }
     }
 
-    pub(crate) fn task_context(&self) -> TaskCommandContext<ResponseSender, WorkerTaskWorktrees> {
+    pub(crate) fn task_context(
+        &self,
+    ) -> TaskCommandContext<EventLoopResponseSender, WorkerTaskWorktrees> {
         TaskCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
             worktrees: WorkerTaskWorktrees {
                 workspace_dir: self.config.workspace_dir.clone(),
             },
+            git_locks: self.git_locks.clone(),
         }
     }
 
-    pub(crate) fn cron_context(&self) -> CronCommandContext<ResponseSender> {
+    pub(crate) fn cron_context(&self) -> CronCommandContext<EventLoopResponseSender> {
         CronCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
         }
     }
 
-    pub(crate) fn heartbeat_context(&self) -> HeartbeatCommandContext<ResponseSender> {
+    pub(crate) fn heartbeat_context(&self) -> HeartbeatCommandContext<EventLoopResponseSender> {
         HeartbeatCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
@@ -455,11 +492,29 @@ impl CommandContext {
             },
         }
     }
+
+    pub(crate) fn manifest_context(
+        &self,
+    ) -> ManifestCommandContext<
+        crate::bootstrap::WorkerManifestCache,
+        std::sync::Arc<crate::external_mcp::ExternalMcpPool>,
+    > {
+        ManifestCommandContext {
+            client: self.api.clone(),
+            store: crate::bootstrap::WorkerManifestCache {
+                manifests_dir: self.config.manifests_dir.clone(),
+                workspace_dir: self.config.workspace_dir.clone(),
+                state_dir: self.config.state_dir.clone(),
+                config_dir: self.config.config_dir.clone(),
+            },
+            mcp: Some(self.external_mcp.clone()),
+        }
+    }
 }
 
 fn repo_context(
     ctx: &CommandContext,
-) -> RepoCommandContext<ResponseSender, repo::WorkerRepoRuntime> {
+) -> RepoCommandContext<EventLoopResponseSender, repo::WorkerRepoRuntime> {
     RepoCommandContext {
         response_sink: ctx.response_tx.clone(),
         repo_runtime: repo::WorkerRepoRuntime {

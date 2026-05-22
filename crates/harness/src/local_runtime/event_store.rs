@@ -10,10 +10,10 @@ use nenjo_sessions::{
 use tracing::warn;
 use uuid::Uuid;
 
-use super::FileSessionStore;
+use super::record_store::FileSessionStore;
 
 #[derive(Debug, Clone)]
-pub struct WorkerSessionStores {
+pub struct FileSessionStores {
     pub records: FileSessionStore,
     pub transcripts: FileTranscriptStore,
     pub traces: FileTraceStore,
@@ -27,7 +27,11 @@ pub struct SessionCleanupReport {
     pub retained: usize,
 }
 
-impl WorkerSessionStores {
+impl FileSessionStores {
+    /// Create file-backed stores under a state directory.
+    ///
+    /// Session records are stored under `sessions/`, while transcript, trace,
+    /// and checkpoint JSONL files are stored under `events/`.
     pub fn new(state_dir: impl AsRef<Path>) -> Self {
         let state_dir = state_dir.as_ref();
         let events_dir = state_dir.join("events");
@@ -183,6 +187,28 @@ impl TraceStore for FileTraceStore {
         if let Some(phase) = query.phase {
             events.retain(|event| event.phase == phase);
         }
+        if let Some(tool_name) = query.tool_name {
+            events.retain(|event| event.tool_name.as_deref() == Some(tool_name.as_str()));
+        }
+        if let Some(parent_tool_name) = query.parent_tool_name {
+            events.retain(|event| {
+                event.parent_tool_name.as_deref() == Some(parent_tool_name.as_str())
+            });
+        }
+        if let Some(ability_name) = query.ability_name {
+            events.retain(|event| event.ability_name.as_deref() == Some(ability_name.as_str()));
+        }
+        if let Some(target_agent_id) = query.target_agent_id {
+            events.retain(|event| event.target_agent_id == Some(target_agent_id));
+        }
+        if let Some(target_agent_name) = query.target_agent_name {
+            events.retain(|event| {
+                event.target_agent_name.as_deref() == Some(target_agent_name.as_str())
+            });
+        }
+        if let Some(success) = query.success {
+            events.retain(|event| event.success == Some(success));
+        }
         events.sort_by_key(|event| event.recorded_at);
         if let Some(limit) = query.limit {
             events.truncate(limit);
@@ -326,7 +352,7 @@ fn remove_file_if_exists(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerSessionStores, read_jsonl};
+    use super::{FileSessionStores, read_jsonl};
     use chrono::{Duration, Utc};
     use nenjo_sessions::{
         SessionKind, SessionRecord, SessionRefs, SessionStatus, SessionStore, SessionSummary,
@@ -398,7 +424,7 @@ mod tests {
     #[test]
     fn prune_terminal_sessions_removes_record_and_event_files() {
         let dir = tempdir().unwrap();
-        let stores = WorkerSessionStores::new(dir.path());
+        let stores = FileSessionStores::new(dir.path());
         let session_id = Uuid::new_v4();
 
         stores
@@ -435,7 +461,7 @@ mod tests {
     #[test]
     fn prune_terminal_sessions_keeps_recent_and_non_terminal_sessions() {
         let dir = tempdir().unwrap();
-        let stores = WorkerSessionStores::new(dir.path());
+        let stores = FileSessionStores::new(dir.path());
         let recent_terminal_id = Uuid::new_v4();
         let old_active_id = Uuid::new_v4();
 

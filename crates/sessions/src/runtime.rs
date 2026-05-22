@@ -13,23 +13,38 @@ use crate::{
 ///
 /// Harnesses emit normalized session events through this trait. Concrete hosts
 /// decide whether those events go to local files, a platform API, a database, or
-/// nowhere.
+/// nowhere. Implementors may handle only [`record`] for append-only capture, or
+/// override the typed helpers to support richer session lookup, recovery, and
+/// transcript/checkpoint reads.
+///
+/// Methods that return `bool` should return `true` when the requested session
+/// state was created or updated and `false` when the runtime intentionally did
+/// not apply the update, such as a no-op runtime or a failed compare-and-swap.
 #[async_trait]
 pub trait SessionRuntime: Send + Sync {
+    /// Record a normalized session event emitted by the harness.
+    ///
+    /// This is the minimum required write surface. Rich runtimes usually route
+    /// each variant to the corresponding session, transcript, trace, or
+    /// checkpoint store. No-op runtimes can accept and drop the event.
     async fn record(&self, event: SessionRuntimeEvent) -> Result<()>;
 
+    /// Load the canonical session record for `session_id`, if it exists.
     async fn get_session(&self, _session_id: Uuid) -> Result<Option<SessionRecord>> {
         Ok(None)
     }
 
+    /// List known sessions in runtime-defined order.
     async fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         Ok(Vec::new())
     }
 
+    /// Delete a session and any runtime-owned session artifacts.
     async fn delete_session(&self, _session_id: Uuid) -> Result<()> {
         Ok(())
     }
 
+    /// Read ordered transcript evidence for a session.
     async fn read_transcript(
         &self,
         _session_id: Uuid,
@@ -38,6 +53,10 @@ pub trait SessionRuntime: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Append a transcript event and return the persisted event when available.
+    ///
+    /// Returning `None` means the runtime accepted no durable append, or cannot
+    /// report the assigned sequence and timestamp.
     async fn append_transcript(
         &self,
         _append: SessionTranscriptAppend,
@@ -45,6 +64,7 @@ pub trait SessionRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// Load the newest checkpoint for a session matching `query`.
     async fn load_latest_checkpoint(
         &self,
         _session_id: Uuid,
@@ -53,18 +73,22 @@ pub trait SessionRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// Save or merge checkpoint state for a session.
     async fn update_checkpoint(&self, _update: SessionCheckpointUpdate) -> Result<bool> {
         Ok(false)
     }
 
+    /// Transition a session to a new execution phase and/or lifecycle status.
     async fn transition_session(&self, _transition: SessionTransition) -> Result<bool> {
         Ok(false)
     }
 
+    /// Create or update a scheduler-owned session such as cron or heartbeat.
     async fn upsert_scheduler_session(&self, _upsert: SchedulerSessionUpsert) -> Result<bool> {
         Ok(false)
     }
 
+    /// Create or update a chat session record.
     async fn upsert_chat_session(&self, upsert: ChatSessionUpsert) -> Result<bool> {
         self.record(SessionRuntimeEvent::SessionUpsert(SessionUpsert {
             session_id: upsert.session_id,
@@ -89,6 +113,7 @@ pub trait SessionRuntime: Send + Sync {
         Ok(true)
     }
 
+    /// Create or update a task session record.
     async fn upsert_task_session(&self, upsert: TaskSessionUpsert) -> Result<bool> {
         self.record(SessionRuntimeEvent::SessionUpsert(SessionUpsert {
             session_id: upsert.task_id,
@@ -113,10 +138,12 @@ pub trait SessionRuntime: Send + Sync {
         Ok(true)
     }
 
+    /// Create or update a domain-expanded chat session record.
     async fn upsert_domain_session(&self, _upsert: DomainSessionUpsert) -> Result<bool> {
         Ok(false)
     }
 
+    /// Resolve the memory namespace currently bound to a session.
     async fn session_memory_namespace(&self, session_id: Uuid) -> Result<Option<String>> {
         Ok(self
             .get_session(session_id)

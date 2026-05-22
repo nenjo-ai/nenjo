@@ -7,11 +7,15 @@ use async_trait::async_trait;
 use nenjo_events::WrappedAccountContentKey;
 use uuid::Uuid;
 
-use crate::execution_trace::ExecutionTraceRuntime;
-use crate::{Harness, HarnessProvider};
+use nenjo_harness::{Harness, ProviderRuntime};
 
 #[async_trait]
+/// Stores user-scoped wrapped account content keys for the worker.
+///
+/// Platform key update events are decoded by the worker and handed to this
+/// trait so the concrete runtime can persist them in its local auth/key state.
 pub trait AccountKeyStore: Send + Sync {
+    /// Persist the wrapped account content key for `user_id`.
     async fn store_user_ack(
         &self,
         user_id: Uuid,
@@ -25,22 +29,32 @@ pub struct CryptoCommandContext<K> {
     pub account_keys: K,
 }
 
-impl<P, SessionRt, TraceRt, StoreRt, McpRt> Harness<P, SessionRt, TraceRt, StoreRt, McpRt>
+#[async_trait]
+/// Worker integration methods for crypto/account-key platform events.
+pub(crate) trait WorkerCryptoHarnessExt<K>
 where
-    P: HarnessProvider,
-    SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    TraceRt: ExecutionTraceRuntime + 'static,
-    StoreRt: crate::handlers::manifest::ManifestStore + 'static,
-    McpRt: crate::handlers::manifest::McpRuntime + 'static,
+    K: AccountKeyStore,
 {
-    pub async fn handle_worker_account_key_updated<K>(
+    /// Handle a platform notification that the account content key changed.
+    async fn handle_worker_account_key_updated(
         &self,
         ctx: &CryptoCommandContext<K>,
         wrapped_ack: WrappedAccountContentKey,
-    ) -> Result<()>
-    where
-        K: AccountKeyStore,
-    {
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl<P, SessionRt, K> WorkerCryptoHarnessExt<K> for Harness<P, SessionRt>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    K: AccountKeyStore,
+{
+    async fn handle_worker_account_key_updated(
+        &self,
+        ctx: &CryptoCommandContext<K>,
+        wrapped_ack: WrappedAccountContentKey,
+    ) -> Result<()> {
         ctx.account_keys
             .store_user_ack(ctx.actor_user_id, wrapped_ack)
             .await
