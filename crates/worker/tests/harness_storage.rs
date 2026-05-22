@@ -208,7 +208,6 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
             project_id: Some(project_id),
             agent_id,
             memory_namespace: Some("project_alpha_agent_test".to_string()),
-            trace_ref: None,
             metadata: json!({"progress": "started"}),
         })
         .await

@@ -142,14 +142,23 @@ This is useful for tests, embedded flows, or callers that keep their own agent
 catalog:
 
 ```rust
+use nenjo::manifest::AgentManifest;
 use nenjo::Provider;
 
+let agent_manifest = AgentManifest::builder()
+    .with_name("reviewer")
+    .with_system_prompt("Act as a focused review worker.")
+    .with_developer_prompt("Be concise and evidence-driven.")
+    .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
+    .build()?;
+
 let runner = Provider::builder()
+    .with_model_factory(model_factory)
     .build()
     .await?
     .new_agent()
     .with_agent_manifest(agent_manifest)
-    .with_model_provider(model_manifest, model_provider)
+    .with_model_manifest(model_manifest)
     .build()
     .await?;
 ```

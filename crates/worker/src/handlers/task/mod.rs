@@ -86,7 +86,6 @@ struct TaskSessionRecord<'a> {
     agent_id: Option<Uuid>,
     memory_namespace: Option<&'a str>,
     execution_run_id: Uuid,
-    trace_ref: Option<String>,
     status: SessionStatus,
 }
 
@@ -115,7 +114,6 @@ async fn upsert_task_session<P, SessionRt>(
         routine_id,
         execution_run_id: params.execution_run_id,
         memory_namespace: params.memory_namespace.map(ToOwned::to_owned),
-        trace_ref: params.trace_ref.clone(),
         metadata: json!({
             "source": "worker_task",
             "project_slug": project_slug,
@@ -166,7 +164,7 @@ fn record_task_turn_event<P, SessionRt>(
         agent_name: agent_name.map(ToOwned::to_owned),
         recorded_at: Utc::now(),
     };
-    harness.sessions().spawn_recorded_events(
+    harness.sessions().record_events(
         session_runtime_events_from_turn_event(&context, event),
         task_id,
     );
@@ -447,7 +445,6 @@ where
         agent_id: assigned_agent_id,
         memory_namespace: task_memory_namespace.as_deref(),
         execution_run_id,
-        trace_ref: None,
         status: SessionStatus::Active,
     };
     upsert_task_session(
@@ -589,7 +586,6 @@ where
                     agent_id: assigned_agent_id,
                     memory_namespace: task_memory_namespace.as_deref(),
                     execution_run_id,
-                    trace_ref: None,
                     status: SessionStatus::Failed,
                 };
                 upsert_task_session(
@@ -696,7 +692,6 @@ where
             agent_id: assigned_agent_id,
             memory_namespace: task_memory_namespace.as_deref(),
             execution_run_id,
-            trace_ref: None,
             status: SessionStatus::Failed,
         };
         upsert_task_session(
@@ -796,7 +791,6 @@ where
         agent_id: assigned_agent_id,
         memory_namespace: task_memory_namespace.as_deref(),
         execution_run_id,
-        trace_ref: None,
         status: final_status,
     };
     upsert_task_session(

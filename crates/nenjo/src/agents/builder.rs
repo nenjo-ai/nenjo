@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::instance::{AgentInstance, AgentModel, AgentPromptState, AgentRuntime};
+use super::instance::{
+    AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
+};
 use super::prompts::PromptContext;
 use super::runner::AgentRunner;
 use crate::agents::error::AgentError;
@@ -18,13 +20,13 @@ use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
-    pub agent: AgentManifest,
-    pub model: ModelManifest,
-    pub model_provider: Arc<P::Model<'static>>,
+    pub agent_manifest: AgentManifest,
+    pub model_manifest: ModelManifest,
     pub tools: Vec<Arc<dyn Tool>>,
     pub prompt_context: PromptContext,
     pub agent_config: AgentConfig,
     pub context_renderer: ContextRenderer,
+    pub provider_runtime: P,
 }
 
 /// Builder for constructing an [`AgentRunner`].
@@ -33,8 +35,7 @@ pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
 /// manifest data. Callers can override individual fields before building.
 pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     agent: Option<AgentManifest>,
-    model: Option<ModelManifest>,
-    model_provider: Option<Arc<P::Model<'static>>>,
+    model_manifest: Option<ModelManifest>,
     tools: Vec<Arc<dyn Tool>>,
     prompt_context: Option<PromptContext>,
     agent_config: AgentConfig,
@@ -48,6 +49,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     // For DelegateToTool construction, set when a provider creates the builder.
     provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
+    execution_mode: AgentExecutionMode,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
     work_dir: Option<PathBuf>,
@@ -57,9 +59,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Create a new builder with required fields (called by Provider).
     pub(crate) fn new(params: AgentBuilderParams<P>) -> Self {
         Self {
-            agent: Some(params.agent),
-            model: Some(params.model),
-            model_provider: Some(params.model_provider),
+            agent: Some(params.agent_manifest),
+            model_manifest: Some(params.model_manifest),
             tools: params.tools,
             prompt_context: Some(params.prompt_context),
             agent_config: params.agent_config,
@@ -70,8 +71,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_project_context: None,
             pending_routine_context: None,
             pending_step_context: None,
-            provider_runtime: None,
+            provider_runtime: Some(params.provider_runtime),
             child_delegation_ctx: None,
+            execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
         }
     }
@@ -84,8 +86,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     ) -> Self {
         Self {
             agent: None,
-            model: None,
-            model_provider: None,
+            model_manifest: None,
             tools: Vec::new(),
             prompt_context: None,
             agent_config,
@@ -98,6 +99,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_step_context: None,
             provider_runtime: Some(provider),
             child_delegation_ctx: None,
+            execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
         }
     }
@@ -114,18 +116,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
     /// Set the model manifest for this builder.
     pub fn with_model_manifest(mut self, model: ModelManifest) -> Self {
-        self.model = Some(model);
-        self
-    }
-
-    /// Set both the model manifest and the concrete model provider to use.
-    pub fn with_model_provider(
-        mut self,
-        model: ModelManifest,
-        provider: Arc<P::Model<'static>>,
-    ) -> Self {
-        self.model = Some(model);
-        self.model_provider = Some(provider);
+        self.model_manifest = Some(model);
         self
     }
 
@@ -235,19 +226,28 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
+    pub(crate) fn with_execution_mode(mut self, mode: AgentExecutionMode) -> Self {
+        self.execution_mode = mode;
+        self
+    }
+
     /// Build the [`AgentRunner`].
     pub async fn build(mut self) -> Result<AgentRunner<P>, super::error::AgentError> {
         let agent = self.agent.take().ok_or(AgentError::MissingAgentManifest)?;
-        let model = self.model.take().ok_or(AgentError::MissingModelManifest)?;
-        let model_provider = match self.model_provider.take() {
-            Some(provider) => provider,
-            None => {
-                let provider = self
-                    .provider_runtime
-                    .as_ref()
-                    .ok_or(AgentError::MissingModelProvider)?;
-                provider.create_model_provider(&model).await?
-            }
+        let model_manifest = self
+            .model_manifest
+            .take()
+            .ok_or(AgentError::MissingModelManifest)?;
+        let provider = self
+            .provider_runtime
+            .as_ref()
+            .ok_or(AgentError::MissingModelProvider)?;
+        let model_provider = provider.create_model_provider(&model_manifest).await?;
+        let model = AgentModel {
+            model_name: model_manifest.model.clone(),
+            id: model_manifest.id,
+            temperature: model_manifest.temperature.unwrap_or(0.7),
+            model_provider,
         };
         let mut prompt_context = match self.prompt_context.take() {
             Some(prompt_context) => prompt_context,
@@ -275,6 +275,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         if let Some(ctx) = self.pending_step_context.take() {
             prompt_context.render_ctx_extra.routine.step = ctx;
         }
+        if self.execution_mode == AgentExecutionMode::Child {
+            strip_child_prompt_capabilities(&mut prompt_context);
+        }
 
         let mut policy = match &self.provider_runtime {
             Some(provider) => {
@@ -290,7 +293,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         }
         let security = Arc::new(policy);
 
-        if let Some(ref provider) = self.provider_runtime {
+        if self.execution_mode == AgentExecutionMode::Parent
+            && let Some(ref provider) = self.provider_runtime
+        {
             let project_slug = active_project_slug(&prompt_context);
             let mut provider_tools = provider
                 .tool_factory()
@@ -310,7 +315,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         // Build memory scope and inject tools. This is the single place
         // where memory/artifact tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
-        let memory_scope = if let Some(ref mem) = self.memory {
+        let memory_scope = if self.execution_mode == AgentExecutionMode::Parent
+            && let Some(ref mem) = self.memory
+        {
             let scope = if let Some(scope) = self.memory_scope_override.clone() {
                 scope
             } else {
@@ -326,23 +333,18 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             None
         };
 
+        let runner_memory = if self.execution_mode == AgentExecutionMode::Parent {
+            self.memory
+        } else {
+            None
+        };
+
         let provider_runtime = self.provider_runtime.clone();
-        let delegation_support =
-            self.provider_runtime
-                .map(|provider| super::runner::DelegationSupport {
-                    provider,
-                    max_delegation_depth: self.agent_config.max_delegation_depth,
-                    delegation_ctx: self.child_delegation_ctx,
-                });
 
         let instance = AgentInstance {
             manifest: agent,
-            model: AgentModel {
-                model_name: model.model.clone(),
-                id: model.id,
-                temperature: model.temperature.unwrap_or(0.7),
-                model_provider,
-            },
+            model_manifest,
+            model,
             prompt: AgentPromptState {
                 context: prompt_context,
                 renderer: self.context_renderer,
@@ -354,10 +356,12 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 security,
                 config: self.agent_config,
                 provider_runtime,
+                sub_agent_ctx: self.child_delegation_ctx,
+                execution_mode: self.execution_mode,
             },
         };
 
-        AgentRunner::new(instance, self.memory, memory_scope, delegation_support).await
+        AgentRunner::new(instance, runner_memory, memory_scope).await
     }
 }
 
@@ -373,4 +377,15 @@ fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
     } else {
         Some(slug.as_str())
     }
+}
+
+fn strip_child_prompt_capabilities(prompt_context: &mut PromptContext) {
+    prompt_context.available_agents.clear();
+    prompt_context.available_routines.clear();
+    prompt_context.available_abilities.clear();
+    prompt_context.available_domains.clear();
+    prompt_context.mcp_server_info.clear();
+    prompt_context.platform_scopes.clear();
+    prompt_context.active_domain = None;
+    prompt_context.append_active_domain_addon = false;
 }

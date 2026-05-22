@@ -5,6 +5,7 @@
 //! sources (API backend, local `.nenjo/` folder) and merged.
 
 use anyhow::Result;
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -282,12 +283,18 @@ impl RoutineEdgeCondition {
 /// An LLM model configuration (provider, model name, temperature).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelManifest {
+    /// Stable manifest ID for this model configuration.
     pub id: Uuid,
+    /// Human-readable model configuration name.
     pub name: String,
     pub description: Option<String>,
+    /// Provider-specific model identifier, for example `openai/gpt-4.1`.
     pub model: String,
+    /// Provider registry key, for example `openrouter`, `openai`, or `anthropic`.
     pub model_provider: String,
+    /// Optional sampling temperature for calls using this model.
     pub temperature: Option<f64>,
+    /// Optional provider base URL override.
     pub base_url: Option<String>,
 }
 
@@ -340,22 +347,84 @@ impl MemoryProfile {
 }
 
 /// An agent definition — prompt config, assigned model, domains, and tools.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Runtime-created agents, including ephemeral sub-agents, can use the builder
+/// with only a name and prompt:
+///
+/// ```
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nenjo::manifest::AgentManifest;
+///
+/// let agent = AgentManifest::builder()
+///     .with_name("reviewer")
+///     .with_system_prompt("Act as a focused review worker.")
+///     .with_developer_prompt("Be concise and evidence-driven.")
+///     .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
+///     .build()?;
+/// # let _ = agent;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AgentManifest {
+    #[builder(default = "Uuid::new_v4()")]
     pub id: Uuid,
     pub name: String,
+    #[builder(default, setter(strip_option))]
     pub description: Option<String>,
     pub prompt_config: PromptConfig,
+    #[builder(default, setter(strip_option))]
     pub color: Option<String>,
+    #[builder(default, setter(strip_option))]
     pub model_id: Option<Uuid>,
+    #[builder(default)]
     pub domain_ids: Vec<Uuid>,
+    #[builder(default)]
     pub platform_scopes: Vec<String>,
+    #[builder(default)]
     pub mcp_server_ids: Vec<Uuid>,
+    #[builder(default)]
     pub ability_ids: Vec<Uuid>,
     /// When true, prompt_config updates are blocked.
+    #[builder(default)]
     pub prompt_locked: bool,
     #[serde(default)]
+    #[builder(default, setter(strip_option))]
     pub heartbeat: Option<AgentHeartbeatManifest>,
+}
+
+impl AgentManifest {
+    /// Create a builder for an agent manifest.
+    pub fn builder() -> AgentManifestBuilder {
+        AgentManifestBuilder::default()
+    }
+}
+
+impl AgentManifestBuilder {
+    /// Set the system prompt without manually constructing [`PromptConfig`].
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.system_prompt = prompt.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
+
+    /// Set the developer prompt without manually constructing [`PromptConfig`].
+    pub fn with_developer_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.developer_prompt = prompt.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
+
+    /// Set the task execution template without manually constructing [`PromptConfig`].
+    pub fn with_task_template(mut self, template: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.templates.task_execution = template.into();
+        self.prompt_config = Some(prompt_config);
+        self
+    }
 }
 
 impl HasManifestId for AgentManifest {

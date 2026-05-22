@@ -103,7 +103,6 @@ pub trait SessionRuntime: Send + Sync {
             lease: None,
             memory_namespace: upsert.memory_namespace.clone(),
             refs: SessionRefs {
-                trace_ref: upsert.trace_ref,
                 memory_namespace: upsert.memory_namespace,
                 ..Default::default()
             },
@@ -128,7 +127,6 @@ pub trait SessionRuntime: Send + Sync {
             lease: None,
             memory_namespace: upsert.memory_namespace.clone(),
             refs: SessionRefs {
-                trace_ref: upsert.trace_ref,
                 memory_namespace: upsert.memory_namespace,
                 ..Default::default()
             },
@@ -310,7 +308,6 @@ pub struct ChatSessionUpsert {
     pub project_id: Option<Uuid>,
     pub agent_id: Uuid,
     pub memory_namespace: Option<String>,
-    pub trace_ref: Option<String>,
     pub metadata: serde_json::Value,
 }
 
@@ -323,7 +320,6 @@ pub struct TaskSessionUpsert {
     pub routine_id: Option<Uuid>,
     pub execution_run_id: Uuid,
     pub memory_namespace: Option<String>,
-    pub trace_ref: Option<String>,
     pub metadata: serde_json::Value,
 }
 

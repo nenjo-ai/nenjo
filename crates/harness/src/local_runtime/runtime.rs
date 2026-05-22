@@ -10,7 +10,7 @@ use nenjo_sessions::{
     SessionCheckpoint, SessionCheckpointUpdate, SessionCoordinator, SessionKind, SessionLease,
     SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
     SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
-    SessionUpsert, TraceStore, TranscriptQuery, TranscriptStore,
+    SessionUpsert, TraceEvent, TraceStore, TranscriptQuery, TranscriptStore,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
@@ -330,6 +330,19 @@ impl FileSessionRuntime {
         anyhow::bail!("failed to append transcript event after compare-and-swap retries")
     }
 
+    async fn handle_trace(&self, event: TraceEvent) -> Result<()> {
+        if let Some(mut record) = self.records.get(event.session_id)?
+            && record.refs.trace_ref.is_none()
+        {
+            record.refs.trace_ref = Some(format!("traces/{}.jsonl", event.session_id));
+            record.version += 1;
+            record.updated_at = event.recorded_at;
+            self.records.put(&record)?;
+        }
+
+        self.traces.append(event).await
+    }
+
     async fn update_checkpoint_record(&self, update: SessionCheckpointUpdate) -> Result<bool> {
         let Some(mut session) = self.records.get(update.session_id)? else {
             return Ok(false);
@@ -611,7 +624,10 @@ impl SessionRuntime for FileSessionRuntime {
                 let _guard = self.record_guard(record.session_id).await;
                 self.handle_transcript(record).await
             }
-            SessionRuntimeEvent::Trace(event) => self.traces.append(event).await,
+            SessionRuntimeEvent::Trace(event) => {
+                let _guard = self.record_guard(event.session_id).await;
+                self.handle_trace(event).await
+            }
             SessionRuntimeEvent::Checkpoint(record) => {
                 let _guard = self.record_guard(record.session_id).await;
                 self.handle_checkpoint(record).await
@@ -730,9 +746,10 @@ mod tests {
     use chrono::Utc;
     use nenjo_sessions::{
         CheckpointStore, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionRecord,
-        SessionRefs, SessionRuntime, SessionStatus, SessionStore, SessionSummary,
-        SessionTranscriptAppend, SessionTranscriptChatMessage, SessionTranscriptEventPayload,
-        SessionTransition, TranscriptQuery, TranscriptState, WorktreeSnapshot,
+        SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
+        SessionSummary, SessionTranscriptAppend, SessionTranscriptChatMessage,
+        SessionTranscriptEventPayload, SessionTransition, TokenUsage, TraceEvent, TracePhase,
+        TranscriptQuery, TranscriptState, WorktreeSnapshot,
     };
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -966,5 +983,57 @@ mod tests {
         );
         assert_eq!(record.summary.last_transcript_seq, 2);
         assert_eq!(record.summary.transcript_state, TranscriptState::Clean);
+    }
+
+    #[tokio::test]
+    async fn trace_events_create_trace_ref_when_missing() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let runtime =
+            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let session_id = Uuid::new_v4();
+
+        records
+            .put(&test_record(session_id, SessionStatus::Active))
+            .unwrap();
+
+        runtime
+            .record(SessionRuntimeEvent::Trace(TraceEvent {
+                session_id,
+                turn_id: None,
+                recorded_at: Utc::now(),
+                phase: TracePhase::Completed,
+                agent_id: None,
+                agent_name: None,
+                tool_name: None,
+                parent_tool_name: None,
+                ability_name: None,
+                target_agent_id: None,
+                target_agent_name: None,
+                success: Some(true),
+                usage: TokenUsage::default(),
+                preview: Some("done".to_string()),
+                task_input: None,
+                final_output: Some("done".to_string()),
+                tool_args: None,
+                error_preview: None,
+                metadata: serde_json::Value::Null,
+            }))
+            .await
+            .unwrap();
+
+        let record = records.get(session_id).unwrap().unwrap();
+        assert_eq!(
+            record.refs.trace_ref.as_deref(),
+            Some(format!("traces/{session_id}.jsonl").as_str())
+        );
+        assert!(
+            dir.path()
+                .join("events")
+                .join("traces")
+                .join(format!("{session_id}.jsonl"))
+                .exists()
+        );
     }
 }

@@ -21,7 +21,7 @@ use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::{AgentRef, ChatRequest};
 use crate::session::{
     TurnEventContext, chat_message_to_transcript, replay_transcript_history,
-    session_runtime_events_from_turn_event, trace_ref,
+    session_runtime_events_from_turn_event,
 };
 use crate::{Harness, ProviderRuntime};
 
@@ -121,7 +121,6 @@ where
     let agent_id = resolve_agent_id(provider.as_ref(), &agent)?;
     let slug = project_slug(&manifest, effective_project_id);
     let aname = agent_name(&manifest, agent_id);
-    let trace_ref = Some(trace_ref(session_id));
     let worker_id = "harness".to_string();
 
     if let Some(activation) = &domain_activation {
@@ -167,7 +166,6 @@ where
             agent_id,
             project_slug: slug.clone(),
             agent_name: aname.clone(),
-            trace_ref,
             status: SessionStatus::Active,
         },
         SessionUpsertMode::Await,
@@ -312,7 +310,6 @@ where
                         agent_id: prepared.agent_id,
                         project_slug: prepared.project_slug.clone(),
                         agent_name: prepared.agent_name.clone(),
-                        trace_ref: Some(trace_ref(prepared.session_id)),
                         status: SessionStatus::Failed,
                     },
                     SessionUpsertMode::Spawn,
@@ -404,11 +401,12 @@ where
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };
-                            harness.sessions().spawn_recorded_events(
-                                session_runtime_events_from_turn_event(&session_event_context, &ev),
-                                session_id,
-                            );
+                            let runtime_events =
+                                session_runtime_events_from_turn_event(&session_event_context, &ev);
                             let _ = events_tx.send(HarnessEvent::Turn(ev));
+                            harness
+                                .sessions()
+                                .record_events(runtime_events, session_id);
                         }
                         None => break,
                     }
@@ -435,7 +433,6 @@ where
                                 agent_id,
                                 project_slug: project_slug.clone(),
                                 agent_name: agent_name.clone(),
-                                trace_ref: Some(trace_ref(session_id)),
                                 status: SessionStatus::Cancelled,
                             },
                             SessionUpsertMode::Spawn,
@@ -476,7 +473,6 @@ where
                 agent_id,
                 project_slug,
                 agent_name: agent_name.clone(),
-                trace_ref: Some(trace_ref(session_id)),
                 status: SessionStatus::Completed,
             },
             SessionUpsertMode::Spawn,
@@ -527,7 +523,6 @@ struct ChatSessionRecord {
     agent_id: Uuid,
     project_slug: String,
     agent_name: String,
-    trace_ref: Option<String>,
     status: SessionStatus,
 }
 
@@ -551,7 +546,6 @@ async fn upsert_chat_session_record<P, SessionRt>(
         agent_id,
         project_slug,
         agent_name,
-        trace_ref,
         status,
     } = params;
     let memory_namespace = chat_memory_namespace(&agent_name, &project_slug);
@@ -561,7 +555,6 @@ async fn upsert_chat_session_record<P, SessionRt>(
         project_id,
         agent_id,
         memory_namespace: Some(memory_namespace.clone()),
-        trace_ref,
         metadata: json!({
             "source": "harness_chat",
             "agent_name": agent_name,
