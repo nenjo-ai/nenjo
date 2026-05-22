@@ -12,6 +12,7 @@ use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime};
 use crate::tools::{Tool, ToolSecurity, ToolSpec};
+use crate::types::DelegationContext;
 
 /// The system and developer prompts ready for the turn loop.
 #[derive(Debug)]
@@ -69,6 +70,14 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) security: Arc<ToolSecurity>,
     pub(crate) config: AgentConfig,
     pub(crate) provider_runtime: Option<P>,
+    pub(crate) sub_agent_ctx: Option<DelegationContext>,
+    pub(crate) execution_mode: AgentExecutionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentExecutionMode {
+    Parent,
+    Child,
 }
 
 impl<P: ProviderRuntime> Clone for AgentModel<P> {
@@ -89,6 +98,8 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             security: self.security.clone(),
             config: self.config.clone(),
             provider_runtime: self.provider_runtime.clone(),
+            sub_agent_ctx: self.sub_agent_ctx.clone(),
+            execution_mode: self.execution_mode,
         }
     }
 }

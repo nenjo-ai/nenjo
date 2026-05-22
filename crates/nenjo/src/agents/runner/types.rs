@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tools::ToolResult;
 use nenjo_models::ChatMessage;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 /// A single tool call with its name and arguments.
@@ -16,6 +17,68 @@ pub struct ToolCall {
     pub text_preview: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubAgentTranscriptEvent {
+    Input {
+        summary: String,
+    },
+    AssistantMessage {
+        summary: String,
+    },
+    ToolCall {
+        tool: String,
+        summary: String,
+    },
+    ToolResult {
+        tool: String,
+        success: bool,
+        summary: String,
+    },
+    Error {
+        summary: String,
+    },
+}
+
+impl SubAgentTranscriptEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "input",
+            Self::AssistantMessage { .. } => "assistant_message",
+            Self::ToolCall { .. } => "tool_call",
+            Self::ToolResult { .. } => "tool_result",
+            Self::Error { .. } => "error",
+        }
+    }
+
+    pub fn summary(&self) -> &str {
+        match self {
+            Self::Input { summary }
+            | Self::AssistantMessage { summary }
+            | Self::ToolCall { summary, .. }
+            | Self::ToolResult { summary, .. }
+            | Self::Error { summary } => summary,
+        }
+    }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::ToolCall { tool, .. } | Self::ToolResult { tool, .. } => Some(tool),
+            Self::Input { .. } | Self::AssistantMessage { .. } | Self::Error { .. } => None,
+        }
+    }
+
+    pub fn success(&self) -> Option<bool> {
+        match self {
+            Self::ToolResult { success, .. } => Some(*success),
+            Self::Input { .. }
+            | Self::AssistantMessage { .. }
+            | Self::ToolCall { .. }
+            | Self::Error { .. } => None,
+        }
+    }
+}
+
 /// Events yielded by the turn loop during execution.
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
@@ -23,14 +86,6 @@ pub enum TurnEvent {
     AbilityStarted {
         ability_tool_name: String,
         ability_name: String,
-        task_input: String,
-        caller_history: Vec<ChatMessage>,
-    },
-    /// An agent-to-agent delegation started.
-    DelegationStarted {
-        delegate_tool_name: String,
-        target_agent_name: String,
-        target_agent_id: uuid::Uuid,
         task_input: String,
         caller_history: Vec<ChatMessage>,
     },
@@ -54,13 +109,19 @@ pub enum TurnEvent {
         success: bool,
         final_output: String,
     },
-    /// An agent-to-agent delegation finished.
-    DelegationCompleted {
-        delegate_tool_name: String,
-        target_agent_name: String,
-        target_agent_id: uuid::Uuid,
-        success: bool,
-        final_output: String,
+    /// A sub-agent lifecycle or signal event for observers.
+    SubAgentEvent {
+        slug: String,
+        agent_name: String,
+        kind: String,
+        summary: String,
+        model_visible: bool,
+    },
+    /// A bounded child transcript event stored as parent-owned trace evidence.
+    SubAgentTranscript {
+        slug: String,
+        agent_name: String,
+        event: SubAgentTranscriptEvent,
     },
     /// Older history was compacted into a summary.
     MessageCompacted {

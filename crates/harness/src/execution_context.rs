@@ -43,18 +43,6 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             task_input.len(),
             caller_history.len()
         ),
-        nenjo::TurnEvent::DelegationStarted {
-            delegate_tool_name,
-            target_agent_name,
-            task_input,
-            caller_history,
-            ..
-        } => format!(
-            "delegation_started(tool={delegate_tool_name}, target={target_agent_name}, task_preview={:?}, task_len={}, caller_messages={})",
-            truncate_preview(task_input, 80),
-            task_input.len(),
-            caller_history.len()
-        ),
         nenjo::TurnEvent::ToolCallStart {
             parent_tool_name,
             calls,
@@ -95,15 +83,24 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
-        nenjo::TurnEvent::DelegationCompleted {
-            delegate_tool_name,
-            target_agent_name,
-            success,
-            final_output,
+        nenjo::TurnEvent::SubAgentEvent {
+            slug,
+            agent_name,
+            kind,
+            summary,
             ..
         } => format!(
-            "delegation_completed(tool={delegate_tool_name}, target={target_agent_name}, success={success}, output_len={})",
-            final_output.len()
+            "sub_agent_event(slug={slug}, agent={agent_name}, kind={kind}, summary_len={})",
+            summary.len()
+        ),
+        nenjo::TurnEvent::SubAgentTranscript {
+            slug,
+            agent_name,
+            event,
+        } => format!(
+            "sub_agent_transcript(slug={slug}, agent={agent_name}, kind={}, summary_len={})",
+            event.kind(),
+            event.summary().len()
         ),
         nenjo::TurnEvent::MessageCompacted {
             messages_before,

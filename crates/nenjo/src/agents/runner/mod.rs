@@ -13,7 +13,10 @@ use tracing::{info, trace};
 use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, is_ability_tool};
-use super::delegation::DelegateToTool;
+use super::instance::AgentExecutionMode;
+use super::sub_agents::{
+    ChildRuntimeHandle, SubAgentLimits, SubAgentRuntime, child_tools, parent_tools,
+};
 use anyhow::Context;
 use nenjo_models::ModelProvider;
 
@@ -22,7 +25,7 @@ use crate::input::{AgentRun, AgentRunKind, ChatInput, TaskInput};
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, MemoryScope};
 use crate::provider::{ErasedProvider, ProviderRuntime};
-use crate::types::{ActiveDomain, DelegationContext};
+use crate::types::ActiveDomain;
 use types::{TurnEvent, TurnOutput};
 
 /// Handle to a running agent execution.
@@ -31,7 +34,7 @@ use types::{TurnEvent, TurnOutput};
 /// to the final [`TurnOutput`] when done.
 pub struct ExecutionHandle {
     events_rx: mpsc::UnboundedReceiver<TurnEvent>,
-    join: tokio::task::JoinHandle<Result<TurnOutput>>,
+    join: Option<tokio::task::JoinHandle<Result<TurnOutput>>>,
     pause_token: types::PauseToken,
 }
 
@@ -53,7 +56,9 @@ impl ExecutionHandle {
 
     /// Abort the running execution. The spawned task is cancelled immediately.
     pub fn abort(&self) {
-        self.join.abort();
+        if let Some(join) = &self.join {
+            join.abort();
+        }
     }
 
     /// Pause execution. The turn loop will block before the next LLM call.
@@ -77,23 +82,23 @@ impl ExecutionHandle {
     }
 
     /// Wait for the final output.
-    pub async fn output(self) -> Result<TurnOutput> {
+    pub async fn output(mut self) -> Result<TurnOutput> {
         self.join
+            .take()
+            .expect("execution join handle should be present")
             .await
             .map_err(|e| anyhow::anyhow!("execution task panicked: {e}"))?
     }
 }
 
-/// Provider handle needed to construct DelegateToTool in the runner.
-///
-/// Passed from AgentBuilder when the Provider sets up delegation support.
-pub(crate) struct DelegationSupport<P: ProviderRuntime = ErasedProvider> {
-    pub(crate) provider: P,
-    pub(crate) max_delegation_depth: u32,
-    /// Pre-built delegation context from a parent delegation. When set,
-    /// the runner uses this instead of creating a fresh one — this is how
-    /// depth decrements across nested delegations.
-    pub(crate) delegation_ctx: Option<DelegationContext>,
+impl Drop for ExecutionHandle {
+    fn drop(&mut self) {
+        if let Some(join) = &self.join
+            && !join.is_finished()
+        {
+            join.abort();
+        }
+    }
 }
 
 pub(crate) fn build_instruction_messages(
@@ -131,18 +136,20 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         mut instance: AgentInstance<P>,
         memory: Option<Arc<P::Memory<'static>>>,
         memory_scope: Option<MemoryScope>,
-        delegation: Option<DelegationSupport<P>>,
     ) -> Result<Self, super::error::AgentError> {
         // Extract manifest before delegation is consumed so domain_expansion can
         // pass it to sub-runners.
-        let manifest = delegation
+        let manifest = instance
+            .runtime
+            .provider_runtime
             .as_ref()
-            .map(|ds| ds.provider.manifest_snapshot());
+            .map(|provider| provider.manifest_snapshot());
 
         // If the agent has abilities, register one tool per assigned ability
         // resolved from the canonical manifest.
         if let Some(active_abilities) = manifest
             .as_ref()
+            .filter(|_| instance.runtime.execution_mode == AgentExecutionMode::Parent)
             .map(|manifest| resolve_active_abilities(manifest, Some(instance.agent_id()), None))
             .filter(|abilities| !abilities.is_empty())
         {
@@ -154,31 +161,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .runtime
                 .tools
                 .extend(build_ability_tools(&active_abilities, base_instance, m));
-        }
-
-        // If delegation is enabled (other agents exist + max_depth > 0), add delegate_to.
-        if let Some(ds) = delegation {
-            let other_agents = instance
-                .prompt
-                .context
-                .available_agents
-                .iter()
-                .any(|a| a.id != instance.agent_id());
-
-            // Use pre-built context from parent delegation, or create fresh.
-            let ctx = ds
-                .delegation_ctx
-                .unwrap_or_else(|| DelegationContext::new(ds.max_delegation_depth));
-
-            // Only inject if there's remaining depth and other agents exist.
-            if other_agents && ctx.max_depth > ctx.current_depth {
-                let delegate_tool = DelegateToTool::new(super::delegation::DelegateToToolParams {
-                    provider: ds.provider,
-                    caller_agent_id: instance.agent_id(),
-                    delegation_ctx: ctx,
-                });
-                instance.runtime.tools.push(Arc::new(delegate_tool));
-            }
         }
 
         let instance = Arc::new(instance);
@@ -389,6 +371,30 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     // -- Internal --
 
     async fn execute_stream(&self, run: AgentRun) -> Result<ExecutionHandle> {
+        self.execute_stream_with_sub_agent(run, None).await
+    }
+
+    pub(crate) async fn chat_stream_as_sub_agent(
+        &self,
+        message: &str,
+        child_handle: ChildRuntimeHandle<P>,
+    ) -> Result<ExecutionHandle> {
+        self.execute_stream_with_sub_agent(
+            AgentRun::chat(ChatInput {
+                message: message.to_string(),
+                history: Vec::new(),
+                project_id: None,
+            }),
+            Some(child_handle),
+        )
+        .await
+    }
+
+    async fn execute_stream_with_sub_agent(
+        &self,
+        run: AgentRun,
+        child_handle: Option<ChildRuntimeHandle<P>>,
+    ) -> Result<ExecutionHandle> {
         let memory_vars = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
             && self.instance.prompt.memory_vars.is_empty()
         {
@@ -404,11 +410,38 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             None
         };
 
-        let inst = self.instance.clone();
+        let is_child_execution = child_handle.is_some();
+        // 5. Spawn the turn loop.
+        let (events_tx, events_rx) = mpsc::unbounded_channel::<TurnEvent>();
+        let pause_token = types::PauseToken::new();
+        let loop_pause = pause_token.clone();
 
-        // 3. Build prompts.
-        let prompts =
-            inst.build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref());
+        let mut inst = (*self.instance).clone();
+        if let Some(child_handle) = child_handle {
+            inst.runtime.tools.extend(child_tools(child_handle));
+        } else if inst.runtime.execution_mode == AgentExecutionMode::Parent
+            && let Some(provider) = inst.runtime.provider_runtime.clone()
+        {
+            let other_agents = inst
+                .prompt
+                .context
+                .available_agents
+                .iter()
+                .any(|agent| agent.id != inst.agent_id());
+            if other_agents && inst.runtime.config.max_delegation_depth > 0 {
+                let runtime = SubAgentRuntime::new(
+                    provider,
+                    inst.agent_id(),
+                    SubAgentLimits {
+                        max_depth: inst.runtime.config.max_delegation_depth,
+                    },
+                    inst.runtime.sub_agent_ctx.clone(),
+                    Some(events_tx.clone()),
+                );
+                inst.runtime.tools.extend(parent_tools(runtime.handle()));
+            }
+        }
+        let inst = Arc::new(inst);
 
         let task_label = match &run.kind {
             AgentRunKind::Chat { .. } => "chat",
@@ -434,66 +467,50 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             "Executing agent"
         );
 
-        let system_prompt = prompts.system;
-        let developer_prompt = prompts.developer;
-        let templated_user_message = prompts.user_message;
-        trace!(
-            agent = inst.name(),
-            "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
-            inst.name(),
-            system_prompt,
-            developer_prompt,
-            templated_user_message,
-        );
-
-        // 4. Build initial messages.
-        let supports_developer_role = inst
-            .model
-            .model_provider
-            .supports_developer_role(&inst.model.model_name);
-        let mut messages: Vec<ChatMessage> =
-            build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
-
-        if let AgentRunKind::Chat(ref chat) = run.kind {
-            for msg in &chat.history {
-                messages.push(msg.clone());
-            }
-        }
-
-        let user_message = if !templated_user_message.is_empty() {
-            templated_user_message
+        let messages = if is_child_execution {
+            vec![ChatMessage::user(raw_user_message(&run))]
         } else {
-            // Template rendered empty — fall back to the raw task content.
-            match &run.kind {
-                AgentRunKind::Chat(chat) => chat.message.clone(),
-                AgentRunKind::Task(task) => {
-                    if task.description.is_empty() {
-                        task.title.clone()
-                    } else {
-                        task.description.clone()
-                    }
-                }
-                AgentRunKind::Cron(crate::input::CronInput {
-                    task: Some(task), ..
-                }) => {
-                    if task.description.is_empty() {
-                        task.title.clone()
-                    } else {
-                        task.description.clone()
-                    }
-                }
-                AgentRunKind::Cron(_) => String::new(),
-                AgentRunKind::Heartbeat(_) => String::new(),
-                AgentRunKind::Gate(gate) => gate.criteria.clone(),
-                AgentRunKind::CouncilSubtask(subtask) => subtask.subtask_description.clone(),
-            }
-        };
-        messages.push(ChatMessage::user(&user_message));
+            // 3. Build prompts.
+            let prompts =
+                inst.build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref());
 
-        // 5. Spawn the turn loop.
-        let (events_tx, events_rx) = mpsc::unbounded_channel::<TurnEvent>();
-        let pause_token = types::PauseToken::new();
-        let loop_pause = pause_token.clone();
+            let system_prompt = prompts.system;
+            let developer_prompt = prompts.developer;
+            let templated_user_message = prompts.user_message;
+            trace!(
+                agent = inst.name(),
+                "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
+                inst.name(),
+                system_prompt,
+                developer_prompt,
+                templated_user_message,
+            );
+
+            // 4. Build initial messages.
+            let supports_developer_role = inst
+                .model
+                .model_provider
+                .supports_developer_role(&inst.model.model_name);
+            let mut messages: Vec<ChatMessage> = build_instruction_messages(
+                &system_prompt,
+                &developer_prompt,
+                supports_developer_role,
+            );
+
+            if let AgentRunKind::Chat(ref chat) = run.kind {
+                for msg in &chat.history {
+                    messages.push(msg.clone());
+                }
+            }
+
+            let user_message = if !templated_user_message.is_empty() {
+                templated_user_message
+            } else {
+                raw_user_message(&run)
+            };
+            messages.push(ChatMessage::user(&user_message));
+            messages
+        };
 
         let join = tokio::spawn(async move {
             turn_loop::run(&inst, messages, Some(events_tx), Some(loop_pause)).await
@@ -501,9 +518,35 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         Ok(ExecutionHandle {
             events_rx,
-            join,
+            join: Some(join),
             pause_token,
         })
+    }
+}
+
+fn raw_user_message(run: &AgentRun) -> String {
+    match &run.kind {
+        AgentRunKind::Chat(chat) => chat.message.clone(),
+        AgentRunKind::Task(task) => {
+            if task.description.is_empty() {
+                task.title.clone()
+            } else {
+                task.description.clone()
+            }
+        }
+        AgentRunKind::Cron(crate::input::CronInput {
+            task: Some(task), ..
+        }) => {
+            if task.description.is_empty() {
+                task.title.clone()
+            } else {
+                task.description.clone()
+            }
+        }
+        AgentRunKind::Cron(_) => String::new(),
+        AgentRunKind::Heartbeat(_) => String::new(),
+        AgentRunKind::Gate(gate) => gate.criteria.clone(),
+        AgentRunKind::CouncilSubtask(subtask) => subtask.subtask_description.clone(),
     }
 }
 

@@ -594,8 +594,8 @@ mod tests {
     fn tool_call_assistant_message_has_structured_json() {
         let tool_calls = vec![serde_json::json!({
             "id": "call_123",
-            "name": "delegate_to",
-            "arguments": r#"{"agent_name":"Dev","task":"fix bug"}"#,
+            "name": "spawn_sub_agents",
+            "arguments": r#"{"agents":[{"agent":"Dev","task":{"description":"fix bug","goal":"bug fixed"}}]}"#,
         })];
         let assistant_content = serde_json::json!({
             "content": "I'll delegate this.",
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(parsed["content"], "I'll delegate this.");
         assert!(parsed["tool_calls"].is_array());
         assert_eq!(parsed["tool_calls"][0]["id"], "call_123");
-        assert_eq!(parsed["tool_calls"][0]["name"], "delegate_to");
+        assert_eq!(parsed["tool_calls"][0]["name"], "spawn_sub_agents");
     }
 
     #[test]

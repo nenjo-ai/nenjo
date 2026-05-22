@@ -195,9 +195,6 @@ where
                         TurnEvent::AbilityStarted { .. } => {
                             let _ = parent_tx.send(event);
                         }
-                        TurnEvent::DelegationStarted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
                         TurnEvent::ToolCallStart {
                             parent_tool_name,
                             calls,
@@ -225,9 +222,6 @@ where
                             });
                         }
                         TurnEvent::AbilityCompleted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
-                        TurnEvent::DelegationCompleted { .. } => {
                             let _ = parent_tx.send(event);
                         }
                         TurnEvent::MessageCompacted { .. } => {
@@ -455,6 +449,8 @@ where
             security: scoped_security,
             config: caller.runtime.config.clone(),
             provider_runtime: caller.runtime.provider_runtime.clone(),
+            sub_agent_ctx: caller.runtime.sub_agent_ctx.clone(),
+            execution_mode: caller.runtime.execution_mode,
         },
     }
 }
@@ -483,6 +479,7 @@ fn ability_runtime_env_names(ability: &AbilityManifest) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentExecutionMode;
     use crate::agents::instance::AgentModel;
     use crate::agents::prompts::PromptContext;
     use crate::config::AgentConfig;
@@ -691,6 +688,8 @@ mod tests {
                 security: Arc::new(ToolSecurity::default()),
                 config: AgentConfig::default(),
                 provider_runtime: Some(test_sdk_provider()),
+                sub_agent_ctx: None,
+                execution_mode: AgentExecutionMode::Parent,
             },
         }
     }

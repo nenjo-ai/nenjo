@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::instance::{AgentInstance, AgentModel, AgentPromptState, AgentRuntime};
+use super::instance::{
+    AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
+};
 use super::prompts::PromptContext;
 use super::runner::AgentRunner;
 use crate::agents::error::AgentError;
@@ -48,6 +50,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     // For DelegateToTool construction, set when a provider creates the builder.
     provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
+    execution_mode: AgentExecutionMode,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
     work_dir: Option<PathBuf>,
@@ -72,6 +75,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_step_context: None,
             provider_runtime: None,
             child_delegation_ctx: None,
+            execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
         }
     }
@@ -98,6 +102,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_step_context: None,
             provider_runtime: Some(provider),
             child_delegation_ctx: None,
+            execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
         }
     }
@@ -235,6 +240,11 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
+    pub(crate) fn with_execution_mode(mut self, mode: AgentExecutionMode) -> Self {
+        self.execution_mode = mode;
+        self
+    }
+
     /// Build the [`AgentRunner`].
     pub async fn build(mut self) -> Result<AgentRunner<P>, super::error::AgentError> {
         let agent = self.agent.take().ok_or(AgentError::MissingAgentManifest)?;
@@ -275,6 +285,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         if let Some(ctx) = self.pending_step_context.take() {
             prompt_context.render_ctx_extra.routine.step = ctx;
         }
+        if self.execution_mode == AgentExecutionMode::Child {
+            strip_child_prompt_capabilities(&mut prompt_context);
+        }
 
         let mut policy = match &self.provider_runtime {
             Some(provider) => {
@@ -290,7 +303,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         }
         let security = Arc::new(policy);
 
-        if let Some(ref provider) = self.provider_runtime {
+        if self.execution_mode == AgentExecutionMode::Parent
+            && let Some(ref provider) = self.provider_runtime
+        {
             let project_slug = active_project_slug(&prompt_context);
             let mut provider_tools = provider
                 .tool_factory()
@@ -310,7 +325,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         // Build memory scope and inject tools. This is the single place
         // where memory/artifact tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
-        let memory_scope = if let Some(ref mem) = self.memory {
+        let memory_scope = if self.execution_mode == AgentExecutionMode::Parent
+            && let Some(ref mem) = self.memory
+        {
             let scope = if let Some(scope) = self.memory_scope_override.clone() {
                 scope
             } else {
@@ -326,14 +343,13 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             None
         };
 
+        let runner_memory = if self.execution_mode == AgentExecutionMode::Parent {
+            self.memory
+        } else {
+            None
+        };
+
         let provider_runtime = self.provider_runtime.clone();
-        let delegation_support =
-            self.provider_runtime
-                .map(|provider| super::runner::DelegationSupport {
-                    provider,
-                    max_delegation_depth: self.agent_config.max_delegation_depth,
-                    delegation_ctx: self.child_delegation_ctx,
-                });
 
         let instance = AgentInstance {
             manifest: agent,
@@ -354,10 +370,12 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 security,
                 config: self.agent_config,
                 provider_runtime,
+                sub_agent_ctx: self.child_delegation_ctx,
+                execution_mode: self.execution_mode,
             },
         };
 
-        AgentRunner::new(instance, self.memory, memory_scope, delegation_support).await
+        AgentRunner::new(instance, runner_memory, memory_scope).await
     }
 }
 
@@ -373,4 +391,15 @@ fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
     } else {
         Some(slug.as_str())
     }
+}
+
+fn strip_child_prompt_capabilities(prompt_context: &mut PromptContext) {
+    prompt_context.available_agents.clear();
+    prompt_context.available_routines.clear();
+    prompt_context.available_abilities.clear();
+    prompt_context.available_domains.clear();
+    prompt_context.mcp_server_info.clear();
+    prompt_context.platform_scopes.clear();
+    prompt_context.active_domain = None;
+    prompt_context.append_active_domain_addon = false;
 }

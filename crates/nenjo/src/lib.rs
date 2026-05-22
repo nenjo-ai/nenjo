@@ -31,7 +31,7 @@ pub mod types;
 
 // Re-export key types at the crate root.
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
-pub use agents::{ExecutionHandle, TurnEvent, TurnLoopConfig, TurnOutput};
+pub use agents::{ExecutionHandle, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnOutput};
 pub use config::AgentConfig;
 pub use input::{
     AgentRun, AgentRunKind, ChatInput, CronInput, ExecutionOptions, GateInput, HeartbeatInput,

@@ -1,4 +1,4 @@
-//! Real LLM integration tests for agent-to-agent delegation.
+//! Real LLM integration tests for native sub-agents.
 //!
 //! Requires `OPENROUTER_API_KEY` environment variable.
 //! Tests are skipped automatically if the key is not set.
@@ -89,11 +89,10 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
 // Tests
 // ===========================================================================
 
-/// An agent with delegate_to can delegate a task to another agent using a
-/// real LLM. The leader agent is told to delegate, and we verify the
-/// delegate_to tool was called and the response incorporates the delegate's work.
+/// A parent agent can spawn a normal agent manifest as a native sub-agent using
+/// the model-facing sub-agent tools.
 #[tokio::test]
-async fn delegate_to_real_llm() {
+async fn sub_agent_real_llm() {
     let api_key = match get_api_key() {
         Some(key) => key,
         None => {
@@ -107,10 +106,9 @@ async fn delegate_to_real_llm() {
     let leader = make_agent(
         "leader",
         model.id,
-        "You are a team leader. When you receive a task, you MUST delegate it \
-         to the 'specialist' agent using the delegate_to tool. Pass the task \
-         description to the specialist exactly as you received it. After \
-         receiving the delegate's response, summarize it briefly.",
+        "You are a team leader. When you receive a task, you MUST call \
+         spawn_sub_agents for the 'specialist' agent, then call wait to collect \
+         the result, then summarize it briefly.",
     );
 
     let specialist = make_agent(
@@ -136,7 +134,6 @@ async fn delegate_to_real_llm() {
         .await
         .unwrap();
 
-    // Verify delegate_to is available
     let runner = provider
         .agent_by_name("leader")
         .await
@@ -144,20 +141,13 @@ async fn delegate_to_real_llm() {
         .build()
         .await
         .unwrap();
-    let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(
-        tool_names.contains(&"delegate_to"),
-        "delegate_to should be injected. Tools: {tool_names:?}"
-    );
 
-    // Run the leader with a task that should trigger delegation
     let output = runner
         .chat("What is the capital of France?")
         .await
         .expect("chat should succeed");
 
-    println!("--- Delegation Test ---");
+    println!("--- Sub-Agent Test ---");
     println!("Response: {}", output.text);
     println!("Tool calls: {}", output.tool_calls);
     println!("Input tokens: {}", output.input_tokens);
@@ -166,7 +156,7 @@ async fn delegate_to_real_llm() {
     // The leader should have delegated (at least 1 tool call)
     assert!(
         output.tool_calls >= 1,
-        "leader should have called delegate_to, got {} tool calls",
+        "leader should have called sub-agent tools, got {} tool calls",
         output.tool_calls
     );
 
@@ -175,10 +165,10 @@ async fn delegate_to_real_llm() {
     assert!(!output.text.is_empty(), "response should not be empty");
 }
 
-/// Verify that delegate_to's parameters_schema includes available agent names
-/// so the LLM knows who it can delegate to.
+/// Verify the canonical runtime no longer exposes legacy delegate_to on the
+/// stored runner instance.
 #[tokio::test]
-async fn delegate_to_schema_includes_agent_names() {
+async fn delegate_to_is_not_model_facing() {
     let api_key = match get_api_key() {
         Some(key) => key,
         None => {
@@ -216,28 +206,5 @@ async fn delegate_to_schema_includes_agent_names() {
         .await
         .unwrap();
     let specs = runner.instance().tool_specs();
-    let delegate_spec = specs
-        .iter()
-        .find(|s| s.name == "delegate_to")
-        .expect("delegate_to should exist");
-
-    let agent_desc = delegate_spec.parameters["properties"]["agent_name"]["description"]
-        .as_str()
-        .unwrap_or("");
-
-    println!("--- Schema Test ---");
-    println!("agent_name description: {agent_desc}");
-
-    assert!(
-        agent_desc.contains("beta"),
-        "should list beta: {agent_desc}"
-    );
-    assert!(
-        agent_desc.contains("gamma"),
-        "should list gamma: {agent_desc}"
-    );
-    assert!(
-        !agent_desc.contains("alpha"),
-        "should NOT list self (alpha): {agent_desc}"
-    );
+    assert!(specs.iter().all(|spec| spec.name != "delegate_to"));
 }
