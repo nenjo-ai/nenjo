@@ -1,5 +1,5 @@
-use nenjo::Manifest;
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -179,14 +179,14 @@ where
                                 .as_ref()
                                 .map(|domain| domain.platform_scopes.clone())
                                 .unwrap_or_else(|| domain.platform_scopes.clone()),
-                            ability_ids: existing_manifest
+                            abilities: existing_manifest
                                 .as_ref()
-                                .map(|domain| domain.ability_ids.clone())
-                                .unwrap_or_else(|| domain.ability_ids.clone()),
-                            mcp_server_ids: existing_manifest
+                                .map(|domain| domain.abilities.clone())
+                                .unwrap_or_else(|| domain.abilities.clone()),
+                            mcp_servers: existing_manifest
                                 .as_ref()
-                                .map(|domain| domain.mcp_server_ids.clone())
-                                .unwrap_or_else(|| domain.mcp_server_ids.clone()),
+                                .map(|domain| domain.mcp_servers.clone())
+                                .unwrap_or(domain.mcp_servers),
                             prompt_config: prompt_config.clone(),
                         }
                     }
@@ -289,12 +289,19 @@ where
                 _ => metadata.filename.clone(),
             };
 
-            if let Err(error) = store.write_document_content(
-                metadata.pack_id.unwrap_or_else(Uuid::nil),
-                metadata.pack_slug.as_deref(),
-                &relative_path,
-                &content,
-            ) {
+            let pack = match metadata.pack_slug.as_deref().map(Slug::parse).transpose() {
+                Ok(Some(pack)) => pack,
+                Ok(None) => {
+                    warn!(%rt, %id, "Encrypted document payload received without pack slug metadata");
+                    return false;
+                }
+                Err(error) => {
+                    warn!(%rt, %id, error = %error, "Encrypted document payload contained invalid pack slug metadata");
+                    return false;
+                }
+            };
+
+            if let Err(error) = store.write_document_content(&pack, &relative_path, &content) {
                 warn!(%rt, %id, error = %error, "Failed to write inline decrypted document");
                 return false;
             }
@@ -385,7 +392,7 @@ mod tests {
             "model_id": null,
             "domains": [],
             "platform_scopes": [],
-            "mcp_server_ids": [],
+            "mcp_servers": [],
             "abilities": [],
             "prompt_locked": false,
             "heartbeat": null

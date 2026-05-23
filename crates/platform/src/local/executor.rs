@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::{
-    ManifestReader, ManifestResource, ManifestResourceKind, ManifestWriter,
+    ManifestReader, ManifestResource, ManifestResourceKind, ManifestWriter, Slug,
     manifest::{
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
         CouncilManifest, CouncilMemberManifest, DomainManifest, ModelManifest, ProjectManifest,
@@ -14,13 +14,13 @@ use nenjo::{
     },
 };
 use nenjo_knowledge::tools::{
-    KnowledgeDocReadResult, KnowledgeListArgs, KnowledgeNeighborArgs, KnowledgePackSummary,
-    KnowledgeReadArgs, KnowledgeRegistry, KnowledgeSearchArgs, KnowledgeTreeArgs, knowledge_filter,
-    knowledge_manifest_result, knowledge_search_result, parse_knowledge_enum,
+    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackSummary, KnowledgeReadArgs,
+    KnowledgeRegistry, KnowledgeSearchArgs, knowledge_document_metadata, knowledge_filter,
+    knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
 };
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 
-use crate::knowledge_backend::{is_default_library_pack_selector, unknown_pack};
+use crate::knowledge_backend::unknown_pack;
 use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
     AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
@@ -39,15 +39,15 @@ use crate::manifest_mcp::{
     DeleteResult, DomainDeleteParams, DomainDocument, DomainGetResult, DomainManifestBackend,
     DomainManifestDocument, DomainManifestGetParams, DomainManifestGetResult,
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeItemContentMutationResult,
-    KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams, KnowledgeItemDeleteParams,
-    KnowledgeItemMutationResult, KnowledgeManifestBackend, ModelDeleteParams, ModelDocument,
-    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocCreateParams,
+    KnowledgeDocDeleteParams, KnowledgeDocMutationResult, KnowledgeDocUpdateParams,
+    KnowledgeManifestBackend, ModelDeleteParams, ModelDocument, ModelGetResult,
+    ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
     ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
     ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
-    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
-    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
-    RoutinesGetParams, RoutinesListResult,
+    ProjectsGetParams, ProjectsListResult, ResourceRef, RoutineDeleteParams, RoutineDocument,
+    RoutineGetResult, RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult,
+    RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
 };
 use crate::prompt_merge::merge_prompt_config;
 use crate::{
@@ -56,7 +56,8 @@ use crate::{
 };
 
 fn graph_input_to_manifest_parts(
-    routine_id: uuid::Uuid,
+    _routine_id: uuid::Uuid,
+    routine: Slug,
     mut metadata: RoutineMetadata,
     graph: Option<RoutineGraphInput>,
 ) -> (
@@ -79,11 +80,7 @@ fn graph_input_to_manifest_parts(
         })
         .collect();
 
-    metadata.entry_step_ids = graph
-        .entry_step_ids
-        .iter()
-        .filter_map(|step_id| step_ids.get(step_id).copied())
-        .collect();
+    metadata.entry_steps = graph.entry_step_ids.iter().map(Slug::derive).collect();
 
     let steps = graph
         .steps
@@ -92,11 +89,12 @@ fn graph_input_to_manifest_parts(
             id: *step_ids
                 .get(&step.step_id)
                 .expect("step id mapping should exist"),
-            routine_id,
+            slug: Slug::derive(&step.step_id),
+            routine: routine.clone(),
             name: step.name,
             step_type: step.step_type,
-            council_id: step.council_id,
-            agent_id: step.agent_id,
+            council: step.council,
+            agent: step.agent,
             config: step.config,
             order_index: step.order_index,
         })
@@ -107,19 +105,102 @@ fn graph_input_to_manifest_parts(
         .into_iter()
         .map(|edge| RoutineEdgeManifest {
             id: uuid::Uuid::new_v4(),
-            routine_id,
-            source_step_id: *step_ids
-                .get(&edge.source_step_id)
-                .expect("edge source mapping should exist"),
-            target_step_id: *step_ids
-                .get(&edge.target_step_id)
-                .expect("edge target mapping should exist"),
+            routine: routine.clone(),
+            source_step: Slug::derive(&edge.source_step),
+            target_step: Slug::derive(&edge.target_step),
             condition: edge.condition,
             metadata: edge.metadata,
         })
         .collect();
 
     (steps, edges, metadata)
+}
+
+async fn local_routine_by_slug<R>(reader: &R, routine: &Slug) -> Result<RoutineManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_routines()
+        .await?
+        .into_iter()
+        .find(|item| Slug::derive(&item.name) == *routine)
+        .ok_or_else(|| anyhow!("routine not found: {routine}"))
+}
+
+async fn local_council_by_slug<R>(reader: &R, council: &Slug) -> Result<CouncilManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_councils()
+        .await?
+        .into_iter()
+        .find(|item| Slug::derive(&item.name) == *council)
+        .ok_or_else(|| anyhow!("council not found: {council}"))
+}
+
+async fn local_agent_by_slug<R>(reader: &R, agent: &Slug) -> Result<AgentManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_agents()
+        .await?
+        .into_iter()
+        .find(|item| Slug::derive(&item.name) == *agent)
+        .ok_or_else(|| anyhow!("agent not found: {agent}"))
+}
+
+async fn local_model_by_slug<R>(reader: &R, model: &Slug) -> Result<ModelManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_models()
+        .await?
+        .into_iter()
+        .find(|item| Slug::derive(&item.name) == *model)
+        .ok_or_else(|| anyhow!("model not found: {model}"))
+}
+
+async fn local_context_block_by_slug<R>(
+    reader: &R,
+    context_block: &Slug,
+) -> Result<ContextBlockManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_context_blocks()
+        .await?
+        .into_iter()
+        .find(|item| item.slug() == *context_block)
+        .ok_or_else(|| anyhow!("context block not found: {context_block}"))
+}
+
+async fn local_domain_by_slug<R>(reader: &R, domain: &Slug) -> Result<DomainManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_domains()
+        .await?
+        .into_iter()
+        .find(|item| item.slug() == *domain)
+        .ok_or_else(|| anyhow!("domain not found: {domain}"))
+}
+
+async fn local_project_by_slug<R>(reader: &R, project: &Slug) -> Result<ProjectManifest>
+where
+    R: ManifestReader + Send + Sync,
+{
+    reader
+        .list_projects()
+        .await?
+        .into_iter()
+        .find(|item| item.slug == *project)
+        .ok_or_else(|| anyhow!("project not found: {project}"))
 }
 
 /// Manifest MCP backend that reads and writes directly against a local manifest store.
@@ -132,6 +213,29 @@ impl<R, W> LocalManifestMcpBackend<R, W> {
     /// Create a backend from separate manifest reader and writer implementations.
     pub fn new(reader: Arc<R>, writer: Arc<W>) -> Self {
         Self { reader, writer }
+    }
+}
+
+impl<R, W> LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn resolve_ability(&self, ability_ref: &ResourceRef) -> Result<AbilityManifest> {
+        match ability_ref {
+            ResourceRef::Id(id) => self
+                .reader
+                .get_ability(*id)
+                .await?
+                .ok_or_else(|| anyhow!("ability not found: {}", ability_ref)),
+            ResourceRef::Slug(name) => self
+                .reader
+                .list_abilities()
+                .await?
+                .into_iter()
+                .find(|ability| ability.name == *name)
+                .ok_or_else(|| anyhow!("ability not found: {}", ability_ref)),
+        }
     }
 }
 
@@ -160,37 +264,6 @@ where
         serde_json::to_value(KnowledgeRegistry::list_packs(self).await?).map_err(Into::into)
     }
 
-    async fn list_knowledge_docs(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeListArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.list_docs(filter)
-                .into_iter()
-                .map(|doc| knowledge_manifest_result(&args.pack, doc))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn read_knowledge_doc_manifest(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: KnowledgeReadArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let manifest = pack.read_manifest(&args.path).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(knowledge_manifest_result(&args.pack, manifest)).map_err(Into::into)
-    }
-
     async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
         let args: KnowledgeReadArgs =
             serde_json::from_value(params).map_err(anyhow::Error::from)?;
@@ -203,7 +276,7 @@ where
             )
         })?;
         serde_json::to_value(KnowledgeDocReadResult {
-            manifest: knowledge_manifest_result(&args.pack, &doc.manifest),
+            document: knowledge_document_metadata(&doc.manifest),
             content: doc.content,
         })
         .map_err(Into::into)
@@ -215,33 +288,12 @@ where
         let pack = local_knowledge_pack(&args.pack)?;
         let filter = knowledge_filter(args.filter)?;
         serde_json::to_value(
-            pack.search_docs(&args.query, filter)
+            pack.search(&args.query, filter)
                 .into_iter()
-                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .map(knowledge_search_result)
                 .collect::<Vec<_>>(),
         )
         .map_err(Into::into)
-    }
-
-    async fn search_knowledge_paths(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeSearchArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.search_paths(&args.query, filter)
-                .into_iter()
-                .map(|hit| knowledge_search_result(&args.pack, hit))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn list_knowledge_tree(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeTreeArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        serde_json::to_value(pack.list_tree(args.prefix.as_deref())).map_err(Into::into)
     }
 
     async fn list_knowledge_neighbors(
@@ -252,18 +304,19 @@ where
             serde_json::from_value(params).map_err(anyhow::Error::from)?;
         let pack = local_knowledge_pack(&args.pack)?;
         let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        serde_json::to_value(pack.neighbors(&args.path, edge_type)).map_err(Into::into)
+        let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(knowledge_neighbors_result(neighbors)).map_err(Into::into)
     }
 }
 
 fn local_knowledge_pack(selector: &str) -> Result<crate::knowledge_backend::ResolvedKnowledgePack> {
-    if is_default_library_pack_selector(selector) {
-        Err(anyhow::anyhow!(
-            "knowledge pack 'lib' requires a default library pack; use lib:<slug> in the worker harness"
-        ))
-    } else {
-        Err(unknown_pack(selector))
-    }
+    Err(unknown_pack(selector))
 }
 
 #[async_trait]
@@ -284,22 +337,14 @@ where
     }
 
     async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
-        let agent = self
-            .reader
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found: {}", params.id))?;
+        let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         Ok(AgentGetResult {
             agent: AgentDocument::from(agent),
         })
     }
 
     async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult> {
-        let agent = self
-            .reader
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found: {}", params.id))?;
+        let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         Ok(AgentPromptGetResult {
             agent: agent.into(),
         })
@@ -312,11 +357,11 @@ where
             description: params.data.description,
             prompt_config: PromptConfig::default(),
             color: params.data.color,
-            model_id: params.data.model_id,
-            domain_ids: Vec::new(),
+            model: params.data.model,
+            domains: Vec::new(),
             platform_scopes: Vec::new(),
-            mcp_server_ids: Vec::new(),
-            ability_ids: Vec::new(),
+            mcp_servers: Vec::new(),
+            abilities: Vec::new(),
             prompt_locked: false,
             heartbeat: None,
         };
@@ -329,11 +374,7 @@ where
     }
 
     async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
-        let existing = self
-            .reader
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found: {}", params.id))?;
+        let existing = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         let mut agent: AgentManifest = existing.clone();
         if let Some(name) = params.data.name {
             agent.name = name;
@@ -344,8 +385,8 @@ where
         if let Some(color) = params.data.color {
             agent.color = color;
         }
-        if let Some(model_id) = params.data.model_id {
-            agent.model_id = model_id;
+        if let Some(model) = params.data.model {
+            agent.model = model;
         }
         let resource = ManifestResource::Agent(agent.clone());
         self.writer.upsert_resource(&resource).await?;
@@ -358,13 +399,9 @@ where
         &self,
         params: AgentPromptUpdateParams,
     ) -> Result<AgentPromptMutationResult> {
-        let mut agent = self
-            .reader
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found: {}", params.id))?;
+        let mut agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         if agent.prompt_locked {
-            return Err(anyhow!("agent prompt is locked: {}", params.id));
+            return Err(anyhow!("agent prompt is locked: {}", params.agent));
         }
         if let Some(prompt_patch) = params.prompt_config {
             agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
@@ -377,12 +414,13 @@ where
     }
 
     async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
+        let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Agent, params.id)
+            .delete_resource(ManifestResourceKind::Agent, agent.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: agent.id,
         })
     }
 }
@@ -405,11 +443,7 @@ where
     }
 
     async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
-        let ability = self
-            .reader
-            .get_ability(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("ability not found: {}", params.id))?;
+        let ability = self.resolve_ability(&params.ability).await?;
         Ok(AbilityGetResult {
             ability: AbilityDocument::from(ability),
         })
@@ -419,11 +453,7 @@ where
         &self,
         params: AbilityPromptGetParams,
     ) -> Result<AbilityPromptGetResult> {
-        let ability = self
-            .reader
-            .get_ability(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("ability not found: {}", params.id))?;
+        let ability = self.resolve_ability(&params.ability).await?;
         Ok(AbilityPromptGetResult {
             ability: AbilityPromptDocument::from(ability),
         })
@@ -433,14 +463,16 @@ where
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
-            tool_name: params.data.tool_name,
-            path: params.data.path,
-            display_name: params.data.display_name,
+            path: if params.data.path.is_empty() {
+                None
+            } else {
+                Some(params.data.path)
+            },
             description: params.data.description,
             activation_condition: params.data.activation_condition,
             prompt_config: params.data.prompt_config,
             platform_scopes: Vec::new(),
-            mcp_server_ids: params.data.mcp_server_ids.unwrap_or_default(),
+            mcp_servers: params.data.mcp_servers.unwrap_or_default(),
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -459,17 +491,10 @@ where
                 "ability update requires at least one field in data"
             ));
         }
-        let existing = self
-            .reader
-            .get_ability(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("ability not found: {}", params.id))?;
+        let existing = self.resolve_ability(&params.ability).await?;
         let mut ability = existing.clone();
-        if let Some(display_name) = params.data.display_name {
-            ability.display_name = display_name;
-        }
-        if let Some(tool_name) = params.data.tool_name {
-            ability.tool_name = tool_name;
+        if let Some(name) = params.data.name {
+            ability.name = name;
         }
         if let Some(description) = params.data.description {
             ability.description = description;
@@ -477,8 +502,8 @@ where
         if let Some(activation_condition) = params.data.activation_condition {
             ability.activation_condition = activation_condition;
         }
-        if let Some(mcp_server_ids) = params.data.mcp_server_ids {
-            ability.mcp_server_ids = mcp_server_ids;
+        if let Some(mcp_servers) = params.data.mcp_servers {
+            ability.mcp_servers = mcp_servers;
         }
         self.writer
             .upsert_resource(&ManifestResource::Ability(ability.clone()))
@@ -492,11 +517,7 @@ where
         &self,
         params: AbilityPromptUpdateParams,
     ) -> Result<AbilityPromptMutationResult> {
-        let mut ability = self
-            .reader
-            .get_ability(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("ability not found: {}", params.id))?;
+        let mut ability = self.resolve_ability(&params.ability).await?;
         ability.prompt_config = params.prompt_config;
         let prompt_config = ability.prompt_config.clone();
         self.writer
@@ -506,12 +527,13 @@ where
     }
 
     async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
+        let ability = self.resolve_ability(&params.ability).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Ability, params.id)
+            .delete_resource(ManifestResourceKind::Ability, ability.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: ability.id,
         })
     }
 }
@@ -534,11 +556,7 @@ where
     }
 
     async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
-        let domain = self
-            .reader
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found: {}", params.id))?;
+        let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         Ok(DomainGetResult {
             domain: DomainDocument::from(domain),
         })
@@ -548,11 +566,7 @@ where
         &self,
         params: DomainManifestGetParams,
     ) -> Result<DomainManifestGetResult> {
-        let domain = self
-            .reader
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found: {}", params.id))?;
+        let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         Ok(DomainManifestGetResult {
             domain: DomainManifestDocument::from(domain),
         })
@@ -567,8 +581,8 @@ where
             description: params.data.description,
             command: params.data.command,
             platform_scopes: Vec::new(),
-            ability_ids: params.data.ability_ids.unwrap_or_default(),
-            mcp_server_ids: params.data.mcp_server_ids.unwrap_or_default(),
+            abilities: params.data.abilities.unwrap_or_default(),
+            mcp_servers: params.data.mcp_servers.unwrap_or_default(),
             prompt_config: params.data.prompt_config.unwrap_or_default(),
         };
         self.writer
@@ -580,11 +594,7 @@ where
     }
 
     async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
-        let existing = self
-            .reader
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found: {}", params.id))?;
+        let existing = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         if params.data.is_empty() {
             return Err(anyhow!("domain update requires at least one field"));
         }
@@ -601,11 +611,11 @@ where
         if let Some(command) = params.data.command {
             domain.command = command;
         }
-        if let Some(ability_ids) = params.data.ability_ids {
-            domain.ability_ids = ability_ids;
+        if let Some(abilities) = params.data.abilities {
+            domain.abilities = abilities;
         }
-        if let Some(mcp_server_ids) = params.data.mcp_server_ids {
-            domain.mcp_server_ids = mcp_server_ids;
+        if let Some(mcp_servers) = params.data.mcp_servers {
+            domain.mcp_servers = mcp_servers;
         }
         self.writer
             .upsert_resource(&ManifestResource::Domain(domain.clone()))
@@ -619,11 +629,7 @@ where
         &self,
         params: DomainManifestUpdateParams,
     ) -> Result<DomainManifestMutationResult> {
-        let mut domain = self
-            .reader
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found: {}", params.id))?;
+        let mut domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         domain.prompt_config = params.prompt_config;
         let prompt_config = domain.prompt_config.clone();
         self.writer
@@ -633,12 +639,13 @@ where
     }
 
     async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
+        let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Domain, params.id)
+            .delete_resource(ManifestResourceKind::Domain, domain.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: domain.id,
         })
     }
 }
@@ -661,11 +668,7 @@ where
     }
 
     async fn get_project(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
-        let project = self
-            .reader
-            .get_project(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("project not found: {}", params.id))?;
+        let project = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         Ok(ProjectGetResult {
             project: ProjectDocument::from(project),
         })
@@ -680,8 +683,8 @@ where
         }
         let project = ProjectManifest {
             id: uuid::Uuid::new_v4(),
-            name: params.data.name,
-            slug: String::new(),
+            name: params.data.name.clone(),
+            slug: params.data.slug,
             description: params.data.description,
             settings,
         };
@@ -694,14 +697,13 @@ where
     }
 
     async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
-        let existing = self
-            .reader
-            .get_project(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("project not found: {}", params.id))?;
+        let existing = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         let mut project = existing.clone();
         if let Some(name) = params.data.name {
             project.name = name;
+        }
+        if let Some(slug) = params.data.slug {
+            project.slug = slug;
         }
         if let Some(description) = params.data.description {
             project.description = description;
@@ -731,37 +733,35 @@ where
     }
 
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
+        let project = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Project, params.id)
+            .delete_resource(ManifestResourceKind::Project, project.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: project.id,
         })
     }
 
-    async fn create_knowledge_item(
+    async fn create_knowledge_doc(
         &self,
-        _params: KnowledgeItemCreateParams,
-    ) -> Result<KnowledgeItemMutationResult> {
-        bail!("library knowledge item tools require the platform backend")
+        _params: KnowledgeDocCreateParams,
+    ) -> Result<KnowledgeDocMutationResult> {
+        bail!("library knowledge document tools require the platform backend")
     }
 
-    async fn update_knowledge_item_content(
+    async fn update_knowledge_doc(
         &self,
-        _params: KnowledgeItemContentUpdateParams,
-    ) -> Result<KnowledgeItemContentMutationResult> {
-        bail!("library knowledge item tools require the platform backend")
+        _params: KnowledgeDocUpdateParams,
+    ) -> Result<KnowledgeDocMutationResult> {
+        bail!("library knowledge document tools require the platform backend")
     }
 
-    async fn delete_knowledge_item(
+    async fn delete_knowledge_doc(
         &self,
-        params: KnowledgeItemDeleteParams,
+        _params: KnowledgeDocDeleteParams,
     ) -> Result<DeleteResult> {
-        Ok(DeleteResult {
-            deleted: false,
-            id: params.item_id,
-        })
+        bail!("library knowledge document tools require the platform backend")
     }
 }
 
@@ -784,11 +784,7 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = self
-            .reader
-            .get_routine(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("routine not found: {}", params.id))?;
+        let routine = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
         Ok(RoutineGetResult {
             routine: RoutineDocument::from(routine),
         })
@@ -796,8 +792,10 @@ where
 
     async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
         let routine_id = uuid::Uuid::new_v4();
+        let routine_slug = Slug::derive(&params.data.name);
         let (steps, edges, metadata) = graph_input_to_manifest_parts(
             routine_id,
+            routine_slug.clone(),
             params.data.metadata.unwrap_or_default(),
             params.data.graph,
         );
@@ -824,11 +822,7 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let existing = self
-            .reader
-            .get_routine(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("routine not found: {}", params.id))?;
+        let existing = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
         let mut routine = existing.clone();
         if let Some(name) = params.data.name {
             routine.name = name;
@@ -843,8 +837,12 @@ where
             routine.metadata = metadata;
         }
         if let Some(graph) = params.data.graph {
-            let (steps, edges, metadata) =
-                graph_input_to_manifest_parts(routine.id, routine.metadata.clone(), Some(graph));
+            let (steps, edges, metadata) = graph_input_to_manifest_parts(
+                routine.id,
+                Slug::derive(&routine.name),
+                routine.metadata.clone(),
+                Some(graph),
+            );
             routine.steps = steps;
             routine.edges = edges;
             routine.metadata = metadata;
@@ -858,12 +856,13 @@ where
     }
 
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
+        let routine = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Routine, params.id)
+            .delete_resource(ManifestResourceKind::Routine, routine.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: routine.id,
         })
     }
 }
@@ -887,11 +886,7 @@ where
     }
 
     async fn get_model(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
-        let model = self
-            .reader
-            .get_model(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("model not found: {}", params.id))?;
+        let model = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         Ok(ModelGetResult {
             model: ModelDocument::from(model),
         })
@@ -919,11 +914,7 @@ where
     }
 
     async fn update_model(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
-        let existing = self
-            .reader
-            .get_model(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("model not found: {}", params.id))?;
+        let existing = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         let mut model = existing.clone();
         if let Some(name) = params.data.name {
             model.name = name;
@@ -931,8 +922,8 @@ where
         if let Some(description) = params.data.description {
             model.description = description;
         }
-        if let Some(model_name) = params.data.model {
-            model.model = model_name;
+        if let Some(model_ref) = params.data.model {
+            model.model = model_ref;
         }
         if let Some(model_provider) = params.data.model_provider {
             model.model_provider = model_provider;
@@ -952,12 +943,13 @@ where
     }
 
     async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
+        let model = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Model, params.id)
+            .delete_resource(ManifestResourceKind::Model, model.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: model.id,
         })
     }
 }
@@ -981,11 +973,7 @@ where
     }
 
     async fn get_council(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
-        let council = self
-            .reader
-            .get_council(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found: {}", params.id))?;
+        let council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         Ok(CouncilGetResult {
             council: CouncilDocument::from(council),
         })
@@ -999,14 +987,13 @@ where
                 .data
                 .delegation_strategy
                 .unwrap_or(CouncilDelegationStrategy::Decompose),
-            leader_agent_id: params.data.leader_agent_id,
+            leader_agent: params.data.leader_agent,
             members: params
                 .data
                 .members
                 .into_iter()
                 .map(|member| CouncilMemberManifest {
-                    agent_id: member.agent_id,
-                    agent_name: String::new(),
+                    agent: member.agent,
                     priority: member.priority,
                 })
                 .collect(),
@@ -1020,11 +1007,7 @@ where
     }
 
     async fn update_council(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
-        let existing = self
-            .reader
-            .get_council(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found: {}", params.id))?;
+        let existing = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         let mut council = existing.clone();
         if let Some(name) = params.data.name {
             council.name = name;
@@ -1044,21 +1027,16 @@ where
         &self,
         params: CouncilAddMemberParams,
     ) -> Result<CouncilMutationResult> {
-        let mut council = self
-            .reader
-            .get_council(params.council_id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found: {}", params.council_id))?;
+        let mut council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         if council
             .members
             .iter()
-            .any(|member| member.agent_id == params.data.agent_id)
+            .any(|member| member.agent == params.data.agent)
         {
-            bail!("council member already exists: {}", params.data.agent_id);
+            bail!("council member already exists: {}", params.data.agent);
         }
         council.members.push(CouncilMemberManifest {
-            agent_id: params.data.agent_id,
-            agent_name: String::new(),
+            agent: params.data.agent,
             priority: params.data.priority,
         });
         self.writer
@@ -1076,16 +1054,12 @@ where
         if params.data.is_empty() {
             bail!("council member update requires at least one field");
         }
-        let mut council = self
-            .reader
-            .get_council(params.council_id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found: {}", params.council_id))?;
+        let mut council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         let member = council
             .members
             .iter_mut()
-            .find(|member| member.agent_id == params.agent_id)
-            .ok_or_else(|| anyhow!("council member not found: {}", params.agent_id))?;
+            .find(|member| member.agent == params.agent)
+            .ok_or_else(|| anyhow!("council member not found: {}", params.agent))?;
         if let Some(priority) = params.data.priority {
             member.priority = priority;
         }
@@ -1101,17 +1075,13 @@ where
         &self,
         params: CouncilRemoveMemberParams,
     ) -> Result<CouncilMutationResult> {
-        let mut council = self
-            .reader
-            .get_council(params.council_id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found: {}", params.council_id))?;
+        let mut council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         let original_len = council.members.len();
         council
             .members
-            .retain(|member| member.agent_id != params.agent_id);
+            .retain(|member| member.agent != params.agent);
         if council.members.len() == original_len {
-            bail!("council member not found: {}", params.agent_id);
+            bail!("council member not found: {}", params.agent);
         }
         self.writer
             .upsert_resource(&ManifestResource::Council(council.clone()))
@@ -1122,12 +1092,13 @@ where
     }
 
     async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
+        let council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Council, params.id)
+            .delete_resource(ManifestResourceKind::Council, council.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: council.id,
         })
     }
 }
@@ -1154,11 +1125,8 @@ where
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult> {
-        let context_block = self
-            .reader
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found: {}", params.id))?;
+        let context_block =
+            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         Ok(ContextBlockGetResult {
             context_block: ContextBlockDocument::from(context_block),
         })
@@ -1168,11 +1136,8 @@ where
         &self,
         params: ContextBlockContentGetParams,
     ) -> Result<ContextBlockContentGetResult> {
-        let context_block = self
-            .reader
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found: {}", params.id))?;
+        let context_block =
+            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         Ok(ContextBlockContentGetResult {
             context_block: ContextBlockContentDocument::from(context_block),
         })
@@ -1202,11 +1167,8 @@ where
         &self,
         params: ContextBlockUpdateParams,
     ) -> Result<ContextBlockMutationResult> {
-        let existing = self
-            .reader
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found: {}", params.id))?;
+        let existing =
+            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         let mut context_block = existing.clone();
         if let Some(name) = params.data.name {
             context_block.name = name;
@@ -1229,11 +1191,8 @@ where
         &self,
         params: ContextBlockContentUpdateParams,
     ) -> Result<ContextBlockContentMutationResult> {
-        let mut context_block = self
-            .reader
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found: {}", params.id))?;
+        let mut context_block =
+            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         if let Some(template) = params.template {
             context_block.template = template;
         }
@@ -1245,12 +1204,14 @@ where
     }
 
     async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult> {
+        let context_block =
+            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::ContextBlock, params.id)
+            .delete_resource(ManifestResourceKind::ContextBlock, context_block.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: context_block.id,
         })
     }
 }
@@ -1335,11 +1296,11 @@ mod tests {
                 ..Default::default()
             },
             color: Some("#123456".into()),
-            model_id: Some(model.id),
-            domain_ids: vec![],
+            model: Some(Slug::derive(&model.name)),
+            domains: vec![],
             platform_scopes: vec!["agents:read".into()],
-            mcp_server_ids: vec![],
-            ability_ids: vec![],
+            mcp_servers: vec![],
+            abilities: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -1347,16 +1308,14 @@ mod tests {
         let ability = AbilityManifest {
             id: Uuid::new_v4(),
             name: "review_helper".into(),
-            tool_name: "review_helper".into(),
-            path: "team/core".into(),
-            display_name: Some("Review Helper".into()),
+            path: Some("team/core".into()),
             description: Some("Helps review code".into()),
             activation_condition: "when reviewing".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "Review the proposed change".into(),
             },
             platform_scopes: vec!["projects:read".into()],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1370,8 +1329,8 @@ mod tests {
             description: Some("Creates new resources".into()),
             command: "#creator".into(),
             platform_scopes: vec![],
-            ability_ids: vec![],
-            mcp_server_ids: vec![],
+            abilities: vec![],
+            mcp_servers: vec![],
             prompt_config: DomainPromptConfig {
                 developer_prompt_addon: Some("Creator mode".into()),
             },
@@ -1380,7 +1339,7 @@ mod tests {
         let project = ProjectManifest {
             id: Uuid::new_v4(),
             name: "workspace".into(),
-            slug: "workspace".into(),
+            slug: Slug::derive("workspace"),
             description: Some("Main working project".into()),
             settings: serde_json::json!({
                 "repo_url": "https://example.com/repo.git"
@@ -1396,23 +1355,24 @@ mod tests {
             trigger: RoutineTrigger::Cron,
             metadata: nenjo::manifest::RoutineMetadata {
                 schedule: Some("0 0 * * *".into()),
-                entry_step_ids: vec![step_id],
+                entry_steps: vec![Slug::derive("compile")],
             },
             steps: vec![RoutineStepManifest {
                 id: step_id,
-                routine_id,
+                slug: Slug::derive("compile"),
+                routine: Slug::derive("nightly-build"),
                 name: "compile".into(),
                 step_type: nenjo::manifest::RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(agent.id),
+                council: None,
+                agent: Some(Slug::derive(&agent.name)),
                 config: serde_json::json!({}),
                 order_index: 0,
             }],
             edges: vec![RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: step_id,
-                target_step_id: step_id,
+                routine: Slug::derive("nightly-build"),
+                source_step: Slug::derive("compile"),
+                target_step: Slug::derive("compile"),
                 condition: nenjo::manifest::RoutineEdgeCondition::Always,
                 metadata: serde_json::json!({}),
             }],
@@ -1422,10 +1382,9 @@ mod tests {
             id: Uuid::new_v4(),
             name: "triage".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
-            leader_agent_id: agent.id,
+            leader_agent: Slug::derive(&agent.name),
             members: vec![CouncilMemberManifest {
-                agent_id: Uuid::new_v4(),
-                agent_name: "worker".into(),
+                agent: Slug::derive("worker"),
                 priority: 10,
             }],
         };
@@ -1509,7 +1468,9 @@ mod tests {
         assert!(list_value["agents"][0].get("prompt_config").is_none());
 
         let result = backend
-            .get_agent(AgentsGetParams { id: agent.id })
+            .get_agent(AgentsGetParams {
+                agent: Slug::derive(&agent.name),
+            })
             .await
             .unwrap();
         let value = serde_json::to_value(result).unwrap();
@@ -1530,7 +1491,7 @@ mod tests {
         } = sample_manifest();
         manifest.agents[0].heartbeat = Some(nenjo::manifest::AgentHeartbeatManifest {
             id: Uuid::new_v4(),
-            agent_id: agent.id,
+            agent: Slug::derive(&agent.name),
             interval: "5m".into(),
             is_active: true,
             last_run_at: None,
@@ -1541,7 +1502,9 @@ mod tests {
         let backend = LocalManifestMcpBackend::new(store.clone(), store);
 
         let result = backend
-            .get_agent(AgentsGetParams { id: agent.id })
+            .get_agent(AgentsGetParams {
+                agent: Slug::derive(&agent.name),
+            })
             .await
             .unwrap();
 
@@ -1560,7 +1523,9 @@ mod tests {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .get_agent_prompt(AgentPromptGetParams { id: agent.id })
+            .get_agent_prompt(AgentPromptGetParams {
+                agent: Slug::derive(&agent.name),
+            })
             .await
             .unwrap();
 
@@ -1577,12 +1542,12 @@ mod tests {
 
         let result = backend
             .update_agent(AgentUpdateParams {
-                id: agent.id,
+                agent: Slug::derive(&agent.name),
                 data: crate::AgentUpdateDocument {
                     name: Some("reviewer".into()),
                     description: None,
                     color: None,
-                    model_id: None,
+                    model: None,
                 },
             })
             .await
@@ -1600,12 +1565,12 @@ mod tests {
 
         let result = backend
             .update_agent(AgentUpdateParams {
-                id: agent.id,
+                agent: Slug::derive(&agent.name),
                 data: crate::AgentUpdateDocument {
                     name: None,
                     description: Some(None),
                     color: Some(None),
-                    model_id: Some(None),
+                    model: Some(None),
                 },
             })
             .await
@@ -1614,7 +1579,7 @@ mod tests {
         assert_eq!(result.agent.summary.name, "coder");
         assert_eq!(result.agent.summary.description, None);
         assert_eq!(result.agent.summary.color, None);
-        assert_eq!(result.agent.summary.model_id, None);
+        assert_eq!(result.agent.summary.model, None);
     }
 
     #[tokio::test]
@@ -1623,7 +1588,7 @@ mod tests {
 
         let result = backend
             .update_agent_prompt(AgentPromptUpdateParams {
-                id: agent.id,
+                agent: Slug::derive(&agent.name),
                 prompt_config: Some(serde_json::json!({
                     "developer_prompt": "Prefer minimal diffs.",
                     "templates": {
@@ -1668,7 +1633,7 @@ mod tests {
 
         let error = backend
             .update_agent_prompt(AgentPromptUpdateParams {
-                id: agent.id,
+                agent: Slug::derive(&agent.name),
                 prompt_config: Some(serde_json::json!({
                     "developer_prompt": "This should fail."
                 })),
@@ -1687,7 +1652,7 @@ mod tests {
             &backend,
             "update_agent",
             serde_json::json!({
-                "id": agent.id,
+                "agent": Slug::derive(&agent.name),
                 "name": "planner"
             }),
         )
@@ -1700,7 +1665,7 @@ mod tests {
             &backend,
             "update_agent_prompt",
             serde_json::json!({
-                "id": agent.id,
+                "agent": "planner",
                 "prompt_config": {
                     "templates": {
                         "chat": "Planner chat"
@@ -1748,7 +1713,7 @@ mod tests {
             &backend,
             "update_agent",
             serde_json::json!({
-                "id": agent.id,
+                "agent": Slug::derive(&agent.name),
                 "name": "writer",
                 "platform_scopes": ["agents:write"]
             }),
@@ -1774,7 +1739,9 @@ mod tests {
         assert_eq!(list.abilities[0].id, ability.id);
 
         let get = backend
-            .get_ability(AbilitiesGetParams { id: ability.id })
+            .get_ability(AbilitiesGetParams {
+                ability: ResourceRef::Id(ability.id),
+            })
             .await
             .unwrap();
         assert_eq!(get.ability.summary.name, "review_helper");
@@ -1788,7 +1755,9 @@ mod tests {
         } = backend().await;
 
         let get = backend
-            .get_ability_prompt(AbilityPromptGetParams { id: ability.id })
+            .get_ability_prompt(AbilityPromptGetParams {
+                ability: ResourceRef::Id(ability.id),
+            })
             .await
             .unwrap();
         assert_eq!(get.ability.ability.summary.name, "review_helper");
@@ -1806,23 +1775,23 @@ mod tests {
 
         let result = backend
             .update_ability(AbilityUpdateParams {
-                id: ability.id,
+                ability: ResourceRef::Id(ability.id),
                 data: crate::AbilityUpdateDocument {
-                    tool_name: None,
-                    display_name: Some(Some("Reviewer".into())),
+                    name: None,
                     description: None,
-                    activation_condition: None,
-                    mcp_server_ids: None,
+                    activation_condition: Some("when reviewing code".into()),
+                    mcp_servers: None,
                 },
             })
             .await
             .unwrap();
 
-        assert_eq!(result.ability.summary.display_name, Some("Reviewer".into()));
+        assert_eq!(result.ability.summary.name, "review_helper");
         assert_eq!(
             result.ability.summary.description,
             Some("Helps review code".into())
         );
+        assert_eq!(result.ability.activation_condition, "when reviewing code");
         assert_eq!(result.ability.platform_scopes, vec!["projects:read"]);
     }
 
@@ -1836,7 +1805,7 @@ mod tests {
             &backend,
             "update_ability",
             serde_json::json!({
-                "id": ability.id,
+                "ability": ability.id,
                 "description": "Updated",
                 "platform_scopes": ["projects:write"]
             }),
@@ -1862,7 +1831,7 @@ mod tests {
 
         let result = backend
             .update_ability_prompt(AbilityPromptUpdateParams {
-                id: ability.id,
+                ability: ResourceRef::Id(ability.id),
                 prompt_config: AbilityPromptConfig {
                     developer_prompt: "New review prompt".into(),
                 },
@@ -1884,7 +1853,9 @@ mod tests {
         assert_eq!(list.domains[0].id, domain.id);
 
         let get = backend
-            .get_domain(DomainsGetParams { id: domain.id })
+            .get_domain(DomainsGetParams {
+                domain: domain.slug(),
+            })
             .await
             .unwrap();
         assert_eq!(get.domain.summary.name, "creator");
@@ -1898,7 +1869,9 @@ mod tests {
         } = backend().await;
 
         let get = backend
-            .get_domain_prompt(DomainManifestGetParams { id: domain.id })
+            .get_domain_prompt(DomainManifestGetParams {
+                domain: domain.slug(),
+            })
             .await
             .unwrap();
         assert_eq!(get.domain.domain.summary.name, "creator");
@@ -1916,21 +1889,21 @@ mod tests {
 
         let result = backend
             .update_domain(DomainUpdateParams {
-                id: domain.id,
+                domain: domain.slug(),
                 data: crate::DomainUpdateDocument {
                     name: None,
-                    display_name: Some("Builder".into()),
+                    display_name: None,
                     description: Some(None),
                     command: None,
-                    ability_ids: None,
-                    mcp_server_ids: None,
+                    abilities: None,
+                    mcp_servers: None,
                 },
             })
             .await
             .unwrap();
 
         assert_eq!(result.domain.summary.name, "creator");
-        assert_eq!(result.domain.summary.display_name, "Builder");
+        assert_eq!(result.domain.summary.display_name, "Creator");
         assert_eq!(result.domain.summary.description, None);
         assert_eq!(result.domain.platform_scopes, domain.platform_scopes);
     }
@@ -1945,7 +1918,7 @@ mod tests {
             &backend,
             "update_domain",
             serde_json::json!({
-                "id": domain.id,
+                "domain": domain.slug(),
                 "display_name": "Builder",
                 "platform_scopes": ["agents:write"]
             }),
@@ -1968,7 +1941,7 @@ mod tests {
 
         let result = backend
             .update_domain_prompt(DomainManifestUpdateParams {
-                id: domain.id,
+                domain: domain.slug(),
                 prompt_config: DomainPromptConfig {
                     developer_prompt_addon: Some("Builder mode".into()),
                 },
@@ -1995,7 +1968,7 @@ mod tests {
             &backend,
             "update_ability",
             serde_json::json!({
-                "id": ability.id,
+                "ability": ability.id,
                 "description": "Improved review helper"
             }),
         )
@@ -2010,7 +1983,7 @@ mod tests {
             &backend,
             "update_ability_prompt",
             serde_json::json!({
-                "id": ability.id,
+                "ability": ability.id,
                 "prompt_config": {
                     "developer_prompt": "Upgraded prompt"
                 }
@@ -2027,7 +2000,7 @@ mod tests {
             &backend,
             "update_domain",
             serde_json::json!({
-                "id": domain.id,
+                "domain": domain.slug(),
                 "description": "Updated creator domain"
             }),
         )
@@ -2042,7 +2015,7 @@ mod tests {
             &backend,
             "update_domain_prompt",
             serde_json::json!({
-                "id": domain.id,
+                "domain": domain.slug(),
                 "prompt_config": {
                     "developer_prompt_addon": "Build mode"
                 }
@@ -2069,11 +2042,13 @@ mod tests {
         assert!(list_value["projects"][0].get("settings").is_none());
 
         let get = backend
-            .get_project(ProjectsGetParams { id: project.id })
+            .get_project(ProjectsGetParams {
+                project: project.slug.clone(),
+            })
             .await
             .unwrap();
         assert_eq!(get.project.summary.name, "workspace");
-        assert_eq!(get.project.summary.slug, "workspace");
+        assert_eq!(get.project.summary.slug.as_str(), "workspace");
     }
 
     #[tokio::test]
@@ -2084,9 +2059,10 @@ mod tests {
 
         let result = backend
             .update_project(ProjectUpdateParams {
-                id: project.id,
+                project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: Some("workspace-v2".into()),
+                    slug: None,
                     description: None,
                     repo_url: None,
                 },
@@ -2113,9 +2089,10 @@ mod tests {
 
         let result = backend
             .update_project(ProjectUpdateParams {
-                id: project.id,
+                project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: None,
+                    slug: None,
                     description: Some(None),
                     repo_url: None,
                 },
@@ -2137,7 +2114,7 @@ mod tests {
             &backend,
             "update_project",
             serde_json::json!({
-                "id": project.id,
+                "project": project.slug,
                 "repo_url": "https://example.com/next.git"
             }),
         )
@@ -2165,7 +2142,9 @@ mod tests {
         assert!(list_value["routines"][0].get("edges").is_none());
 
         let get = backend
-            .get_routine(RoutinesGetParams { id: routine.id })
+            .get_routine(RoutinesGetParams {
+                routine: Slug::derive(&routine.name),
+            })
             .await
             .unwrap();
         assert_eq!(get.routine.summary.name, "nightly-build");
@@ -2181,7 +2160,7 @@ mod tests {
 
         let result = backend
             .update_routine(RoutineUpdateParams {
-                id: routine.id,
+                routine: Slug::derive(&routine.name),
                 data: crate::RoutineUpdateDocument {
                     name: Some("nightly-release".into()),
                     description: None,
@@ -2204,8 +2183,8 @@ mod tests {
             Some("0 0 * * *")
         );
         assert_eq!(
-            result.routine.metadata.entry_step_ids,
-            vec![routine.steps[0].id]
+            result.routine.metadata.entry_steps,
+            vec![routine.steps[0].slug.clone()]
         );
     }
 
@@ -2217,7 +2196,7 @@ mod tests {
 
         let result = backend
             .update_routine(RoutineUpdateParams {
-                id: routine.id,
+                routine: Slug::derive(&routine.name),
                 data: crate::RoutineUpdateDocument {
                     name: None,
                     description: Some(None),
@@ -2243,10 +2222,10 @@ mod tests {
             &backend,
             "update_routine",
             serde_json::json!({
-                "id": routine.id,
+                "routine": Slug::derive(&routine.name),
                 "metadata": {
                     "schedule": "0 6 * * *",
-                    "entry_step_ids": [routine.steps[0].id]
+                    "entry_steps": [routine.steps[0].slug]
                 }
             }),
         )
@@ -2257,7 +2236,7 @@ mod tests {
             result["routine"]["metadata"],
             serde_json::json!({
                 "schedule": "0 6 * * *",
-                "entry_step_ids": [routine.steps[0].id]
+                "entry_steps": [routine.steps[0].slug]
             })
         );
     }
@@ -2276,7 +2255,7 @@ mod tests {
                     trigger: Some(RoutineTrigger::Task),
                     metadata: Some(RoutineMetadata {
                         schedule: None,
-                        entry_step_ids: vec![],
+                        entry_steps: vec![],
                     }),
                     graph: Some(RoutineGraphInput {
                         entry_step_ids: vec![step_id.to_string()],
@@ -2285,8 +2264,8 @@ mod tests {
                                 step_id: step_id.to_string(),
                                 name: "build".into(),
                                 step_type: RoutineStepType::Agent,
-                                council_id: None,
-                                agent_id: None,
+                                council: None,
+                                agent: None,
                                 config: serde_json::json!({}),
                                 order_index: 0,
                             },
@@ -2294,15 +2273,15 @@ mod tests {
                                 step_id: terminal_id.to_string(),
                                 name: "done".into(),
                                 step_type: RoutineStepType::Terminal,
-                                council_id: None,
-                                agent_id: None,
+                                council: None,
+                                agent: None,
                                 config: serde_json::json!({}),
                                 order_index: 1,
                             },
                         ],
                         edges: vec![RoutineEdgeInput {
-                            source_step_id: step_id.to_string(),
-                            target_step_id: terminal_id.to_string(),
+                            source_step: step_id.to_string(),
+                            target_step: terminal_id.to_string(),
                             condition: RoutineEdgeCondition::Always,
                             metadata: serde_json::json!({}),
                         }],
@@ -2317,7 +2296,7 @@ mod tests {
 
         let updated = backend
             .update_routine(RoutineUpdateParams {
-                id: created.routine.summary.id,
+                routine: Slug::derive(&created.routine.summary.name),
                 data: crate::RoutineUpdateDocument {
                     name: None,
                     description: None,
@@ -2329,8 +2308,8 @@ mod tests {
                             step_id: step_id.to_string(),
                             name: "build".into(),
                             step_type: RoutineStepType::Agent,
-                            council_id: None,
-                            agent_id: None,
+                            council: None,
+                            agent: None,
                             config: serde_json::json!({ "revised": true }),
                             order_index: 0,
                         }],
@@ -2365,7 +2344,9 @@ mod tests {
         assert!(reasoner.get("base_url").is_none());
 
         let get = backend
-            .get_model(ModelsGetParams { id: model.id })
+            .get_model(ModelsGetParams {
+                model: Slug::derive(&model.name),
+            })
             .await
             .unwrap();
         assert_eq!(get.model.summary.name, "reasoner");
@@ -2378,7 +2359,7 @@ mod tests {
 
         let result = backend
             .update_model(ModelUpdateParams {
-                id: model.id,
+                model: Slug::derive(&model.name),
                 data: crate::ModelUpdateDocument {
                     name: Some("reasoner-v2".into()),
                     description: None,
@@ -2409,7 +2390,7 @@ mod tests {
 
         let result = backend
             .update_model(ModelUpdateParams {
-                id: model.id,
+                model: Slug::derive(&model.name),
                 data: crate::ModelUpdateDocument {
                     name: None,
                     description: Some(None),
@@ -2435,7 +2416,7 @@ mod tests {
             &backend,
             "update_model",
             serde_json::json!({
-                "id": model.id,
+                "model": Slug::derive(&model.name),
                 "temperature": 0.42
             }),
         )
@@ -2458,7 +2439,9 @@ mod tests {
         assert!(list_value["councils"][0].get("members").is_none());
 
         let get = backend
-            .get_council(CouncilsGetParams { id: council.id })
+            .get_council(CouncilsGetParams {
+                council: Slug::derive(&council.name),
+            })
             .await
             .unwrap();
         assert_eq!(get.council.summary.name, "triage");
@@ -2473,7 +2456,7 @@ mod tests {
 
         let result = backend
             .update_council(CouncilUpdateParams {
-                id: council.id,
+                council: Slug::derive(&council.name),
                 data: crate::CouncilUpdateDocument {
                     name: Some("dispatch".into()),
                     description: None,
@@ -2502,7 +2485,7 @@ mod tests {
             &backend,
             "update_council",
             serde_json::json!({
-                "id": council.id,
+                "council": Slug::derive(&council.name),
                 "delegation_strategy": "broadcast"
             }),
         )
@@ -2520,15 +2503,15 @@ mod tests {
         let TestContext {
             backend, council, ..
         } = backend().await;
-        let member_agent_id = council.members[0].agent_id;
-        let new_agent_id = Uuid::new_v4();
+        let member_agent = Slug::derive("worker");
+        let new_agent = Slug::derive("new-agent");
 
         let add_result = ManifestMcpContract::dispatch(
             &backend,
             "add_council_member",
             serde_json::json!({
-                "council_id": council.id,
-                "agent_id": new_agent_id,
+                "council": Slug::derive(&council.name),
+                "agent": new_agent,
                 "priority": 5,
                 "config": {}
             }),
@@ -2544,8 +2527,8 @@ mod tests {
             &backend,
             "update_council_member",
             serde_json::json!({
-                "council_id": council.id,
-                "agent_id": member_agent_id,
+                "council": Slug::derive(&council.name),
+                "agent": member_agent,
                 "priority": 42
             }),
         )
@@ -2557,8 +2540,8 @@ mod tests {
             &backend,
             "remove_council_member",
             serde_json::json!({
-                "council_id": council.id,
-                "agent_id": new_agent_id
+                "council": Slug::derive(&council.name),
+                "agent": new_agent
             }),
         )
         .await
@@ -2591,7 +2574,7 @@ mod tests {
 
         let get = backend
             .get_context_block(ContextBlocksGetParams {
-                id: context_block.id,
+                context_block: context_block.slug(),
             })
             .await
             .unwrap();
@@ -2613,7 +2596,7 @@ mod tests {
 
         let result = backend
             .get_context_block_content(ContextBlockContentGetParams {
-                id: context_block.id,
+                context_block: context_block.slug(),
             })
             .await
             .unwrap();
@@ -2631,10 +2614,10 @@ mod tests {
 
         let result = backend
             .update_context_block(ContextBlockUpdateParams {
-                id: context_block.id,
+                context_block: context_block.slug(),
                 data: crate::ContextBlockUpdateDocument {
                     name: None,
-                    display_name: Some(Some("Repository Overview".into())),
+                    display_name: None,
                     description: None,
                     template: None,
                 },
@@ -2644,7 +2627,7 @@ mod tests {
 
         assert_eq!(
             result.context_block.summary.display_name,
-            Some("Repository Overview".into())
+            Some("Repo Summary".into())
         );
         assert_eq!(
             result.context_block.summary.description,
@@ -2662,7 +2645,7 @@ mod tests {
 
         let result = backend
             .update_context_block_content(ContextBlockContentUpdateParams {
-                id: context_block.id,
+                context_block: context_block.slug(),
                 template: Some("Repository: {{ repo_slug }}".into()),
             })
             .await
@@ -2672,7 +2655,7 @@ mod tests {
 
         let fetched = backend
             .get_context_block_content(ContextBlockContentGetParams {
-                id: context_block.id,
+                context_block: context_block.slug(),
             })
             .await
             .unwrap();
@@ -2694,7 +2677,7 @@ mod tests {
             &backend,
             "update_context_block_content",
             serde_json::json!({
-                "id": context_block.id,
+                "context_block": context_block.slug(),
                 "template": "Repository: {{ project_name }}"
             }),
         )

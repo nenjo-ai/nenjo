@@ -4,10 +4,7 @@ use std::collections::HashMap;
 
 use crate::context::{MemoryProfileContext, TaskContext};
 
-use super::types::{
-    AbilityContext, AgentContext, AvailableAbilitiesContext, AvailableAgentsContext,
-    AvailableDomainsContext, DomainContext, GitContext, ProjectContext, RoutineContext,
-};
+use super::types::{AgentContext, GitContext, ProjectContext, RoutineContext};
 
 /// All renderable data for template variable substitution.
 ///
@@ -22,11 +19,6 @@ pub struct RenderContextVars {
     pub routine: RoutineContext,
     pub memory_profile: MemoryProfileContext,
     pub git: GitContext,
-
-    // Available collections (plural)
-    pub available_agents: Vec<AgentContext>,
-    pub available_abilities: Vec<AbilityContext>,
-    pub available_domains: Vec<DomainContext>,
 
     // Separate vars
     pub chat_message: String,
@@ -62,7 +54,7 @@ impl RenderContextVars {
 
         // Grouped XML renders (singular entity = full XML)
         // Only serialize if the entity has meaningful data.
-        let self_xml = if self._self.id.is_nil() {
+        let self_xml = if self._self.slug.is_empty() {
             String::new()
         } else {
             nenjo_xml::to_xml_pretty(&self._self, 2)
@@ -108,54 +100,6 @@ impl RenderContextVars {
             nenjo_xml::to_xml_pretty(&self.git, 2)
         };
 
-        // Available collections (plural = XML list)
-        let available_agents_xml = if self.available_agents.is_empty() {
-            String::new()
-        } else {
-            nenjo_xml::to_xml_pretty(
-                &AvailableAgentsContext {
-                    agents: self.available_agents.clone(),
-                },
-                2,
-            )
-        };
-        let available_abilities_xml = if self.available_abilities.is_empty() {
-            String::new()
-        } else {
-            nenjo_xml::to_xml_pretty(
-                &AvailableAbilitiesContext {
-                    abilities: self.available_abilities.clone(),
-                },
-                2,
-            )
-        };
-        let available_domains_xml = if self.available_domains.is_empty() {
-            String::new()
-        } else {
-            nenjo_xml::to_xml_pretty(
-                &AvailableDomainsContext {
-                    domains: self.available_domains.clone(),
-                },
-                2,
-            )
-        };
-        // Convert UUIDs, skipping nil values
-        let agent_id = if self._self.id.is_nil() {
-            String::new()
-        } else {
-            self._self.id.to_string()
-        };
-        let project_id = if self.project.id == uuid::Uuid::nil().to_string() {
-            String::new()
-        } else {
-            self.project.id.clone()
-        };
-        let routine_id = if self.routine.id.is_nil() {
-            String::new()
-        } else {
-            self.routine.id.to_string()
-        };
-
         let fields: &[(&str, &str)] = &[
             // Task — singular XML + fields
             ("task", task_xml.as_str()),
@@ -184,7 +128,7 @@ impl RenderContextVars {
             ("subtask.description", &self.subtask_description),
             // Agent (self) — singular XML + fields
             ("self", self_xml.as_str()),
-            ("agent.id", agent_id.as_str()),
+            ("agent.slug", &self._self.slug),
             ("agent.role", &self._self.role),
             ("agent.name", &self._self.display_name),
             ("agent.model", &self._self.model_name),
@@ -194,7 +138,6 @@ impl RenderContextVars {
             ),
             // Project — singular XML + fields
             ("project", project_xml.as_str()),
-            ("project.id", project_id.as_str()),
             ("project.name", &self.project.name),
             ("project.slug", &self.project.slug),
             ("project.description", &self.project.description),
@@ -203,7 +146,7 @@ impl RenderContextVars {
             ("project.working_dir", &self.project.working_dir),
             // Routine — singular XML + fields
             ("routine", routine_xml.as_str()),
-            ("routine.id", routine_id.as_str()),
+            ("routine.slug", &self.routine.slug),
             ("routine.name", &self.routine.name),
             ("routine.execution_id", &self.routine.execution_id),
             // Routine step context
@@ -233,10 +176,6 @@ impl RenderContextVars {
                 "memory_profile.shared_focus",
                 memory_profile_shared_xml.as_str(),
             ),
-            // Available collections — plural XML
-            ("available_agents", available_agents_xml.as_str()),
-            ("available_abilities", available_abilities_xml.as_str()),
-            ("available_domains", available_domains_xml.as_str()),
         ];
 
         for (key, value) in fields {
@@ -262,28 +201,26 @@ impl RenderContextVars {
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::RenderContextVars;
 
     #[test]
-    fn nil_project_id_is_not_rendered() {
+    fn empty_project_slug_is_not_rendered() {
         let mut ctx = RenderContextVars::default();
-        ctx.project.id = Uuid::nil().to_string();
+        ctx.project.slug.clear();
 
         let vars = ctx.to_vars();
 
-        assert_eq!(vars.get("project.id"), None);
+        assert_eq!(vars.get("project.slug"), None);
     }
 
     #[test]
-    fn non_nil_project_id_is_rendered() {
+    fn project_slug_is_rendered() {
         let mut ctx = RenderContextVars::default();
-        let project_id = Uuid::new_v4();
-        ctx.project.id = project_id.to_string();
+        ctx.project.name = "Project".to_string();
+        ctx.project.slug = "project".to_string();
 
         let vars = ctx.to_vars();
 
-        assert_eq!(vars.get("project.id"), Some(&project_id.to_string()));
+        assert_eq!(vars.get("project.slug"), Some(&"project".to_string()));
     }
 }

@@ -29,7 +29,7 @@ where
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let registry_token = Uuid::new_v4();
-    let schedule_id = request.routine_id;
+    let schedule_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
 
     if let Some((_, previous)) = harness.executions().remove(&schedule_id) {
         previous.cancel.cancel();
@@ -50,6 +50,7 @@ where
     let join = tokio::spawn(async move {
         let mut next_run_at = next_run_at;
         let _ = events_tx.send(HarnessScheduleEvent::Scheduled {
+            session_id: schedule_id,
             id: schedule_id,
             next_run_at,
         });
@@ -68,6 +69,7 @@ where
 
             let execution_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
             let _ = events_tx.send(HarnessScheduleEvent::Started {
+                session_id: schedule_id,
                 id: schedule_id,
                 execution_id,
                 scheduled_for: next_run_at,
@@ -75,7 +77,7 @@ where
 
             let mut run = RoutineRun::cron(CronInput {
                 task: None,
-                project_id: request.project_id,
+                project: request.project.clone(),
                 schedule: schedule.clone(),
                 start_at: Some(next_run_at),
                 timeout: request.timeout,
@@ -85,7 +87,11 @@ where
                 run = run.project_location(location);
             }
 
-            match harness.provider().routine_by_id(request.routine_id) {
+            match harness
+                .provider()
+                .routine(&request.routine)
+                .map_err(anyhow::Error::from)
+            {
                 Ok(runner) => match runner.run_stream(run).await {
                     Ok(mut handle) => {
                         loop {
@@ -93,7 +99,11 @@ where
                                 event = handle.recv() => {
                                     match event {
                                         Some(event) => {
-                                            let _ = events_tx.send(HarnessScheduleEvent::Cron(event));
+                                            let _ = events_tx.send(HarnessScheduleEvent::Cron {
+                                                session_id: schedule_id,
+                                                execution_id,
+                                                event,
+                                            });
                                         }
                                         None => break,
                                     }
@@ -111,6 +121,7 @@ where
                             Ok(result) => {
                                 next_run_at = schedule.next_fire_at();
                                 let _ = events_tx.send(HarnessScheduleEvent::Completed {
+                                    session_id: schedule_id,
                                     id: schedule_id,
                                     execution_id,
                                     success: result.passed,
@@ -124,6 +135,7 @@ where
                             Err(error) => {
                                 next_run_at = schedule.next_fire_at();
                                 let _ = events_tx.send(HarnessScheduleEvent::Failed {
+                                    session_id: schedule_id,
                                     id: schedule_id,
                                     execution_id: Some(execution_id),
                                     error: error.to_string(),
@@ -135,6 +147,7 @@ where
                     Err(error) => {
                         next_run_at = schedule.next_fire_at();
                         let _ = events_tx.send(HarnessScheduleEvent::Failed {
+                            session_id: schedule_id,
                             id: schedule_id,
                             execution_id: Some(execution_id),
                             error: error.to_string(),
@@ -145,6 +158,7 @@ where
                 Err(error) => {
                     next_run_at = schedule.next_fire_at();
                     let _ = events_tx.send(HarnessScheduleEvent::Failed {
+                        session_id: schedule_id,
                         id: schedule_id,
                         execution_id: Some(execution_id),
                         error: error.to_string(),
@@ -154,6 +168,7 @@ where
             }
 
             let _ = events_tx.send(HarnessScheduleEvent::Scheduled {
+                session_id: schedule_id,
                 id: schedule_id,
                 next_run_at,
             });
@@ -166,7 +181,10 @@ where
         {
             harness.executions().remove(&schedule_id);
         }
-        let _ = events_tx.send(HarnessScheduleEvent::Stopped { id: schedule_id });
+        let _ = events_tx.send(HarnessScheduleEvent::Stopped {
+            session_id: schedule_id,
+            id: schedule_id,
+        });
 
         if join_cancel.is_cancelled() {
             return Ok(());

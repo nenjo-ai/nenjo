@@ -9,19 +9,19 @@ use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
     ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, RoutineManifest,
 };
-use nenjo::{ManifestReader, ManifestWriter};
+use nenjo::{ManifestReader, ManifestWriter, Slug};
 use nenjo_knowledge::tools::{
-    KnowledgeDocReadResult, KnowledgeListArgs, KnowledgeNeighborArgs, KnowledgePackSummary,
-    KnowledgeReadArgs, KnowledgeRegistry, KnowledgeSearchArgs, KnowledgeTreeArgs, knowledge_filter,
-    knowledge_manifest_result, knowledge_search_result, parse_knowledge_enum,
+    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackSummary, KnowledgeReadArgs,
+    KnowledgeRef, KnowledgeRegistry, KnowledgeSearchArgs, knowledge_document_metadata,
+    knowledge_filter, knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
 };
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
-use crate::client::PlatformManifestClient;
+use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
 use crate::knowledge_backend::{
-    ResolvedKnowledgePack, ensure_known_pack_selector, is_default_library_pack_selector,
-    library_pack_selector, parse_library_pack_selector, unknown_pack,
+    ResolvedKnowledgePack, ensure_known_pack_selector, library_pack_selector,
+    parse_library_pack_selector, unknown_pack,
 };
 use crate::library_knowledge::LibraryKnowledgePack;
 use crate::manifest_contract::ManifestKind;
@@ -29,17 +29,20 @@ use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
 
+fn string_to_manifest_path(path: String) -> Option<String> {
+    if path.is_empty() { None } else { Some(path) }
+}
+
 fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {
         id: council.summary.id,
         name: council.summary.name.clone(),
-        leader_agent_id: council.summary.leader_agent_id,
+        leader_agent: council.summary.leader_agent.clone(),
         members: council
             .members
             .iter()
             .map(|member| nenjo::manifest::CouncilMemberManifest {
-                agent_id: member.agent_id,
-                agent_name: member.agent_name.clone(),
+                agent: member.agent.clone(),
                 priority: member.priority,
             })
             .collect(),
@@ -189,26 +192,69 @@ where
             .context("failed to derive org_id from authenticated platform context")
     }
 
-    async fn cached_or_remote_ability(&self, id: Uuid) -> Result<AbilityManifest> {
-        if let Some(ability) = self.local_store.get_ability(id).await? {
+    async fn replace_knowledge_doc_related(
+        &self,
+        pack: &Slug,
+        doc: &Slug,
+        related: &[KnowledgeDocRelatedDocument],
+    ) -> Result<()> {
+        let existing = self
+            .platform_client
+            .list_knowledge_doc_edges(pack, doc)
+            .await?;
+        for edge in existing.into_iter().filter(|edge| edge.source_doc == *doc) {
+            self.platform_client
+                .delete_knowledge_doc_edge(pack, doc, edge.id)
+                .await?;
+        }
+        for edge in related {
+            self.platform_client
+                .create_knowledge_doc_edge(
+                    pack,
+                    doc,
+                    &edge.target_doc,
+                    &edge.edge_type,
+                    edge.note.as_deref(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn cached_or_remote_ability(&self, ability_ref: &ResourceRef) -> Result<AbilityManifest> {
+        let local = match ability_ref {
+            ResourceRef::Id(id) => self.local_store.get_ability(*id).await?,
+            ResourceRef::Slug(name) => self
+                .local_store
+                .list_abilities()
+                .await?
+                .into_iter()
+                .find(|ability| ability.name == *name),
+        };
+        if let Some(ability) = local {
             return Ok(ability);
         }
 
-        let Some(remote) = self.platform_client.fetch_ability_document(id).await? else {
-            return Err(anyhow!("ability not found in local manifest: {}", id));
+        let Some(remote) = self
+            .platform_client
+            .fetch_ability_document(ability_ref)
+            .await?
+        else {
+            return Err(anyhow!(
+                "ability not found in local manifest: {}",
+                ability_ref
+            ));
         };
 
         let hydrated = AbilityManifest {
             id: remote.summary.id,
             name: remote.summary.name,
-            tool_name: remote.summary.tool_name,
-            path: remote.summary.path,
-            display_name: remote.summary.display_name,
+            path: string_to_manifest_path(remote.summary.path),
             description: remote.summary.description,
             activation_condition: remote.activation_condition,
             prompt_config: Default::default(),
             platform_scopes: remote.platform_scopes,
-            mcp_server_ids: remote.mcp_server_ids,
+            mcp_servers: remote.mcp_servers,
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -217,6 +263,69 @@ where
             .upsert_resource(&ManifestResource::Ability(hydrated.clone()))
             .await?;
         Ok(hydrated)
+    }
+
+    async fn cached_agent(&self, agent: &Slug) -> Result<AgentManifest> {
+        self.local_store
+            .list_agents()
+            .await?
+            .into_iter()
+            .find(|item| Slug::derive(&item.name) == *agent)
+            .ok_or_else(|| anyhow!("agent not found in local manifest: {agent}"))
+    }
+
+    async fn cached_routine(&self, routine: &Slug) -> Result<RoutineManifest> {
+        self.local_store
+            .list_routines()
+            .await?
+            .into_iter()
+            .find(|item| Slug::derive(&item.name) == *routine)
+            .ok_or_else(|| anyhow!("routine not found in local manifest: {routine}"))
+    }
+
+    async fn cached_council(&self, council: &Slug) -> Result<CouncilManifest> {
+        self.local_store
+            .list_councils()
+            .await?
+            .into_iter()
+            .find(|item| Slug::derive(&item.name) == *council)
+            .ok_or_else(|| anyhow!("council not found in local manifest: {council}"))
+    }
+
+    async fn cached_model(&self, model: &Slug) -> Result<ModelManifest> {
+        self.local_store
+            .list_models()
+            .await?
+            .into_iter()
+            .find(|item| Slug::derive(&item.name) == *model)
+            .ok_or_else(|| anyhow!("model not found in local manifest: {model}"))
+    }
+
+    async fn cached_context_block(&self, context_block: &Slug) -> Result<ContextBlockManifest> {
+        self.local_store
+            .list_context_blocks()
+            .await?
+            .into_iter()
+            .find(|item| item.slug() == *context_block)
+            .ok_or_else(|| anyhow!("context block not found in local manifest: {context_block}"))
+    }
+
+    async fn cached_domain(&self, domain: &Slug) -> Result<DomainManifest> {
+        self.local_store
+            .list_domains()
+            .await?
+            .into_iter()
+            .find(|item| item.slug() == *domain)
+            .ok_or_else(|| anyhow!("domain not found in local manifest: {domain}"))
+    }
+
+    async fn cached_project(&self, project: &Slug) -> Result<ProjectManifest> {
+        self.local_store
+            .list_projects()
+            .await?
+            .into_iter()
+            .find(|item| item.slug == *project)
+            .ok_or_else(|| anyhow!("project not found in local manifest: {project}"))
     }
 
     fn workspace_dir(&self) -> Result<&Path> {
@@ -241,17 +350,6 @@ where
 
     async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
         ensure_known_pack_selector(selector)?;
-        if is_default_library_pack_selector(selector) {
-            let pack_slug = self.current_library_slug.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "knowledge pack 'lib' requires a selected pack; use lib:<slug> outside pack context"
-                )
-            })?;
-            return self
-                .library_knowledge_pack(pack_slug)
-                .await
-                .map(ResolvedKnowledgePack::Library);
-        }
         if selector.starts_with("lib:") {
             let pack_slug = parse_library_pack_selector(selector)?;
             return self
@@ -259,9 +357,9 @@ where
                 .await
                 .map(ResolvedKnowledgePack::Library);
         }
-        if selector.starts_with("git://") {
+        if let KnowledgeRef::Package { package } = selector.parse::<KnowledgeRef>()? {
             let library_dir = self.workspace_dir()?.join("library").join("repos");
-            return find_repo_knowledge_pack(&library_dir, selector)
+            return find_package_knowledge_pack(&library_dir, &package.to_string())
                 .map(ResolvedKnowledgePack::Library)
                 .ok_or_else(|| anyhow!("knowledge pack '{selector}' is not cached locally"));
         }
@@ -269,7 +367,7 @@ where
     }
 }
 
-fn find_repo_knowledge_pack(root: &Path, selector: &str) -> Option<LibraryKnowledgePack> {
+fn find_package_knowledge_pack(root: &Path, package_name: &str) -> Option<LibraryKnowledgePack> {
     let entries = std::fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -280,10 +378,10 @@ fn find_repo_knowledge_pack(root: &Path, selector: &str) -> Option<LibraryKnowle
             continue;
         }
         if let Some(pack) = LibraryKnowledgePack::load(&path) {
-            if pack.manifest().root_uri().trim_end_matches('/') == selector {
+            if pack.manifest().pack_id() == package_name {
                 return Some(pack);
             }
-        } else if let Some(pack) = find_repo_knowledge_pack(&path, selector) {
+        } else if let Some(pack) = find_package_knowledge_pack(&path, package_name) {
             return Some(pack);
         }
     }
@@ -337,17 +435,16 @@ where
                     let Some(pack) = LibraryKnowledgePack::load(entry.path()) else {
                         continue;
                     };
-                    if self.current_library_slug.as_deref() == Some(slug.as_str()) {
-                        packs.push(KnowledgePackSummary::new("lib", pack.manifest()));
-                    }
                     packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
                 }
             }
             let repos_dir = self.workspace_dir()?.join("library").join("repos");
             for pack in list_repo_knowledge_packs(&repos_dir) {
-                let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
-                if selector.starts_with("git://") {
-                    packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
+                if let Ok(knowledge_ref) = KnowledgeRef::package(pack.manifest().pack_id()) {
+                    packs.push(KnowledgePackSummary::new(
+                        knowledge_ref.selector(),
+                        pack.manifest(),
+                    ));
                 }
             }
         }
@@ -372,37 +469,6 @@ where
         serde_json::to_value(packs).map_err(Into::into)
     }
 
-    async fn list_knowledge_docs(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeListArgs =
-            serde_json::from_value(params).context("invalid list_knowledge_docs args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.list_docs(filter)
-                .into_iter()
-                .map(|doc| knowledge_manifest_result(&args.pack, doc))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn read_knowledge_doc_manifest(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: KnowledgeReadArgs =
-            serde_json::from_value(params).context("invalid read_knowledge_doc_manifest args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let manifest = pack.read_manifest(&args.path).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(knowledge_manifest_result(&args.pack, manifest)).map_err(Into::into)
-    }
-
     async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
         let args: KnowledgeReadArgs =
             serde_json::from_value(params).context("invalid read_knowledge_doc args")?;
@@ -415,7 +481,7 @@ where
             )
         })?;
         serde_json::to_value(KnowledgeDocReadResult {
-            manifest: knowledge_manifest_result(&args.pack, &doc.manifest),
+            document: knowledge_document_metadata(&doc.manifest),
             content: doc.content,
         })
         .map_err(Into::into)
@@ -427,33 +493,12 @@ where
         let pack = self.resolve_knowledge_pack(&args.pack).await?;
         let filter = knowledge_filter(args.filter)?;
         serde_json::to_value(
-            pack.search_docs(&args.query, filter)
+            pack.search(&args.query, filter)
                 .into_iter()
-                .map(|hit| knowledge_search_result(&args.pack, hit))
+                .map(knowledge_search_result)
                 .collect::<Vec<_>>(),
         )
         .map_err(Into::into)
-    }
-
-    async fn search_knowledge_paths(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeSearchArgs =
-            serde_json::from_value(params).context("invalid search_knowledge_paths args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.search_paths(&args.query, filter)
-                .into_iter()
-                .map(|hit| knowledge_search_result(&args.pack, hit))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn list_knowledge_tree(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeTreeArgs =
-            serde_json::from_value(params).context("invalid list_knowledge_tree args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        serde_json::to_value(pack.list_tree(args.prefix.as_deref())).map_err(Into::into)
     }
 
     async fn list_knowledge_neighbors(
@@ -464,7 +509,14 @@ where
             serde_json::from_value(params).context("invalid list_knowledge_neighbors args")?;
         let pack = self.resolve_knowledge_pack(&args.pack).await?;
         let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        serde_json::to_value(pack.neighbors(&args.path, edge_type)).map_err(Into::into)
+        let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+            anyhow!(
+                "unknown knowledge doc '{}' in pack '{}'",
+                args.path,
+                args.pack
+            )
+        })?;
+        serde_json::to_value(knowledge_neighbors_result(neighbors)).map_err(Into::into)
     }
 }
 
@@ -487,13 +539,12 @@ where
     }
 
     async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
-        let agent = self
-            .local_store
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.id))?;
+        let agent = self.cached_agent(&params.agent).await?;
         if !self.allow_agent(&agent) {
-            return Err(anyhow!("agent not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "agent not found in local manifest: {}",
+                params.agent
+            ));
         }
         Ok(AgentGetResult {
             agent: AgentDocument::from(agent),
@@ -501,13 +552,12 @@ where
     }
 
     async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult> {
-        let agent = self
-            .local_store
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.id))?;
+        let agent = self.cached_agent(&params.agent).await?;
         if !self.allow_agent(&agent) {
-            return Err(anyhow!("agent not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "agent not found in local manifest: {}",
+                params.agent
+            ));
         }
         Ok(AgentPromptGetResult {
             agent: AgentPromptDocument::from(agent),
@@ -519,7 +569,7 @@ where
             name: params.data.name,
             description: params.data.description,
             color: params.data.color,
-            model_id: params.data.model_id,
+            model: params.data.model,
         };
 
         let created = self.platform_client.create_agent_document(&create).await?;
@@ -533,28 +583,16 @@ where
     }
 
     async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
-        let existing = self
-            .local_store
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.id))?;
+        let existing = self.cached_agent(&params.agent).await?;
         if !self.allow_agent(&existing) {
-            return Err(anyhow!("agent not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "agent not found in local manifest: {}",
+                params.agent
+            ));
         }
-        let merged = AgentUpdateDocument {
-            name: params.data.name.or_else(|| Some(existing.name.clone())),
-            description: Some(
-                params
-                    .data
-                    .description
-                    .unwrap_or_else(|| existing.description.clone()),
-            ),
-            color: Some(params.data.color.unwrap_or_else(|| existing.color.clone())),
-            model_id: Some(params.data.model_id.unwrap_or(existing.model_id)),
-        };
         let updated = self
             .platform_client
-            .update_agent_document(params.id, &merged)
+            .update_agent_document(&params.agent, &params.data)
             .await?;
 
         let mut local_agent: AgentManifest = updated.clone().into();
@@ -571,16 +609,15 @@ where
         &self,
         params: AgentPromptUpdateParams,
     ) -> Result<AgentPromptMutationResult> {
-        let mut agent = self
-            .local_store
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.id))?;
+        let mut agent = self.cached_agent(&params.agent).await?;
         if !self.allow_agent(&agent) {
-            return Err(anyhow!("agent not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "agent not found in local manifest: {}",
+                params.agent
+            ));
         }
         if agent.prompt_locked {
-            return Err(anyhow!("agent prompt is locked: {}", params.id));
+            return Err(anyhow!("agent prompt is locked: {}", params.agent));
         }
         if let Some(prompt_patch) = params.prompt_config {
             agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
@@ -591,7 +628,7 @@ where
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                params.id,
+                agent.id,
                 ManifestKind::Agent
                     .encrypted_object_type()
                     .expect("agent prompt object type"),
@@ -600,7 +637,7 @@ where
             .await?;
         let prompt_config = self
             .platform_client
-            .update_agent_prompt_document(params.id, &prompt_payload, encrypted_payload)
+            .update_agent_prompt_document(&params.agent, &prompt_payload, encrypted_payload)
             .await?
             .map(serde_json::from_value)
             .transpose()?
@@ -615,23 +652,22 @@ where
     }
 
     async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
-        let existing = self
-            .local_store
-            .get_agent(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.id))?;
+        let existing = self.cached_agent(&params.agent).await?;
         if !self.allow_agent(&existing) {
-            return Err(anyhow!("agent not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "agent not found in local manifest: {}",
+                params.agent
+            ));
         }
         self.platform_client
-            .delete_agent_document(params.id)
+            .delete_agent_document(&params.agent)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Agent, params.id)
+            .delete_resource(ManifestResourceKind::Agent, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -655,11 +691,11 @@ where
     }
 
     async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
-        let ability = self.cached_or_remote_ability(params.id).await?;
+        let ability = self.cached_or_remote_ability(&params.ability).await?;
         if !self.allow_ability(&ability) {
             return Err(anyhow!(
                 "ability not found in local manifest: {}",
-                params.id
+                params.ability
             ));
         }
         Ok(AbilityGetResult {
@@ -671,11 +707,11 @@ where
         &self,
         params: AbilityPromptGetParams,
     ) -> Result<AbilityPromptGetResult> {
-        let ability = self.cached_or_remote_ability(params.id).await?;
+        let ability = self.cached_or_remote_ability(&params.ability).await?;
         if !self.allow_ability(&ability) {
             return Err(anyhow!(
                 "ability not found in local manifest: {}",
-                params.id
+                params.ability
             ));
         }
         Ok(AbilityPromptGetResult {
@@ -702,14 +738,12 @@ where
         let local_ability = AbilityManifest {
             id: created.summary.id,
             name: created.summary.name.clone(),
-            tool_name: created.summary.tool_name.clone(),
-            path: created.summary.path.clone(),
-            display_name: created.summary.display_name.clone(),
+            path: string_to_manifest_path(created.summary.path.clone()),
             description: created.summary.description.clone(),
             activation_condition: created.activation_condition.clone(),
             prompt_config: params.data.prompt_config.clone(),
             platform_scopes: created.platform_scopes.clone(),
-            mcp_server_ids: created.mcp_server_ids.clone(),
+            mcp_servers: created.mcp_servers.clone(),
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -726,24 +760,15 @@ where
                 "ability update requires at least one field in data"
             ));
         }
-        let existing = self.cached_or_remote_ability(params.id).await?;
+        let existing = self.cached_or_remote_ability(&params.ability).await?;
         if !self.allow_ability(&existing) {
             return Err(anyhow!(
                 "ability not found in local manifest: {}",
-                params.id
+                params.ability
             ));
         }
         let merged = AbilityUpdateDocument {
-            tool_name: params
-                .data
-                .tool_name
-                .or_else(|| Some(existing.tool_name.clone())),
-            display_name: Some(
-                params
-                    .data
-                    .display_name
-                    .unwrap_or_else(|| existing.display_name.clone()),
-            ),
+            name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: Some(
                 params
                     .data
@@ -754,26 +779,24 @@ where
                 .data
                 .activation_condition
                 .or_else(|| Some(existing.activation_condition.clone())),
-            mcp_server_ids: params
+            mcp_servers: params
                 .data
-                .mcp_server_ids
-                .or_else(|| Some(existing.mcp_server_ids.clone())),
+                .mcp_servers
+                .or_else(|| Some(existing.mcp_servers.clone())),
         };
         let updated = self
             .platform_client
-            .update_ability_document(params.id, &merged)
+            .update_ability_document(&params.ability, &merged)
             .await?;
         let local_ability = AbilityManifest {
             id: updated.summary.id,
             name: updated.summary.name.clone(),
-            tool_name: updated.summary.tool_name.clone(),
-            path: updated.summary.path.clone(),
-            display_name: updated.summary.display_name.clone(),
+            path: string_to_manifest_path(updated.summary.path.clone()),
             description: updated.summary.description.clone(),
             activation_condition: updated.activation_condition.clone(),
             prompt_config: existing.prompt_config.clone(),
             platform_scopes: updated.platform_scopes.clone(),
-            mcp_server_ids: updated.mcp_server_ids.clone(),
+            mcp_servers: updated.mcp_servers.clone(),
             source_type: existing.source_type.clone(),
             read_only: existing.read_only,
             metadata: existing.metadata.clone(),
@@ -788,23 +811,24 @@ where
         &self,
         params: AbilityPromptUpdateParams,
     ) -> Result<AbilityPromptMutationResult> {
-        let existing = self.cached_or_remote_ability(params.id).await?;
+        let existing = self.cached_or_remote_ability(&params.ability).await?;
         if !self.allow_ability(&existing) {
             return Err(anyhow!(
                 "ability not found in local manifest: {}",
-                params.id
+                params.ability
             ));
         }
         let prompt_config = params.prompt_config;
+        let ability_id = existing.id;
         let updated = self
             .platform_client
             .update_ability_prompt_document(
-                params.id,
+                &params.ability,
                 &prompt_config,
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        params.id,
+                        ability_id,
                         ManifestKind::Ability
                             .encrypted_object_type()
                             .expect("ability prompt object type"),
@@ -816,14 +840,12 @@ where
         let local_ability = AbilityManifest {
             id: existing.id,
             name: existing.name,
-            tool_name: existing.tool_name,
             path: existing.path,
-            display_name: existing.display_name,
             description: existing.description,
             activation_condition: existing.activation_condition,
             prompt_config: updated.prompt_config.clone(),
             platform_scopes: existing.platform_scopes,
-            mcp_server_ids: existing.mcp_server_ids,
+            mcp_servers: existing.mcp_servers,
             source_type: existing.source_type,
             read_only: existing.read_only,
             metadata: existing.metadata,
@@ -837,22 +859,22 @@ where
     }
 
     async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
-        let existing = self.cached_or_remote_ability(params.id).await?;
+        let existing = self.cached_or_remote_ability(&params.ability).await?;
         if !self.allow_ability(&existing) {
             return Err(anyhow!(
                 "ability not found in local manifest: {}",
-                params.id
+                params.ability
             ));
         }
         self.platform_client
-            .delete_ability_document(params.id)
+            .delete_ability_document(&params.ability)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Ability, params.id)
+            .delete_resource(ManifestResourceKind::Ability, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -876,13 +898,12 @@ where
     }
 
     async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
-        let domain = self
-            .local_store
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found in local manifest: {}", params.id))?;
+        let domain = self.cached_domain(&params.domain).await?;
         if !self.allow_domain(&domain) {
-            return Err(anyhow!("domain not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "domain not found in local manifest: {}",
+                params.domain
+            ));
         }
         Ok(DomainGetResult {
             domain: DomainDocument::from(domain),
@@ -893,13 +914,12 @@ where
         &self,
         params: DomainManifestGetParams,
     ) -> Result<DomainManifestGetResult> {
-        let domain = self
-            .local_store
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found in local manifest: {}", params.id))?;
+        let domain = self.cached_domain(&params.domain).await?;
         if !self.allow_domain(&domain) {
-            return Err(anyhow!("domain not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "domain not found in local manifest: {}",
+                params.domain
+            ));
         }
         Ok(DomainManifestGetResult {
             domain: DomainManifestDocument::from(domain),
@@ -930,8 +950,8 @@ where
             description: created.summary.description.clone(),
             command: created.command.clone(),
             platform_scopes: created.platform_scopes.clone(),
-            ability_ids: params.data.ability_ids.clone().unwrap_or_default(),
-            mcp_server_ids: params.data.mcp_server_ids.clone().unwrap_or_default(),
+            abilities: params.data.abilities.clone().unwrap_or_default(),
+            mcp_servers: params.data.mcp_servers.clone().unwrap_or_default(),
             prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
         };
         self.local_store
@@ -941,13 +961,12 @@ where
     }
 
     async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
-        let existing = self
-            .local_store
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found in local manifest: {}", params.id))?;
+        let existing = self.cached_domain(&params.domain).await?;
         if !self.allow_domain(&existing) {
-            return Err(anyhow!("domain not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "domain not found in local manifest: {}",
+                params.domain
+            ));
         }
         if params.data.is_empty() {
             return Err(anyhow!("domain update requires at least one field"));
@@ -968,22 +987,22 @@ where
                 .data
                 .command
                 .or_else(|| Some(existing.command.clone())),
-            ability_ids: Some(
+            abilities: Some(
                 params
                     .data
-                    .ability_ids
-                    .unwrap_or_else(|| existing.ability_ids.clone()),
+                    .abilities
+                    .unwrap_or_else(|| existing.abilities.clone()),
             ),
-            mcp_server_ids: Some(
+            mcp_servers: Some(
                 params
                     .data
-                    .mcp_server_ids
-                    .unwrap_or_else(|| existing.mcp_server_ids.clone()),
+                    .mcp_servers
+                    .unwrap_or_else(|| existing.mcp_servers.clone()),
             ),
         };
         let updated = self
             .platform_client
-            .update_domain_document(params.id, &merged)
+            .update_domain_document(&params.domain, &merged)
             .await?;
         let local_domain = DomainManifest {
             id: updated.summary.id,
@@ -993,8 +1012,8 @@ where
             description: updated.summary.description.clone(),
             command: updated.command.clone(),
             platform_scopes: updated.platform_scopes.clone(),
-            ability_ids: updated.ability_ids.clone(),
-            mcp_server_ids: updated.mcp_server_ids.clone(),
+            abilities: updated.abilities.clone(),
+            mcp_servers: updated.mcp_servers.clone(),
             prompt_config: existing.prompt_config.clone(),
         };
         self.local_store
@@ -1007,13 +1026,12 @@ where
         &self,
         params: DomainManifestUpdateParams,
     ) -> Result<DomainManifestMutationResult> {
-        let existing = self
-            .local_store
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found in local manifest: {}", params.id))?;
+        let existing = self.cached_domain(&params.domain).await?;
         if !self.allow_domain(&existing) {
-            return Err(anyhow!("domain not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "domain not found in local manifest: {}",
+                params.domain
+            ));
         }
         if let Some(policy) = &self.access_policy
             && !policy.validate_domain_scopes(&existing.platform_scopes)
@@ -1023,12 +1041,12 @@ where
         let updated = self
             .platform_client
             .update_domain_manifest_document(
-                params.id,
+                &params.domain,
                 params.prompt_config.clone(),
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        params.id,
+                        existing.id,
                         ManifestKind::Domain
                             .encrypted_object_type()
                             .expect("domain prompt object type"),
@@ -1045,8 +1063,8 @@ where
             description: existing.description.clone(),
             command: existing.command.clone(),
             platform_scopes: existing.platform_scopes.clone(),
-            ability_ids: existing.ability_ids.clone(),
-            mcp_server_ids: existing.mcp_server_ids.clone(),
+            abilities: existing.abilities.clone(),
+            mcp_servers: existing.mcp_servers.clone(),
             prompt_config: updated.prompt_config.clone(),
         };
         self.local_store
@@ -1058,23 +1076,22 @@ where
     }
 
     async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
-        let existing = self
-            .local_store
-            .get_domain(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("domain not found in local manifest: {}", params.id))?;
+        let existing = self.cached_domain(&params.domain).await?;
         if !self.allow_domain(&existing) {
-            return Err(anyhow!("domain not found in local manifest: {}", params.id));
+            return Err(anyhow!(
+                "domain not found in local manifest: {}",
+                params.domain
+            ));
         }
         self.platform_client
-            .delete_domain_document(params.id)
+            .delete_domain_document(&params.domain)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Domain, params.id)
+            .delete_resource(ManifestResourceKind::Domain, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -1097,11 +1114,7 @@ where
     }
 
     async fn get_project(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
-        let project = self
-            .local_store
-            .get_project(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("project not found in local manifest: {}", params.id))?;
+        let project = self.cached_project(&params.project).await?;
         Ok(ProjectGetResult {
             project: ProjectDocument::from(project),
         })
@@ -1126,13 +1139,10 @@ where
     }
 
     async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult> {
-        let existing = self
-            .local_store
-            .get_project(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("project not found in local manifest: {}", params.id))?;
+        let existing = self.cached_project(&params.project).await?;
         let merged = ProjectUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
+            slug: params.data.slug.or_else(|| Some(existing.slug.clone())),
             description: Some(
                 params
                     .data
@@ -1149,7 +1159,7 @@ where
         };
         let updated = self
             .platform_client
-            .update_project_document(params.id, &merged)
+            .update_project_document(&params.project, &merged)
             .await?;
         let local_project = ProjectManifest {
             id: updated.summary.id,
@@ -1165,80 +1175,107 @@ where
     }
 
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
+        let existing = self.cached_project(&params.project).await?;
         self.platform_client
-            .delete_project_document(params.id)
+            .delete_project_document(&params.project)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Project, params.id)
+            .delete_resource(ManifestResourceKind::Project, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 
-    async fn create_knowledge_item(
+    async fn create_knowledge_doc(
         &self,
-        params: KnowledgeItemCreateParams,
-    ) -> Result<KnowledgeItemMutationResult> {
-        let mut data = params.data;
-        let item_id = data.id.unwrap_or_else(Uuid::new_v4);
-        data.id = Some(item_id);
+        params: KnowledgeDocCreateParams,
+    ) -> Result<KnowledgeDocMutationResult> {
+        let data = params.data;
+        let doc_id = Uuid::new_v4();
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                item_id,
+                doc_id,
                 ManifestKind::Document
                     .encrypted_object_type()
                     .expect("document content object type"),
                 &serde_json::Value::String(data.content.clone()),
             )
             .await?;
-        let knowledge_item = self
+        let knowledge_doc = self
             .platform_client
-            .create_knowledge_item(&data, encrypted_payload)
+            .create_knowledge_doc(&data.pack, doc_id, &data, encrypted_payload)
             .await?;
-        Ok(KnowledgeItemMutationResult { knowledge_item })
+        self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.doc, &data.related)
+            .await?;
+        Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
-    async fn update_knowledge_item_content(
+    async fn update_knowledge_doc(
         &self,
-        params: KnowledgeItemContentUpdateParams,
-    ) -> Result<KnowledgeItemContentMutationResult> {
-        let encrypted_payload = self
-            .sensitive_payload_encoder
-            .encode_payload(
-                self.local_manifest_org_id().await?,
-                params.item_id,
-                ManifestKind::Document
-                    .encrypted_object_type()
-                    .expect("document content object type"),
-                &serde_json::Value::String(params.content.clone()),
-            )
-            .await?;
-        let knowledge_item = self
+        params: KnowledgeDocUpdateParams,
+    ) -> Result<KnowledgeDocMutationResult> {
+        let doc_id = self
             .platform_client
-            .update_knowledge_item_content(
-                params.pack_id,
-                params.item_id,
-                &params.content,
-                encrypted_payload,
-            )
+            .resolve_knowledge_doc_slug(&params.pack, &params.doc)
             .await?;
-        Ok(KnowledgeItemContentMutationResult { knowledge_item })
+        let mut knowledge_doc = if let Some(content) = params.data.content.as_deref() {
+            let encrypted_payload = self
+                .sensitive_payload_encoder
+                .encode_payload(
+                    self.local_manifest_org_id().await?,
+                    doc_id,
+                    ManifestKind::Document
+                        .encrypted_object_type()
+                        .expect("document content object type"),
+                    &serde_json::Value::String(content.to_string()),
+                )
+                .await?;
+            self.platform_client
+                .update_knowledge_doc_content(&params.pack, &params.doc, content, encrypted_payload)
+                .await?
+        } else {
+            self.platform_client
+                .update_knowledge_doc_metadata(&params.pack, &params.doc, &params.data)
+                .await?
+        };
+
+        if params.data.content.is_some()
+            && (params.data.filename.is_some()
+                || params.data.path.is_some()
+                || params.data.title.is_some()
+                || params.data.kind.is_some()
+                || params.data.summary.is_some()
+                || params.data.tags.is_some())
+        {
+            knowledge_doc = self
+                .platform_client
+                .update_knowledge_doc_metadata(&params.pack, &params.doc, &params.data)
+                .await?;
+        }
+
+        if let Some(related) = params.data.related.as_deref() {
+            self.replace_knowledge_doc_related(&params.pack, &params.doc, related)
+                .await?;
+        }
+
+        Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
-    async fn delete_knowledge_item(
-        &self,
-        params: KnowledgeItemDeleteParams,
-    ) -> Result<DeleteResult> {
+    async fn delete_knowledge_doc(&self, params: KnowledgeDocDeleteParams) -> Result<DeleteResult> {
+        let doc_id = self
+            .platform_client
+            .resolve_knowledge_doc_slug(&params.pack, &params.doc)
+            .await?;
         self.platform_client
-            .delete_knowledge_item(params.pack_id, params.item_id)
+            .delete_knowledge_doc(&params.pack, &params.doc)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.item_id,
+            id: doc_id,
         })
     }
 }
@@ -1261,11 +1298,7 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = self
-            .local_store
-            .get_routine(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("routine not found in local manifest: {}", params.id))?;
+        let routine = self.cached_routine(&params.routine).await?;
         Ok(RoutineGetResult {
             routine: RoutineDocument::from(routine),
         })
@@ -1297,11 +1330,7 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let existing = self
-            .local_store
-            .get_routine(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("routine not found in local manifest: {}", params.id))?;
+        let existing = self.cached_routine(&params.routine).await?;
         let merged = RoutineUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: Some(
@@ -1322,7 +1351,7 @@ where
         };
         let updated = self
             .platform_client
-            .update_routine_document(params.id, &merged)
+            .update_routine_document(&params.routine, &merged)
             .await?;
         let local_routine = RoutineManifest {
             id: updated.summary.id,
@@ -1340,15 +1369,16 @@ where
     }
 
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
+        let existing = self.cached_routine(&params.routine).await?;
         self.platform_client
-            .delete_routine_document(params.id)
+            .delete_routine_document(&params.routine)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Routine, params.id)
+            .delete_resource(ManifestResourceKind::Routine, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -1371,11 +1401,7 @@ where
     }
 
     async fn get_model(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
-        let model = self
-            .local_store
-            .get_model(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("model not found in local manifest: {}", params.id))?;
+        let model = self.cached_model(&params.model).await?;
         Ok(ModelGetResult {
             model: ModelDocument::from(model),
         })
@@ -1402,11 +1428,7 @@ where
     }
 
     async fn update_model(&self, params: ModelUpdateParams) -> Result<ModelMutationResult> {
-        let existing = self
-            .local_store
-            .get_model(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("model not found in local manifest: {}", params.id))?;
+        let existing = self.cached_model(&params.model).await?;
         let merged = ModelUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: Some(
@@ -1425,7 +1447,7 @@ where
         };
         let updated = self
             .platform_client
-            .update_model_document(params.id, &merged)
+            .update_model_document(&params.model, &merged)
             .await?;
         let local_model = ModelManifest {
             id: updated.summary.id,
@@ -1443,15 +1465,16 @@ where
     }
 
     async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
+        let existing = self.cached_model(&params.model).await?;
         self.platform_client
-            .delete_model_document(params.id)
+            .delete_model_document(&params.model)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Model, params.id)
+            .delete_resource(ManifestResourceKind::Model, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -1474,21 +1497,32 @@ where
     }
 
     async fn get_council(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
-        let council = self
-            .local_store
-            .get_council(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found in local manifest: {}", params.id))?;
+        let council = self.cached_council(&params.council).await?;
         Ok(CouncilGetResult {
             council: CouncilDocument::from(council),
         })
     }
 
     async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
-        let created = self
-            .platform_client
-            .create_council_document(&params.data)
-            .await?;
+        let leader_agent = params.data.leader_agent.clone();
+        let mut members = Vec::with_capacity(params.data.members.len());
+        for member in &params.data.members {
+            members.push(CouncilCreateMemberApiBody {
+                agent: member.agent.clone(),
+                priority: member.priority,
+                config: member.config.clone(),
+            });
+        }
+        let body = CouncilCreateApiBody {
+            name: params.data.name,
+            description: params.data.description,
+            leader_agent: params.data.leader_agent,
+            delegation_strategy: params.data.delegation_strategy,
+            config: params.data.config,
+            members,
+        };
+        let mut created = self.platform_client.create_council_document(&body).await?;
+        created.summary.leader_agent = leader_agent;
         let local_council = local_council_from_document(&created);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
@@ -1497,11 +1531,7 @@ where
     }
 
     async fn update_council(&self, params: CouncilUpdateParams) -> Result<CouncilMutationResult> {
-        let existing = self
-            .local_store
-            .get_council(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("council not found in local manifest: {}", params.id))?;
+        let existing = self.cached_council(&params.council).await?;
         let merged = CouncilUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             description: params.data.description,
@@ -1511,10 +1541,11 @@ where
                 .or(Some(existing.delegation_strategy)),
             config: params.data.config,
         };
-        let updated = self
+        let mut updated = self
             .platform_client
-            .update_council_document(params.id, &merged)
+            .update_council_document(&params.council, &merged)
             .await?;
+        updated.summary.leader_agent = existing.leader_agent;
         let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
@@ -1526,10 +1557,17 @@ where
         &self,
         params: CouncilAddMemberParams,
     ) -> Result<CouncilMutationResult> {
-        let updated = self
+        let existing = self.cached_council(&params.council).await?;
+        let member = CouncilCreateMemberApiBody {
+            agent: params.data.agent,
+            priority: params.data.priority,
+            config: params.data.config,
+        };
+        let mut updated = self
             .platform_client
-            .add_council_member_document(params.council_id, &params.data)
+            .add_council_member_document(&params.council, &member)
             .await?;
+        updated.summary.leader_agent = existing.leader_agent;
         let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
@@ -1544,10 +1582,12 @@ where
         if params.data.is_empty() {
             bail!("council member update requires at least one field");
         }
-        let updated = self
+        let existing = self.cached_council(&params.council).await?;
+        let mut updated = self
             .platform_client
-            .update_council_member_document(params.council_id, params.agent_id, &params.data)
+            .update_council_member_document(&params.council, &params.agent, &params.data)
             .await?;
+        updated.summary.leader_agent = existing.leader_agent;
         let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
@@ -1559,10 +1599,12 @@ where
         &self,
         params: CouncilRemoveMemberParams,
     ) -> Result<CouncilMutationResult> {
-        let updated = self
+        let existing = self.cached_council(&params.council).await?;
+        let mut updated = self
             .platform_client
-            .remove_council_member_document(params.council_id, params.agent_id)
+            .remove_council_member_document(&params.council, &params.agent)
             .await?;
+        updated.summary.leader_agent = existing.leader_agent;
         let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
@@ -1571,15 +1613,16 @@ where
     }
 
     async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
+        let existing = self.cached_council(&params.council).await?;
         self.platform_client
-            .delete_council_document(params.id)
+            .delete_council_document(&params.council)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Council, params.id)
+            .delete_resource(ManifestResourceKind::Council, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -1605,11 +1648,7 @@ where
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult> {
-        let context_block = self
-            .local_store
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found in local manifest: {}", params.id))?;
+        let context_block = self.cached_context_block(&params.context_block).await?;
         Ok(ContextBlockGetResult {
             context_block: ContextBlockDocument::from(context_block),
         })
@@ -1619,11 +1658,7 @@ where
         &self,
         params: ContextBlockContentGetParams,
     ) -> Result<ContextBlockContentGetResult> {
-        let context_block = self
-            .local_store
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found in local manifest: {}", params.id))?;
+        let context_block = self.cached_context_block(&params.context_block).await?;
         Ok(ContextBlockContentGetResult {
             context_block: ContextBlockContentDocument::from(context_block),
         })
@@ -1668,11 +1703,7 @@ where
         &self,
         params: ContextBlockUpdateParams,
     ) -> Result<ContextBlockMutationResult> {
-        let existing = self
-            .local_store
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found in local manifest: {}", params.id))?;
+        let existing = self.cached_context_block(&params.context_block).await?;
         let merged = ContextBlockUpdateDocument {
             name: params.data.name.or_else(|| Some(existing.name.clone())),
             display_name: Some(
@@ -1691,7 +1722,7 @@ where
         };
         let updated = self
             .platform_client
-            .update_context_block_document(params.id, &merged)
+            .update_context_block_document(&params.context_block, &merged)
             .await?;
         let local_context_block = ContextBlockManifest {
             id: updated.summary.id,
@@ -1713,21 +1744,17 @@ where
         &self,
         params: ContextBlockContentUpdateParams,
     ) -> Result<ContextBlockContentMutationResult> {
-        let existing = self
-            .local_store
-            .get_context_block(params.id)
-            .await?
-            .ok_or_else(|| anyhow!("context block not found in local manifest: {}", params.id))?;
+        let existing = self.cached_context_block(&params.context_block).await?;
         let template = params.template.unwrap_or_else(|| existing.template.clone());
         let updated = self
             .platform_client
             .update_context_block_content_document(
-                params.id,
+                &params.context_block,
                 &template,
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        params.id,
+                        existing.id,
                         ManifestKind::ContextBlock
                             .encrypted_object_type()
                             .expect("context block content object type"),
@@ -1753,15 +1780,16 @@ where
     }
 
     async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult> {
+        let existing = self.cached_context_block(&params.context_block).await?;
         self.platform_client
-            .delete_context_block_document(params.id)
+            .delete_context_block_document(&params.context_block)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::ContextBlock, params.id)
+            .delete_resource(ManifestResourceKind::ContextBlock, existing.id)
             .await?;
         Ok(DeleteResult {
             deleted: true,
-            id: params.id,
+            id: existing.id,
         })
     }
 }
@@ -1772,12 +1800,21 @@ mod tests {
 
     use serde_json::json;
     use tempfile::{TempDir, tempdir};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use nenjo::manifest::ProjectManifest;
     use nenjo::manifest::local::LocalManifestStore;
     use nenjo::{ManifestResource, ManifestWriter};
 
     use super::*;
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        body: String,
+    }
 
     async fn library_backend_fixture() -> Result<(
         PlatformManifestBackend<LocalManifestStore, NoopSensitivePayloadEncoder>,
@@ -1801,7 +1838,7 @@ mod tests {
             .upsert_resource(&ManifestResource::Project(ProjectManifest {
                 id: project_id,
                 name: "Graph Eval".to_string(),
-                slug: pack_slug.to_string(),
+                slug: Slug::derive(pack_slug),
                 description: None,
                 settings: json!({}),
             }))
@@ -1820,17 +1857,12 @@ mod tests {
             "docs": [
                 {
                     "id": "overview",
-                    "virtual_path": overview_path,
+                    "path": overview_path,
                     "source_path": "docs/overview.md",
                     "title": "Overview",
                     "summary": "Library overview",
-                    "description": null,
                     "kind": "guide",
-                    "authority": "canonical",
-                    "status": "stable",
                     "tags": ["domain:library"],
-                    "aliases": ["overview.md"],
-                    "keywords": ["overview"],
                     "related": [
                         {
                             "type": "references",
@@ -1841,17 +1873,12 @@ mod tests {
                 },
                 {
                     "id": "routine",
-                    "virtual_path": routine_path,
+                    "path": routine_path,
                     "source_path": "docs/routine.md",
                     "title": "Routine",
                     "summary": "Routine design",
-                    "description": null,
                     "kind": "guide",
-                    "authority": "canonical",
-                    "status": "stable",
                     "tags": ["resource:routine"],
-                    "aliases": ["routine.md"],
-                    "keywords": ["routine"],
                     "related": [
                         {
                             "type": "depends_on",
@@ -1862,32 +1889,22 @@ mod tests {
                 },
                 {
                     "id": "gate",
-                    "virtual_path": gate_path,
+                    "path": gate_path,
                     "source_path": "docs/gate.md",
                     "title": "Gate",
                     "summary": "Gate design",
-                    "description": null,
                     "kind": "reference",
-                    "authority": "reference",
-                    "status": "stable",
                     "tags": ["resource:gate"],
-                    "aliases": ["gate.md"],
-                    "keywords": ["gate"],
                     "related": []
                 },
                 {
                     "id": "unrelated",
-                    "virtual_path": unrelated_path,
+                    "path": unrelated_path,
                     "source_path": "docs/unrelated.md",
                     "title": "Unrelated",
                     "summary": "Unrelated document",
-                    "description": null,
                     "kind": "reference",
-                    "authority": "reference",
-                    "status": "stable",
                     "tags": ["domain:other"],
-                    "aliases": ["unrelated.md"],
-                    "keywords": ["unrelated"],
                     "related": []
                 }
             ]
@@ -1911,35 +1928,215 @@ mod tests {
         Ok((backend, project_id, pack_slug.to_string(), temp))
     }
 
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<RecordedRequest> {
+        let mut buffer = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                anyhow::bail!("connection closed before request headers completed");
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let request_line = headers
+            .lines()
+            .next()
+            .ok_or_else(|| anyhow!("missing request line"))?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let path = parts.next().unwrap_or_default().to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+
+        let body_start = header_end;
+        while buffer.len() < body_start + content_length {
+            let mut chunk = vec![0_u8; body_start + content_length - buffer.len()];
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+
+        Ok(RecordedRequest {
+            method,
+            path,
+            body: String::from_utf8_lossy(&buffer[body_start..body_start + content_length])
+                .to_string(),
+        })
+    }
+
+    fn response(status: &str, body: serde_json::Value) -> String {
+        let body = body.to_string();
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn spawn_knowledge_update_server(
+        pack_id: Uuid,
+        doc_id: Uuid,
+        target_doc_id: Uuid,
+    ) -> Result<(
+        String,
+        tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let base_url = format!("http://{address}");
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().await?;
+                let request = read_request(&mut stream).await?;
+                let body = match (request.method.as_str(), request.path.as_str()) {
+                    ("GET", "/api/v1/knowledge") => response(
+                        "200 OK",
+                        json!([{
+                            "id": pack_id,
+                            "slug": "test-pack",
+                            "name": "Test Pack",
+                            "description": null,
+                            "selector": null,
+                            "version": null
+                        }]),
+                    ),
+                    ("GET", "/api/v1/knowledge/test-pack/items") => response(
+                        "200 OK",
+                        json!([
+                            {
+                                "id": doc_id,
+                                "pack_id": pack_id,
+                                "slug": "guide",
+                                "filename": "guide.md",
+                                "path": "docs/guide.md",
+                                "title": "Guide",
+                                "kind": "guide",
+                                "summary": "Guide",
+                                "tags": ["core"],
+                                "content_type": "text/plain",
+                                "updated_at": "2026-05-23T00:00:00Z"
+                            },
+                            {
+                                "id": target_doc_id,
+                                "pack_id": pack_id,
+                                "slug": "target",
+                                "filename": "target.md",
+                                "path": "docs/target.md",
+                                "title": "Target",
+                                "kind": "guide",
+                                "summary": "Target",
+                                "tags": [],
+                                "content_type": "text/plain",
+                                "updated_at": "2026-05-23T00:00:00Z"
+                            }
+                        ]),
+                    ),
+                    ("PUT", "/api/v1/knowledge/test-pack/items/guide/content") => response(
+                        "200 OK",
+                        json!({
+                            "id": doc_id,
+                            "pack_id": pack_id,
+                            "slug": "guide",
+                            "filename": "guide.md",
+                            "path": "docs/guide.md",
+                            "title": "Guide",
+                            "kind": "guide",
+                            "summary": "Updated guide",
+                            "tags": ["core"],
+                            "content_type": "text/plain",
+                            "updated_at": "2026-05-23T00:00:00Z"
+                        }),
+                    ),
+                    ("PATCH", "/api/v1/knowledge/test-pack/items/guide") => response(
+                        "200 OK",
+                        json!({
+                            "id": doc_id,
+                            "pack_id": pack_id,
+                            "slug": "guide",
+                            "filename": "guide.md",
+                            "path": "docs/guide.md",
+                            "title": "Guide",
+                            "kind": "guide",
+                            "summary": "Updated guide",
+                            "tags": ["core"],
+                            "content_type": "text/markdown",
+                            "updated_at": "2026-05-23T00:01:00Z"
+                        }),
+                    ),
+                    ("GET", "/api/v1/knowledge/test-pack/items/guide/edges") => {
+                        response("200 OK", json!([]))
+                    }
+                    ("POST", "/api/v1/knowledge/test-pack/items/guide/edges") => response(
+                        "201 Created",
+                        json!({
+                            "id": Uuid::new_v4(),
+                            "org_id": Uuid::new_v4(),
+                            "source_item_id": doc_id,
+                            "source_doc": "guide",
+                            "target_item_id": target_doc_id,
+                            "target_doc": "target",
+                            "edge_type": "references",
+                            "note": "see target",
+                            "created_at": "2026-05-23T00:02:00Z",
+                            "updated_at": "2026-05-23T00:02:00Z"
+                        }),
+                    ),
+                    _ => response("404 Not Found", json!({ "error": "not found" })),
+                };
+                stream.write_all(body.as_bytes()).await?;
+                requests.push(request);
+            }
+            Ok(requests)
+        });
+        Ok((base_url, handle))
+    }
+
     #[tokio::test]
-    async fn library_knowledge_alias_resolves_default_library_pack() {
+    async fn library_knowledge_uses_slug_selector() {
         let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
         let backend = backend.with_current_library_slug(Some(pack_slug.clone()));
 
         let packs = backend.list_knowledge_packs().await.unwrap();
         let packs = packs.as_array().expect("packs array");
-        assert!(packs.iter().any(|pack| pack["pack"] == "lib"));
+        assert!(
+            packs
+                .iter()
+                .any(|pack| pack["pack"] == format!("lib:{pack_slug}"))
+        );
 
         let value = backend
-            .read_knowledge_doc_manifest(json!({
-                "pack": "lib",
+            .read_knowledge_doc(json!({
+                "pack": format!("lib:{pack_slug}"),
                 "path": "routine"
             }))
             .await
             .unwrap();
 
-        assert_eq!(value["pack"], "lib");
+        assert_eq!(value["content"], "# routine.md\n");
         assert_eq!(
-            value["virtual_path"],
+            value["document"]["path"],
             format!("library://{pack_slug}/docs/routine.md")
         );
     }
 
     #[tokio::test]
-    async fn library_knowledge_neighbors_expose_outgoing_and_incoming_edges() {
+    async fn library_knowledge_neighbors_expose_outgoing_edges_with_metadata() {
         let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
         let routine_path = format!("library://{pack_slug}/docs/routine.md");
-        let overview_path = format!("library://{pack_slug}/docs/overview.md");
         let gate_path = format!("library://{pack_slug}/docs/gate.md");
 
         let value = backend
@@ -1949,30 +2146,13 @@ mod tests {
             }))
             .await
             .unwrap();
-        let neighbors = value.as_array().expect("neighbors array");
-
-        assert!(neighbors.iter().any(|neighbor| {
-            neighbor["target"] == overview_path
-                && neighbor["edges"].as_array().is_some_and(|edges| {
-                    edges.iter().any(|edge| {
-                        edge["edge_type"] == "references"
-                            && edge["source"] == overview_path
-                            && edge["target"] == routine_path
-                            && edge["note"] == "Overview references routine design"
-                    })
-                })
-        }));
-        assert!(neighbors.iter().any(|neighbor| {
-            neighbor["target"] == gate_path
-                && neighbor["edges"].as_array().is_some_and(|edges| {
-                    edges.iter().any(|edge| {
-                        edge["edge_type"] == "depends_on"
-                            && edge["source"] == routine_path
-                            && edge["target"] == gate_path
-                            && edge["note"] == "Routine depends on gate design"
-                    })
-                })
-        }));
+        assert_eq!(value["document"]["path"], routine_path);
+        let edges = value["edges"].as_array().expect("edges array");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["type"], "depends_on");
+        assert_eq!(edges[0]["target"]["path"], gate_path);
+        assert_eq!(edges[0]["target"]["title"], "Gate");
+        assert!(edges[0].get("note").is_none());
 
         let filtered = backend
             .list_knowledge_neighbors(json!({
@@ -1982,10 +2162,81 @@ mod tests {
             }))
             .await
             .unwrap();
-        let filtered = filtered.as_array().expect("filtered neighbors array");
+        let filtered = filtered["edges"].as_array().expect("filtered edges array");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["target"], gate_path);
-        assert_eq!(filtered[0]["edges"][0]["edge_type"], "depends_on");
+        assert_eq!(filtered[0]["target"]["path"], gate_path);
+        assert_eq!(filtered[0]["type"], "depends_on");
+    }
+
+    #[tokio::test]
+    async fn update_knowledge_doc_with_content_metadata_and_related_calls_all_slug_paths() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let pack_id = Uuid::new_v4();
+        let doc_id = Uuid::new_v4();
+        let target_doc_id = Uuid::new_v4();
+        let (base_url, server) = spawn_knowledge_update_server(pack_id, doc_id, target_doc_id)
+            .await
+            .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, NoopSensitivePayloadEncoder)
+            .with_cached_org_id(Some(Uuid::new_v4()));
+
+        let result = backend
+            .update_knowledge_doc(KnowledgeDocUpdateParams {
+                pack: Slug::parse("test-pack").unwrap(),
+                doc: Slug::parse("guide").unwrap(),
+                data: KnowledgeDocUpdateDocument {
+                    filename: Some("guide.md".into()),
+                    content: Some("updated content".into()),
+                    path: Some(Some("docs/guide.md".into())),
+                    title: Some(Some("Guide".into())),
+                    kind: Some(Some("guide".into())),
+                    summary: Some(Some("Updated guide".into())),
+                    tags: Some(vec!["core".into()]),
+                    related: Some(vec![KnowledgeDocRelatedDocument {
+                        target_doc: Slug::parse("target").unwrap(),
+                        edge_type: "references".into(),
+                        note: Some("see target".into()),
+                    }]),
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.knowledge_doc.pack.as_str(), "test-pack");
+        assert_eq!(result.knowledge_doc.doc.as_str(), "guide");
+        assert_eq!(result.knowledge_doc.path.as_deref(), Some("docs/guide.md"));
+        assert_eq!(result.knowledge_doc.title.as_deref(), Some("Guide"));
+        assert_eq!(result.knowledge_doc.tags, vec!["core"]);
+
+        let requests = server.await.unwrap().unwrap();
+        let expected_paths = [
+            "/api/v1/knowledge/test-pack/items".to_string(),
+            "/api/v1/knowledge/test-pack/items/guide/content".to_string(),
+            "/api/v1/knowledge/test-pack/items/guide".to_string(),
+            "/api/v1/knowledge/test-pack/items/guide/edges".to_string(),
+            "/api/v1/knowledge/test-pack/items/guide/edges".to_string(),
+        ];
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GET", expected_paths[0].clone()),
+                ("PUT", expected_paths[1].clone()),
+                ("PATCH", expected_paths[2].clone()),
+                ("GET", expected_paths[3].clone()),
+                ("POST", expected_paths[4].clone())
+            ]
+        );
+        assert!(requests[1].body.contains("updated content"));
+        assert!(requests[2].body.contains("\"filename\":\"guide.md\""));
+        assert!(!requests[2].body.contains("updated content"));
+        assert!(!requests[2].body.contains("related"));
+        assert!(requests[4].body.contains("target"));
+        assert!(requests[4].body.contains("references"));
     }
 
     #[tokio::test]

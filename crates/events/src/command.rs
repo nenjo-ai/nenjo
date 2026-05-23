@@ -60,13 +60,13 @@ pub enum Command {
         hidden: bool,
         /// Target project for context scoping.
         #[serde(default)]
-        project_id: Option<Uuid>,
+        project: Option<String>,
         /// If set, routes to a specific routine instead of a chat agent.
         #[serde(default)]
-        routine_id: Option<Uuid>,
+        routine: Option<String>,
         /// If set, routes to a specific agent; otherwise uses the default.
         #[serde(default)]
-        agent_id: Option<Uuid>,
+        agent: Option<String>,
         /// Active domain session context, if any.
         #[serde(default)]
         domain_session_id: Option<Uuid>,
@@ -80,8 +80,8 @@ pub enum Command {
     /// Exit an active domain session.
     #[serde(rename = "chat.domain_exit")]
     ChatDomainExit {
-        project_id: Uuid,
-        agent_id: Uuid,
+        project: String,
+        agent: String,
         domain_session_id: Uuid,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chat_session_id: Option<Uuid>,
@@ -90,16 +90,16 @@ pub enum Command {
     /// Cancel an in-flight chat response.
     #[serde(rename = "chat.cancel")]
     ChatCancel {
-        project_id: Uuid,
+        project: String,
         #[serde(default)]
-        agent_id: Option<Uuid>,
+        agent: Option<String>,
     },
 
     /// Delete a chat session's local history.
     #[serde(rename = "chat.session_delete")]
     ChatSessionDelete {
-        project_id: Uuid,
-        agent_id: Uuid,
+        project: String,
+        agent: String,
         session_id: Uuid,
     },
 
@@ -110,12 +110,12 @@ pub enum Command {
     #[serde(rename = "task.execute")]
     TaskExecute {
         task_id: Uuid,
-        project_id: Uuid,
+        project: String,
         execution_run_id: Uuid,
         #[serde(default)]
-        routine_id: Option<Uuid>,
+        routine: Option<String>,
         #[serde(default)]
-        assigned_agent_id: Option<Uuid>,
+        agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<TaskExecuteContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,7 +141,7 @@ pub enum Command {
     /// Clone/pull a project repository.
     #[serde(rename = "repo.sync")]
     RepoSync {
-        project_id: Uuid,
+        project: String,
         repo_url: String,
         /// Branch to sync. The clone/pull targets this branch.
         target_branch: String,
@@ -149,7 +149,7 @@ pub enum Command {
 
     /// Remove a synced project repository.
     #[serde(rename = "repo.unsync")]
-    RepoUnsync { project_id: Uuid },
+    RepoUnsync { project: String },
 
     // -----------------------------------------------------------------
     // Cron scheduling
@@ -157,9 +157,9 @@ pub enum Command {
     /// Enable a cron schedule for a routine.
     #[serde(rename = "cron.enable")]
     CronEnable {
-        routine_id: Uuid,
+        routine: String,
         #[serde(default)]
-        project_id: Option<Uuid>,
+        project: Option<String>,
         schedule: String,
         #[serde(default)]
         timezone: Option<String>,
@@ -167,20 +167,20 @@ pub enum Command {
 
     /// Disable a cron schedule.
     #[serde(rename = "cron.disable")]
-    CronDisable { routine_id: Uuid },
+    CronDisable { routine: String },
 
     /// Trigger a routine immediately (manual or test run).
     #[serde(rename = "cron.trigger")]
     CronTrigger {
-        routine_id: Uuid,
+        routine: String,
         #[serde(default)]
-        project_id: Option<Uuid>,
+        project: Option<String>,
     },
 
     /// Enable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.enable")]
     AgentHeartbeatEnable {
-        agent_id: Uuid,
+        agent: String,
         interval: String,
         #[serde(default)]
         timezone: Option<String>,
@@ -188,11 +188,11 @@ pub enum Command {
 
     /// Disable a recurring heartbeat schedule for an agent.
     #[serde(rename = "agent_heartbeat.disable")]
-    AgentHeartbeatDisable { agent_id: Uuid },
+    AgentHeartbeatDisable { agent: String },
 
     /// Trigger a one-time heartbeat run for an agent.
     #[serde(rename = "agent_heartbeat.trigger")]
-    AgentHeartbeatTrigger { agent_id: Uuid },
+    AgentHeartbeatTrigger { agent: String },
 
     // -----------------------------------------------------------------
     // Bootstrap
@@ -220,11 +220,11 @@ pub enum Command {
     #[serde(rename = "manifest.changed")]
     ManifestChanged {
         resource_type: ResourceType,
-        resource_id: Uuid,
+        resource: String,
         action: ResourceAction,
-        /// Parent project ID for project-scoped resources.
+        /// Parent project slug for project-scoped resources.
         #[serde(default)]
-        project_id: Option<Uuid>,
+        project: Option<String>,
         /// Inline resource payload — avoids a round-trip fetch to the backend API.
         /// `None` means the harness should fetch from the detail endpoint (fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +243,7 @@ impl std::fmt::Display for Command {
             Self::ChatDomainExit {
                 domain_session_id, ..
             } => write!(f, "chat.domain_exit(session={domain_session_id})"),
-            Self::ChatCancel { project_id, .. } => write!(f, "chat.cancel(project={project_id})"),
+            Self::ChatCancel { project, .. } => write!(f, "chat.cancel(project={project})"),
             Self::ChatSessionDelete { session_id, .. } => {
                 write!(f, "chat.session_delete(session={session_id})")
             }
@@ -261,23 +261,23 @@ impl std::fmt::Display for Command {
             Self::ExecutionResume { execution_run_id } => {
                 write!(f, "execution.resume(run={execution_run_id})")
             }
-            Self::RepoSync { project_id, .. } => write!(f, "repo.sync(project={project_id})"),
-            Self::RepoUnsync { project_id } => write!(f, "repo.unsync(project={project_id})"),
-            Self::CronEnable { routine_id, .. } => {
-                write!(f, "cron.enable(routine={routine_id})")
+            Self::RepoSync { project, .. } => write!(f, "repo.sync(project={project})"),
+            Self::RepoUnsync { project } => write!(f, "repo.unsync(project={project})"),
+            Self::CronEnable { routine, .. } => {
+                write!(f, "cron.enable(routine={routine})")
             }
-            Self::CronDisable { routine_id } => {
-                write!(f, "cron.disable(routine={routine_id})")
+            Self::CronDisable { routine } => {
+                write!(f, "cron.disable(routine={routine})")
             }
-            Self::CronTrigger { routine_id, .. } => write!(f, "cron.trigger(routine={routine_id})"),
-            Self::AgentHeartbeatEnable { agent_id, .. } => {
-                write!(f, "agent_heartbeat.enable(agent={agent_id})")
+            Self::CronTrigger { routine, .. } => write!(f, "cron.trigger(routine={routine})"),
+            Self::AgentHeartbeatEnable { agent, .. } => {
+                write!(f, "agent_heartbeat.enable(agent={agent})")
             }
-            Self::AgentHeartbeatDisable { agent_id } => {
-                write!(f, "agent_heartbeat.disable(agent={agent_id})")
+            Self::AgentHeartbeatDisable { agent } => {
+                write!(f, "agent_heartbeat.disable(agent={agent})")
             }
-            Self::AgentHeartbeatTrigger { agent_id } => {
-                write!(f, "agent_heartbeat.trigger(agent={agent_id})")
+            Self::AgentHeartbeatTrigger { agent } => {
+                write!(f, "agent_heartbeat.trigger(agent={agent})")
             }
             Self::WorkerPing => write!(f, "worker.ping"),
             Self::WorkerAccountKeyUpdated { .. } => write!(f, "worker.account_key_updated"),
@@ -389,8 +389,8 @@ mod tests {
 
         assert_eq!(
             Command::ChatCancel {
-                project_id: id,
-                agent_id: None,
+                project: "demo_project".into(),
+                agent: None,
             }
             .delivery(),
             CommandDelivery::Queue
@@ -398,10 +398,10 @@ mod tests {
         assert_eq!(
             Command::TaskExecute {
                 task_id: id,
-                project_id: id,
+                project: "demo_project".into(),
                 execution_run_id: id,
-                routine_id: None,
-                assigned_agent_id: None,
+                routine: None,
+                agent: None,
                 payload: None,
                 encrypted_payload: None,
             }
@@ -411,9 +411,9 @@ mod tests {
         assert_eq!(
             Command::ManifestChanged {
                 resource_type: ResourceType::Agent,
-                resource_id: id,
+                resource: "demo_agent".into(),
                 action: ResourceAction::Updated,
-                project_id: None,
+                project: None,
                 payload: None,
                 encrypted_payload: None,
             }
@@ -422,7 +422,7 @@ mod tests {
         );
         assert_eq!(
             Command::RepoSync {
-                project_id: id,
+                project: "demo_project".into(),
                 repo_url: "https://example.test/repo.git".into(),
                 target_branch: "main".into(),
             }

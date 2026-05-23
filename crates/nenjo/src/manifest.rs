@@ -9,6 +9,8 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::Slug;
+
 pub mod local;
 pub mod store;
 
@@ -41,39 +43,34 @@ pub struct Manifest {
 impl Manifest {
     /// Merge another manifest into this one.
     ///
-    /// Collections are last-write-wins by resource ID so package, platform,
-    /// global, and local loaders can model normal dependency precedence.
+    /// Collections are last-write-wins by manifest resource identity so package,
+    /// platform, global, and local loaders can model normal dependency
+    /// precedence. Executable SDK resources are keyed by slug; platform-owned
+    /// support resources keep UUID identity until their schemas are slug-native.
     pub fn merge(&mut self, other: Manifest) {
-        merge_by_id(&mut self.routines, other.routines);
-        merge_by_id(&mut self.models, other.models);
-        merge_by_id(&mut self.agents, other.agents);
-        merge_by_id(&mut self.councils, other.councils);
-        merge_by_id(&mut self.domains, other.domains);
-        merge_by_id(&mut self.projects, other.projects);
-        merge_by_id(&mut self.mcp_servers, other.mcp_servers);
-        merge_by_id(&mut self.abilities, other.abilities);
-        merge_by_id(&mut self.context_blocks, other.context_blocks);
+        merge_by_slug(&mut self.routines, other.routines);
+        merge_by_slug(&mut self.models, other.models);
+        merge_by_slug(&mut self.agents, other.agents);
+        merge_by_slug(&mut self.councils, other.councils);
+        merge_by_slug(&mut self.domains, other.domains);
+        merge_by_slug(&mut self.projects, other.projects);
+        merge_by_slug(&mut self.mcp_servers, other.mcp_servers);
+        merge_by_slug(&mut self.abilities, other.abilities);
+        merge_by_slug(&mut self.context_blocks, other.context_blocks);
     }
 
     /// Insert or replace a single resource in this manifest.
     pub fn upsert_resource(&mut self, resource: ManifestResource) {
         match resource {
-            ManifestResource::Agent(item) => upsert_by_id(&mut self.agents, item),
-            ManifestResource::Model(item) => upsert_by_id(&mut self.models, item),
-            ManifestResource::Routine(item) => upsert_by_id(&mut self.routines, item),
-            ManifestResource::Project(item) => upsert_by_id(&mut self.projects, item),
-            ManifestResource::Council(item) => upsert_by_id(&mut self.councils, item),
-            ManifestResource::Domain(item) => upsert_by_id(&mut self.domains, item),
-            ManifestResource::McpServer(item) => upsert_by_id(&mut self.mcp_servers, item),
-            ManifestResource::Ability(item) => upsert_by_id(&mut self.abilities, item),
-            ManifestResource::ContextBlock(item) => {
-                if let Some(existing) = self.context_blocks.iter_mut().find(|b| b.name == item.name)
-                {
-                    *existing = item;
-                } else {
-                    self.context_blocks.push(item);
-                }
-            }
+            ManifestResource::Agent(item) => upsert_by_slug(&mut self.agents, item),
+            ManifestResource::Model(item) => upsert_by_slug(&mut self.models, item),
+            ManifestResource::Routine(item) => upsert_by_slug(&mut self.routines, item),
+            ManifestResource::Project(item) => upsert_by_slug(&mut self.projects, item),
+            ManifestResource::Council(item) => upsert_by_slug(&mut self.councils, item),
+            ManifestResource::Domain(item) => upsert_by_slug(&mut self.domains, item),
+            ManifestResource::McpServer(item) => upsert_by_slug(&mut self.mcp_servers, item),
+            ManifestResource::Ability(item) => upsert_by_slug(&mut self.abilities, item),
+            ManifestResource::ContextBlock(item) => upsert_by_slug(&mut self.context_blocks, item),
         }
     }
 
@@ -93,10 +90,11 @@ impl Manifest {
     }
 }
 
-fn upsert_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: T) {
+fn upsert_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: T) {
+    let incoming_slug = incoming.manifest_slug();
     if let Some(existing) = items
         .iter_mut()
-        .find(|item| item.manifest_id() == incoming.manifest_id())
+        .find(|item| item.manifest_slug() == incoming_slug)
     {
         *existing = incoming;
     } else {
@@ -104,14 +102,14 @@ fn upsert_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: T) {
     }
 }
 
-fn merge_by_id<T: HasManifestId>(items: &mut Vec<T>, incoming: Vec<T>) {
+fn merge_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: Vec<T>) {
     for item in incoming {
-        upsert_by_id(items, item);
+        upsert_by_slug(items, item);
     }
 }
 
-trait HasManifestId {
-    fn manifest_id(&self) -> Uuid;
+trait HasManifestSlug {
+    fn manifest_slug(&self) -> Slug;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,9 +141,9 @@ fn default_mcp_source_type() -> String {
     "native".to_string()
 }
 
-impl HasManifestId for McpServerManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for McpServerManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
     }
 }
 
@@ -154,14 +152,14 @@ impl HasManifestId for McpServerManifest {
 pub struct ProjectManifest {
     pub id: Uuid,
     pub name: String,
-    pub slug: String,
+    pub slug: Slug,
     pub description: Option<String>,
     pub settings: serde_json::Value,
 }
 
-impl HasManifestId for ProjectManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for ProjectManifest {
+    fn manifest_slug(&self) -> Slug {
+        self.slug.clone()
     }
 }
 
@@ -177,9 +175,9 @@ pub struct RoutineManifest {
     pub edges: Vec<RoutineEdgeManifest>,
 }
 
-impl HasManifestId for RoutineManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for RoutineManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
     }
 }
 
@@ -197,18 +195,19 @@ pub struct RoutineMetadata {
     #[serde(default)]
     pub schedule: Option<String>,
     #[serde(default)]
-    pub entry_step_ids: Vec<Uuid>,
+    pub entry_steps: Vec<Slug>,
 }
 
 /// A single step in a routine DAG (agent, gate, council, cron, or terminal).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineStepManifest {
     pub id: Uuid,
-    pub routine_id: Uuid,
+    pub slug: Slug,
+    pub routine: Slug,
     pub name: String,
     pub step_type: RoutineStepType,
-    pub council_id: Option<Uuid>,
-    pub agent_id: Option<Uuid>,
+    pub council: Option<Slug>,
+    pub agent: Option<Slug>,
     pub config: serde_json::Value,
     pub order_index: i32,
 }
@@ -244,9 +243,9 @@ impl std::fmt::Display for RoutineStepType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineEdgeManifest {
     pub id: Uuid,
-    pub routine_id: Uuid,
-    pub source_step_id: Uuid,
-    pub target_step_id: Uuid,
+    pub routine: Slug,
+    pub source_step: Slug,
+    pub target_step: Slug,
     pub condition: RoutineEdgeCondition,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -298,9 +297,9 @@ pub struct ModelManifest {
     pub base_url: Option<String>,
 }
 
-impl HasManifestId for ModelManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for ModelManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
     }
 }
 
@@ -377,15 +376,19 @@ pub struct AgentManifest {
     #[builder(default, setter(strip_option))]
     pub color: Option<String>,
     #[builder(default, setter(strip_option))]
-    pub model_id: Option<Uuid>,
+    pub model: Option<Slug>,
     #[builder(default)]
-    pub domain_ids: Vec<Uuid>,
+    /// Domain slugs assigned to this agent.
+    pub domains: Vec<Slug>,
     #[builder(default)]
     pub platform_scopes: Vec<String>,
     #[builder(default)]
-    pub mcp_server_ids: Vec<Uuid>,
+    /// MCP server slugs assigned to this agent.
+    pub mcp_servers: Vec<Slug>,
+    /// Ability slugs assigned to this agent.
+    #[serde(default)]
     #[builder(default)]
-    pub ability_ids: Vec<Uuid>,
+    pub abilities: Vec<String>,
     /// When true, prompt_config updates are blocked.
     #[builder(default)]
     pub prompt_locked: bool,
@@ -427,16 +430,16 @@ impl AgentManifestBuilder {
     }
 }
 
-impl HasManifestId for AgentManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for AgentManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentHeartbeatManifest {
     pub id: Uuid,
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub interval: String,
     pub is_active: bool,
     #[serde(default)]
@@ -451,27 +454,67 @@ pub struct AgentHeartbeatManifest {
 /// staying intentionally narrow: abilities contribute only developer guidance.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AbilityPromptConfig {
+    /// Developer prompt appended while an agent is executing inside this ability.
     pub developer_prompt: String,
 }
 
 /// An ability — a sub-execution mode with its own prompt and filtered tools.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Runtime-created abilities can use the builder with only a name and prompt.
+/// The optional `path` field defaults to `None`, which places the ability at
+/// the root of local manifest trees.
+///
+/// ```
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nenjo::manifest::AbilityManifest;
+///
+/// let ability = AbilityManifest::builder()
+///     .with_name("review")
+///     .with_description("Reviews code changes")
+///     .with_activation_condition("When code review is requested")
+///     .with_prompt("Focus on correctness, regressions, and tests.")
+///     .build()?;
+/// # let _ = ability;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AbilityManifest {
+    /// Stable UUID for this ability resource.
+    #[builder(default = "Uuid::new_v4()")]
     pub id: Uuid,
+    /// Stable slug used by agents to assign and invoke this ability.
     pub name: String,
-    pub tool_name: String,
-    pub path: String,
-    pub display_name: Option<String>,
+    /// Optional folder path used only for local manifest tree organization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub path: Option<String>,
+    /// Human-readable summary of what this ability does.
+    #[builder(default, setter(strip_option))]
     pub description: Option<String>,
+    /// Condition shown by `list_abilities` to help the model decide when to invoke this ability.
+    #[builder(default)]
     pub activation_condition: String,
+    /// Developer prompt applied while the ability sub-execution runs.
     pub prompt_config: AbilityPromptConfig,
+    /// Platform permissions available while this ability runs.
+    #[builder(default)]
     pub platform_scopes: Vec<String>,
-    pub mcp_server_ids: Vec<Uuid>,
+    /// MCP server slugs made available while this ability runs.
+    #[builder(default)]
+    pub mcp_servers: Vec<Slug>,
+    /// Source classification for lifecycle behavior such as native, skill, or package.
     #[serde(default = "default_ability_source_type")]
+    #[builder(default = "default_ability_source_type()")]
     pub source_type: String,
+    /// Whether the ability is source-managed and should not be edited directly.
     #[serde(default)]
+    #[builder(default)]
     pub read_only: bool,
+    /// Source/install/runtime metadata carried with this ability.
     #[serde(default)]
+    #[builder(default)]
     pub metadata: serde_json::Value,
 }
 
@@ -479,9 +522,26 @@ fn default_ability_source_type() -> String {
     "native".to_string()
 }
 
-impl HasManifestId for AbilityManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for AbilityManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
+    }
+}
+
+impl AbilityManifest {
+    /// Create a builder for an ability manifest.
+    pub fn builder() -> AbilityManifestBuilder {
+        AbilityManifestBuilder::default()
+    }
+}
+
+impl AbilityManifestBuilder {
+    /// Set the developer prompt without manually constructing [`AbilityPromptConfig`].
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
+        prompt_config.developer_prompt = prompt.into();
+        self.prompt_config = Some(prompt_config);
+        self
     }
 }
 
@@ -490,9 +550,7 @@ impl HasManifestId for AbilityManifest {
 pub struct AbilityMeta {
     pub id: Uuid,
     pub name: String,
-    pub tool_name: String,
-    pub path: String,
-    pub display_name: Option<String>,
+    pub path: Option<String>,
     pub description: Option<String>,
     pub activation_condition: String,
 }
@@ -502,9 +560,7 @@ impl From<&AbilityManifest> for AbilityMeta {
         Self {
             id: a.id,
             name: a.name.clone(),
-            tool_name: a.tool_name.clone(),
             path: a.path.clone(),
-            display_name: a.display_name.clone(),
             description: a.description.clone(),
             activation_condition: a.activation_condition.clone(),
         }
@@ -540,9 +596,23 @@ pub struct ContextBlockManifest {
     pub template: String,
 }
 
-impl HasManifestId for ContextBlockManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl ContextBlockManifest {
+    pub fn slug(&self) -> Slug {
+        context_block_slug(&self.path, &self.name)
+    }
+}
+
+impl HasManifestSlug for ContextBlockManifest {
+    fn manifest_slug(&self) -> Slug {
+        self.slug()
+    }
+}
+
+pub fn context_block_slug(path: &str, name: &str) -> Slug {
+    if path.trim().is_empty() {
+        Slug::derive(name)
+    } else {
+        Slug::derive(format!("{}/{}", path, name))
     }
 }
 
@@ -562,14 +632,30 @@ pub struct DomainManifest {
     pub description: Option<String>,
     pub command: String,
     pub platform_scopes: Vec<String>,
-    pub ability_ids: Vec<Uuid>,
-    pub mcp_server_ids: Vec<Uuid>,
+    /// Ability slugs activated by this domain.
+    #[serde(default)]
+    pub abilities: Vec<String>,
+    pub mcp_servers: Vec<Slug>,
     pub prompt_config: DomainPromptConfig,
 }
 
-impl HasManifestId for DomainManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for DomainManifest {
+    fn manifest_slug(&self) -> Slug {
+        self.slug()
+    }
+}
+
+impl DomainManifest {
+    pub fn slug(&self) -> Slug {
+        domain_slug(&self.path, &self.name)
+    }
+}
+
+pub fn domain_slug(path: &str, name: &str) -> Slug {
+    if path.trim().is_empty() {
+        Slug::derive(name)
+    } else {
+        Slug::derive(format!("{}/{}", path, name))
     }
 }
 
@@ -579,13 +665,13 @@ pub struct CouncilManifest {
     pub id: Uuid,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
-    pub leader_agent_id: Uuid,
+    pub leader_agent: Slug,
     pub members: Vec<CouncilMemberManifest>,
 }
 
-impl HasManifestId for CouncilManifest {
-    fn manifest_id(&self) -> Uuid {
-        self.id
+impl HasManifestSlug for CouncilManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
     }
 }
 
@@ -604,8 +690,7 @@ pub enum CouncilDelegationStrategy {
 /// A member of a council with a priority ranking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouncilMemberManifest {
-    pub agent_id: Uuid,
-    pub agent_name: String,
+    pub agent: Slug,
     pub priority: i32,
 }
 

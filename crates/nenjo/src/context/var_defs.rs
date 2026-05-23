@@ -28,12 +28,12 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             variables: vec![
                 TemplateVarDef {
                     name: "self",
-                    description: "Full XML of the executing agent (id, role, name, model, description)",
+                    description: "Full XML of the executing agent (slug, role, name, model, description)",
                     group: "Agent (self)",
                 },
                 TemplateVarDef {
-                    name: "agent.id",
-                    description: "UUID of the executing agent",
+                    name: "agent.slug",
+                    description: "Slug of the executing agent",
                     group: "Agent (self)",
                 },
                 TemplateVarDef {
@@ -136,12 +136,7 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             variables: vec![
                 TemplateVarDef {
                     name: "project",
-                    description: "Full XML of the active project (id, name, description, git)",
-                    group: "Project",
-                },
-                TemplateVarDef {
-                    name: "project.id",
-                    description: "Project UUID",
+                    description: "Full XML of the active project (slug, name, description, git)",
                     group: "Project",
                 },
                 TemplateVarDef {
@@ -181,12 +176,12 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             variables: vec![
                 TemplateVarDef {
                     name: "routine",
-                    description: "Full XML of the active routine (id, name, execution_id, step)",
+                    description: "Full XML of the active routine (slug, name, execution_id, step)",
                     group: "Routine",
                 },
                 TemplateVarDef {
-                    name: "routine.id",
-                    description: "UUID of the active routine",
+                    name: "routine.slug",
+                    description: "Slug of the active routine",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -298,26 +293,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     name: "git.repo_url",
                     description: "Remote clone URL for the repository",
                     group: "Git",
-                },
-            ],
-        },
-        TemplateVarGroup {
-            name: "Available",
-            variables: vec![
-                TemplateVarDef {
-                    name: "available_agents",
-                    description: "XML list of all available agents (id, role, name, model, description)",
-                    group: "Available",
-                },
-                TemplateVarDef {
-                    name: "available_abilities",
-                    description: "XML list of all available abilities (name, activation condition)",
-                    group: "Available",
-                },
-                TemplateVarDef {
-                    name: "available_domains",
-                    description: "XML list of all available domains (name, command, description)",
-                    group: "Available",
                 },
             ],
         },

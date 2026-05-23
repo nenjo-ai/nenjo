@@ -11,6 +11,14 @@ pub enum ProviderError {
     #[error("routine not found: {0}")]
     RoutineNotFound(String),
 
+    /// The requested project was not found in the manifest.
+    #[error("project not found: {0}")]
+    ProjectNotFound(String),
+
+    /// The requested council was not found in the manifest.
+    #[error("council not found: {0}")]
+    CouncilNotFound(String),
+
     /// The agent's assigned model was not found in the manifest.
     #[error("model not found: {0}")]
     ModelNotFound(String),

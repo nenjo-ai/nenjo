@@ -229,16 +229,16 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
             object.entry("color").or_insert(Value::Null);
             object.entry("model_id").or_insert(Value::Null);
             object
-                .entry("domain_ids")
+                .entry("domains")
                 .or_insert_with(|| serde_json::json!([]));
             object
                 .entry("platform_scopes")
                 .or_insert_with(|| serde_json::json!([]));
             object
-                .entry("mcp_server_ids")
+                .entry("mcp_servers")
                 .or_insert_with(|| serde_json::json!([]));
             object
-                .entry("ability_ids")
+                .entry("abilities")
                 .or_insert_with(|| serde_json::json!([]));
             object
                 .entry("prompt_locked")
@@ -252,14 +252,6 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                     defaults.module_path,
                 )),
             );
-            let name = object
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("package_ability")
-                .to_string();
-            object
-                .entry("tool_name")
-                .or_insert_with(|| Value::String(name));
             object
                 .entry("activation_condition")
                 .or_insert_with(|| Value::String(String::new()));
@@ -268,7 +260,7 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .entry("platform_scopes")
                 .or_insert_with(|| serde_json::json!([]));
             object
-                .entry("mcp_server_ids")
+                .entry("mcp_servers")
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Domain => {
@@ -294,10 +286,10 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .entry("platform_scopes")
                 .or_insert_with(|| serde_json::json!([]));
             object
-                .entry("ability_ids")
+                .entry("abilities")
                 .or_insert_with(|| serde_json::json!([]));
             object
-                .entry("mcp_server_ids")
+                .entry("mcp_servers")
                 .or_insert_with(|| serde_json::json!([]));
             object
                 .entry("prompt_config")
@@ -472,8 +464,7 @@ mod tests {
             },
         );
         let ability: AbilityManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(ability.path, "nenji/abilities/design");
-        assert_eq!(ability.tool_name, "design_agent");
+        assert_eq!(ability.path.as_deref(), Some("nenji/abilities/design"));
         assert!(ability.read_only);
         assert_eq!(ability.source_type, "package");
         assert_eq!(ability.metadata["package"]["version"], "0.2.0");

@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use anyhow::Result;
-use uuid::Uuid;
-
 use super::{ProviderError, RoutineRunner, ToolFactory, builder};
+use crate::Slug;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
 use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
 use crate::tools::Tool;
+use anyhow::Result;
 
 #[doc(hidden)]
 pub trait ProviderMemory: Send + Sync + 'static {
@@ -96,11 +95,11 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     /// Borrow the runtime's tool factory.
     fn tool_factory(&self) -> &Self::ToolFactory<'_>;
 
-    /// Find an agent manifest by name.
-    fn find_agent_manifest(&self, name: &str) -> Option<&AgentManifest>;
+    /// Find an agent manifest by slug.
+    fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest>;
 
-    /// Find a project manifest by ID.
-    fn find_project(&self, id: Uuid) -> Option<&ProjectManifest>;
+    /// Find a project manifest by slug.
+    fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest>;
 
     /// Create provider-level knowledge tools.
     fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>>;
@@ -117,14 +116,11 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     /// Start a blank agent builder backed by this provider runtime.
     fn new_agent(&self) -> AgentBuilder<Self>;
 
-    /// Build an agent from the provider manifest by ID.
-    async fn build_agent_by_id(&self, id: Uuid) -> Result<AgentBuilder<Self>, ProviderError>;
+    /// Build an agent from the provider manifest by slug.
+    async fn agent(&self, slug: &Slug) -> Result<AgentBuilder<Self>, ProviderError>;
 
-    /// Build an agent from the provider manifest by name.
-    async fn build_agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError>;
-
-    /// Build a routine runner from the provider manifest by routine ID.
-    fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError>
+    /// Build a routine runner from the provider manifest by routine slug.
+    fn routine(&self, slug: &Slug) -> Result<RoutineRunner<Self>, ProviderError>
     where
         Self: Sized;
 }

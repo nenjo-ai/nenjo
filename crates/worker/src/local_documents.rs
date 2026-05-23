@@ -1,90 +1,55 @@
-//! Library knowledge sync — download library items to the local workspace.
+//! Library knowledge sync — download library documents to the local workspace.
 //!
-//! At bootstrap, fetches library item metadata via the v1 API, diffs against
-//! the local library `manifest.json`, and downloads new/changed items.
-//! Deleted items are removed locally. Network errors are soft-fail (logged);
+//! At bootstrap, fetches library document metadata via the v1 API, diffs against
+//! the local library `manifest.json`, and downloads new/changed documents.
+//! Deleted documents are removed locally. Network errors are soft-fail (logged);
 //! filesystem errors are hard-fail.
 
 use anyhow::{Context, Result};
 use nenjo_events::EncryptedPayload;
 use nenjo_knowledge::KnowledgeDocManifest;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta, NenjoClient};
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo_platform::library_knowledge::{
-    LibraryKnowledgePackManifest, build_library_knowledge_manifest, library_item_relative_path,
-    library_knowledge_item_relative_path, load_library_knowledge_manifest,
+    LibraryKnowledgePackManifest, build_library_knowledge_manifest, library_doc_relative_path,
+    library_knowledge_doc_relative_path, load_library_knowledge_manifest,
     remove_library_knowledge_entry, upsert_library_knowledge_entry,
     write_library_knowledge_manifest,
 };
 
-pub fn manifest_library_dir(
-    manifest: &nenjo::Manifest,
-    platform_library_root: &Path,
-    project_id: Uuid,
-) -> PathBuf {
-    platform_library_root.join(library_pack_slug(manifest, project_id))
-}
-
-pub fn remove_manifest_document(
-    manifest: &nenjo::Manifest,
-    platform_library_root: &Path,
-    project_id: Uuid,
-    document_id: Uuid,
-) -> Result<()> {
-    let library_dir = manifest_library_dir(manifest, platform_library_root, project_id);
-    let existing = library_knowledge_item_relative_path(&library_dir, document_id);
-    remove_library_knowledge_entry(&library_dir, document_id)?;
-    if let Some(filename) = existing {
-        delete_document_file(&library_dir, &filename)?;
-    } else {
-        debug!(%project_id, %document_id, "Deleted library knowledge item was not present in local knowledge manifest");
-    }
-    Ok(())
-}
-
 pub fn remove_manifest_document_from_pack_dir(
     pack_dir: &Path,
-    document_id: Uuid,
+    doc: &nenjo::Slug,
     metadata: Option<&DocumentSyncMeta>,
 ) -> Result<()> {
-    let existing = library_knowledge_item_relative_path(pack_dir, document_id)
-        .or_else(|| metadata.map(library_item_relative_path));
-    remove_library_knowledge_entry(pack_dir, document_id)?;
+    let existing = library_knowledge_doc_relative_path(pack_dir, doc)
+        .or_else(|| metadata.map(library_doc_relative_path));
+    remove_library_knowledge_entry(pack_dir, doc)?;
     if let Some(filename) = existing {
         delete_document_file(pack_dir, &filename)?;
     } else {
-        debug!(%document_id, "Deleted library knowledge item was not present in local knowledge manifest");
+        debug!(%doc, "Deleted library knowledge document was not present in local knowledge manifest");
     }
     Ok(())
-}
-
-fn library_pack_slug(manifest: &nenjo::Manifest, project_id: Uuid) -> String {
-    manifest
-        .projects
-        .iter()
-        .find(|project| project.id == project_id)
-        .map(|project| project.slug.clone())
-        .unwrap_or_else(|| project_id.to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Diff
 // ---------------------------------------------------------------------------
 
-/// Result of comparing remote library items against the local manifest.
+/// Result of comparing remote library documents against the local manifest.
 #[derive(Debug)]
 pub struct SyncDiff {
     /// Library items to download (new or updated).
     pub to_download: Vec<DocumentSyncMeta>,
     /// Local files to rename when only the filename changed.
     pub to_rename: Vec<FileRename>,
-    /// Local library item files to delete (no longer present remotely).
+    /// Local library document files to delete (no longer present remotely).
     pub to_delete: Vec<String>,
 }
 
@@ -102,59 +67,65 @@ fn knowledge_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
         .to_string()
 }
 
-fn knowledge_doc_id(doc: &KnowledgeDocManifest) -> Option<Uuid> {
-    Uuid::parse_str(&doc.id).ok()
+fn knowledge_doc_slug(doc: &KnowledgeDocManifest) -> Option<nenjo::Slug> {
+    nenjo::Slug::parse(&doc.id).ok()
 }
 
-/// Compare remote library item list against a local manifest.
+/// Compare remote library document list against a local manifest.
 ///
-/// A library item is considered changed if its `updated_at` timestamp differs.
+/// A library document is considered changed if its `updated_at` timestamp differs.
 pub fn compute_diff(
     manifest: Option<&LibraryKnowledgePackManifest>,
     remote: &[DocumentSyncMeta],
 ) -> SyncDiff {
-    let local_map: HashMap<Uuid, &KnowledgeDocManifest> = manifest
+    let local_map: HashMap<nenjo::Slug, &KnowledgeDocManifest> = manifest
         .map(|m| {
             m.docs
                 .iter()
-                .filter_map(|doc| knowledge_doc_id(doc).map(|id| (id, doc)))
+                .filter_map(|doc| knowledge_doc_slug(doc).map(|slug| (slug, doc)))
                 .collect()
         })
         .unwrap_or_default();
 
-    let remote_ids: std::collections::HashSet<Uuid> = remote.iter().map(|d| d.id).collect();
+    let remote_docs: std::collections::HashSet<nenjo::Slug> = remote
+        .iter()
+        .map(|doc| nenjo::Slug::derive(&doc.slug))
+        .collect();
 
     let to_download: Vec<DocumentSyncMeta> = remote
         .iter()
         .filter(|doc| {
-            match local_map.get(&doc.id) {
+            let slug = nenjo::Slug::derive(&doc.slug);
+            match local_map.get(&slug) {
                 Some(entry) => entry.updated_at != doc.updated_at,
-                None => true, // new library item
+                None => true, // new library document
             }
         })
         .cloned()
         .collect();
 
-    let rename_download_ids: std::collections::HashSet<Uuid> = remote
+    let rename_download_docs: std::collections::HashSet<nenjo::Slug> = remote
         .iter()
         .filter_map(|doc| {
+            let slug = nenjo::Slug::derive(&doc.slug);
             local_map
-                .get(&doc.id)
+                .get(&slug)
                 .filter(|entry| {
-                    knowledge_doc_relative_path(entry) != library_item_relative_path(doc)
+                    knowledge_doc_relative_path(entry) != library_doc_relative_path(doc)
                         && entry.updated_at != doc.updated_at
                 })
-                .map(|_| doc.id)
+                .map(|_| slug)
         })
         .collect();
 
     let to_rename: Vec<FileRename> = remote
         .iter()
         .filter_map(|doc| {
-            let entry = local_map.get(&doc.id)?;
+            let slug = nenjo::Slug::derive(&doc.slug);
+            let entry = local_map.get(&slug)?;
             let from = knowledge_doc_relative_path(entry);
-            let to = library_item_relative_path(doc);
-            if from == to || rename_download_ids.contains(&doc.id) {
+            let to = library_doc_relative_path(doc);
+            if from == to || rename_download_docs.contains(&slug) {
                 return None;
             }
             Some(FileRename { from, to })
@@ -166,8 +137,8 @@ pub fn compute_diff(
             m.docs
                 .iter()
                 .filter_map(|entry| {
-                    let id = knowledge_doc_id(entry)?;
-                    (!remote_ids.contains(&id) || rename_download_ids.contains(&id))
+                    let doc = knowledge_doc_slug(entry)?;
+                    (!remote_docs.contains(&doc) || rename_download_docs.contains(&doc))
                         .then(|| knowledge_doc_relative_path(entry))
                 })
                 .collect()
@@ -220,7 +191,7 @@ pub async fn sync_all(
         let result = if pack.source_type == "github" {
             crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
         } else {
-            sync_pack(api, &pack_dir, pack.id, state_dir).await
+            sync_pack(api, &pack_dir, &pack.slug, state_dir).await
         };
         if let Err(e) = result {
             warn!(
@@ -236,19 +207,22 @@ pub async fn sync_all(
     Ok(())
 }
 
-/// Sync one library knowledge pack by id.
-pub async fn sync_pack_by_id(
+/// Sync one library knowledge pack by slug.
+pub async fn sync_pack_by_slug(
     api: &NenjoClient,
     nenjo_home: &Path,
     state_dir: &Path,
-    pack_id: Uuid,
+    pack_slug: &nenjo::Slug,
 ) -> Result<()> {
     let packs = api
         .list_knowledge_packs()
         .await
         .context("failed to list knowledge packs")?;
-    let Some(pack) = packs.into_iter().find(|pack| pack.id == pack_id) else {
-        warn!(%pack_id, "Knowledge pack not found during sync");
+    let Some(pack) = packs
+        .into_iter()
+        .find(|pack| nenjo::Slug::derive(&pack.slug) == *pack_slug)
+    else {
+        warn!(%pack_slug, "Knowledge pack not found during sync");
         return Ok(());
     };
 
@@ -256,49 +230,43 @@ pub async fn sync_pack_by_id(
         crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
     } else {
         let pack_dir = nenjo_home.join("library").join("platform").join(&pack.slug);
-        sync_pack(api, &pack_dir, pack.id, state_dir).await
+        sync_pack(api, &pack_dir, &pack.slug, state_dir).await
     }
 }
 
-/// Sync knowledge items for a single pack.
+/// Sync knowledge documents for a single pack.
 pub async fn sync_pack(
     api: &NenjoClient,
     pack_dir: &Path,
-    pack_id: Uuid,
+    pack_slug: &str,
     state_dir: &Path,
 ) -> Result<()> {
-    let pack_slug = pack_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("default")
-        .to_string();
-
-    let remote_docs = match api.list_knowledge_items(pack_id).await {
+    let remote_docs = match api.list_knowledge_docs(pack_slug).await {
         Ok(docs) => docs,
         Err(e) => {
             warn!(
-                pack_id = %pack_id,
+                pack_slug = %pack_slug,
                 error = %e,
-                "Failed to list knowledge items — skipping sync"
+                "Failed to list knowledge documents — skipping sync"
             );
             return Ok(());
         }
     };
 
-    let mut edges_by_doc: HashMap<Uuid, Vec<DocumentSyncEdge>> = HashMap::new();
+    let mut edges_by_doc: HashMap<nenjo::Slug, Vec<DocumentSyncEdge>> = HashMap::new();
     for doc in &remote_docs {
-        match api.list_knowledge_item_edges(pack_id, doc.id).await {
+        match api.list_knowledge_doc_edges(pack_slug, &doc.slug).await {
             Ok(edges) => {
-                edges_by_doc.insert(doc.id, edges);
+                edges_by_doc.insert(nenjo::Slug::derive(&doc.slug), edges);
             }
             Err(e) => {
                 warn!(
-                    pack_id = %pack_id,
-                    doc_id = %doc.id,
+                    pack_slug = %pack_slug,
+                    doc = %doc.slug,
                     error = %e,
-                    "Failed to list knowledge item edges — continuing with empty edge set"
+                    "Failed to list knowledge document edges — continuing with empty edge set"
                 );
-                edges_by_doc.insert(doc.id, Vec::new());
+                edges_by_doc.insert(nenjo::Slug::derive(&doc.slug), Vec::new());
             }
         }
     }
@@ -307,12 +275,11 @@ pub async fn sync_pack(
     let diff = compute_diff(manifest.as_ref(), &remote_docs);
 
     if diff.to_download.is_empty() && diff.to_delete.is_empty() && diff.to_rename.is_empty() {
-        debug!(pack_id = %pack_id, "Knowledge items up to date");
+        debug!(pack_slug = %pack_slug, "Knowledge documents up to date");
         return Ok(());
     }
 
     info!(
-        pack_id = %pack_id,
         pack_slug = %pack_slug,
         downloads = diff.to_download.len(),
         renames = diff.to_rename.len(),
@@ -320,17 +287,17 @@ pub async fn sync_pack(
         "Syncing knowledge pack"
     );
 
-    // Track which library items were successfully downloaded.
-    let mut failed_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // Track which library documents were successfully downloaded.
+    let mut failed_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Ensure the local docs directory exists inside the library pack.
     let docs_dir = pack_dir.join("docs");
     std::fs::create_dir_all(&docs_dir)
         .with_context(|| format!("Failed to create docs dir: {}", docs_dir.display()))?;
 
-    // Download new/changed library items.
+    // Download new/changed library documents.
     for doc in &diff.to_download {
-        match api.get_knowledge_item_content(pack_id, doc.id).await {
+        match api.get_knowledge_doc_content(pack_slug, &doc.slug).await {
             Ok(response) => {
                 let content = resolve_document_content(
                     state_dir,
@@ -339,47 +306,50 @@ pub async fn sync_pack(
                 )
                 .await
                 .with_context(|| {
-                    format!("Failed to resolve content for library item {}", doc.id)
+                    format!(
+                        "Failed to resolve content for library document {}",
+                        doc.slug
+                    )
                 })?;
 
-                write_document_content(pack_dir, &library_item_relative_path(doc), &content)?;
-                info!(doc_id = %doc.id, filename = %doc.filename, "Downloaded knowledge item");
+                write_document_content(pack_dir, &library_doc_relative_path(doc), &content)?;
+                info!(doc = %doc.slug, filename = %doc.filename, "Downloaded knowledge document");
             }
             Err(e) => {
                 warn!(
-                    doc_id = %doc.id,
+                    doc = %doc.slug,
                     filename = %doc.filename,
                     error = %e,
-                    "Failed to download knowledge item — skipping"
+                    "Failed to download knowledge document — skipping"
                 );
-                failed_ids.insert(doc.id);
+                failed_docs.insert(doc.slug.clone());
             }
         }
     }
 
     for rename in &diff.to_rename {
         rename_document_file(pack_dir, &rename.from, &rename.to)?;
-        debug!(from = %rename.from, to = %rename.to, "Renamed library item file");
+        debug!(from = %rename.from, to = %rename.to, "Renamed library document file");
     }
 
-    // Delete removed library items.
+    // Delete removed library documents.
     for relative_path in &diff.to_delete {
         let path = docs_dir.join(relative_path);
         if path.exists() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("Failed to delete {}", path.display()))?;
-            debug!(path = %relative_path, "Deleted removed library item file");
+            debug!(path = %relative_path, "Deleted removed library document file");
         }
     }
 
     let synced_docs = remote_docs
         .iter()
-        .filter(|doc| !failed_ids.contains(&doc.id))
+        .filter(|doc| !failed_docs.contains(&doc.slug))
         .cloned()
         .collect::<Vec<_>>();
     write_library_knowledge_manifest(
         pack_dir,
-        &build_library_knowledge_manifest(pack_id, &pack_slug, &synced_docs, &edges_by_doc),
+        &build_library_knowledge_manifest(pack_slug, &synced_docs, &edges_by_doc),
     )?;
 
     Ok(())
@@ -488,8 +458,7 @@ fn reconcile_document_file_location(pack_dir: &Path, from: &str, to: &str) -> Re
 pub async fn sync_document(
     api: &NenjoClient,
     pack_dir: &Path,
-    pack_id: Uuid,
-    document_id: Uuid,
+    doc_slug: &nenjo::Slug,
     state_dir: &Path,
     metadata: Option<&DocumentSyncMeta>,
 ) -> Result<()> {
@@ -498,43 +467,41 @@ pub async fn sync_document(
         .and_then(|name| name.to_str())
         .unwrap_or("default")
         .to_string();
-    let response = api.get_knowledge_item_content(pack_id, document_id).await?;
-    let content =
-        resolve_document_content(state_dir, &response.encrypted_payload, response.content).await?;
-
     let resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
-        api.list_knowledge_items(pack_id)
+        api.list_knowledge_docs(&pack_slug)
             .await?
             .into_iter()
-            .find(|doc| doc.id == document_id)
+            .find(|doc| nenjo::Slug::derive(&doc.slug) == *doc_slug)
             .ok_or_else(|| {
-                anyhow::anyhow!("knowledge item not found in metadata list: {document_id}")
+                anyhow::anyhow!("knowledge document not found in metadata list: {doc_slug}")
             })?
     };
+    let response = api
+        .get_knowledge_doc_content(&pack_slug, &resolved_meta.slug)
+        .await?;
+    let content =
+        resolve_document_content(state_dir, &response.encrypted_payload, response.content).await?;
     write_document_content(
         pack_dir,
-        &library_item_relative_path(&resolved_meta),
+        &library_doc_relative_path(&resolved_meta),
         &content,
     )?;
 
     let edges = api
-        .list_knowledge_item_edges(pack_id, document_id)
+        .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
         .await
         .unwrap_or_default();
 
-    let mut resolved_meta = resolved_meta;
-    resolved_meta.size_bytes = resolved_meta.size_bytes.max(response.size_bytes);
-    upsert_library_knowledge_entry(pack_dir, pack_id, &pack_slug, &resolved_meta, &edges)?;
+    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta, &edges)?;
     Ok(())
 }
 
 pub async fn sync_document_metadata(
     api: &NenjoClient,
     pack_dir: &Path,
-    pack_id: Uuid,
-    document_id: Uuid,
+    doc_slug: &nenjo::Slug,
     metadata: Option<&DocumentSyncMeta>,
 ) -> Result<()> {
     let pack_slug = pack_dir
@@ -545,29 +512,29 @@ pub async fn sync_document_metadata(
     let resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
-        api.list_knowledge_items(pack_id)
+        api.list_knowledge_docs(&pack_slug)
             .await?
             .into_iter()
-            .find(|doc| doc.id == document_id)
+            .find(|doc| nenjo::Slug::derive(&doc.slug) == *doc_slug)
             .ok_or_else(|| {
-                anyhow::anyhow!("knowledge item not found in metadata list: {document_id}")
+                anyhow::anyhow!("knowledge document not found in metadata list: {doc_slug}")
             })?
     };
 
     let edges = api
-        .list_knowledge_item_edges(pack_id, document_id)
+        .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
         .await
         .unwrap_or_default();
 
-    if let Some(existing) = library_knowledge_item_relative_path(pack_dir, document_id) {
+    if let Some(existing) = library_knowledge_doc_relative_path(pack_dir, doc_slug) {
         reconcile_document_file_location(
             pack_dir,
             &existing,
-            &library_item_relative_path(&resolved_meta),
+            &library_doc_relative_path(&resolved_meta),
         )?;
     }
 
-    upsert_library_knowledge_entry(pack_dir, pack_id, &pack_slug, &resolved_meta, &edges)?;
+    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta, &edges)?;
     Ok(())
 }
 
@@ -603,38 +570,34 @@ pub async fn resolve_document_content(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
-    fn meta(id: u128, filename: &str, updated: &str, size: i64) -> DocumentSyncMeta {
+    fn meta(id: u128, filename: &str, updated: &str) -> DocumentSyncMeta {
         DocumentSyncMeta {
-            id: Uuid::from_u128(id),
-            pack_id: Uuid::from_u128(7),
-            pack_slug: Some("test".into()),
-            slug: "test".into(),
+            id: Some(Uuid::from_u128(id)),
+            pack_id: Some(Uuid::from_u128(7)),
+            pack_slug: "test".into(),
+            slug: format!("doc_{id}"),
             filename: filename.into(),
             path: None,
             title: None,
             kind: None,
-            authority: None,
             summary: None,
-            status: None,
             tags: Vec::new(),
-            aliases: Vec::new(),
-            keywords: Vec::new(),
             content_type: "text/markdown".into(),
-            size_bytes: size,
             updated_at: updated.into(),
         }
     }
 
     fn manifest(docs: Vec<DocumentSyncMeta>) -> LibraryKnowledgePackManifest {
-        build_library_knowledge_manifest(Uuid::nil(), "test", &docs, &Default::default())
+        build_library_knowledge_manifest("test", &docs, &Default::default())
     }
 
     #[test]
     fn diff_no_manifest_downloads_all() {
         let remote = vec![
-            meta(1, "arch.md", "2026-01-01", 100),
-            meta(2, "req.md", "2026-01-01", 200),
+            meta(1, "arch.md", "2026-01-01"),
+            meta(2, "req.md", "2026-01-01"),
         ];
         let diff = compute_diff(None, &remote);
         assert_eq!(diff.to_download.len(), 2);
@@ -644,8 +607,8 @@ mod tests {
 
     #[test]
     fn diff_unchanged_skips() {
-        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01", 100)]);
-        let remote = vec![meta(1, "arch.md", "2026-01-01", 100)];
+        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01")]);
+        let remote = vec![meta(1, "arch.md", "2026-01-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
         assert!(diff.to_rename.is_empty());
@@ -654,8 +617,8 @@ mod tests {
 
     #[test]
     fn diff_updated_downloads() {
-        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01", 100)]);
-        let remote = vec![meta(1, "arch.md", "2026-02-01", 150)];
+        let manifest = manifest(vec![meta(1, "arch.md", "2026-01-01")]);
+        let remote = vec![meta(1, "arch.md", "2026-02-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
         assert!(diff.to_rename.is_empty());
@@ -665,10 +628,10 @@ mod tests {
     #[test]
     fn diff_deleted_remotely() {
         let manifest = manifest(vec![
-            meta(1, "arch.md", "2026-01-01", 100),
-            meta(2, "old.md", "2026-01-01", 50),
+            meta(1, "arch.md", "2026-01-01"),
+            meta(2, "old.md", "2026-01-01"),
         ]);
-        let remote = vec![meta(1, "arch.md", "2026-01-01", 100)];
+        let remote = vec![meta(1, "arch.md", "2026-01-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
         assert!(diff.to_rename.is_empty());
@@ -677,8 +640,8 @@ mod tests {
 
     #[test]
     fn diff_new_and_deleted() {
-        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
-        let remote = vec![meta(2, "new.md", "2026-02-01", 200)];
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01")]);
+        let remote = vec![meta(2, "new.md", "2026-02-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
         assert!(diff.to_rename.is_empty());
@@ -688,8 +651,8 @@ mod tests {
 
     #[test]
     fn diff_renamed_file_without_content_change_renames_only() {
-        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
-        let remote = vec![meta(1, "new.md", "2026-01-01", 100)];
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01")]);
+        let remote = vec![meta(1, "new.md", "2026-01-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert!(diff.to_download.is_empty());
         assert_eq!(
@@ -704,8 +667,8 @@ mod tests {
 
     #[test]
     fn diff_renamed_and_updated_file_redownloads_and_deletes_old_name() {
-        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01", 100)]);
-        let remote = vec![meta(1, "new.md", "2026-02-01", 150)];
+        let manifest = manifest(vec![meta(1, "old.md", "2026-01-01")]);
+        let remote = vec![meta(1, "new.md", "2026-02-01")];
         let diff = compute_diff(Some(&manifest), &remote);
         assert_eq!(diff.to_download.len(), 1);
         assert!(diff.to_rename.is_empty());
@@ -758,55 +721,38 @@ mod tests {
     }
 
     #[test]
-    fn library_knowledge_manifest_does_not_derive_aliases() {
-        let mut doc = meta(1, "random.md", "2026-02-22", 512);
+    fn library_knowledge_manifest_keeps_traversal_metadata_concise() {
+        let mut doc = meta(1, "random.md", "2026-02-22");
         doc.path = Some("domain/path".into());
         doc.title = Some("Random".into());
         doc.summary = Some("Just a test document".into());
-        doc.aliases = vec!["Random concept".into()];
-        doc.keywords = vec!["randomness".into()];
 
-        let manifest = build_library_knowledge_manifest(
-            Uuid::from_u128(7),
-            "test",
-            &[doc],
-            &Default::default(),
-        );
+        let manifest = build_library_knowledge_manifest("test", &[doc], &Default::default());
 
         assert_eq!(manifest.docs.len(), 1);
-        assert_eq!(manifest.docs[0].aliases, ["Random concept"]);
-        assert_eq!(manifest.docs[0].keywords, ["randomness"]);
         assert_eq!(manifest.docs[0].summary, "Just a test document");
         assert_eq!(
-            manifest.docs[0].virtual_path,
+            manifest.docs[0].path,
             "library://test/domain/path/random.md"
         );
     }
 
     #[test]
-    fn library_item_metadata_persists_to_knowledge_manifest() {
+    fn library_doc_metadata_persists_to_knowledge_manifest() {
         let dir = tempdir().unwrap();
-        let pack_id = Uuid::from_u128(7);
-        let mut doc = meta(1, "random.md", "2026-02-22", 512);
+        let mut doc = meta(1, "random.md", "2026-02-22");
         doc.path = Some("domain".into());
         doc.title = Some("Random".into());
         doc.kind = Some("guide".into());
-        doc.authority = Some("draft".into());
         doc.summary = Some("Just a test document".into());
-        doc.status = Some("draft".into());
         doc.tags = vec!["library".into()];
-        doc.aliases = vec!["Random concept".into()];
-        doc.keywords = vec!["randomness".into()];
 
-        upsert_library_knowledge_entry(dir.path(), pack_id, "test", &doc, &[]).unwrap();
+        upsert_library_knowledge_entry(dir.path(), "test", &doc, &[]).unwrap();
 
         let knowledge = load_library_knowledge_manifest(dir.path()).unwrap();
         assert_eq!(knowledge.docs.len(), 1);
         assert_eq!(knowledge.docs[0].title, "Random");
         assert_eq!(knowledge.docs[0].summary, "Just a test document");
-        assert_eq!(knowledge.docs[0].aliases, ["Random concept"]);
-        assert_eq!(knowledge.docs[0].keywords, ["randomness"]);
-        assert_eq!(knowledge.docs[0].size_bytes, 512);
         assert_eq!(knowledge.docs[0].updated_at, "2026-02-22");
     }
 

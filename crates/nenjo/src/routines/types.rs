@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::input::{RoutineRun, RoutineRunKind, TaskInput};
+use crate::{IntoSlug, Slug};
 
 /// Outcome of a routine step execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StepResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<Uuid>,
     pub passed: bool,
     pub output: String,
     pub data: serde_json::Value,
@@ -35,13 +38,13 @@ pub struct StepResult {
 /// Input context for a routine execution.
 ///
 /// ```ignore
-/// let input = RoutineInput::new(project_id, "Implement auth", "Add JWT authentication")
+/// let input = RoutineInput::new("demo_project", "Implement auth", "Add JWT authentication")
 ///     .with_task_id(task_id)
 ///     .with_execution_run_id(run_id)
 ///     .with_tags(vec!["auth".into(), "security".into()]);
 /// ```
 pub struct RoutineInput {
-    pub project_id: Uuid,
+    pub project: Option<Slug>,
     pub title: String,
     pub description: String,
     pub task_id: Option<Uuid>,
@@ -69,9 +72,13 @@ pub struct SessionBinding {
 }
 
 impl RoutineInput {
-    pub fn new(project_id: Uuid, title: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(
+        project: impl IntoSlug,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
-            project_id,
+            project: Some(project.into_slug()),
             title: title.into(),
             description: description.into(),
             task_id: None,
@@ -184,11 +191,27 @@ impl RoutineInput {
                 let location = run.execution.project_location;
                 let mut input = match cron.task {
                     Some(task) => RoutineInput::from_task_input(task),
-                    None => RoutineInput::new(
-                        cron.project_id.unwrap_or_else(Uuid::nil),
-                        "Cron",
-                        "Cron-triggered routine",
-                    ),
+                    None => RoutineInput {
+                        project: cron.project,
+                        title: "Cron".to_string(),
+                        description: "Cron-triggered routine".to_string(),
+                        task_id: None,
+                        execution_run_id: None,
+                        acceptance_criteria: None,
+                        tags: Vec::new(),
+                        slug: None,
+                        status: None,
+                        priority: None,
+                        task_type: None,
+                        complexity: None,
+                        source: None,
+                        git: None,
+                        project_name: None,
+                        project_description: None,
+                        project_metadata: None,
+                        is_cron_trigger: false,
+                        session_binding: None,
+                    },
                 }
                 .with_git(location.and_then(|location| location.git))
                 .with_cron_trigger()
@@ -202,10 +225,30 @@ impl RoutineInput {
     }
 
     fn from_task_input(task: TaskInput) -> Self {
-        let mut input = RoutineInput::new(task.project_id, task.title, task.description)
-            .with_tags(task.tags)
-            .with_acceptance_criteria(task.acceptance_criteria)
-            .with_task_id(task.task_id);
+        let mut input = RoutineInput {
+            project: Some(task.project),
+            title: task.title,
+            description: task.description,
+            task_id: None,
+            execution_run_id: None,
+            acceptance_criteria: None,
+            tags: Vec::new(),
+            slug: None,
+            status: None,
+            priority: None,
+            task_type: None,
+            complexity: None,
+            source: None,
+            git: None,
+            project_name: None,
+            project_description: None,
+            project_metadata: None,
+            is_cron_trigger: false,
+            session_binding: None,
+        }
+        .with_tags(task.tags)
+        .with_acceptance_criteria(task.acceptance_criteria)
+        .with_task_id(task.task_id);
         if let Some(slug) = task.slug {
             input = input.with_slug(slug);
         }
@@ -239,7 +282,6 @@ impl RoutineInput {
 
 /// Internal execution state, accumulated as steps run.
 pub(crate) struct RoutineState {
-    pub routine_id: Uuid,
     pub step_results: HashMap<Uuid, StepResult>,
     pub initial_input: String,
     pub input: RoutineInput,
@@ -254,10 +296,9 @@ pub(crate) struct RoutineState {
 }
 
 impl RoutineState {
-    pub fn new(routine_id: Uuid, input: RoutineInput) -> Self {
+    pub fn new(input: RoutineInput) -> Self {
         let initial_input = input.description.clone();
         Self {
-            routine_id,
             step_results: HashMap::new(),
             initial_input,
             input,
@@ -316,7 +357,7 @@ impl StepType {
 /// Execution mode for a cron step.
 #[derive(Debug, Clone)]
 pub enum CronMode {
-    Agent(Uuid),
+    Agent(Slug),
     Lambda(Uuid),
 }
 
@@ -330,7 +371,7 @@ pub struct CronStepConfig {
 impl CronStepConfig {
     pub fn from_config(
         config: &serde_json::Value,
-        agent_id: Option<Uuid>,
+        agent: Option<Slug>,
         lambda_id: Option<Uuid>,
     ) -> Result<Self> {
         let interval = config
@@ -354,11 +395,11 @@ impl CronStepConfig {
                 .and_then(|s| Uuid::parse_str(s).ok())
         });
 
-        let resolved_agent = agent_id.or_else(|| {
+        let resolved_agent = agent.or_else(|| {
             config
-                .get("agent_id")
+                .get("agent")
                 .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
+                .and_then(|s| Slug::parse(s).ok())
         });
 
         let mode = if let Some(lid) = resolved_lambda {
@@ -366,7 +407,7 @@ impl CronStepConfig {
         } else if let Some(aid) = resolved_agent {
             CronMode::Agent(aid)
         } else {
-            bail!("Cron step requires either an agent_id or a lambda_id");
+            bail!("Cron step requires either an agent or a lambda_id");
         };
 
         Ok(Self {
@@ -676,9 +717,9 @@ mod tests {
 
     #[test]
     fn cron_config_defaults() {
-        let id = Uuid::new_v4();
+        let id = Slug::derive("agent");
         let config = serde_json::json!({});
-        let cron = CronStepConfig::from_config(&config, Some(id), None).unwrap();
+        let cron = CronStepConfig::from_config(&config, Some(id.clone()), None).unwrap();
         assert_eq!(cron.interval, Duration::from_secs(60));
         assert_eq!(cron.timeout, Duration::from_secs(86400));
         assert!(matches!(cron.mode, CronMode::Agent(aid) if aid == id));
@@ -686,7 +727,7 @@ mod tests {
 
     #[test]
     fn cron_config_lambda_precedence() {
-        let agent_id = Uuid::new_v4();
+        let agent_id = Slug::derive("agent");
         let lambda_id = Uuid::new_v4();
         let config = serde_json::json!({});
         let cron = CronStepConfig::from_config(&config, Some(agent_id), Some(lambda_id)).unwrap();
@@ -701,11 +742,13 @@ mod tests {
 
     #[test]
     fn routine_input_builder() {
-        let pid = Uuid::new_v4();
-        let input = RoutineInput::new(pid, "Title", "Desc")
+        let input = RoutineInput::new("demo_project", "Title", "Desc")
             .with_tags(vec!["a".into()])
             .with_cron_trigger();
-        assert_eq!(input.project_id, pid);
+        assert_eq!(
+            input.project.as_ref().map(Slug::as_str),
+            Some("demo_project")
+        );
         assert_eq!(input.title, "Title");
         assert!(input.is_cron_trigger);
         assert_eq!(input.tags, vec!["a"]);

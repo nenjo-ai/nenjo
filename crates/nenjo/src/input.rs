@@ -13,26 +13,21 @@ use uuid::Uuid;
 
 use crate::routines::types::{CronSchedule, SessionBinding, StepResult};
 use crate::types::GitContext;
+use crate::{IntoSlug, Slug};
 
 pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::RenderContextVars {
     let mut ctx = crate::context::RenderContextVars::default();
     match &run.kind {
         AgentRunKind::Task(task) => {
             ctx.task = task_to_context(task);
-            ctx.project.id = task.project_id.to_string();
             ctx.git = git_to_context(run.execution.project_location.as_ref());
         }
         AgentRunKind::Chat(chat) => {
             ctx.chat_message = chat.message.clone();
-            ctx.project.id = chat
-                .project_id
-                .map(|project_id| project_id.to_string())
-                .unwrap_or_default();
         }
         AgentRunKind::Gate(gate) => {
             ctx.gate_criteria = gate.criteria.clone();
             ctx.gate_previous_output = gate.previous_result.output.clone();
-            ctx.project.id = gate.project_id.to_string();
             if let Some(task) = &gate.task {
                 ctx.task = task_to_context(task);
             }
@@ -41,13 +36,8 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
         AgentRunKind::CouncilSubtask(subtask) => {
             ctx.subtask_parent_task = subtask.parent_task.clone();
             ctx.subtask_description = subtask.subtask_description.clone();
-            ctx.project.id = subtask.project_id.to_string();
         }
         AgentRunKind::Cron(cron) => {
-            ctx.project.id = cron
-                .project_id
-                .map(|project_id| project_id.to_string())
-                .unwrap_or_default();
             if let Some(task) = &cron.task {
                 ctx.task = task_to_context(task);
             }
@@ -99,7 +89,7 @@ fn git_to_context(location: Option<&ProjectLocation>) -> crate::context::types::
 /// Task execution input supplied by SDK callers.
 #[derive(Debug, Clone)]
 pub struct TaskInput {
-    pub project_id: Uuid,
+    pub project: Slug,
     pub task_id: Uuid,
     pub title: String,
     pub description: String,
@@ -115,14 +105,13 @@ pub struct TaskInput {
 
 impl TaskInput {
     pub fn new(
-        project_id: Uuid,
-        task_id: Uuid,
+        project: impl IntoSlug,
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
-            project_id,
-            task_id,
+            project: project.into_slug(),
+            task_id: Uuid::new_v4(),
             title: title.into(),
             description: description.into(),
             acceptance_criteria: None,
@@ -134,6 +123,11 @@ impl TaskInput {
             slug: None,
             complexity: None,
         }
+    }
+
+    pub fn with_task_id(mut self, task_id: Uuid) -> Self {
+        self.task_id = task_id;
+        self
     }
 
     pub fn acceptance_criteria(mut self, value: impl Into<String>) -> Self {
@@ -180,7 +174,7 @@ impl TaskInput {
 /// Chat execution input.
 #[derive(Debug, Clone)]
 pub struct ChatInput {
-    pub project_id: Option<Uuid>,
+    pub project: Option<Slug>,
     pub message: String,
     pub history: Vec<ChatMessage>,
 }
@@ -188,14 +182,14 @@ pub struct ChatInput {
 impl ChatInput {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
-            project_id: None,
+            project: None,
             message: message.into(),
             history: Vec::new(),
         }
     }
 
-    pub fn project_id(mut self, project_id: Uuid) -> Self {
-        self.project_id = Some(project_id);
+    pub fn project(mut self, project: impl IntoSlug) -> Self {
+        self.project = Some(project.into_slug());
         self
     }
 
@@ -210,7 +204,7 @@ impl ChatInput {
 pub struct GateInput {
     pub previous_result: StepResult,
     pub criteria: String,
-    pub project_id: Uuid,
+    pub project: Option<Slug>,
     pub task: Option<TaskInput>,
 }
 
@@ -220,13 +214,13 @@ pub struct CouncilSubtaskInput {
     pub parent_task: String,
     pub subtask_description: String,
     pub subtask_index: usize,
-    pub project_id: Uuid,
+    pub project: Option<Slug>,
 }
 
 /// Cron execution input.
 #[derive(Debug, Clone)]
 pub struct CronInput {
-    pub project_id: Option<Uuid>,
+    pub project: Option<Slug>,
     pub task: Option<TaskInput>,
     pub schedule: CronSchedule,
     pub start_at: Option<DateTime<Utc>>,
@@ -236,7 +230,7 @@ pub struct CronInput {
 /// Heartbeat execution input.
 #[derive(Debug, Clone)]
 pub struct HeartbeatInput {
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub interval: Duration,
     pub start_at: Option<DateTime<Utc>>,
     pub previous_output: Option<String>,
@@ -386,5 +380,21 @@ impl ProjectLocation {
             working_dir,
             git: Some(git),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_input_generates_task_id_and_allows_override() {
+        let generated = TaskInput::new("demo_project", "Title", "Description");
+        assert!(!generated.task_id.is_nil());
+        assert_eq!(generated.project.as_str(), "demo_project");
+
+        let task_id = Uuid::new_v4();
+        let explicit = TaskInput::new("demo_project", "Title", "Description").with_task_id(task_id);
+        assert_eq!(explicit.task_id, task_id);
     }
 }

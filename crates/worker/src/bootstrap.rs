@@ -18,14 +18,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
+use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
 use nenjo_platform::ManifestKind;
-use nenjo_platform::library_knowledge::{
-    library_knowledge_item_relative_path, load_library_knowledge_manifest,
-};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -190,15 +188,15 @@ struct BootstrapAgentManifest {
     name: String,
     description: Option<String>,
     color: Option<String>,
-    model_id: Option<Uuid>,
-    #[serde(default, alias = "domain_ids")]
-    domains: Vec<Uuid>,
+    model: Option<Slug>,
+    #[serde(default)]
+    domains: Vec<Slug>,
     #[serde(default)]
     platform_scopes: Vec<String>,
     #[serde(default)]
-    mcp_server_ids: Vec<Uuid>,
-    #[serde(default, alias = "ability_ids")]
-    abilities: Vec<Uuid>,
+    mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    abilities: Vec<String>,
     #[serde(default)]
     prompt_locked: bool,
     #[serde(default)]
@@ -229,7 +227,7 @@ struct BootstrapProjectManifest {
     description: Option<String>,
     #[serde(default)]
     settings: serde_json::Value,
-    #[serde(default, alias = "settings_encrypted_payload")]
+    #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
 }
 
@@ -241,7 +239,7 @@ pub trait TreeItem: serde::Serialize {
 
 impl TreeItem for nenjo::manifest::AbilityManifest {
     fn path(&self) -> &str {
-        &self.path
+        self.path.as_deref().unwrap_or("")
     }
     fn name(&self) -> &str {
         &self.name
@@ -431,11 +429,11 @@ async fn hydrate_bootstrap_manifest(
             description: agent.description,
             prompt_config,
             color: agent.color,
-            model_id: agent.model_id,
-            domain_ids: agent.domains,
+            model: agent.model,
+            domains: agent.domains,
             platform_scopes: agent.platform_scopes,
-            mcp_server_ids: agent.mcp_server_ids,
-            ability_ids: agent.abilities,
+            mcp_servers: agent.mcp_servers,
+            abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
         });
@@ -460,7 +458,7 @@ async fn hydrate_bootstrap_manifest(
         projects.push(nenjo::manifest::ProjectManifest {
             id: project.id,
             name: project.name,
-            slug: project.slug,
+            slug: Slug::derive(&project.slug),
             description: project.description,
             settings,
         });
@@ -683,29 +681,8 @@ impl WorkerManifestCache {
         nenjo::ManifestLoader::load(&loader).await
     }
 
-    fn knowledge_pack_dir(&self, pack_id: Uuid, metadata: Option<&DocumentSyncMeta>) -> PathBuf {
-        self.knowledge_pack_dir_for(
-            pack_id,
-            metadata.and_then(|meta| meta.pack_slug.as_deref()),
-            metadata.map(|meta| meta.id),
-        )
-    }
-
-    fn knowledge_pack_dir_for(
-        &self,
-        pack_id: Uuid,
-        pack_slug: Option<&str>,
-        document_id: Option<Uuid>,
-    ) -> PathBuf {
-        let platform_root = self.platform_library_root();
-        if let Some(slug) = pack_slug.map(str::trim).filter(|slug| !slug.is_empty()) {
-            return platform_root.join(slug);
-        }
-        if let Some(pack_dir) = find_local_knowledge_pack_dir(&platform_root, pack_id, document_id)
-        {
-            return pack_dir;
-        }
-        platform_root.join(pack_id.to_string())
+    fn knowledge_pack_dir(&self, metadata: &DocumentSyncMeta) -> PathBuf {
+        self.platform_library_root().join(metadata.pack_slug.trim())
     }
 
     fn platform_library_root(&self) -> PathBuf {
@@ -766,7 +743,7 @@ impl ManifestStore for WorkerManifestCache {
         &self,
         manifest: &nenjo::Manifest,
         resource_type: ResourceType,
-        _resource_id: Uuid,
+        _resource: &nenjo::Slug,
     ) -> Result<()> {
         WorkerManifestCache::persist_resource(self, manifest, resource_type)
     }
@@ -774,7 +751,8 @@ impl ManifestStore for WorkerManifestCache {
     async fn cleanup_deleted_resource(
         &self,
         resource_type: ResourceType,
-        resource_id: Uuid,
+        resource: &nenjo::Slug,
+        resource_id: Option<Uuid>,
         payload: Option<&serde_json::Value>,
     ) -> Result<()> {
         let nenjo_home = self.workspace_dir.join(".nenjo");
@@ -783,11 +761,19 @@ impl ManifestStore for WorkerManifestCache {
                 let Some(metadata) = deleted_resource_metadata(payload, "skill") else {
                     return Ok(());
                 };
+                let Some(resource_id) = resource_id else {
+                    warn!(%resource, "Deleted skill ability did not include a resolvable id; skipping uninstall");
+                    return Ok(());
+                };
                 crate::marketplace::uninstall_skill_ability(resource_id, metadata, &nenjo_home)
                     .await?;
             }
             ResourceType::McpServer => {
                 let Some(metadata) = deleted_resource_metadata(payload, "plugin") else {
+                    return Ok(());
+                };
+                let Some(resource_id) = resource_id else {
+                    warn!(%resource, "Deleted plugin MCP server did not include a resolvable id; skipping uninstall");
                     return Ok(());
                 };
                 crate::marketplace::uninstall_plugin_mcp_server(resource_id, metadata, &nenjo_home)
@@ -805,113 +791,61 @@ impl ManifestStore for WorkerManifestCache {
     async fn sync_document_metadata(
         &self,
         client: &NenjoClient,
-        document_id: Uuid,
+        doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         let Some(meta) = metadata else {
             return Ok(());
         };
-        let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
-        crate::local_documents::sync_document_metadata(
-            client,
-            &pack_dir,
-            meta.pack_id,
-            document_id,
-            metadata,
-        )
-        .await
+        let pack_dir = self.knowledge_pack_dir(meta);
+        crate::local_documents::sync_document_metadata(client, &pack_dir, doc, metadata).await
     }
 
     async fn sync_document(
         &self,
         client: &NenjoClient,
-        document_id: Uuid,
+        doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         let Some(meta) = metadata else {
             return Ok(());
         };
-        let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
-        crate::local_documents::sync_document(
-            client,
-            &pack_dir,
-            meta.pack_id,
-            document_id,
-            &self.state_dir,
-            metadata,
-        )
-        .await
+        let pack_dir = self.knowledge_pack_dir(meta);
+        crate::local_documents::sync_document(client, &pack_dir, doc, &self.state_dir, metadata)
+            .await
     }
 
     async fn remove_document(
         &self,
-        document_id: Uuid,
+        doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         if let Some(meta) = metadata {
-            let pack_dir = self.knowledge_pack_dir(meta.pack_id, Some(meta));
+            let pack_dir = self.knowledge_pack_dir(meta);
             crate::local_documents::remove_manifest_document_from_pack_dir(
                 &pack_dir,
-                document_id,
+                doc,
                 Some(meta),
             )
         } else {
-            let Some(pack_dir) = find_local_knowledge_pack_dir(
-                &self.platform_library_root(),
-                Uuid::nil(),
-                Some(document_id),
-            ) else {
-                return Ok(());
-            };
-            crate::local_documents::remove_manifest_document_from_pack_dir(
-                &pack_dir,
-                document_id,
-                None,
-            )
+            Ok(())
         }
     }
 
-    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack_id: Uuid) -> Result<()> {
-        crate::local_documents::sync_pack_by_id(client, &self.config_dir, &self.state_dir, pack_id)
+    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack: &nenjo::Slug) -> Result<()> {
+        crate::local_documents::sync_pack_by_slug(client, &self.config_dir, &self.state_dir, pack)
             .await
     }
 
     fn write_document_content(
         &self,
-        pack_id: Uuid,
-        pack_slug: Option<&str>,
+        pack: &nenjo::Slug,
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        let pack_dir = self.knowledge_pack_dir_for(pack_id, pack_slug, None);
+        let pack_dir = self.platform_library_root().join(pack.as_str());
         crate::local_documents::write_document_content(&pack_dir, relative_path, content)
     }
-}
-
-fn find_local_knowledge_pack_dir(
-    platform_root: &Path,
-    pack_id: Uuid,
-    document_id: Option<Uuid>,
-) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(platform_root).ok()?;
-    let pack_id = pack_id.to_string();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if let Some(manifest) = load_library_knowledge_manifest(&path)
-            && manifest.pack_id == pack_id
-        {
-            return Some(path);
-        }
-        if let Some(document_id) = document_id
-            && library_knowledge_item_relative_path(&path, document_id).is_some()
-        {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn deleted_resource_metadata(

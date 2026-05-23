@@ -1,10 +1,9 @@
 use nenjo::{ToolCategory, ToolSpec};
 
-fn context_block_id_schema() -> serde_json::Value {
+fn context_block_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target context block."
+        "description": "The slug of the target context block."
     })
 }
 
@@ -41,7 +40,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_context_blocks".to_string(),
-            description: "List context blocks so you can find a context block id before reading, updating, or deleting one."
+            description: "List context blocks so you can find a context block slug before reading, updating, or deleting one."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -52,23 +51,23 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_context_block".to_string(),
-            description: "Get one context block's name, path, display_name, and description by id."
+            description: "Get one context block's name, path, display_name, and description by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": context_block_id_schema() },
+                "required": ["context_block"],
+                "properties": { "context_block": context_block_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_context_block_content".to_string(),
-            description: "Get one context block's template text by id.".to_string(),
+            description: "Get one context block's template text by slug.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": context_block_id_schema() },
+                "required": ["context_block"],
+                "properties": { "context_block": context_block_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -87,13 +86,13 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_context_block".to_string(),
-            description: "Update one context block's name, display_name, or description by id; use update_context_block_content to change template."
+            description: "Update one context block's name, display_name, or description by slug; use update_context_block_content to change template."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["context_block"],
                 "properties": {
-                    "id": context_block_id_schema(),
+                    "context_block": context_block_ref_schema(),
                     "name": context_block_update_schema()["properties"]["name"].clone(),
                     "display_name": context_block_update_schema()["properties"]["display_name"].clone(),
                     "description": context_block_update_schema()["properties"]["description"].clone()
@@ -104,13 +103,13 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_context_block_content".to_string(),
-            description: "Update one context block's template text by id using the top-level template field."
+            description: "Update one context block's template text by slug using the top-level template field."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["context_block"],
                 "properties": {
-                    "id": context_block_id_schema(),
+                    "context_block": context_block_ref_schema(),
                     "template": {
                         "type": "string",
                         "description": "MiniJinja template content for this context block."
@@ -122,12 +121,12 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_context_block".to_string(),
-            description: "Delete one context block by id when you want it removed from the manifest."
+            description: "Delete one context block by slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": context_block_id_schema() },
+                "required": ["context_block"],
+                "properties": { "context_block": context_block_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,

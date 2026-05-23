@@ -1,22 +1,20 @@
 use nenjo::{ToolCategory, ToolSpec};
 
-fn council_id_schema() -> serde_json::Value {
+fn council_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target council."
+        "description": "Council slug."
     })
 }
 
 fn council_member_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["agent_id"],
+        "required": ["agent"],
         "properties": {
-            "agent_id": {
+            "agent": {
                 "type": "string",
-                "format": "uuid",
-                "description": "Agent id for this council member."
+                "description": "Agent slug for this council member."
             },
             "priority": {
                 "type": "integer",
@@ -34,14 +32,13 @@ fn council_member_create_schema() -> serde_json::Value {
 fn council_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "leader_agent_id", "members"],
+        "required": ["name", "leader_agent", "members"],
         "properties": {
             "name": { "type": "string", "description": "Display name for the council." },
             "description": { "type": ["string", "null"], "description": "Optional council description." },
-            "leader_agent_id": {
+            "leader_agent": {
                 "type": "string",
-                "format": "uuid",
-                "description": "Leader agent id for the council."
+                "description": "Leader agent slug for the council."
             },
             "delegation_strategy": {
                 "type": "string",
@@ -86,7 +83,7 @@ fn council_update_schema() -> serde_json::Value {
 fn council_member_update_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Partial patch for one existing council member identified by agent_id.",
+        "description": "Partial patch for one existing council member identified by agent slug.",
         "properties": {
             "priority": {
                 "type": "integer",
@@ -106,30 +103,30 @@ pub fn council_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_councils".to_string(),
-            description: "List councils so you can find a council id before reading, updating, or deleting one."
+            description: "List councils so you can find a council slug before reading, updating, or deleting one."
                 .to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_council".to_string(),
-            description: "Get one council's name, description, delegation_strategy, leader_agent_id, config, and members by id."
+            description: "Get one council's name, description, delegation_strategy, leader_agent, config, and members by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": council_id_schema() },
+                "required": ["council"],
+                "properties": { "council": council_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "create_council".to_string(),
-            description: "Create one council with top-level name, optional description, leader_agent_id, delegation_strategy, optional config, and members."
+            description: "Create one council with top-level name, optional description, leader_agent, delegation_strategy, optional config, and members."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["name", "leader_agent_id", "members"],
+                "required": ["name", "leader_agent", "members"],
                 "properties": council_create_schema()["properties"].clone(),
                 "additionalProperties": false
             }),
@@ -137,13 +134,13 @@ pub fn council_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_council".to_string(),
-            description: "Update one council's name, description, delegation_strategy, or config by id; use member tools to change membership."
+            description: "Update one council's name, description, delegation_strategy, or config by slug; use member tools to change membership."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["council"],
                 "properties": {
-                    "id": council_id_schema(),
+                    "council": council_ref_schema(),
                     "name": council_update_schema()["properties"]["name"].clone(),
                     "description": council_update_schema()["properties"]["description"].clone(),
                     "delegation_strategy": council_update_schema()["properties"]["delegation_strategy"].clone(),
@@ -155,14 +152,14 @@ pub fn council_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "add_council_member".to_string(),
-            description: "Add one council member by passing council_id, agent_id, and optional priority or config."
+            description: "Add one council member by passing council, agent, and optional priority or config."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["council_id", "agent_id"],
+                "required": ["council", "agent"],
                 "properties": {
-                    "council_id": council_id_schema(),
-                    "agent_id": council_member_create_schema()["properties"]["agent_id"].clone(),
+                    "council": council_ref_schema(),
+                    "agent": council_member_create_schema()["properties"]["agent"].clone(),
                     "priority": council_member_create_schema()["properties"]["priority"].clone(),
                     "config": council_member_create_schema()["properties"]["config"].clone()
                 },
@@ -172,17 +169,16 @@ pub fn council_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_council_member".to_string(),
-            description: "Update one council member by council_id and agent_id using top-level priority or config fields."
+            description: "Update one council member by council and agent using top-level priority or config fields."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["council_id", "agent_id"],
+                "required": ["council", "agent"],
                 "properties": {
-                    "council_id": council_id_schema(),
-                    "agent_id": {
+                    "council": council_ref_schema(),
+                    "agent": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Agent id for the council member being updated."
+                        "description": "Agent slug for the council member being updated."
                     },
                     "priority": council_member_update_schema()["properties"]["priority"].clone(),
                     "config": council_member_update_schema()["properties"]["config"].clone()
@@ -193,16 +189,15 @@ pub fn council_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "remove_council_member".to_string(),
-            description: "Remove one council member by council_id and agent_id.".to_string(),
+            description: "Remove one council member by council and agent.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["council_id", "agent_id"],
+                "required": ["council", "agent"],
                 "properties": {
-                    "council_id": council_id_schema(),
-                    "agent_id": {
+                    "council": council_ref_schema(),
+                    "agent": {
                         "type": "string",
-                        "format": "uuid",
-                        "description": "Agent id for the council member being removed."
+                        "description": "Agent slug for the council member being removed."
                     }
                 },
                 "additionalProperties": false
@@ -211,12 +206,12 @@ pub fn council_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_council".to_string(),
-            description: "Delete one council by id when you want it removed from the manifest."
+            description: "Delete one council by slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": council_id_schema() },
+                "required": ["council"],
+                "properties": { "council": council_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,

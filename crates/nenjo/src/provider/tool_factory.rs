@@ -6,7 +6,7 @@ use crate::tools::{Tool, ToolSecurity};
 /// Creates tools for an agent based on its bootstrap configuration.
 ///
 /// Implementations use the agent's `platform_scopes`, `abilities`,
-/// and `mcp_server_ids` to decide which tools to provide.
+/// and `mcp_servers` to decide which tools to provide.
 #[async_trait::async_trait]
 pub trait ToolFactory: Send + Sync {
     /// Create tools available to the given agent.

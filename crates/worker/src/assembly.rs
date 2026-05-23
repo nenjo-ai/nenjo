@@ -138,6 +138,7 @@ pub(crate) async fn build_provider(
         ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
     let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
     let platform_tools = build_platform_tool_services(config, auth_provider);
+    let library_knowledge_packs = provider_knowledge_packs(&config.config_dir, &platform_tools);
     let tool_factory = WorkerToolFactory::new(
         security,
         NativeRuntime,
@@ -148,8 +149,6 @@ pub(crate) async fn build_provider(
 
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
-
-    let library_knowledge_packs = load_library_knowledge_packs(&config.config_dir);
 
     Provider::builder()
         .with_loader(loader)
@@ -184,8 +183,10 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
                 continue;
             }
             let slug = entry.file_name().to_string_lossy().to_string();
-            if let Some(pack) = LibraryKnowledgePack::load(entry.path()) {
-                packs.push(KnowledgePackEntry::new(format!("lib:{slug}"), pack));
+            if let Some(pack) = LibraryKnowledgePack::load(entry.path())
+                && let Ok(entry) = KnowledgePackEntry::library(slug, pack)
+            {
+                packs.push(entry);
             }
         }
     }
@@ -195,12 +196,23 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
         let Some(pack) = LibraryKnowledgePack::load(&pack_dir) else {
             continue;
         };
-        let selector = pack.manifest().root_uri().trim_end_matches('/').to_string();
-        if selector.starts_with("git://") {
-            packs.push(KnowledgePackEntry::new(selector, pack));
+        let package_name = pack.manifest().pack_id().to_string();
+        if let Ok(entry) = KnowledgePackEntry::package(package_name, pack) {
+            packs.push(entry);
         }
     }
     packs
+}
+
+fn provider_knowledge_packs(
+    nenjo_home: &Path,
+    platform_tools: &PlatformToolServices,
+) -> Vec<KnowledgePackEntry> {
+    if platform_tools.manifest_backend.is_some() {
+        Vec::new()
+    } else {
+        load_library_knowledge_packs(nenjo_home)
+    }
 }
 
 fn find_library_pack_dirs(root: &Path) -> Vec<PathBuf> {
@@ -249,4 +261,76 @@ fn build_platform_tool_services(
         cached_org_id,
         config.config_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_library_pack(root: &Path) {
+        let pack_dir = root.join("library").join("platform").join("demo");
+        let docs_dir = pack_dir.join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("intro.md"), "# Intro").unwrap();
+        std::fs::write(
+            pack_dir.join(LibraryKnowledgePack::MANIFEST_FILENAME),
+            r#"{
+              "pack_id": "demo",
+              "pack_version": "1",
+              "schema_version": 1,
+              "root_uri": "library://demo/",
+              "content_hash": "",
+              "synced_at": "",
+              "docs": [
+                {
+                  "id": "intro",
+                  "path": "library://demo/intro.md",
+                  "source_path": "docs/intro.md",
+                  "title": "Intro",
+                  "summary": "Intro doc",
+                  "kind": "reference",
+                  "tags": [],
+                  "related": [],
+                  "updated_at": ""
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+    }
+
+    fn platform_tools(root: &Path, with_manifest_backend: bool) -> PlatformToolServices {
+        let auth_provider =
+            Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+        let manifest_store = Arc::new(LocalManifestStore::new(root.join("manifests")));
+        let platform_client = with_manifest_backend
+            .then(|| PlatformManifestClient::new("http://localhost:1", "test-api-key").unwrap())
+            .map(Arc::new);
+
+        PlatformToolServices::new(
+            manifest_store,
+            platform_client,
+            PlatformPayloadEncoder::new(auth_provider),
+            None,
+            root.to_path_buf(),
+        )
+    }
+
+    #[test]
+    fn provider_knowledge_packs_are_skipped_when_platform_manifest_backend_is_present() {
+        let temp = tempfile::tempdir().unwrap();
+        write_library_pack(temp.path());
+
+        let without_platform = platform_tools(temp.path(), false);
+        assert_eq!(
+            provider_knowledge_packs(temp.path(), &without_platform).len(),
+            1
+        );
+
+        let with_platform = platform_tools(temp.path(), true);
+        assert!(
+            provider_knowledge_packs(temp.path(), &with_platform).is_empty(),
+            "platform manifest backend owns knowledge tools for platform workers"
+        );
+    }
 }

@@ -67,22 +67,24 @@ use std::time::Duration;
 use nenjo_harness::{ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
 
 let output = harness
-    .chat(ChatRequest::new(session_id, "coder", "Fix the failing test")
-        .with_project(project_id))
+    .chat(ChatRequest::new("coder", "Fix the failing test")
+        .with_session(session_id)
+        .with_project("website"))
     .await?;
 
 let task_output = harness
-    .task(TaskRequest::new(task_id, project_id, "Fix login", "Repair OAuth callback")
+    .task(TaskRequest::new("website", "Fix login", "Repair OAuth callback")
+        .with_task_id(task_id)
         .with_agent("coder")
         .with_slug("fix-login"))
     .await?;
 
 let mut cron = harness
-    .cron(CronRequest::new(routine_id, "0 */6 * * * *")
-        .with_project(project_id))
+    .cron(CronRequest::new("daily_maintenance", "0 */6 * * * *")
+        .with_project("website"))
     .await?;
 
 let mut heartbeat = harness
-    .heartbeat(HeartbeatRequest::new(agent_id, Duration::from_secs(300)))
+    .heartbeat(HeartbeatRequest::new("coder", Duration::from_secs(300)))
     .await?;
 ```

@@ -68,13 +68,13 @@ pub struct SessionRecord {
     pub kind: SessionKind,
     pub status: SessionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<Uuid>,
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<Uuid>,
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routine_id: Option<Uuid>,
+    pub routine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_run_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +91,8 @@ pub struct SessionRecord {
     pub domain: Option<DomainState>,
     #[serde(default)]
     pub summary: SessionSummary,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -336,28 +336,28 @@ impl NenjoClient {
         }
     }
 
-    pub async fn list_knowledge_items(&self, pack_id: Uuid) -> Result<Vec<KnowledgeItemSyncMeta>> {
-        let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack_id);
+    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocSyncMeta>> {
+        let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let items: Vec<KnowledgeItemSyncMeta> = resp.json().await?;
-                debug!(pack_id = %pack_id, count = items.len(), "Listed knowledge items");
-                Ok(items)
+                let docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                debug!(pack = %pack, count = docs.len(), "Listed knowledge documents");
+                Ok(docs)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    pub async fn get_knowledge_item_content(
+    pub async fn get_knowledge_doc_content(
         &self,
-        pack_id: Uuid,
-        item_id: Uuid,
-    ) -> Result<KnowledgeItemSyncContent> {
+        pack: &str,
+        doc: &str,
+    ) -> Result<KnowledgeDocSyncContent> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/content",
-            self.base_url, pack_id, item_id
+            self.base_url, pack, doc
         );
         let resp = self.get(&url).await?;
 
@@ -365,56 +365,32 @@ impl NenjoClient {
             StatusCode::OK => {
                 let content = resp.json().await.map_err(ApiClientError::Http)?;
                 let content = self.decode_document_content(content).await?;
-                debug!(pack_id = %pack_id, item_id = %item_id, "Fetched knowledge item content");
+                debug!(pack = %pack, doc = %doc, "Fetched knowledge document content");
                 Ok(content)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    pub async fn list_knowledge_item_edges(
+    pub async fn list_knowledge_doc_edges(
         &self,
-        pack_id: Uuid,
-        item_id: Uuid,
-    ) -> Result<Vec<KnowledgeItemSyncEdge>> {
+        pack: &str,
+        doc: &str,
+    ) -> Result<Vec<KnowledgeDocSyncEdge>> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/edges",
-            self.base_url, pack_id, item_id
+            self.base_url, pack, doc
         );
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let edges: Vec<KnowledgeItemSyncEdge> = resp.json().await?;
-                debug!(pack_id = %pack_id, item_id = %item_id, count = edges.len(), "Listed knowledge item edges");
+                let edges: Vec<KnowledgeDocSyncEdge> = resp.json().await?;
+                debug!(pack = %pack, doc = %doc, count = edges.len(), "Listed knowledge document edges");
                 Ok(edges)
             }
             status => Err(self.api_error(status, resp).await),
         }
-    }
-
-    #[deprecated(note = "Use workspace knowledge APIs")]
-    pub async fn list_project_documents(&self, project_id: Uuid) -> Result<Vec<DocumentSyncMeta>> {
-        let _ = project_id;
-        self.list_knowledge_packs().await.map(|_| Vec::new())
-    }
-
-    #[deprecated(note = "Use get_knowledge_item_content")]
-    pub async fn get_document_content(
-        &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<DocumentSyncContent> {
-        self.get_knowledge_item_content(project_id, doc_id).await
-    }
-
-    #[deprecated(note = "Use list_knowledge_item_edges")]
-    pub async fn list_project_document_edges(
-        &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<Vec<DocumentSyncEdge>> {
-        self.list_knowledge_item_edges(project_id, doc_id).await
     }
 
     // -----------------------------------------------------------------------

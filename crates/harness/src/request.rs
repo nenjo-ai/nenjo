@@ -3,36 +3,10 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use nenjo::{IntoSlug, Slug};
 use uuid::Uuid;
 
 use nenjo::{ProjectLocation, TaskInput};
-
-/// Agent selector accepted by harness execution APIs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentRef {
-    /// Select an agent by manifest ID.
-    Id(Uuid),
-    /// Select an agent by manifest name.
-    Name(String),
-}
-
-impl From<Uuid> for AgentRef {
-    fn from(value: Uuid) -> Self {
-        Self::Id(value)
-    }
-}
-
-impl From<String> for AgentRef {
-    fn from(value: String) -> Self {
-        Self::Name(value)
-    }
-}
-
-impl From<&str> for AgentRef {
-    fn from(value: &str) -> Self {
-        Self::Name(value.to_string())
-    }
-}
 
 /// Domain activation requested for a chat turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,29 +29,35 @@ impl ChatDomainActivation {
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub session_id: Uuid,
-    pub agent: AgentRef,
+    pub agent: Slug,
     pub message: String,
-    pub project_id: Option<Uuid>,
+    pub project: Option<Slug>,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<ChatDomainActivation>,
 }
 
 impl ChatRequest {
-    /// Create a chat request with the required session, agent, and message.
-    pub fn new(session_id: Uuid, agent: impl Into<AgentRef>, message: impl Into<String>) -> Self {
+    /// Create a chat request with a new session ID.
+    pub fn new(agent: impl IntoSlug, message: impl Into<String>) -> Self {
         Self {
-            session_id,
-            agent: agent.into(),
+            session_id: Uuid::new_v4(),
+            agent: agent.into_slug(),
             message: message.into(),
-            project_id: None,
+            project: None,
             domain_session_id: None,
             domain_activation: None,
         }
     }
 
+    /// Set the session ID used for conversation continuity and host correlation.
+    pub fn with_session(mut self, session_id: Uuid) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
     /// Attach project context to the chat turn.
-    pub fn with_project(mut self, project_id: Uuid) -> Self {
-        self.project_id = Some(project_id);
+    pub fn with_project(mut self, project: impl IntoSlug) -> Self {
+        self.project = Some(project.into_slug());
         self
     }
 
@@ -102,11 +82,11 @@ impl ChatRequest {
 #[derive(Debug, Clone)]
 pub struct TaskRequest {
     pub task_id: Uuid,
-    pub project_id: Uuid,
+    pub project: Slug,
     pub title: String,
     pub description: String,
-    pub routine_id: Option<Uuid>,
-    pub agent: Option<AgentRef>,
+    pub routine: Option<Slug>,
+    pub agent: Option<Slug>,
     pub execution_run_id: Option<Uuid>,
     pub slug: Option<String>,
     pub acceptance_criteria: Option<String>,
@@ -121,8 +101,8 @@ pub struct TaskRequest {
 /// Scheduled cron routine request for the harness API.
 #[derive(Debug, Clone)]
 pub struct CronRequest {
-    pub routine_id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub routine: Slug,
+    pub project: Option<Slug>,
     pub schedule: String,
     pub timezone: Option<String>,
     pub start_at: Option<DateTime<Utc>>,
@@ -133,10 +113,10 @@ pub struct CronRequest {
 
 impl CronRequest {
     /// Create a cron routine request with the required routine identity and schedule.
-    pub fn new(routine_id: Uuid, schedule: impl Into<String>) -> Self {
+    pub fn new(routine: impl IntoSlug, schedule: impl Into<String>) -> Self {
         Self {
-            routine_id,
-            project_id: None,
+            routine: routine.into_slug(),
+            project: None,
             schedule: schedule.into(),
             timezone: None,
             start_at: None,
@@ -147,8 +127,8 @@ impl CronRequest {
     }
 
     /// Attach project context to the cron routine run.
-    pub fn with_project(mut self, project_id: Uuid) -> Self {
-        self.project_id = Some(project_id);
+    pub fn with_project(mut self, project: impl IntoSlug) -> Self {
+        self.project = Some(project.into_slug());
         self
     }
 
@@ -186,7 +166,7 @@ impl CronRequest {
 /// Scheduled agent heartbeat request for the harness API.
 #[derive(Debug, Clone)]
 pub struct HeartbeatRequest {
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub interval: Duration,
     pub start_at: Option<DateTime<Utc>>,
     pub previous_output: Option<String>,
@@ -197,9 +177,9 @@ pub struct HeartbeatRequest {
 
 impl HeartbeatRequest {
     /// Create a heartbeat request with the required agent and interval.
-    pub fn new(agent_id: Uuid, interval: Duration) -> Self {
+    pub fn new(agent: impl IntoSlug, interval: Duration) -> Self {
         Self {
-            agent_id,
+            agent: agent.into_slug(),
             interval,
             start_at: None,
             previous_output: None,
@@ -241,19 +221,18 @@ impl HeartbeatRequest {
 }
 
 impl TaskRequest {
-    /// Create a task request with the required task identity and content.
+    /// Create a task request with a new task ID.
     pub fn new(
-        task_id: Uuid,
-        project_id: Uuid,
+        project: impl IntoSlug,
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
-            task_id,
-            project_id,
+            task_id: Uuid::new_v4(),
+            project: project.into_slug(),
             title: title.into(),
             description: description.into(),
-            routine_id: None,
+            routine: None,
             agent: None,
             execution_run_id: None,
             slug: None,
@@ -267,14 +246,20 @@ impl TaskRequest {
         }
     }
 
+    /// Set the task ID used for task continuity and host correlation.
+    pub fn with_task_id(mut self, task_id: Uuid) -> Self {
+        self.task_id = task_id;
+        self
+    }
+
     /// Create a task request from a core SDK task input.
-    pub fn from_task_input(task: &TaskInput) -> Self {
+    pub fn from_task_input(task: &TaskInput, project: Slug) -> Self {
         Self {
             task_id: task.task_id,
-            project_id: task.project_id,
+            project,
             title: task.title.clone(),
             description: task.description.clone(),
-            routine_id: None,
+            routine: None,
             agent: None,
             execution_run_id: None,
             slug: task.slug.clone(),
@@ -289,14 +274,14 @@ impl TaskRequest {
     }
 
     /// Execute the task through a routine.
-    pub fn with_routine(mut self, routine_id: Uuid) -> Self {
-        self.routine_id = Some(routine_id);
+    pub fn with_routine(mut self, routine: impl IntoSlug) -> Self {
+        self.routine = Some(routine.into_slug());
         self
     }
 
     /// Execute the task directly with an agent.
-    pub fn with_agent(mut self, agent: impl Into<AgentRef>) -> Self {
-        self.agent = Some(agent.into());
+    pub fn with_agent(mut self, agent: impl IntoSlug) -> Self {
+        self.agent = Some(agent.into_slug());
         self
     }
 
@@ -352,5 +337,35 @@ impl TaskRequest {
     pub fn with_project_location(mut self, location: ProjectLocation) -> Self {
         self.project_location = Some(location);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_request_generates_session_and_allows_override() {
+        let generated = ChatRequest::new("code_reviewer", "review this");
+        assert!(!generated.session_id.is_nil());
+        assert_eq!(generated.agent.as_str(), "code_reviewer");
+
+        let session_id = Uuid::new_v4();
+        let explicit = ChatRequest::new("Code Reviewer", "review this").with_session(session_id);
+        assert_eq!(explicit.session_id, session_id);
+        assert_eq!(explicit.agent.as_str(), "code_reviewer");
+    }
+
+    #[test]
+    fn task_request_generates_task_id_and_allows_override() {
+        let generated = TaskRequest::new("demo_project", "Title", "Description");
+        assert!(!generated.task_id.is_nil());
+        assert_eq!(generated.project.as_str(), "demo_project");
+
+        let task_id = Uuid::new_v4();
+        let explicit =
+            TaskRequest::new("Demo Project", "Title", "Description").with_task_id(task_id);
+        assert_eq!(explicit.task_id, task_id);
+        assert_eq!(explicit.project.as_str(), "demo_project");
     }
 }

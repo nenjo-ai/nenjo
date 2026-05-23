@@ -1,6 +1,8 @@
 //! Canonical manifest MCP document types.
 
-use serde::{Deserialize, Serialize};
+use derive_builder::Builder;
+use nenjo::Slug;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use nenjo::manifest::{
@@ -18,7 +20,8 @@ pub struct AgentSummary {
     pub name: String,
     pub description: Option<String>,
     pub color: Option<String>,
-    pub model_id: Option<Uuid>,
+    #[serde(default)]
+    pub model: Option<Slug>,
 }
 
 /// Canonical prompt-free agent document used by manifest get/update/delete operations.
@@ -26,14 +29,14 @@ pub struct AgentSummary {
 pub struct AgentDocument {
     #[serde(flatten)]
     pub summary: AgentSummary,
-    #[serde(default, alias = "domain_ids")]
-    pub domains: Vec<Uuid>,
+    #[serde(default)]
+    pub domains: Vec<Slug>,
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub mcp_server_ids: Vec<Uuid>,
-    #[serde(default, alias = "ability_ids")]
-    pub abilities: Vec<Uuid>,
+    pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub abilities: Vec<String>,
     #[serde(default)]
     pub prompt_locked: bool,
     #[serde(default)]
@@ -58,8 +61,21 @@ pub struct AgentUpdateDocument {
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<Option<Uuid>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_slug_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model: Option<Option<Slug>>,
+}
+
+fn deserialize_optional_slug_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Slug>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Slug>::deserialize(deserializer).map(Some)
 }
 
 impl From<AgentManifest> for AgentDocument {
@@ -70,12 +86,12 @@ impl From<AgentManifest> for AgentDocument {
                 name: agent.name,
                 description: agent.description,
                 color: agent.color,
-                model_id: agent.model_id,
+                model: agent.model,
             },
-            domains: agent.domain_ids,
+            domains: agent.domains,
             platform_scopes: agent.platform_scopes,
-            mcp_server_ids: agent.mcp_server_ids,
-            abilities: agent.ability_ids,
+            mcp_servers: agent.mcp_servers,
+            abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
         }
@@ -100,11 +116,11 @@ impl From<AgentDocument> for AgentManifest {
             description: agent.summary.description,
             prompt_config: PromptConfig::default(),
             color: agent.summary.color,
-            model_id: agent.summary.model_id,
-            domain_ids: agent.domains,
+            model: agent.summary.model,
+            domains: agent.domains,
             platform_scopes: agent.platform_scopes,
-            mcp_server_ids: agent.mcp_server_ids,
-            ability_ids: agent.abilities,
+            mcp_servers: agent.mcp_servers,
+            abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
         }
@@ -117,7 +133,7 @@ impl From<AgentDocument> for AgentUpdateDocument {
             name: Some(agent.summary.name),
             description: Some(agent.summary.description),
             color: Some(agent.summary.color),
-            model_id: Some(agent.summary.model_id),
+            model: None,
         }
     }
 }
@@ -131,7 +147,7 @@ pub struct AgentCreateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<Uuid>,
+    pub model: Option<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,10 +155,8 @@ pub struct AgentCreateDocument {
 pub struct AbilitySummary {
     pub id: Uuid,
     pub name: String,
-    pub tool_name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
 }
 
@@ -155,7 +169,7 @@ pub struct AbilityDocument {
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub mcp_server_ids: Vec<Uuid>,
+    pub mcp_servers: Vec<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,41 +184,36 @@ pub struct AbilityPromptDocument {
 /// Request body for creating an ability.
 pub struct AbilityCreateDocument {
     pub name: String,
-    pub tool_name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
     #[serde(default)]
     pub activation_condition: String,
     pub prompt_config: AbilityPromptConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_server_ids: Option<Vec<Uuid>>,
+    pub mcp_servers: Option<Vec<Slug>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Partial update body for an ability.
 pub struct AbilityUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<Option<String>>,
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_condition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_server_ids: Option<Vec<Uuid>>,
+    pub mcp_servers: Option<Vec<Slug>>,
 }
 
 impl AbilityUpdateDocument {
     /// Return whether the update contains no effective field changes.
     pub fn is_empty(&self) -> bool {
-        self.display_name.is_none()
-            && self.tool_name.is_none()
+        self.name.is_none()
             && self.description.is_none()
             && self.activation_condition.is_none()
-            && self.mcp_server_ids.is_none()
+            && self.mcp_servers.is_none()
     }
 }
 
@@ -214,14 +223,12 @@ impl From<AbilityManifest> for AbilityDocument {
             summary: AbilitySummary {
                 id: ability.id,
                 name: ability.name,
-                tool_name: ability.tool_name,
-                path: ability.path,
-                display_name: ability.display_name,
+                path: ability.path.unwrap_or_default(),
                 description: ability.description,
             },
             activation_condition: ability.activation_condition,
             platform_scopes: ability.platform_scopes,
-            mcp_server_ids: ability.mcp_server_ids,
+            mcp_servers: ability.mcp_servers,
         }
     }
 }
@@ -241,14 +248,16 @@ impl From<AbilityDocument> for AbilityManifest {
         Self {
             id: ability.summary.id,
             name: ability.summary.name,
-            tool_name: ability.summary.tool_name,
-            path: ability.summary.path,
-            display_name: ability.summary.display_name,
+            path: if ability.summary.path.is_empty() {
+                None
+            } else {
+                Some(ability.summary.path)
+            },
             description: ability.summary.description,
             activation_condition: ability.activation_condition,
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: ability.platform_scopes,
-            mcp_server_ids: ability.mcp_server_ids,
+            mcp_servers: ability.mcp_servers,
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -261,6 +270,7 @@ impl From<AbilityDocument> for AbilityManifest {
 pub struct DomainSummary {
     pub id: Uuid,
     pub name: String,
+    pub slug: Slug,
     #[serde(default)]
     pub path: String,
     pub display_name: String,
@@ -276,9 +286,9 @@ pub struct DomainDocument {
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub ability_ids: Vec<Uuid>,
+    pub abilities: Vec<String>,
     #[serde(default)]
-    pub mcp_server_ids: Vec<Uuid>,
+    pub mcp_servers: Vec<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,9 +359,9 @@ pub struct DomainCreateDocument {
     pub description: Option<String>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ability_ids: Option<Vec<Uuid>>,
+    pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_server_ids: Option<Vec<Uuid>>,
+    pub mcp_servers: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_config: Option<DomainPromptConfig>,
 }
@@ -368,9 +378,9 @@ pub struct DomainUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ability_ids: Option<Vec<Uuid>>,
+    pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_server_ids: Option<Vec<Uuid>>,
+    pub mcp_servers: Option<Vec<Slug>>,
 }
 
 impl DomainUpdateDocument {
@@ -380,25 +390,27 @@ impl DomainUpdateDocument {
             && self.display_name.is_none()
             && self.description.is_none()
             && self.command.is_none()
-            && self.ability_ids.is_none()
-            && self.mcp_server_ids.is_none()
+            && self.abilities.is_none()
+            && self.mcp_servers.is_none()
     }
 }
 
 impl From<DomainManifest> for DomainDocument {
     fn from(domain: DomainManifest) -> Self {
+        let slug = domain.slug();
         Self {
             summary: DomainSummary {
                 id: domain.id,
                 name: domain.name,
+                slug,
                 path: domain.path,
                 display_name: domain.display_name,
                 description: domain.description,
             },
             command: domain.command,
             platform_scopes: domain.platform_scopes,
-            ability_ids: domain.ability_ids,
-            mcp_server_ids: domain.mcp_server_ids,
+            abilities: domain.abilities,
+            mcp_servers: domain.mcp_servers,
         }
     }
 }
@@ -445,8 +457,7 @@ impl From<ContextBlockManifest> for ContextBlockContentDocument {
 pub struct ProjectSummary {
     pub id: Uuid,
     pub name: String,
-    #[serde(default)]
-    pub slug: String,
+    pub slug: Slug,
     pub description: Option<String>,
 }
 
@@ -459,10 +470,11 @@ pub struct ProjectDocument {
     pub settings: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Request body for creating a project.
 pub struct ProjectCreateDocument {
     pub name: String,
+    pub slug: Slug,
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_url: Option<String>,
@@ -474,40 +486,114 @@ pub struct ProjectUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_url: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Library knowledge item metadata returned by knowledge pack item routes.
-pub struct KnowledgeItemSummary {
-    pub id: Uuid,
-    pub pack_id: Uuid,
+/// Library knowledge document metadata returned by knowledge pack routes.
+pub struct KnowledgeDocSummary {
+    pub pack: Slug,
+    pub doc: Slug,
     pub filename: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub content_type: String,
-    pub size_bytes: i64,
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Library knowledge item including inline content.
-pub struct KnowledgeItemContentDocument {
+/// Library knowledge document including inline content.
+pub struct KnowledgeDocContentDocument {
     #[serde(flatten)]
-    pub item: KnowledgeItemSummary,
+    pub doc: KnowledgeDocSummary,
     pub content: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating a library knowledge item.
-pub struct KnowledgeItemCreateDocument {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<Uuid>,
-    pub pack_id: Uuid,
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Request body for creating a library knowledge document.
+pub struct KnowledgeDocCreateDocument {
+    pub pack: Slug,
     pub filename: String,
     pub content: String,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<Slug>,
+    #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<KnowledgeDocRelatedDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Outbound relationship authored on a library knowledge document.
+pub struct KnowledgeDocRelatedDocument {
+    pub target_doc: Slug,
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Partial update body for library knowledge document content, metadata, and graph edges.
+pub struct KnowledgeDocUpdateDocument {
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related: Option<Vec<KnowledgeDocRelatedDocument>>,
 }
 
 impl From<ProjectManifest> for ProjectDocument {
@@ -576,9 +662,9 @@ pub struct RoutineStepInput {
     pub name: String,
     pub step_type: RoutineStepType,
     #[serde(default)]
-    pub council_id: Option<Uuid>,
+    pub council: Option<Slug>,
     #[serde(default)]
-    pub agent_id: Option<Uuid>,
+    pub agent: Option<Slug>,
     #[serde(default)]
     pub config: serde_json::Value,
     pub order_index: i32,
@@ -587,8 +673,8 @@ pub struct RoutineStepInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One edge in a routine graph write request.
 pub struct RoutineEdgeInput {
-    pub source_step_id: String,
-    pub target_step_id: String,
+    pub source_step: String,
+    pub target_step: String,
     pub condition: RoutineEdgeCondition,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -639,9 +725,9 @@ impl RoutineDocument {
         RoutineGraphInput {
             entry_step_ids: self
                 .metadata
-                .entry_step_ids
+                .entry_steps
                 .iter()
-                .map(Uuid::to_string)
+                .map(ToString::to_string)
                 .collect(),
             steps: self
                 .steps
@@ -650,8 +736,8 @@ impl RoutineDocument {
                     step_id: step.id.to_string(),
                     name: step.name.clone(),
                     step_type: step.step_type,
-                    council_id: step.council_id,
-                    agent_id: step.agent_id,
+                    council: step.council.clone(),
+                    agent: step.agent.clone(),
                     config: step.config.clone(),
                     order_index: step.order_index,
                 })
@@ -660,8 +746,8 @@ impl RoutineDocument {
                 .edges
                 .iter()
                 .map(|edge| RoutineEdgeInput {
-                    source_step_id: edge.source_step_id.to_string(),
-                    target_step_id: edge.target_step_id.to_string(),
+                    source_step: edge.source_step.to_string(),
+                    target_step: edge.target_step.to_string(),
                     condition: edge.condition,
                     metadata: edge.metadata.clone(),
                 })
@@ -758,13 +844,13 @@ pub struct CouncilSummary {
     pub id: Uuid,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
-    pub leader_agent_id: Uuid,
+    pub leader_agent: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Council member entry embedded in a council document.
 pub struct CouncilMemberDocument {
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub agent_name: String,
     pub priority: i32,
 }
@@ -781,7 +867,7 @@ pub struct CouncilDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Request body for creating one council member entry.
 pub struct CouncilCreateMemberDocument {
-    pub agent_id: Uuid,
+    pub agent: Slug,
     #[serde(default)]
     pub priority: i32,
     #[serde(default)]
@@ -804,12 +890,12 @@ impl CouncilMemberUpdateDocument {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Request body for creating a council.
 pub struct CouncilCreateDocument {
     pub name: String,
     pub description: Option<String>,
-    pub leader_agent_id: Uuid,
+    pub leader_agent: Slug,
     #[serde(default)]
     pub delegation_strategy: Option<CouncilDelegationStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,14 +924,14 @@ impl From<CouncilManifest> for CouncilDocument {
                 id: council.id,
                 name: council.name,
                 delegation_strategy: council.delegation_strategy,
-                leader_agent_id: council.leader_agent_id,
+                leader_agent: council.leader_agent,
             },
             members: council
                 .members
                 .into_iter()
                 .map(|member| CouncilMemberDocument {
-                    agent_id: member.agent_id,
-                    agent_name: member.agent_name,
+                    agent: member.agent.clone(),
+                    agent_name: member.agent.to_string(),
                     priority: member.priority,
                 })
                 .collect(),
@@ -859,13 +945,12 @@ impl From<CouncilDocument> for CouncilManifest {
             id: council.summary.id,
             name: council.summary.name,
             delegation_strategy: council.summary.delegation_strategy,
-            leader_agent_id: council.summary.leader_agent_id,
+            leader_agent: council.summary.leader_agent,
             members: council
                 .members
                 .into_iter()
                 .map(|member| nenjo::manifest::CouncilMemberManifest {
-                    agent_id: member.agent_id,
-                    agent_name: member.agent_name,
+                    agent: member.agent,
                     priority: member.priority,
                 })
                 .collect(),
@@ -883,28 +968,27 @@ mod tests {
             name: Some("agent".into()),
             description: None,
             color: None,
-            model_id: None,
+            model: None,
         })
         .unwrap();
         assert!(agent.get("platform_scopes").is_none());
 
         let ability = serde_json::to_value(AbilityUpdateDocument {
-            tool_name: None,
-            display_name: Some(Some("Ability".into())),
+            name: None,
             description: None,
             activation_condition: None,
-            mcp_server_ids: None,
+            mcp_servers: None,
         })
         .unwrap();
         assert!(ability.get("platform_scopes").is_none());
 
         let domain = serde_json::to_value(DomainUpdateDocument {
             name: None,
-            display_name: Some("Domain".into()),
+            display_name: None,
             description: None,
             command: None,
-            ability_ids: None,
-            mcp_server_ids: None,
+            abilities: None,
+            mcp_servers: None,
         })
         .unwrap();
         assert!(domain.get("platform_scopes").is_none());

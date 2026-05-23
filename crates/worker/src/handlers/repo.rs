@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use nenjo::Slug;
 use nenjo_events::Response;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use nenjo_harness::{Harness, ProviderRuntime};
 
-use crate::event_bridge::project_slug;
 use crate::handlers::ResponseSender;
+use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
 
 #[async_trait]
@@ -52,17 +53,14 @@ where
     async fn handle_repo_sync(
         &self,
         ctx: &RepoCommandContext<S, R>,
-        project_id: Uuid,
+        project: &str,
         repo_url: &str,
         target_branch: &str,
     ) -> Result<()>;
 
     /// Handle a request to remove a project repository sync.
-    async fn handle_repo_unsync(
-        &self,
-        ctx: &RepoCommandContext<S, R>,
-        project_id: Uuid,
-    ) -> Result<()>;
+    async fn handle_repo_unsync(&self, ctx: &RepoCommandContext<S, R>, project: &str)
+    -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -76,17 +74,18 @@ where
     async fn handle_repo_sync(
         &self,
         ctx: &RepoCommandContext<S, R>,
-        project_id: Uuid,
+        project: &str,
         repo_url: &str,
         target_branch: &str,
     ) -> Result<()> {
         let provider = self.provider();
         let manifest = provider.manifest_snapshot();
-        let slug = project_slug(&manifest, project_id);
+        let project_slug = Slug::parse(project)?;
+        let project_id = PlatformResourceResolver::new(&manifest).project_id(&project_slug)?;
 
         info!(
             %project_id,
-            slug = %slug,
+            slug = %project_slug,
             %repo_url,
             %target_branch,
             "Syncing repo"
@@ -94,22 +93,22 @@ where
 
         let result = ctx
             .repo_runtime
-            .sync_repo(project_id, &slug, repo_url, target_branch)
+            .sync_repo(project_id, project_slug.as_str(), repo_url, target_branch)
             .await;
 
         match &result {
             Ok(()) => {
-                info!(%project_id, slug = %slug, "Repo sync complete");
+                info!(%project_id, slug = %project_slug, "Repo sync complete");
                 let _ = ctx.response_sink.send(Response::RepoSyncComplete {
-                    project_id,
+                    project: project_slug.to_string(),
                     success: true,
                     error: None,
                 });
             }
             Err(error) => {
-                error!(%project_id, slug = %slug, error = %error, "Repo sync failed");
+                error!(%project_id, slug = %project_slug, error = %error, "Repo sync failed");
                 let _ = ctx.response_sink.send(Response::RepoSyncComplete {
-                    project_id,
+                    project: project_slug.to_string(),
                     success: false,
                     error: Some(error.to_string()),
                 });
@@ -122,18 +121,22 @@ where
     async fn handle_repo_unsync(
         &self,
         ctx: &RepoCommandContext<S, R>,
-        project_id: Uuid,
+        project: &str,
     ) -> Result<()> {
         let provider = self.provider();
         let manifest = provider.manifest_snapshot();
-        let slug = project_slug(&manifest, project_id);
-        let result = ctx.repo_runtime.unsync_repo(project_id, &slug).await;
+        let project_slug = Slug::parse(project)?;
+        let project_id = PlatformResourceResolver::new(&manifest).project_id(&project_slug)?;
+        let result = ctx
+            .repo_runtime
+            .unsync_repo(project_id, project_slug.as_str())
+            .await;
         match &result {
             Ok(()) => {
-                info!(%project_id, slug = %slug, "Repo unsynced");
+                info!(%project_id, slug = %project_slug, "Repo unsynced");
             }
             Err(error) => {
-                error!(%project_id, slug = %slug, error = %error, "Repo unsync failed");
+                error!(%project_id, slug = %project_slug, error = %error, "Repo unsync failed");
             }
         }
         result

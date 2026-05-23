@@ -110,27 +110,38 @@ struct RuntimeSessionRecoveryHandler {
 #[async_trait::async_trait]
 impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
     async fn restore_domain_session(&self, request: DomainSessionRecovery) -> Result<()> {
+        let agent = nenjo::Slug::parse(&request.agent)?;
+        let project = request
+            .project
+            .as_deref()
+            .map(nenjo::Slug::parse)
+            .transpose()?;
         let session = self
             .ctx
             .harness
-            .rebuild_domain_session(
-                request.session_id,
-                request.agent_id,
-                request.project_id,
-                &request.domain_command,
-            )
+            .rebuild_domain_session(request.session_id, agent, project, &request.domain_command)
             .await?;
         self.ctx.domains.insert(request.session_id, session);
         Ok(())
     }
 
     async fn restore_cron_session(&self, request: CronSessionRecovery) -> Result<()> {
+        let Some(routine) = request.routine.as_deref() else {
+            return Ok(());
+        };
+        let routine = nenjo::Slug::parse(routine)?;
+        let project = request
+            .project
+            .as_deref()
+            .map(nenjo::Slug::parse)
+            .transpose()?;
+        let project = project.as_ref().map(|slug| slug.as_str());
         self.ctx
             .harness
             .handle_cron_enable(
                 &self.ctx.cron_context(),
-                request.session_id,
-                request.project_id,
+                routine.as_str(),
+                project,
                 &request.schedule_expr,
                 request.timezone.as_deref(),
                 request.next_run_at,
@@ -140,12 +151,20 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
     }
 
     async fn restore_heartbeat_session(&self, request: HeartbeatSessionRecovery) -> Result<()> {
+        let agent = nenjo::Slug::parse(&request.agent)?;
+        let manifest = self.ctx.harness.provider().manifest_snapshot();
+        let agent_id = manifest
+            .agents
+            .iter()
+            .find(|item| nenjo::Slug::derive(&item.name) == agent)
+            .map(|item| item.id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
         self.ctx
             .harness
             .restore_agent_heartbeat(
                 &self.ctx.heartbeat_context(),
                 HeartbeatRestoreRequest {
-                    agent_id: request.session_id,
+                    agent_id,
                     interval: request.interval,
                     timezone: request.timezone,
                     start_at: request.next_run_at,

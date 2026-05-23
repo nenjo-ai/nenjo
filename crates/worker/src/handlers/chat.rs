@@ -8,6 +8,7 @@ use nenjo_sessions::{
 use tracing::{info, trace};
 use uuid::Uuid;
 
+use nenjo::Slug;
 use nenjo_events::{DomainActivation, Response, StreamEvent};
 
 use nenjo_harness::events::HarnessEvent;
@@ -17,6 +18,7 @@ use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_event};
 use crate::handlers::ResponseSender;
+use crate::resource_resolver::PlatformResourceResolver;
 
 #[derive(Clone)]
 pub struct ChatCommandContext<S> {
@@ -27,8 +29,8 @@ pub struct ChatCommandContext<S> {
 pub struct ChatCommandRequest<'a> {
     pub message_id: Option<&'a str>,
     pub content: &'a str,
-    pub project_id: Option<Uuid>,
-    pub agent_id: Option<Uuid>,
+    pub project: Option<&'a str>,
+    pub agent: Option<&'a str>,
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
@@ -58,16 +60,16 @@ where
     async fn handle_chat_cancel(
         &self,
         ctx: &ChatCommandContext<S>,
-        project_id: Uuid,
-        agent_id: Option<Uuid>,
+        project: &str,
+        agent: Option<&str>,
     ) -> Result<()>;
 
     /// Delete a chat session and cancel any active execution for that session.
     async fn handle_session_delete(
         &self,
         ctx: &ChatCommandContext<S>,
-        project_id: Uuid,
-        agent_id: Uuid,
+        project: &str,
+        agent: &str,
         session_id: Uuid,
     ) -> Result<()>;
 }
@@ -93,20 +95,20 @@ where
     async fn handle_chat_cancel(
         &self,
         ctx: &ChatCommandContext<S>,
-        project_id: Uuid,
-        agent_id: Option<Uuid>,
+        project: &str,
+        agent: Option<&str>,
     ) -> Result<()> {
-        handle_chat_cancel(self, ctx, project_id, agent_id).await
+        handle_chat_cancel(self, ctx, project, agent).await
     }
 
     async fn handle_session_delete(
         &self,
         ctx: &ChatCommandContext<S>,
-        project_id: Uuid,
-        agent_id: Uuid,
+        project: &str,
+        agent: &str,
         session_id: Uuid,
     ) -> Result<()> {
-        handle_session_delete(self, ctx, project_id, agent_id, session_id).await
+        handle_session_delete(self, ctx, project, agent, session_id).await
     }
 }
 
@@ -123,17 +125,24 @@ where
     let ChatCommandRequest {
         message_id: _,
         content,
-        project_id,
-        agent_id,
+        project,
+        agent,
         session_id,
         domain_session_id,
         domain_activation,
     } = request;
 
-    let agent_id = agent_id.context("No agent_id provided for chat")?;
-    let mut chat = ChatRequest::new(session_id, agent_id, content.to_string());
-    if let Some(project_id) = project_id {
-        chat = chat.with_project(project_id);
+    let agent_slug = agent
+        .map(Slug::parse)
+        .transpose()?
+        .context("No agent provided for chat")?;
+    let manifest = harness.provider().manifest_snapshot();
+    let resolver = PlatformResourceResolver::new(&manifest);
+    let agent_id = resolver.agent_id(&agent_slug)?;
+    let mut chat =
+        ChatRequest::new(agent_slug.clone(), content.to_string()).with_session(session_id);
+    if let Some(project) = project {
+        chat = chat.with_project(Slug::parse(project)?);
     }
     if let Some(domain_session_id) = domain_session_id {
         chat = chat.with_domain_session(domain_session_id);
@@ -164,7 +173,11 @@ where
                     },
                 });
             }
-            HarnessEvent::Turn(ev) => {
+            HarnessEvent::Turn {
+                session_id: event_session_id,
+                event: ev,
+                ..
+            } => {
                 if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
                     trace!(
                         stream_event = %summarize_stream_event(&se),
@@ -172,12 +185,12 @@ where
                         "Chat handler produced stream event"
                     );
                     let _ = ctx.response_sink.send(Response::AgentResponse {
-                        session_id: Some(session_id),
+                        session_id: Some(event_session_id),
                         payload: se,
                     });
                 }
             }
-            HarnessEvent::Routine(_) => {}
+            HarnessEvent::Routine { .. } => {}
         }
     }
 
@@ -191,8 +204,8 @@ where
 async fn handle_chat_cancel<P, SessionRt, S>(
     harness: &Harness<P, SessionRt>,
     ctx: &ChatCommandContext<S>,
-    project_id: Uuid,
-    agent_id: Option<Uuid>,
+    project: &str,
+    agent: Option<&str>,
 ) -> Result<()>
 where
     P: ProviderRuntime,
@@ -236,7 +249,7 @@ where
     }
 
     if cancelled > 0 {
-        info!(agent_id = ?agent_id, %project_id, cancelled, "Cancelled chat executions");
+        info!(agent = ?agent, %project, cancelled, "Cancelled chat executions");
     }
     Ok(())
 }
@@ -245,8 +258,8 @@ where
 async fn handle_session_delete<P, SessionRt, S>(
     harness: &Harness<P, SessionRt>,
     _ctx: &ChatCommandContext<S>,
-    _project_id: Uuid,
-    _agent_id: Uuid,
+    _project: &str,
+    _agent: &str,
     session_id: Uuid,
 ) -> Result<()>
 where

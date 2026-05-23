@@ -359,22 +359,16 @@ fn allows_selector_metadata_outside_manifest_body() {
     let manifest: ResourceManifest = parse_json_or_yaml_as(
         r#"
 schema: nenjo.agent.v1
-selector: git://nenjo-ai/packages/nenjo/agent
-root_uri: git://nenjo-ai/packages/nenjo/agent/
+selector: pkg:nenjo.agent
+root_uri: pkg://nenjo.agent/
 manifest:
   name: system
   display_name: Nenji
 "#,
     )
     .unwrap();
-    assert_eq!(
-        manifest.selector(),
-        Some("git://nenjo-ai/packages/nenjo/agent")
-    );
-    assert_eq!(
-        manifest.root_uri(),
-        Some("git://nenjo-ai/packages/nenjo/agent/")
-    );
+    assert_eq!(manifest.selector(), Some("pkg:nenjo.agent"));
+    assert_eq!(manifest.root_uri(), Some("pkg://nenjo.agent/"));
     assert_eq!(manifest.name().unwrap(), "system");
 }
 

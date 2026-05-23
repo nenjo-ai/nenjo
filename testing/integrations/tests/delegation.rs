@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use nenjo::AgentConfig;
+use nenjo::{AgentConfig, Slug};
 use uuid::Uuid;
 
 use nenjo::manifest::{
@@ -53,13 +53,13 @@ fn make_project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     }
 }
 
-fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest {
+fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
         name: name.into(),
@@ -76,11 +76,11 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -177,7 +177,7 @@ async fn sub_agent_real_llm() {
 
     let leader = make_agent(
         "leader",
-        model.id,
+        &model,
         r#"You are a deterministic native sub-agent smoke-test coordinator.
 
 You MUST use native tool calls, not prose, to follow this exact protocol:
@@ -194,7 +194,7 @@ Do not answer directly. Do not skip tool calls."#,
 
     let specialist = make_agent(
         "specialist",
-        model.id,
+        &model,
         "You are a specialist agent. When you receive a task, respond with a \
          concise, helpful answer. Always include the word 'SPECIALIST' in \
          your response so we can verify delegation happened.",
@@ -216,7 +216,7 @@ Do not answer directly. Do not skip tool calls."#,
         .unwrap();
 
     let runner = provider
-        .agent_by_name("leader")
+        .agent("leader")
         .await
         .unwrap()
         .build()
@@ -274,7 +274,7 @@ async fn sub_agent_all_tools_real_llm() {
     let model = make_model();
     let leader = make_agent(
         "leader",
-        model.id,
+        &model,
         r#"You are a deterministic integration-test coordinator.
 
 You MUST use native tool calls, not prose, to follow this exact protocol:
@@ -318,7 +318,7 @@ Do not skip any step."#,
         .unwrap();
 
     let runner = provider
-        .agent_by_name("leader")
+        .agent("leader")
         .await
         .unwrap()
         .with_config(AgentConfig {
@@ -406,9 +406,9 @@ async fn delegate_to_is_not_model_facing() {
 
     let manifest = Manifest {
         agents: vec![
-            make_agent("alpha", model.id, "You are alpha."),
-            make_agent("beta", model.id, "You are beta."),
-            make_agent("gamma", model.id, "You are gamma."),
+            make_agent("alpha", &model, "You are alpha."),
+            make_agent("beta", &model, "You are beta."),
+            make_agent("gamma", &model, "You are gamma."),
         ],
         models: vec![model],
         projects: vec![make_project()],
@@ -424,7 +424,7 @@ async fn delegate_to_is_not_model_facing() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("alpha")
+        .agent("alpha")
         .await
         .unwrap()
         .build()

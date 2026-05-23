@@ -20,7 +20,7 @@ use nenjo_knowledge::tools::KnowledgePackEntry;
 let provider = nenjo::Provider::builder()
     .with_loader(loader)
     .with_model_factory(model_factory)
-    .with_knowledge_packs([KnowledgePackEntry::new("docs:app", app_docs)])
+    .with_knowledge_packs([KnowledgePackEntry::local("app", app_docs)?])
     .build()
     .await?;
 ```
@@ -34,8 +34,8 @@ let provider = nenjo::Provider::builder()
     .with_loader(loader)
     .with_model_factory(model_factory)
     .with_knowledge_packs([
-        KnowledgePackEntry::new("docs:app", app_docs),
-        KnowledgePackEntry::new("docs:runbook", runbook_docs),
+        KnowledgePackEntry::library("product-docs", app_docs)?,
+        KnowledgePackEntry::package("@acme/runbook", runbook_docs)?,
     ])
     .build()
     .await?;

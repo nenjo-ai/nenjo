@@ -2149,6 +2149,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "derive_builder",
  "nenjo",
  "nenjo-events",
  "nenjo-knowledge",

@@ -316,7 +316,7 @@ where
 pub async fn execute_with_pass_verdict<P>(
     runner: &AgentRunner<P>,
     task: AgentRun,
-    project_id: Uuid,
+    project: Option<crate::Slug>,
     step_id: Uuid,
     step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -363,7 +363,7 @@ where
         pending_task = AgentRun::chat(ChatInput {
             message: verdict_retry_prompt(&output.text),
             history: chat_history(&output.messages),
-            project_id: Some(project_id),
+            project: project.clone(),
         });
     }
 }

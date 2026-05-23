@@ -64,7 +64,6 @@ async fn file_session_runtime_persists_sessions_transcripts_and_traces() {
         .with_session_runtime(FileSessionRuntime::new(stores))
         .build();
     let session_id = Uuid::new_v4();
-    let agent_id = Uuid::new_v4();
 
     harness
         .sessions()
@@ -72,10 +71,10 @@ async fn file_session_runtime_persists_sessions_transcripts_and_traces() {
             session_id,
             kind: SessionKind::Chat,
             status: SessionStatus::Active,
-            agent_id: Some(agent_id),
-            project_id: None,
+            agent: Some("test_agent".to_string()),
+            project: Some("demo_project".to_string()),
             task_id: None,
-            routine_id: None,
+            routine: None,
             execution_run_id: None,
             parent_session_id: None,
             lease: None,
@@ -105,7 +104,7 @@ async fn file_session_runtime_persists_sessions_transcripts_and_traces() {
             turn_id: None,
             recorded_at: Utc::now(),
             phase: TracePhase::Completed,
-            agent_id: Some(agent_id),
+            agent_id: Some(Uuid::new_v4()),
             agent_name: Some("agent".to_string()),
             tool_name: None,
             parent_tool_name: None,
@@ -135,6 +134,8 @@ async fn file_session_runtime_persists_sessions_transcripts_and_traces() {
         Some(transcript_ref.as_str())
     );
     assert_eq!(record.refs.trace_ref.as_deref(), Some(trace_ref.as_str()));
+    assert_eq!(record.project.as_deref(), Some("demo_project"));
+    assert_eq!(record.agent.as_deref(), Some("test_agent"));
 
     let transcript = harness
         .sessions()

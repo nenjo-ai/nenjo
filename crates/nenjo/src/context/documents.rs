@@ -1,6 +1,6 @@
 //! Library knowledge context helpers.
 
-/// Build a compact XML listing of library item metadata from a library manifest file.
+/// Build a compact XML listing of library document metadata from a library manifest file.
 ///
 /// Returns empty string if no manifest exists or no documents are present.
 pub async fn build_document_listing(docs_base_dir: &std::path::Path, project_slug: &str) -> String {
@@ -30,12 +30,8 @@ pub async fn build_document_listing(docs_base_dir: &std::path::Path, project_slu
                 title: Some(doc.title.clone()),
                 path: knowledge_doc_parent_path(doc),
                 kind: Some(doc.kind.as_str().to_string()),
-                authority: Some(doc.authority.as_str().to_string()),
                 size: String::new(),
-                status: Some(doc.status.as_str().to_string()),
                 tags: doc.tags.clone(),
-                aliases: doc.aliases.clone(),
-                keywords: doc.keywords.clone(),
                 summary: Some(doc.summary.clone()),
             })
             .collect(),
@@ -45,7 +41,7 @@ pub async fn build_document_listing(docs_base_dir: &std::path::Path, project_slu
 }
 
 fn knowledge_doc_relative_path(doc: &nenjo_knowledge::KnowledgeDocManifest) -> String {
-    doc.virtual_path
+    doc.path
         .strip_prefix("project://")
         .and_then(|rest| rest.split_once('/').map(|(_, path)| path.to_string()))
         .unwrap_or_else(|| {
@@ -90,17 +86,12 @@ mod tests {
               "docs": [
                 {
                   "id": "demo.nenjo",
-                  "virtual_path": "project://11111111-1111-1111-1111-111111111111/domain/nenjo.md",
+                  "path": "project://11111111-1111-1111-1111-111111111111/domain/nenjo.md",
                   "source_path": "docs/domain/nenjo.md",
                   "title": "Nenjo Domain",
                   "summary": "Domain guidance for Nenjo",
-                  "description": null,
                   "kind": "domain",
-                  "authority": "canonical",
-                  "status": "stable",
                   "tags": ["domain:nenjo"],
-                  "aliases": ["nenjo"],
-                  "keywords": ["agents", "routines"],
                   "related": []
                 }
               ]

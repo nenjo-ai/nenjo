@@ -10,7 +10,7 @@ use super::types::{
     AbilityDocument, AbilityPromptDocument, AbilitySummary, AgentDocument, AgentPromptDocument,
     AgentSummary, ContextBlockContentDocument, ContextBlockDocument, ContextBlockSummary,
     CouncilDocument, CouncilSummary, DomainDocument, DomainPromptDocument, DomainSummary,
-    KnowledgeItemSummary, ModelDocument, ModelSummary, ProjectDocument, ProjectSummary,
+    KnowledgeDocSummary, ModelDocument, ModelSummary, ProjectDocument, ProjectSummary,
     RoutineDocument, RoutineSummary,
 };
 
@@ -137,15 +137,9 @@ pub struct ProjectMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for creating a library knowledge item.
-pub struct KnowledgeItemMutationResult {
-    pub knowledge_item: KnowledgeItemSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for updating library knowledge item content.
-pub struct KnowledgeItemContentMutationResult {
-    pub knowledge_item: KnowledgeItemSummary,
+/// Result for creating or updating a library knowledge document.
+pub struct KnowledgeDocMutationResult {
+    pub knowledge_doc: KnowledgeDocSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

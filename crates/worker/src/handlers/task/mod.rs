@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::types::GitContext;
-use nenjo::{ProjectLocation, TaskInput};
+use nenjo::{ProjectLocation, Slug, TaskInput};
 use nenjo_events::{Response, StepAgent};
 use serde_json::json;
 
@@ -30,6 +30,7 @@ use crate::event_bridge::{
     turn_event_to_task_step_response,
 };
 use crate::handlers::ResponseSender;
+use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
 
@@ -82,8 +83,6 @@ where
 #[derive(Clone)]
 struct TaskSessionRecord<'a> {
     task_id: Uuid,
-    project_id: Uuid,
-    agent_id: Option<Uuid>,
     memory_namespace: Option<&'a str>,
     execution_run_id: Uuid,
     status: SessionStatus,
@@ -98,9 +97,10 @@ enum SessionUpsertMode {
 async fn upsert_task_session<P, SessionRt>(
     harness: &Harness<P, SessionRt>,
     params: &TaskSessionRecord<'_>,
-    routine_id: Option<Uuid>,
+    routine_slug: Option<&str>,
     project_slug: &str,
     agent_name: Option<&str>,
+    agent_slug: Option<&str>,
     mode: SessionUpsertMode,
 ) where
     P: ProviderRuntime,
@@ -109,9 +109,9 @@ async fn upsert_task_session<P, SessionRt>(
     let upsert = TaskSessionUpsert {
         task_id: params.task_id,
         status: params.status,
-        project_id: params.project_id,
-        agent_id: params.agent_id,
-        routine_id,
+        project: project_slug.to_string(),
+        agent: agent_slug.map(ToString::to_string),
+        routine: routine_slug.map(ToString::to_string),
         execution_run_id: params.execution_run_id,
         memory_namespace: params.memory_namespace.map(ToOwned::to_owned),
         metadata: json!({
@@ -272,9 +272,9 @@ impl TaskExecutionOutcome {
 
 pub struct TaskExecuteRequest<'a> {
     pub task_id: Uuid,
-    pub project_id: Uuid,
-    pub routine_id: Option<Uuid>,
-    pub assigned_agent_id: Option<Uuid>,
+    pub project: &'a str,
+    pub routine: Option<&'a str>,
+    pub agent: Option<&'a str>,
     pub execution_run_id: Uuid,
     pub title: &'a str,
     pub description: &'a str,
@@ -381,9 +381,9 @@ where
 {
     let TaskExecuteRequest {
         task_id,
-        project_id,
-        routine_id,
-        assigned_agent_id,
+        project,
+        routine,
+        agent,
         execution_run_id,
         title,
         description,
@@ -397,7 +397,20 @@ where
     } = request;
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
+    let resolver = PlatformResourceResolver::new(&manifest);
+    let project = Slug::parse(project)?;
+    let project_id = resolver.project_id(&project)?;
     let pslug = project_slug(&manifest, project_id);
+    let agent_slug = agent.map(Slug::parse).transpose()?;
+    let routine_slug = routine.map(Slug::parse).transpose()?;
+    let assigned_agent_id = agent_slug
+        .as_ref()
+        .map(|slug| resolver.agent_id(slug))
+        .transpose()?;
+    let routine_id = routine_slug
+        .as_ref()
+        .map(|slug| resolver.routine_id(slug))
+        .transpose()?;
     let task_slug = slug.unwrap_or("task");
     let repo_dir = ctx.worktrees.repo_dir(&pslug);
     let cancel = CancellationToken::new();
@@ -441,8 +454,6 @@ where
     let task_memory_namespace = task_memory_namespace(aname.as_deref(), &pslug);
     let active_session = TaskSessionRecord {
         task_id,
-        project_id,
-        agent_id: assigned_agent_id,
         memory_namespace: task_memory_namespace.as_deref(),
         execution_run_id,
         status: SessionStatus::Active,
@@ -450,9 +461,10 @@ where
     upsert_task_session(
         harness,
         &active_session,
-        routine_id,
+        routine_slug.as_ref().map(|slug| slug.as_str()),
         &pslug,
         aname.as_deref(),
+        agent_slug.as_ref().map(|slug| slug.as_str()),
         SessionUpsertMode::Await,
     )
     .await;
@@ -582,8 +594,6 @@ where
                 .await;
                 let failed_session = TaskSessionRecord {
                     task_id,
-                    project_id,
-                    agent_id: assigned_agent_id,
                     memory_namespace: task_memory_namespace.as_deref(),
                     execution_run_id,
                     status: SessionStatus::Failed,
@@ -591,9 +601,10 @@ where
                 upsert_task_session(
                     harness,
                     &failed_session,
-                    routine_id,
+                    routine_slug.as_ref().map(|slug| slug.as_str()),
                     &pslug,
                     aname.as_deref(),
+                    agent_slug.as_ref().map(|slug| slug.as_str()),
                     SessionUpsertMode::Spawn,
                 )
                 .await;
@@ -606,7 +617,7 @@ where
     };
 
     let task = TaskInput {
-        project_id,
+        project: project.clone(),
         task_id,
         title: title.to_string(),
         description: description.to_string(),
@@ -619,7 +630,8 @@ where
         slug: Some(task_slug.to_string()),
         complexity: complexity.map(ToOwned::to_owned),
     };
-    let mut request = TaskRequest::from_task_input(&task).with_execution_run(execution_run_id);
+    let mut request =
+        TaskRequest::from_task_input(&task, project).with_execution_run(execution_run_id);
     if let Some(location) = git_ctx.clone().map(ProjectLocation::from_git) {
         request = request.with_project_location(location);
     }
@@ -642,16 +654,22 @@ where
     };
 
     let result = if let Some(rid) = routine_id {
+        let routine = routine_slug
+            .clone()
+            .ok_or_else(|| anyhow!("routine not found: {rid}"))?;
         execute_routine_task(RoutineTaskExecution {
             shared: execution,
-            request: request.clone().with_routine(rid),
+            request: request.clone().with_routine(routine),
         })
         .await
     } else if let Some(aid) = assigned_agent_id {
+        let agent = agent_slug
+            .clone()
+            .ok_or_else(|| anyhow!("agent not found: {aid}"))?;
         execute_direct_task(DirectTaskExecution {
             shared: execution,
             agent_id: aid,
-            request: request.clone().with_agent(aid),
+            request: request.clone().with_agent(agent),
         })
         .await
     } else {
@@ -688,8 +706,6 @@ where
         }
         let failed_session = TaskSessionRecord {
             task_id,
-            project_id,
-            agent_id: assigned_agent_id,
             memory_namespace: task_memory_namespace.as_deref(),
             execution_run_id,
             status: SessionStatus::Failed,
@@ -697,9 +713,10 @@ where
         upsert_task_session(
             harness,
             &failed_session,
-            routine_id,
+            routine_slug.as_ref().map(|slug| slug.as_str()),
             &pslug,
             aname.as_deref(),
+            agent_slug.as_ref().map(|slug| slug.as_str()),
             SessionUpsertMode::Spawn,
         )
         .await;
@@ -787,8 +804,6 @@ where
 
     let final_session = TaskSessionRecord {
         task_id,
-        project_id,
-        agent_id: assigned_agent_id,
         memory_namespace: task_memory_namespace.as_deref(),
         execution_run_id,
         status: final_status,
@@ -796,9 +811,10 @@ where
     upsert_task_session(
         harness,
         &final_session,
-        routine_id,
+        routine_slug.as_ref().map(|slug| slug.as_str()),
         &pslug,
         aname.as_deref(),
+        agent_slug.as_ref().map(|slug| slug.as_str()),
         SessionUpsertMode::Spawn,
     )
     .await;
@@ -996,7 +1012,7 @@ where
         tokio::select! {
             event = stream.recv() => {
                 match event {
-                    Some(HarnessEvent::Routine(ev)) => {
+                    Some(HarnessEvent::Routine { event: ev, .. }) => {
                         // Track agent identity across step events.
                         if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, agent_id, .. } = &ev {
                             current_agent_id = *agent_id;
@@ -1036,7 +1052,7 @@ where
                             let _ = ctx.response_sink.send(r);
                         }
                     }
-                    Some(HarnessEvent::Turn(_)) | Some(HarnessEvent::DomainEntered { .. }) => {}
+                    Some(HarnessEvent::Turn { .. }) | Some(HarnessEvent::DomainEntered { .. }) => {}
                     None => break,
                 }
             }
@@ -1079,6 +1095,11 @@ where
     } = exec;
     let manifest = harness.provider().manifest_snapshot();
     let aname = agent_name(&manifest, agent_id);
+    let agent_slug = request
+        .agent
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| nenjo::Slug::derive(&aname).to_string());
     let mut request = request;
     if request.slug.is_none() {
         request = request.with_slug(task_slug.to_string());
@@ -1090,7 +1111,7 @@ where
         tokio::select! {
             event = stream.recv() => {
                 match event {
-                    Some(HarnessEvent::Turn(ev)) => {
+                    Some(HarnessEvent::Turn { event: ev, .. }) => {
                         let agent_duration_ms = if matches!(ev, nenjo::TurnEvent::Done { .. }) {
                             Some(task_started_at.elapsed().as_millis() as u64)
                         } else {
@@ -1102,7 +1123,7 @@ where
                                 execution_run_id,
                                 task_id: Some(task_id),
                                 agent: Some(StepAgent {
-                                    agent_id,
+                                    agent: agent_slug.clone(),
                                     agent_name: Some(aname.clone()),
                                     agent_color: manifest
                                         .agents
@@ -1119,7 +1140,7 @@ where
                             let _ = ctx.response_sink.send(response);
                         }
                     }
-                    Some(HarnessEvent::DomainEntered { .. }) | Some(HarnessEvent::Routine(_)) => {}
+                    Some(HarnessEvent::DomainEntered { .. }) | Some(HarnessEvent::Routine { .. }) => {}
                     None => break,
                 }
             }

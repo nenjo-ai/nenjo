@@ -732,6 +732,7 @@ mod tests {
             &context,
             &nenjo::TurnEvent::Done {
                 output: nenjo::TurnOutput {
+                    task_id: None,
                     text: "finished".to_string(),
                     input_tokens: 3,
                     output_tokens: 4,

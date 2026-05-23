@@ -10,10 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
 use nenjo::client::KnowledgePackSyncMeta;
 use nenjo::manifest::{AbilityManifest, AbilityPromptConfig, McpServerManifest};
-use nenjo_knowledge::{
-    KnowledgeDocAuthority, KnowledgeDocEdge, KnowledgeDocKind, KnowledgeDocManifest,
-    KnowledgeDocStatus,
-};
+use nenjo_knowledge::{KnowledgeDocEdge, KnowledgeDocKind, KnowledgeDocManifest};
 use nenjo_platform::library_knowledge::{
     LIBRARY_KNOWLEDGE_MANIFEST_FILENAME, LibraryKnowledgePackManifest,
     write_library_knowledge_manifest,
@@ -94,19 +91,12 @@ struct AuthoredKnowledgePackBody {
 struct AuthoredKnowledgeDoc {
     id: Option<String>,
     path: Option<String>,
-    virtual_path: Option<String>,
     source_path: String,
     title: Option<String>,
     summary: Option<String>,
-    description: Option<String>,
     kind: Option<String>,
-    authority: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default)]
-    aliases: Vec<String>,
-    #[serde(default)]
-    keywords: Vec<String>,
     #[serde(default)]
     related: Vec<KnowledgeDocEdge>,
 }
@@ -225,9 +215,6 @@ pub async fn hydrate_skill_ability(
     }
 
     let mut hydrated = ability;
-    if hydrated.display_name.is_none() {
-        hydrated.display_name = parsed.name.clone();
-    }
     if hydrated.description.is_none() {
         hydrated.description = parsed.description.clone();
     }
@@ -255,11 +242,6 @@ pub async fn uninstall_skill_ability(
         serde_json::from_value(metadata).context("failed to parse skill uninstall metadata")?;
     let package_dir = skill_package_dir_from_metadata(nenjo_home, &metadata, None)?;
     remove_marked_package_dir(&package_dir, "skill").await?;
-
-    let legacy_dir = legacy_skill_package_dir_from_metadata(nenjo_home, &metadata, None)?;
-    if legacy_dir != package_dir {
-        remove_marked_package_dir(&legacy_dir, "skill").await?;
-    }
 
     info!(
         %ability_id,
@@ -625,9 +607,6 @@ fn authored_knowledge_manifest(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "package".to_string());
-    let root_uri = manifest
-        .root_uri
-        .unwrap_or_else(|| repo_root_uri(metadata, &slug));
     let pack_id = manifest
         .pack_id
         .or_else(|| {
@@ -636,7 +615,11 @@ fn authored_knowledge_manifest(
                 .as_ref()
                 .and_then(|body| body.pack_id.clone())
         })
-        .unwrap_or_else(|| format!("repo-knowledge-{slug}"));
+        .or_else(|| metadata.source.package.clone())
+        .unwrap_or(slug.clone());
+    let root_uri = manifest
+        .root_uri
+        .unwrap_or_else(|| package_root_uri(&pack_id));
     let version = manifest
         .version
         .or_else(|| {
@@ -668,19 +651,8 @@ fn authored_knowledge_manifest(
     }
 }
 
-fn repo_root_uri(metadata: &InstallMetadata, slug: &str) -> String {
-    if let Some(selector) = metadata.install.selector.as_deref()
-        && let Some(selector) = selector.strip_prefix("git://")
-    {
-        return format!("git://{}/", selector.trim_matches('/'));
-    }
-    match (
-        metadata.source.owner.as_deref(),
-        metadata.source.repo.as_deref(),
-    ) {
-        (Some(owner), Some(repo)) => format!("git://{owner}/{repo}/{slug}/"),
-        _ => format!("git://local/package/{slug}/"),
-    }
+fn package_root_uri(pack_id: &str) -> String {
+    format!("pkg://{}/knowledge/", pack_id.trim_matches('/'))
 }
 
 fn authored_knowledge_doc(
@@ -688,12 +660,9 @@ fn authored_knowledge_doc(
     slug: &str,
     doc: AuthoredKnowledgeDoc,
 ) -> KnowledgeDocManifest {
-    let path = doc
-        .virtual_path
-        .or(doc.path)
-        .unwrap_or_else(|| doc.source_path.clone());
+    let path = doc.path.unwrap_or_else(|| doc.source_path.clone());
     let relative_path = path.trim_start_matches('/');
-    let virtual_path = if relative_path.contains("://") {
+    let path = if relative_path.contains("://") {
         relative_path.to_string()
     } else {
         format!("{}/{relative_path}", root_uri.trim_end_matches('/'))
@@ -724,55 +693,19 @@ fn authored_knowledge_doc(
 
     KnowledgeDocManifest {
         id,
-        virtual_path,
+        path,
         source_path: doc.source_path,
         title,
         summary: doc.summary.unwrap_or_default(),
-        description: doc.description,
         kind: parse_doc_kind(doc.kind.as_deref()),
-        authority: parse_doc_authority(doc.authority.as_deref()),
-        status: KnowledgeDocStatus::Stable,
         tags: doc.tags,
-        aliases: doc.aliases,
-        keywords: doc.keywords,
         related: doc.related,
-        size_bytes: 0,
         updated_at: String::new(),
     }
 }
 
 fn parse_doc_kind(value: Option<&str>) -> KnowledgeDocKind {
-    match value
-        .unwrap_or("guide")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "reference" => KnowledgeDocKind::Reference,
-        "taxonomy" => KnowledgeDocKind::Taxonomy,
-        "domain" => KnowledgeDocKind::Domain,
-        "entity" => KnowledgeDocKind::Entity,
-        "policy" => KnowledgeDocKind::Policy,
-        _ => KnowledgeDocKind::Guide,
-    }
-}
-
-fn parse_doc_authority(value: Option<&str>) -> KnowledgeDocAuthority {
-    match value
-        .unwrap_or("reference")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "canonical" => KnowledgeDocAuthority::Canonical,
-        "supporting" => KnowledgeDocAuthority::Supporting,
-        "pattern" => KnowledgeDocAuthority::Pattern,
-        "advisory" => KnowledgeDocAuthority::Advisory,
-        "example" => KnowledgeDocAuthority::Example,
-        "draft" => KnowledgeDocAuthority::Draft,
-        "deprecated" => KnowledgeDocAuthority::Deprecated,
-        _ => KnowledgeDocAuthority::Reference,
-    }
+    KnowledgeDocKind::new(value.unwrap_or("guide"))
 }
 
 fn title_from_path(path: &str) -> String {
@@ -829,35 +762,6 @@ fn skill_package_dir_from_metadata(
         .unwrap_or("skill");
     Ok(nenjo_home
         .join("skills")
-        .join(validate_relative_path(Path::new(owner))?)
-        .join(validate_relative_path(Path::new(repo))?)
-        .join(validate_relative_path(Path::new(package))?))
-}
-
-fn legacy_skill_package_dir_from_metadata(
-    nenjo_home: &Path,
-    metadata: &InstallMetadata,
-    fallback_name: Option<&str>,
-) -> Result<PathBuf> {
-    let owner = metadata.source.owner.as_deref().unwrap_or("local");
-    let repo = metadata.source.repo.as_deref().unwrap_or("skills");
-    let package = metadata
-        .source
-        .package
-        .as_deref()
-        .or_else(|| {
-            metadata
-                .source
-                .path
-                .as_deref()
-                .and_then(|path| path.rsplit('/').next())
-        })
-        .or(fallback_name)
-        .unwrap_or("skill");
-    Ok(nenjo_home
-        .join("skills")
-        .join("repos")
-        .join("github")
         .join(validate_relative_path(Path::new(owner))?)
         .join(validate_relative_path(Path::new(repo))?)
         .join(validate_relative_path(Path::new(package))?))
@@ -960,35 +864,30 @@ fn substitute_plugin_paths(value: &str, plugin_root: &Path, nenjo_home: &Path) -
 }
 
 struct ParsedSkill {
-    name: Option<String>,
     description: Option<String>,
     body: String,
 }
 
 #[derive(Default, Deserialize)]
 struct SkillFrontmatter {
-    name: Option<String>,
     description: Option<String>,
 }
 
 fn parse_skill_markdown(content: &str) -> ParsedSkill {
     let Some(rest) = content.strip_prefix("---\n") else {
         return ParsedSkill {
-            name: None,
             description: None,
             body: content.to_string(),
         };
     };
     let Some((frontmatter, body)) = rest.split_once("\n---\n") else {
         return ParsedSkill {
-            name: None,
             description: None,
             body: content.to_string(),
         };
     };
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter).unwrap_or_default();
     ParsedSkill {
-        name: frontmatter.name,
         description: frontmatter.description,
         body: body.to_string(),
     }
@@ -1045,7 +944,7 @@ mod tests {
     fn authored_knowledge_manifest_maps_repo_shape_to_library_manifest() {
         let metadata = InstallMetadata {
             install: InstallRecordMetadata {
-                selector: Some("git://nenjo-ai/packages/nenjo/platform".to_string()),
+                selector: Some("pkg:platform:knowledge".to_string()),
             },
             source: SourceMetadata {
                 provider: Some("github".to_string()),
@@ -1072,7 +971,6 @@ docs:
     source_path: docs/overview.md
     title: Platform Overview
     kind: guide
-    authority: reference
     tags: [platform]
 "#;
 
@@ -1080,23 +978,23 @@ docs:
             parse_knowledge_package_manifest(yaml, Path::new("manifest.yaml"), &metadata)
                 .expect("manifest parses");
 
-        assert_eq!(manifest.pack_id, "repo-knowledge-platform");
+        assert_eq!(manifest.pack_id, "platform");
         assert_eq!(manifest.pack_version, "0.1.0");
-        assert_eq!(manifest.root_uri, "git://nenjo-ai/packages/nenjo/platform/");
+        assert_eq!(manifest.root_uri, "pkg://platform/knowledge/");
         assert_eq!(manifest.docs.len(), 1);
         assert_eq!(
-            manifest.docs[0].virtual_path,
-            "git://nenjo-ai/packages/nenjo/platform/overview.md"
+            manifest.docs[0].path,
+            "pkg://platform/knowledge/overview.md"
         );
         assert_eq!(manifest.docs[0].source_path, "docs/overview.md");
-        assert_eq!(manifest.docs[0].status, KnowledgeDocStatus::Stable);
+        assert_eq!(manifest.docs[0].kind.as_str(), "guide");
     }
 
     #[test]
     fn authored_knowledge_manifest_maps_native_package_shape_to_library_manifest() {
         let metadata = InstallMetadata {
             install: InstallRecordMetadata {
-                selector: Some("git://nenjo-ai/packages/nenjo/core".to_string()),
+                selector: Some("pkg:nenjo.core:knowledge".to_string()),
             },
             source: SourceMetadata {
                 provider: Some("github".to_string()),
@@ -1119,18 +1017,17 @@ docs:
         let yaml = r#"
 schema: nenjo.knowledge.v1
 slug: core
-root_uri: git://nenjo-ai/packages/nenjo/core/
+root_uri: pkg://nenjo.core/knowledge/
 manifest:
   name: Nenjo Core
   pack_id: nenjo.core
   schema_version: 1
   docs:
     - id: nenjo.domain.nenjo
-      virtual_path: git://nenjo-ai/packages/nenjo/core/domain/nenjo.md
+      path: pkg://nenjo.core/knowledge/domain/nenjo.md
       source_path: docs/domain/nenjo.md
       title: Nenjo
       kind: domain
-      authority: canonical
       related:
         - type: references
           target: nenjo.domain.platform
@@ -1142,7 +1039,7 @@ manifest:
 
         assert_eq!(manifest.pack_id, "nenjo.core");
         assert_eq!(manifest.pack_version, "0.1.0");
-        assert_eq!(manifest.root_uri, "git://nenjo-ai/packages/nenjo/core/");
+        assert_eq!(manifest.root_uri, "pkg://nenjo.core/knowledge/");
         assert_eq!(manifest.docs.len(), 1);
         assert_eq!(manifest.docs[0].id, "nenjo.domain.nenjo");
         assert_eq!(manifest.docs[0].source_path, "docs/domain/nenjo.md");

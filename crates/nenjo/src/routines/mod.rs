@@ -6,11 +6,12 @@
 //!
 //! ```ignore
 //! // One-shot task execution
-//! let task = nenjo::TaskInput::new(project_id, task_id, "Fix auth", "Repair the login flow");
-//! let result = provider.routine_by_id(routine_id)?.run(task).await?;
+//! let task = nenjo::TaskInput::new("demo_project", "Fix auth", "Repair the login flow")
+//!     .with_task_id(task_id);
+//! let result = provider.routine("triage")?.run(task).await?;
 //!
 //! // Streaming execution with events
-//! let mut handle = provider.routine_by_id(routine_id)?
+//! let mut handle = provider.routine("triage")?
 //!     .run_stream(task)
 //!     .await?;
 //!

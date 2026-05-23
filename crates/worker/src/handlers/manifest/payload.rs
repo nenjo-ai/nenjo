@@ -23,18 +23,9 @@ pub(super) struct InlineDocumentMeta {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
-    pub authority: Option<String>,
-    #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub keywords: Vec<String>,
-    pub size_bytes: i64,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 

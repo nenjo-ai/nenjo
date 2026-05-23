@@ -8,9 +8,9 @@
 //! ```ignore
 //! use nenjo::{AgentRun, ChatInput};
 //!
-//! let agent = provider.agent_by_name("my-coder").await?.build().await?;
+//! let agent = provider.agent("my-coder").await?.build().await?;
 //! let handle = agent
-//!     .run_stream(AgentRun::chat(ChatInput::new("Hello!").project_id(project_id)))
+//!     .run_stream(AgentRun::chat(ChatInput::new("Hello!").project("demo_project")))
 //!     .await?;
 //! let output = handle.output().await?;
 //! println!("{}", output.text);
@@ -26,6 +26,7 @@ pub mod memory;
 pub mod provider;
 pub mod repo_manifest;
 pub mod routines;
+pub mod slug;
 pub mod tools;
 pub mod types;
 
@@ -46,6 +47,11 @@ pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,
     ProviderRuntime, RoutineRunner, ToolContext, ToolFactory, TypedModelProviderFactory,
 };
+pub use slug::{IntoSlug, Slug, SlugError};
+
+pub mod knowledge {
+    pub use nenjo_knowledge::*;
+}
 
 // Re-export the Tool API for custom tool implementations.
 pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolResult, ToolSecurity, ToolSpec};
