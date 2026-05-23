@@ -9,7 +9,7 @@ use nenjo::manifest::{
     RoutineMetadata, RoutineTrigger,
 };
 use nenjo::provider::NoopToolFactory;
-use nenjo::{ModelProviderFactory, Provider};
+use nenjo::{ModelProviderFactory, Provider, Slug};
 use nenjo_events::{ResourceAction, ResourceType};
 use nenjo_harness::Harness;
 use nenjo_worker::handlers::manifest::{
@@ -22,9 +22,9 @@ use uuid::Uuid;
 struct RecordingManifestStore {
     persisted: Mutex<Vec<ResourceType>>,
     removed: Mutex<Vec<ResourceType>>,
-    metadata_syncs: Mutex<Vec<Uuid>>,
-    content_syncs: Mutex<Vec<Uuid>>,
-    removals: Mutex<Vec<Uuid>>,
+    metadata_syncs: Mutex<Vec<String>>,
+    content_syncs: Mutex<Vec<String>>,
+    removals: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -42,7 +42,7 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _manifest: &Manifest,
         resource_type: ResourceType,
-        _resource_id: Uuid,
+        _resource: &Slug,
     ) -> Result<()> {
         self.removed.lock().unwrap().push(resource_type);
         Ok(())
@@ -55,36 +55,35 @@ impl ManifestStore for RecordingManifestStore {
     async fn sync_document_metadata(
         &self,
         _client: &nenjo::client::NenjoClient,
-        document_id: Uuid,
+        doc: &Slug,
         _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
-        self.metadata_syncs.lock().unwrap().push(document_id);
+        self.metadata_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
     }
 
     async fn sync_document(
         &self,
         _client: &nenjo::client::NenjoClient,
-        document_id: Uuid,
+        doc: &Slug,
         _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
-        self.content_syncs.lock().unwrap().push(document_id);
+        self.content_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
     }
 
     async fn remove_document(
         &self,
-        document_id: Uuid,
+        doc: &Slug,
         _metadata: Option<&nenjo::client::DocumentSyncMeta>,
     ) -> Result<()> {
-        self.removals.lock().unwrap().push(document_id);
+        self.removals.lock().unwrap().push(doc.to_string());
         Ok(())
     }
 
     fn write_document_content(
         &self,
-        _pack_id: Uuid,
-        _pack_slug: Option<&str>,
+        _pack: &Slug,
         _relative_path: &str,
         _content: &str,
     ) -> Result<()> {
@@ -185,11 +184,11 @@ fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model_id: None,
-        domain_ids: Vec::new(),
+        model: None,
+        domains: Vec::new(),
         platform_scopes: Vec::new(),
-        mcp_server_ids: Vec::new(),
-        ability_ids: Vec::new(),
+        mcp_servers: Vec::new(),
+        abilities: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
     }
@@ -223,7 +222,7 @@ fn project(id: Uuid, name: &str) -> ProjectManifest {
     ProjectManifest {
         id,
         name: name.into(),
-        slug: name.to_lowercase(),
+        slug: Slug::derive(name),
         description: None,
         settings: serde_json::json!({}),
     }
@@ -234,7 +233,7 @@ fn council(id: Uuid, name: &str) -> CouncilManifest {
         id,
         name: name.into(),
         delegation_strategy: CouncilDelegationStrategy::Decompose,
-        leader_agent_id: Uuid::new_v4(),
+        leader_agent: Slug::derive("leader"),
         members: Vec::new(),
     }
 }
@@ -243,16 +242,14 @@ fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     AbilityManifest {
         id,
         name: name.into(),
-        tool_name: format!("{name}_tool"),
-        path: String::new(),
-        display_name: Some(name.into()),
+        path: None,
         description: None,
         activation_condition: "always".into(),
         prompt_config: AbilityPromptConfig {
             developer_prompt: prompt.into(),
         },
         platform_scopes: Vec::new(),
-        mcp_server_ids: Vec::new(),
+        mcp_servers: Vec::new(),
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -296,8 +293,8 @@ fn domain(id: Uuid, name: &str, prompt: &str) -> DomainManifest {
         description: None,
         command: name.into(),
         platform_scopes: Vec::new(),
-        ability_ids: Vec::new(),
-        mcp_server_ids: Vec::new(),
+        abilities: Vec::new(),
+        mcp_servers: Vec::new(),
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some(prompt.into()),
         },
@@ -354,9 +351,20 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 &env.manifest_context(),
                 ManifestChangedCommand {
                     resource_type,
-                    resource_id: id,
+                    resource: Slug::derive(match resource_type {
+                        ResourceType::Agent => "agent",
+                        ResourceType::Model => "model",
+                        ResourceType::Routine => "routine",
+                        ResourceType::Project => "project",
+                        ResourceType::Council => "council",
+                        ResourceType::Ability => "ability",
+                        ResourceType::ContextBlock => "context",
+                        ResourceType::McpServer => "mcp",
+                        ResourceType::Domain => "domain",
+                        ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+                    }),
                     action: ResourceAction::Created,
-                    project_id: None,
+                    project: None,
                     payload: Some(payload),
                     encrypted_payload: None,
                 },
@@ -426,10 +434,10 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
         "name": "renamed",
         "description": null,
         "color": null,
-        "model_id": null,
+        "model": null,
         "domains": [],
         "platform_scopes": [],
-        "mcp_server_ids": [],
+        "mcp_servers": [],
         "abilities": [],
         "prompt_locked": false,
         "heartbeat": null
@@ -440,9 +448,9 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
             &env.manifest_context(),
             ManifestChangedCommand {
                 resource_type: ResourceType::Agent,
-                resource_id: id,
+                resource: Slug::derive("renamed"),
                 action: ResourceAction::Updated,
-                project_id: None,
+                project: None,
                 payload: Some(metadata_payload),
                 encrypted_payload: None,
             },
@@ -483,15 +491,27 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
     };
 
     for (resource_type, resource_id) in ids {
+        let resource = match resource_type {
+            ResourceType::Agent => Slug::derive("agent"),
+            ResourceType::Model => Slug::derive("model"),
+            ResourceType::Routine => Slug::derive("routine"),
+            ResourceType::Project => Slug::derive("project"),
+            ResourceType::Council => Slug::derive("council"),
+            ResourceType::Ability => Slug::derive("ability"),
+            ResourceType::ContextBlock => Slug::derive("context"),
+            ResourceType::McpServer => Slug::derive("mcp"),
+            ResourceType::Domain => Slug::derive("domain"),
+            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+        };
         let env = test_harness(manifest.clone()).await;
         env.harness
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
                     resource_type,
-                    resource_id,
+                    resource,
                     action: ResourceAction::Deleted,
-                    project_id: None,
+                    project: None,
                     payload: None,
                     encrypted_payload: None,
                 },
@@ -566,9 +586,9 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
             &env.manifest_context(),
             ManifestChangedCommand {
                 resource_type: ResourceType::Document,
-                resource_id: document_id,
+                resource: Slug::derive("guide"),
                 action: ResourceAction::Updated,
-                project_id: Some(project_id),
+                project: Some(Slug::derive("project")),
                 payload: Some(serde_json::json!({
                 "id": document_id,
                 "pack_id": pack_id,
@@ -577,13 +597,8 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 "path": "docs",
                 "title": "Guide",
                 "kind": "markdown",
-                "authority": null,
                 "summary": null,
-                "status": null,
                 "tags": [],
-                "aliases": [],
-                "keywords": [],
-                "size_bytes": 42,
                 "updated_at": "2026-05-10T00:00:00Z"
                 })),
                 encrypted_payload: None,
@@ -597,9 +612,9 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
             &env.manifest_context(),
             ManifestChangedCommand {
                 resource_type: ResourceType::Document,
-                resource_id: document_id,
+                resource: Slug::derive("guide"),
                 action: ResourceAction::Deleted,
-                project_id: Some(project_id),
+                project: Some(Slug::derive("project")),
                 payload: Some(serde_json::json!({
                 "id": document_id,
                 "pack_id": pack_id,
@@ -608,13 +623,8 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 "path": "docs",
                 "title": "Guide",
                 "kind": "markdown",
-                "authority": null,
                 "summary": null,
-                "status": null,
                 "tags": [],
-                "aliases": [],
-                "keywords": [],
-                "size_bytes": 42,
                 "updated_at": "2026-05-10T00:00:00Z"
                 })),
                 encrypted_payload: None,
@@ -625,12 +635,12 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
 
     assert_eq!(
         env.store.content_syncs.lock().unwrap().as_slice(),
-        &[document_id]
+        &["guide".to_string()]
     );
     assert!(env.store.metadata_syncs.lock().unwrap().is_empty());
     assert_eq!(
         env.store.removals.lock().unwrap().as_slice(),
-        &[document_id]
+        &["guide".to_string()]
     );
     assert_eq!(
         env.store.persisted.lock().unwrap().as_slice(),
@@ -652,9 +662,9 @@ async fn manifest_mcp_changes_reconcile_mcp_runtime() {
             &env.manifest_context(),
             ManifestChangedCommand {
                 resource_type: ResourceType::McpServer,
-                resource_id: id,
+                resource: Slug::derive("mcp"),
                 action: ResourceAction::Created,
-                project_id: None,
+                project: None,
                 payload: Some(serde_json::to_value(mcp_server(id, "mcp")).unwrap()),
                 encrypted_payload: None,
             },

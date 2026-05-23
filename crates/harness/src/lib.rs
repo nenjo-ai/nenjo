@@ -9,15 +9,18 @@
 //!
 //! ```ignore
 //! let output = harness
-//!     .chat(ChatRequest::new(session_id, "coder", "Fix the failing test"))
+//!     .chat(ChatRequest::new("coder", "Fix the failing test")
+//!         .with_session(session_id))
 //!     .await?;
 //!
 //! let mut stream = harness
-//!     .task_stream(TaskRequest::new(task_id, project_id, "Title", "Description"))
+//!     .task_stream(TaskRequest::new("website", "Title", "Description")
+//!         .with_task_id(task_id)
+//!         .with_routine("daily_maintenance"))
 //!     .await?;
 //!
 //! let mut schedule = harness
-//!     .heartbeat(HeartbeatRequest::new(agent_id, std::time::Duration::from_secs(300)))
+//!     .heartbeat(HeartbeatRequest::new("coder", std::time::Duration::from_secs(300)))
 //!     .await?;
 //! ```
 //!
@@ -75,7 +78,7 @@ pub(crate) mod state;
 
 pub mod prelude {
     pub use crate::{
-        AgentRef, ChatRequest, CronRequest, Harness, HarnessBuilder, HarnessError, HarnessEvent,
+        ChatRequest, CronRequest, Harness, HarnessBuilder, HarnessError, HarnessEvent,
         HarnessExecutionHandle, HarnessScheduleEvent, HarnessScheduleHandle, HarnessSessions,
         HeartbeatRequest, Manifest, ModelProviderFactory, Provider, ProviderBuilder,
         ProviderRuntime, Result, TaskRequest, ToolFactory, TypedModelProviderFactory,
@@ -89,12 +92,10 @@ pub use events::{HarnessEvent, HarnessScheduleEvent};
 pub use handle::{HarnessExecutionHandle, HarnessScheduleHandle};
 #[cfg(feature = "local-runtime")]
 pub use local_runtime::{
-    FileCheckpointStore, FileSessionRecoveryHandler, FileSessionRuntime, FileSessionStore,
-    FileSessionStores, FileTraceStore, FileTranscriptStore, LocalSessionCoordinator,
+    FileCheckpointStore, FileSessionRuntime, FileSessionStore, FileSessionStores, FileTraceStore,
+    FileTranscriptStore, LocalSessionCoordinator, SessionRecoveryHandler,
 };
-pub use request::{
-    AgentRef, ChatDomainActivation, ChatRequest, CronRequest, HeartbeatRequest, TaskRequest,
-};
+pub use request::{ChatDomainActivation, ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
 pub use session::HarnessSessions;
 
 /// Cloneable, thread-safe harness handle.

@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::Slug;
 use crate::agents::AgentExecutionMode;
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
 use crate::input::TaskInput;
@@ -22,7 +23,6 @@ use super::events::{
     SignalDigest, SubAgentSignal, SubAgentStatus, SubAgentTranscriptEvent, push_bounded,
 };
 use super::format::ResultFormat;
-use super::slug::SubAgentSlug;
 
 const SIGNAL_QUEUE_CAP: usize = 128;
 const TRANSCRIPT_CAP: usize = 256;
@@ -47,7 +47,7 @@ pub(crate) struct SubAgentLimits {
 #[derive(Debug, Clone)]
 pub(crate) struct SpawnRequest {
     pub(crate) agent_name: String,
-    pub(crate) slug: Option<SubAgentSlug>,
+    pub(crate) slug: Option<Slug>,
     pub(crate) prompt: Option<String>,
     pub(crate) task: SubAgentTask,
     pub(crate) context: Option<Value>,
@@ -109,13 +109,13 @@ struct RuntimeInner<P: ProviderRuntime> {
     parent_agent_id: Uuid,
     parent_model_manifest: ModelManifest,
     delegation_ctx: DelegationContext,
-    runs: Mutex<HashMap<SubAgentSlug, Arc<SubAgentRun>>>,
+    runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
     notify: Notify,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
 struct SubAgentRun {
-    slug: SubAgentSlug,
+    slug: Slug,
     agent_name: String,
     status: Mutex<SubAgentStatus>,
     signals: Mutex<VecDeque<SubAgentSignal>>,
@@ -212,7 +212,10 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
     }
 
     async fn spawn_one(&self, request: SpawnRequest) -> Result<SpawnedSubAgent, SubAgentError> {
-        let child_agent = ephemeral_agent_manifest(&request, self.inner.parent_model_manifest.id)?;
+        let child_agent = ephemeral_agent_manifest(
+            &request,
+            crate::Slug::derive(&self.inner.parent_model_manifest.name),
+        )?;
         let child_ctx = self
             .inner
             .delegation_ctx
@@ -308,11 +311,11 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         })
     }
 
-    async fn reserve_slug(&self, request: &SpawnRequest) -> Result<SubAgentSlug, SubAgentError> {
+    async fn reserve_slug(&self, request: &SpawnRequest) -> Result<Slug, SubAgentError> {
         let base = request
             .slug
             .clone()
-            .unwrap_or_else(|| SubAgentSlug::derive(&request.agent_name));
+            .unwrap_or_else(|| Slug::derive_with_fallback(&request.agent_name, "sub_agent"));
         let runs = self.inner.runs.lock().await;
         if !runs.contains_key(&base) {
             return Ok(base);
@@ -330,7 +333,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         }
     }
 
-    pub(crate) async fn send(&self, messages: Vec<(SubAgentSlug, String)>) -> Vec<DeliveryResult> {
+    pub(crate) async fn send(&self, messages: Vec<(Slug, String)>) -> Vec<DeliveryResult> {
         let mut results = Vec::with_capacity(messages.len());
         for (slug, message) in messages {
             let Some(run) = self.find(&slug).await else {
@@ -372,7 +375,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
 
     pub(crate) async fn stop(
         &self,
-        slugs: Vec<SubAgentSlug>,
+        slugs: Vec<Slug>,
         reason: Option<String>,
     ) -> Vec<StoppedSubAgent> {
         let mut stopped = Vec::with_capacity(slugs.len());
@@ -403,7 +406,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
 
     pub(crate) async fn inspect(
         &self,
-        slugs: Vec<SubAgentSlug>,
+        slugs: Vec<Slug>,
         include_transcript: bool,
         limit: usize,
     ) -> Vec<InspectedSubAgent> {
@@ -510,7 +513,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         updates
     }
 
-    async fn find(&self, slug: &SubAgentSlug) -> Option<Arc<SubAgentRun>> {
+    async fn find(&self, slug: &Slug) -> Option<Arc<SubAgentRun>> {
         self.inner.runs.lock().await.get(slug).cloned()
     }
 
@@ -656,7 +659,7 @@ async fn run_child_agent<P: ProviderRuntime>(
 
 fn ephemeral_agent_manifest(
     request: &SpawnRequest,
-    model_id: Uuid,
+    model: crate::Slug,
 ) -> Result<AgentManifest, SubAgentError> {
     let prompt = request
         .prompt
@@ -667,7 +670,7 @@ fn ephemeral_agent_manifest(
 
     AgentManifest::builder()
         .with_name(request.agent_name.clone())
-        .with_model_id(model_id)
+        .with_model(model)
         .with_system_prompt(prompt)
         .with_developer_prompt(
             "You are an isolated sub-agent worker. Work only on the assigned task, report progress to the parent when useful, and return a focused final result.",
@@ -754,13 +757,8 @@ fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
         acceptance_criteria.push_str(&format.instructions());
     }
 
-    let task = TaskInput::new(
-        Uuid::nil(),
-        Uuid::new_v4(),
-        request.task.goal.trim(),
-        description,
-    )
-    .source("sub_agent");
+    let task =
+        TaskInput::new("sub_agent", request.task.goal.trim(), description).source("sub_agent");
 
     if acceptance_criteria.trim().is_empty() {
         task

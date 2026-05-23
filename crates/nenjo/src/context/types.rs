@@ -1,33 +1,19 @@
 //! Context types for prompt rendering.
 //!
-//! Each entity has a singular context struct (e.g. `AgentContext`) and a plural
-//! "available" wrapper (e.g. `AvailableAgentsContext`). XML serialization is
-//! handled by quick-xml via `#[derive(Serialize)]`.
-//!
-//! Singular types represent the current/active entity. Plural types represent
-//! all available entities of that kind. Both serialize to XML via serde.
+//! XML serialization is handled by quick-xml via `#[derive(Serialize)]`.
 
 use std::collections::HashMap;
 
 use serde::Serialize;
-use uuid::Uuid;
-
 // ---------------------------------------------------------------------------
 // Agent Specific Context
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_agents")]
-pub struct AvailableAgentsContext {
-    #[serde(rename = "agent")]
-    pub agents: Vec<AgentContext>,
-}
-
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename = "agent")]
 pub struct AgentContext {
-    #[serde(rename = "@id")]
-    pub id: Uuid,
+    #[serde(rename = "@slug")]
+    pub slug: String,
     #[serde(rename = "@role")]
     pub role: String,
     #[serde(rename = "@name")]
@@ -38,86 +24,17 @@ pub struct AgentContext {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_abilities")]
-pub struct AvailableAbilitiesContext {
-    #[serde(rename = "ability")]
-    pub abilities: Vec<AbilityContext>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "ability")]
-pub struct AbilityContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "@tool")]
-    pub tool_name: String,
-    #[serde(rename = "@use_when")]
-    pub activate_when: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_domains")]
-pub struct AvailableDomainsContext {
-    #[serde(rename = "domain")]
-    pub domains: Vec<DomainContext>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "domain")]
-pub struct DomainContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(skip)]
-    pub display_name: String,
-    #[serde(rename = "@command")]
-    pub command: String,
-    #[serde(rename = "@description", skip_serializing_if = "str_is_empty")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_mcp_servers")]
-pub struct AvailableMcpServersContext {
-    #[serde(rename = "server")]
-    pub servers: Vec<McpServerContext>,
-    pub platform: Option<PlatformScopesContext>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "server")]
-pub struct McpServerContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "@description", skip_serializing_if = "String::is_empty")]
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "platform")]
-pub struct PlatformScopesContext {
-    #[serde(rename = "@scopes")]
-    pub scopes: String,
-}
-
 // ---------------------------------------------------------------------------
 // Routines
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "available_routines")]
-pub struct AvailableRoutinesContext {
-    #[serde(rename = "routine")]
-    pub routines: Vec<RoutineContext>,
-}
-
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename = "routine")]
 pub struct RoutineContext {
+    #[serde(rename = "@slug")]
+    pub slug: String,
     #[serde(rename = "@name")]
     pub name: String,
-    #[serde(rename = "@id")]
-    pub id: Uuid,
     #[serde(rename = "@execution_id")]
     pub execution_id: String,
     #[serde(rename = "@description", skip_serializing_if = "str_is_empty")]
@@ -279,18 +196,10 @@ pub struct DocumentContext {
     pub path: Option<String>,
     #[serde(rename = "@kind", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(rename = "@authority", skip_serializing_if = "Option::is_none")]
-    pub authority: Option<String>,
     #[serde(rename = "@size", skip_serializing_if = "String::is_empty")]
     pub size: String,
-    #[serde(rename = "@status", skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub aliases: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub keywords: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
@@ -433,8 +342,6 @@ impl GitContext {
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename = "project")]
 pub struct ProjectContext {
-    #[serde(rename = "@id")]
-    pub id: String,
     #[serde(rename = "@name")]
     pub name: String,
     #[serde(rename = "@slug", skip_serializing_if = "String::is_empty")]
@@ -456,7 +363,7 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     pub fn is_empty(&self) -> bool {
-        self.id.is_empty() || self.name.is_empty() || self.id == Uuid::nil().to_string()
+        self.slug.is_empty() || self.name.is_empty()
     }
 
     /// Build from a manifest entry, resolving git context from project settings.
@@ -480,9 +387,8 @@ impl ProjectContext {
             });
 
         Self {
-            id: project.id.to_string(),
             name: project.name.clone(),
-            slug: project.slug.clone(),
+            slug: project.slug.to_string(),
             description: project.description.clone().unwrap_or_default(),
             context: project
                 .settings
@@ -524,7 +430,7 @@ mod tests {
     #[test]
     fn test_agent_context_xml() {
         let agent = AgentContext {
-            id: uuid::Uuid::nil(),
+            slug: "coder".into(),
             role: "coder".into(),
             display_name: "Cody".into(),
             model_name: "gpt-4".into(),
@@ -534,106 +440,6 @@ mod tests {
         assert!(xml.contains("role=\"coder\""));
         assert!(xml.contains("name=\"Cody\""));
         assert!(xml.contains("description=\"Writes code\""));
-    }
-
-    #[test]
-    fn test_available_agents_xml() {
-        let agents = AvailableAgentsContext {
-            agents: vec![
-                AgentContext {
-                    id: uuid::Uuid::nil(),
-                    role: "coder".into(),
-                    display_name: "Cody".into(),
-                    model_name: "gpt-4".into(),
-                    description: Some("Writes code".into()),
-                },
-                AgentContext {
-                    id: uuid::Uuid::nil(),
-                    role: "reviewer".into(),
-                    display_name: "Rex".into(),
-                    model_name: "claude-4".into(),
-                    description: None,
-                },
-            ],
-        };
-        let xml = nenjo_xml::to_xml_pretty(&agents, 2);
-        assert!(xml.contains("<available_agents>"));
-        assert!(xml.contains("role=\"coder\""));
-        assert!(xml.contains("role=\"reviewer\""));
-        assert!(xml.contains("</available_agents>"));
-    }
-
-    #[test]
-    fn test_ability_context_xml() {
-        let abilities = AvailableAbilitiesContext {
-            abilities: vec![AbilityContext {
-                name: "search".into(),
-                tool_name: "search".into(),
-                activate_when: "user asks to find something".into(),
-            }],
-        };
-        let xml = nenjo_xml::to_xml_pretty(&abilities, 2);
-        assert!(xml.contains("<available_abilities>"));
-        assert!(xml.contains("name=\"search\""));
-        assert!(xml.contains("tool=\"search\""));
-        assert!(xml.contains("use_when=\"user asks to find something\""));
-    }
-
-    #[test]
-    fn test_domain_context_xml() {
-        let domains = AvailableDomainsContext {
-            domains: vec![DomainContext {
-                name: "prd".into(),
-                display_name: "PRD Mode".into(),
-                command: "/prd".into(),
-                description: Some("Product requirements".into()),
-            }],
-        };
-        let xml = nenjo_xml::to_xml_pretty(&domains, 2);
-        assert!(xml.contains("<available_domains>"));
-        assert!(xml.contains("command=\"/prd\""));
-        assert!(xml.contains("description=\"Product requirements\""));
-        // display_name is skipped
-        assert!(!xml.contains("display_name"));
-    }
-
-    #[test]
-    fn test_routine_context_xml() {
-        let routines = AvailableRoutinesContext {
-            routines: vec![RoutineContext {
-                name: "deploy".into(),
-                id: uuid::Uuid::nil(),
-                execution_id: String::new(),
-                description: Some("Deploy to prod".into()),
-                step: RoutineStepContext {
-                    name: "review".into(),
-                    step_type: "gate".into(),
-                    instructions: "Check release readiness.".into(),
-                    metadata: String::new(),
-                },
-            }],
-        };
-        let xml = nenjo_xml::to_xml_pretty(&routines, 2);
-        assert!(xml.contains("<available_routines>"));
-        assert!(xml.contains("name=\"deploy\""));
-        assert!(xml.contains("<instructions>Check release readiness.</instructions>"));
-    }
-
-    #[test]
-    fn test_mcp_servers_xml() {
-        let mcp = AvailableMcpServersContext {
-            servers: vec![McpServerContext {
-                name: "github".into(),
-                description: "GitHub integration".into(),
-            }],
-            platform: Some(PlatformScopesContext {
-                scopes: "tickets:read, projects:write".into(),
-            }),
-        };
-        let xml = nenjo_xml::to_xml_pretty(&mcp, 2);
-        assert!(xml.contains("<available_mcp_servers>"));
-        assert!(xml.contains("name=\"github\""));
-        assert!(xml.contains("scopes=\"tickets:read, projects:write\""));
     }
 
     #[test]
@@ -714,7 +520,6 @@ mod tests {
     #[test]
     fn test_project_context_xml() {
         let project = ProjectContext {
-            id: "proj-1".into(),
             name: "MyApp".into(),
             slug: "myapp".into(),
             description: "A cool app".into(),
@@ -729,7 +534,7 @@ mod tests {
             }),
         };
         let xml = nenjo_xml::to_xml_pretty(&project, 2);
-        assert!(xml.contains("id=\"proj-1\""));
+        assert!(xml.contains("slug=\"myapp\""));
         assert!(xml.contains("name=\"MyApp\""));
         assert!(xml.contains("<description>A cool app</description>"));
         assert!(xml.contains("<context>Use postgres</context>"));

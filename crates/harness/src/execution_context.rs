@@ -1,32 +1,12 @@
 //! Provider execution helpers shared by harness chat and task flows.
 
-use nenjo::Manifest;
-use uuid::Uuid;
-
 use crate::preview::truncate_preview;
 
-/// Resolve a project slug from a manifest, falling back to the project UUID.
-pub(crate) fn project_slug(manifest: &Manifest, project_id: Uuid) -> String {
-    if project_id.is_nil() {
-        return String::new();
-    }
-
-    manifest
-        .projects
-        .iter()
-        .find(|project| project.id == project_id)
-        .map(|project| project.slug.clone())
-        .unwrap_or_else(|| project_id.to_string())
-}
-
-/// Resolve an agent name from a manifest, falling back to the agent UUID.
-pub(crate) fn agent_name(manifest: &Manifest, agent_id: Uuid) -> String {
-    manifest
-        .agents
-        .iter()
-        .find(|agent| agent.id == agent_id)
-        .map(|agent| agent.name.clone())
-        .unwrap_or_else(|| agent_id.to_string())
+/// Convert an optional project slug into the memory namespace segment.
+pub(crate) fn project_slug(project: Option<&nenjo::Slug>) -> String {
+    project
+        .map(|project| project.to_string())
+        .unwrap_or_default()
 }
 
 /// Summarize a turn event for trace/session metadata.

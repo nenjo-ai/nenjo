@@ -25,7 +25,7 @@ use super::event_store::FileSessionStores;
 /// require host integration, such as domain runners, cron schedules, and agent
 /// heartbeats. Embedded users can keep the default no-op methods when they only
 /// need persisted records/transcripts/traces.
-pub trait FileSessionRecoveryHandler: Send + Sync {
+pub trait SessionRecoveryHandler: Send + Sync {
     /// Recreate an in-memory domain session from a persisted domain record.
     async fn restore_domain_session(&self, _request: DomainSessionRecovery) -> Result<()> {
         Ok(())
@@ -45,15 +45,16 @@ pub trait FileSessionRecoveryHandler: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct DomainSessionRecovery {
     pub session_id: Uuid,
-    pub project_id: Uuid,
-    pub agent_id: Uuid,
+    pub project: Option<String>,
+    pub agent: String,
     pub domain_command: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct CronSessionRecovery {
     pub session_id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub project: Option<String>,
+    pub routine: Option<String>,
     pub schedule_expr: String,
     pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -62,6 +63,7 @@ pub struct CronSessionRecovery {
 #[derive(Debug, Clone)]
 pub struct HeartbeatSessionRecovery {
     pub session_id: Uuid,
+    pub agent: String,
     pub interval: Duration,
     pub timezone: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -151,10 +153,10 @@ impl FileSessionRuntime {
                 session_id: upsert.session_id,
                 kind: upsert.kind,
                 status: upsert.status,
-                project_id: upsert.project_id,
-                agent_id: upsert.agent_id,
+                project: upsert.project.clone(),
+                agent: upsert.agent.clone(),
                 task_id: upsert.task_id,
-                routine_id: upsert.routine_id,
+                routine: upsert.routine.clone(),
                 execution_run_id: upsert.execution_run_id,
                 parent_session_id: upsert.parent_session_id,
                 version: 0,
@@ -163,6 +165,7 @@ impl FileSessionRuntime {
                 scheduler: None,
                 domain: None,
                 summary: SessionSummary::default(),
+                metadata: serde_json::Value::Null,
                 created_at: now,
                 updated_at: now,
                 completed_at: None,
@@ -170,12 +173,13 @@ impl FileSessionRuntime {
 
         record.kind = upsert.kind;
         record.status = upsert.status;
-        record.agent_id = upsert.agent_id;
-        record.project_id = upsert.project_id;
+        record.agent = upsert.agent;
+        record.project = upsert.project;
         record.task_id = upsert.task_id;
-        record.routine_id = upsert.routine_id;
+        record.routine = upsert.routine;
         record.execution_run_id = upsert.execution_run_id;
         record.parent_session_id = upsert.parent_session_id;
+        record.metadata = upsert.metadata.clone();
         if let Some(lease) = upsert.lease {
             record.lease = lease;
         } else if upsert.kind == SessionKind::Task {
@@ -443,10 +447,10 @@ impl FileSessionRuntime {
                 session_id: upsert.session_id,
                 kind: upsert.kind,
                 status: upsert.status,
-                project_id: upsert.project_id,
-                agent_id: upsert.agent_id,
+                project: upsert.project.clone(),
+                agent: upsert.agent.clone(),
                 task_id: None,
-                routine_id: upsert.routine_id,
+                routine: upsert.routine.clone(),
                 execution_run_id: None,
                 parent_session_id: None,
                 version: 0,
@@ -455,6 +459,7 @@ impl FileSessionRuntime {
                 scheduler: None,
                 domain: None,
                 summary: SessionSummary::default(),
+                metadata: serde_json::Value::Null,
                 created_at: now,
                 updated_at: now,
                 completed_at: None,
@@ -462,9 +467,9 @@ impl FileSessionRuntime {
 
         record.kind = upsert.kind;
         record.status = upsert.status;
-        record.project_id = upsert.project_id;
-        record.agent_id = upsert.agent_id;
-        record.routine_id = upsert.routine_id;
+        record.project = upsert.project;
+        record.agent = upsert.agent;
+        record.routine = upsert.routine;
         record.version += 1;
         record.updated_at = now;
         record.completed_at = if Self::is_terminal_status(upsert.status) {
@@ -531,7 +536,7 @@ impl FileSessionRuntime {
     async fn recover_record(
         &self,
         record: SessionRecord,
-        handler: &(dyn FileSessionRecoveryHandler + Send + Sync),
+        handler: &(dyn SessionRecoveryHandler + Send + Sync),
     ) -> Result<()> {
         if !matches!(record.status, SessionStatus::Active | SessionStatus::Paused) {
             return Ok(());
@@ -542,13 +547,13 @@ impl FileSessionRuntime {
                 let Some(domain) = record.domain.clone() else {
                     return Ok(());
                 };
-                let Some(agent_id) = record.agent_id else {
+                let Some(agent) = record.agent.clone() else {
                     return Ok(());
                 };
                 let request = DomainSessionRecovery {
                     session_id: record.session_id,
-                    project_id: record.project_id.unwrap_or_else(Uuid::nil),
-                    agent_id,
+                    project: record.project.clone(),
+                    agent,
                     domain_command: domain.domain_command,
                 };
                 if let Err(error) = handler.restore_domain_session(request).await {
@@ -570,7 +575,8 @@ impl FileSessionRuntime {
                 handler
                     .restore_cron_session(CronSessionRecovery {
                         session_id: record.session_id,
-                        project_id: record.project_id,
+                        project: record.project.clone(),
+                        routine: record.routine.clone(),
                         schedule_expr: state.schedule_expr,
                         timezone: state.timezone,
                         next_run_at: state.next_run_at,
@@ -583,9 +589,13 @@ impl FileSessionRuntime {
                 else {
                     return Ok(());
                 };
+                let Some(agent) = record.agent.clone() else {
+                    return Ok(());
+                };
                 handler
                     .restore_heartbeat_session(HeartbeatSessionRecovery {
                         session_id: record.session_id,
+                        agent,
                         interval: std::time::Duration::from_secs(state.interval_secs.max(1)),
                         timezone: state.timezone,
                         next_run_at: state.next_run_at,
@@ -601,7 +611,7 @@ impl FileSessionRuntime {
 
     pub async fn recover_reconcilable_sessions(
         &self,
-        handler: &(dyn FileSessionRecoveryHandler + Send + Sync),
+        handler: &(dyn SessionRecoveryHandler + Send + Sync),
     ) -> Result<()> {
         for record in self.records.list()? {
             if let Err(error) = self.recover_record(record.clone(), handler).await {
@@ -694,10 +704,10 @@ impl SessionRuntime for FileSessionRuntime {
                 session_id: upsert.session_id,
                 kind: SessionKind::Domain,
                 status: upsert.status,
-                project_id: upsert.project_id,
-                agent_id: Some(upsert.agent_id),
+                project: upsert.project.clone(),
+                agent: Some(upsert.agent.clone()),
                 task_id: None,
-                routine_id: None,
+                routine: None,
                 execution_run_id: None,
                 parent_session_id: None,
                 version: 0,
@@ -706,6 +716,7 @@ impl SessionRuntime for FileSessionRuntime {
                 scheduler: None,
                 domain: None,
                 summary: SessionSummary::default(),
+                metadata: serde_json::Value::Null,
                 created_at: now,
                 updated_at: now,
                 completed_at: None,
@@ -713,8 +724,9 @@ impl SessionRuntime for FileSessionRuntime {
 
         record.kind = SessionKind::Domain;
         record.status = upsert.status;
-        record.project_id = upsert.project_id;
-        record.agent_id = Some(upsert.agent_id);
+        record.project = upsert.project;
+        record.agent = Some(upsert.agent);
+        record.metadata = upsert.metadata;
         record.refs.memory_namespace = upsert.memory_namespace;
         record.domain = upsert.domain;
         record.version += 1;
@@ -754,7 +766,7 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::{FileSessionRecoveryHandler, FileSessionRuntime};
+    use super::{FileSessionRuntime, SessionRecoveryHandler};
     use crate::local_runtime::{FileSessionStores, LocalSessionCoordinator};
 
     fn test_record(session_id: Uuid, status: SessionStatus) -> SessionRecord {
@@ -763,10 +775,10 @@ mod tests {
             session_id,
             kind: SessionKind::Task,
             status,
-            project_id: None,
-            agent_id: None,
+            project: None,
+            agent: None,
             task_id: Some(session_id),
-            routine_id: None,
+            routine: None,
             execution_run_id: None,
             parent_session_id: None,
             version: 0,
@@ -780,6 +792,7 @@ mod tests {
             scheduler: None,
             domain: None,
             summary: SessionSummary::default(),
+            metadata: serde_json::Value::Null,
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -912,7 +925,7 @@ mod tests {
 
         struct NoopRecovery;
         #[async_trait::async_trait]
-        impl FileSessionRecoveryHandler for NoopRecovery {}
+        impl SessionRecoveryHandler for NoopRecovery {}
 
         runtime
             .recover_reconcilable_sessions(&NoopRecovery)

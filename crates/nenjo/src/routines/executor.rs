@@ -25,8 +25,13 @@ use crate::context::{RoutineContext, RoutineStepContext};
 /// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
 fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContext) {
     let routine = RoutineContext {
-        id: state.routine_id,
         name: state.routine_name.clone().unwrap_or_default(),
+        slug: state
+            .routine_name
+            .as_deref()
+            .map(crate::Slug::derive)
+            .map(|slug| slug.to_string())
+            .unwrap_or_default(),
         execution_id: state
             .input
             .execution_run_id
@@ -93,19 +98,19 @@ where
     }
 
     // Find entry step
-    let entry_step_ids = &routine.metadata.entry_step_ids;
+    let entry_steps = &routine.metadata.entry_steps;
 
-    let entry_step = if !entry_step_ids.is_empty() {
+    let entry_step = if !entry_steps.is_empty() {
         steps
             .iter()
-            .find(|s| entry_step_ids.contains(&s.id))
-            .with_context(|| "Entry step ID from metadata not found in steps")?
+            .find(|s| entry_steps.contains(&s.slug))
+            .with_context(|| "Entry step slug from metadata not found in steps")?
     } else {
         // Fallback: find step with no incoming edges
-        let targets: HashSet<Uuid> = edges.iter().map(|e| e.target_step_id).collect();
+        let targets: HashSet<_> = edges.iter().map(|e| e.target_step.clone()).collect();
         steps
             .iter()
-            .find(|s| !targets.contains(&s.id))
+            .find(|s| !targets.contains(&s.slug))
             .or_else(|| steps.iter().min_by_key(|s| s.order_index))
             .context("Could not determine entry step")?
     };
@@ -135,7 +140,7 @@ where
         let step_run_id = Uuid::new_v4();
         state.current_step_name = Some(current_step.name.clone());
         state.current_step_type = Some(current_step.step_type.to_string());
-        state.current_agent_id = current_step.agent_id;
+        state.current_agent_id = None;
         state.step_instructions = current_step
             .config
             .get("instructions")
@@ -164,7 +169,7 @@ where
             step_run_id,
             step_name: current_step.name.clone(),
             step_type: current_step.step_type.to_string(),
-            agent_id: current_step.agent_id,
+            agent_id: None,
         });
 
         // Execute the step
@@ -267,7 +272,7 @@ where
         // Follow the first matching edge
         let outgoing: Vec<_> = edges
             .iter()
-            .filter(|e| e.source_step_id == current_step.id)
+            .filter(|e| e.source_step == current_step.slug)
             .collect();
 
         if current_step.step_type == RoutineStepType::Gate
@@ -304,9 +309,9 @@ where
                     *traversal_count += 1;
                     current_step = steps
                         .iter()
-                        .find(|s| s.id == edge.target_step_id)
+                        .find(|s| s.slug == edge.target_step)
                         .with_context(|| {
-                            format!("Edge target step {} not found", edge.target_step_id)
+                            format!("Edge target step {} not found", edge.target_step)
                         })?
                         .clone();
                 }
@@ -427,23 +432,18 @@ async fn execute_agent_step<P>(
 where
     P: ProviderRuntime,
 {
-    let agent_id = step
-        .agent_id
-        .with_context(|| format!("Agent step '{}' is missing agent_id", step.name))?;
+    let agent = step
+        .agent
+        .as_ref()
+        .with_context(|| format!("Agent step '{}' is missing agent", step.name))?;
 
     let mut builder = apply_session_binding_memory_scope(
-        provider.build_agent_by_id(agent_id).await?,
+        provider.agent(agent).await?,
         state.input.session_binding.as_ref(),
     );
 
     // Resolve project context from manifest so agent prompts can reference
     // {{ project.name }}, {{ project.description }}, etc.
-    if !state.input.project_id.is_nil()
-        && let Some(project) = provider.find_project(state.input.project_id)
-    {
-        builder = builder.with_project_context(project);
-    }
-
     // Inject routine + step context into the agent's render vars.
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
     builder = builder
@@ -468,12 +468,13 @@ where
         let inner_task = state
             .input
             .task_id
-            .map(|_| build_task(state, task_description));
+            .map(|_| build_task(state, task_description))
+            .transpose()?;
         attach_location(
             AgentRun {
                 kind: AgentRunKind::Cron(CronInput {
                     task: inner_task,
-                    project_id: Some(state.input.project_id),
+                    project: state.input.project.clone(),
                     schedule: crate::routines::types::CronSchedule::Interval(
                         std::time::Duration::from_secs(0),
                     ),
@@ -485,13 +486,13 @@ where
             state,
         )
     } else {
-        attach_location(AgentRun::task(build_task(state, task_description)), state)
+        attach_location(AgentRun::task(build_task(state, task_description)?), state)
     };
 
     let output = gate::execute_with_pass_verdict(
         &runner,
         task,
-        state.input.project_id,
+        state.input.project.clone(),
         step.id,
         step_run_id,
         events_tx,
@@ -507,6 +508,7 @@ where
     });
 
     Ok(StepResult {
+        task_id: output.task_id.or(state.input.task_id),
         passed: verdict.passed,
         output: step_output,
         data,
@@ -533,13 +535,14 @@ async fn execute_gate_step<P>(
 where
     P: ProviderRuntime,
 {
-    let agent_id = step
-        .agent_id
-        .with_context(|| format!("Gate step '{}' is missing agent_id", step.name))?;
+    let agent = step
+        .agent
+        .as_ref()
+        .with_context(|| format!("Gate step '{}' is missing agent", step.name))?;
 
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
     let builder = apply_session_binding_memory_scope(
-        provider.build_agent_by_id(agent_id).await?,
+        provider.agent(agent).await?,
         state.input.session_binding.as_ref(),
     )
     .with_routine_context(routine_ctx)
@@ -567,8 +570,8 @@ where
             kind: AgentRunKind::Gate(GateInput {
                 previous_result,
                 criteria: criteria.to_string(),
-                project_id: state.input.project_id,
-                task: Some(build_task(state, state.input.description.clone())),
+                project: state.input.project.clone(),
+                task: Some(build_task(state, state.input.description.clone())?),
             }),
             execution: Default::default(),
         },
@@ -578,7 +581,7 @@ where
     let output = gate::execute_with_pass_verdict(
         &runner,
         task,
-        state.input.project_id,
+        state.input.project.clone(),
         step.id,
         step_run_id,
         events_tx,
@@ -597,6 +600,7 @@ where
     });
 
     Ok(StepResult {
+        task_id: output.task_id.or(state.input.task_id),
         passed: verdict.passed,
         output: step_output,
         data,
@@ -623,15 +627,15 @@ async fn execute_cron_step<P>(
 where
     P: ProviderRuntime,
 {
-    let config = CronStepConfig::from_config(&step.config, step.agent_id, None)?;
+    let config = CronStepConfig::from_config(&step.config, step.agent.clone(), None)?;
 
     debug!(cycle = 1u32, step = %step.name, "Cron cycle");
 
     let cycle_result = match &config.mode {
-        CronMode::Agent(agent_id) => {
+        CronMode::Agent(agent) => {
             let (routine_ctx, step_ctx) = build_routine_ctx(state);
             let builder = apply_session_binding_memory_scope(
-                provider.build_agent_by_id(*agent_id).await?,
+                provider.agent(agent).await?,
                 state.input.session_binding.as_ref(),
             )
             .with_routine_context(routine_ctx)
@@ -645,12 +649,13 @@ where
             let inner_task = state
                 .input
                 .task_id
-                .map(|_| build_task(state, state.input.description.clone()));
+                .map(|_| build_task(state, state.input.description.clone()))
+                .transpose()?;
             let task = attach_location(
                 AgentRun {
                     kind: AgentRunKind::Cron(CronInput {
                         task: inner_task,
-                        project_id: Some(state.input.project_id),
+                        project: state.input.project.clone(),
                         schedule: crate::routines::types::CronSchedule::Interval(config.interval),
                         start_at: None,
                         timeout: config.timeout,
@@ -663,7 +668,7 @@ where
             gate::execute_with_pass_verdict(
                 &runner,
                 task,
-                state.input.project_id,
+                state.input.project.clone(),
                 step.id,
                 step_run_id,
                 events_tx,
@@ -716,8 +721,13 @@ where
 // ---------------------------------------------------------------------------
 
 /// Build task input from the routine state.
-fn build_task(state: &RoutineState, description: String) -> TaskInput {
-    TaskInput {
+fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
+    let project = state
+        .input
+        .project
+        .clone()
+        .context("routine task execution requires a project slug")?;
+    Ok(TaskInput {
         task_id: state.input.task_id.unwrap_or_else(Uuid::nil),
         title: state.input.title.clone(),
         description,
@@ -728,13 +738,13 @@ fn build_task(state: &RoutineState, description: String) -> TaskInput {
             .source
             .clone()
             .or_else(|| Some("routine".to_string())),
-        project_id: state.input.project_id,
+        project,
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
         task_type: state.input.task_type.clone(),
         slug: state.input.slug.clone(),
         complexity: state.input.complexity.clone(),
-    }
+    })
 }
 
 fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {

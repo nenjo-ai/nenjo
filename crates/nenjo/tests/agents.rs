@@ -11,7 +11,7 @@ use nenjo::manifest::{
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-use nenjo::{Tool, ToolCategory, ToolResult};
+use nenjo::{Slug, Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 
 // ---------------------------------------------------------------------------
@@ -158,11 +158,11 @@ fn test_manifest() -> Manifest {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -173,17 +173,17 @@ fn test_manifest() -> Manifest {
         projects: vec![ProjectManifest {
             id: Uuid::new_v4(),
             name: "test-project".into(),
-            slug: "test-project".into(),
+            slug: Slug::derive("test-project"),
             description: Some("A test project".into()),
             settings: serde_json::Value::Null,
         }],
         context_blocks: vec![ContextBlockManifest {
             id: Uuid::new_v4(),
-            name: "available_agents".into(),
+            name: "agent_notes".into(),
             path: "nenjo".into(),
             display_name: None,
             description: None,
-            template: "<available_agents>\n{{items}}\n</available_agents>".into(),
+            template: "<agent_notes>\n{{items}}\n</agent_notes>".into(),
         }],
         ..Default::default()
     }
@@ -204,7 +204,7 @@ async fn runner_chat() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-coder")
+        .agent("test-coder")
         .await
         .unwrap()
         .build()
@@ -235,7 +235,7 @@ async fn runner_chat_with_history() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-coder")
+        .agent("test-coder")
         .await
         .unwrap()
         .build()
@@ -266,7 +266,7 @@ async fn runner_with_custom_tool() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-coder")
+        .agent("test-coder")
         .await
         .unwrap()
         .with_tool(EchoTool)
@@ -293,7 +293,7 @@ async fn runner_with_tool_factory() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-coder")
+        .agent("test-coder")
         .await
         .unwrap()
         .build()
@@ -319,7 +319,7 @@ async fn instance_builds_prompts() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-coder")
+        .agent("test-coder")
         .await
         .unwrap()
         .with_memory_vars(std::collections::HashMap::from([(
@@ -333,7 +333,7 @@ async fn instance_builds_prompts() {
     let task = nenjo::AgentRun::chat(nenjo::ChatInput {
         message: "Hello!".into(),
         history: vec![],
-        project_id: None,
+        project: None,
     });
 
     let prompts = runner.instance().build_prompts(&task);
@@ -351,6 +351,53 @@ async fn instance_builds_prompts() {
     );
 }
 
+#[tokio::test]
+async fn instance_renders_self_prompt_var() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.system_prompt = "{{ self }}".into();
+    manifest.agents[0].prompt_config.developer_prompt =
+        "{{ agent.slug }}|{{ agent.role }}|{{ agent.name }}|{{ agent.model }}|{{ agent.description }}"
+            .into();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("irrelevant"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let task = nenjo::AgentRun::chat(nenjo::ChatInput {
+        message: "Hello!".into(),
+        history: vec![],
+        project: None,
+    });
+    let prompts = runner.instance().build_prompts(&task);
+
+    assert!(prompts.system.contains("<agent "));
+    assert!(prompts.system.contains("slug=\"test-coder\""));
+    assert!(prompts.system.contains("role=\"test-coder\""));
+    assert!(prompts.system.contains("name=\"test-coder\""));
+    assert!(prompts.system.contains("llm_model_name=\"mock-llm-v1\""));
+    assert!(
+        prompts
+            .system
+            .contains("description=\"A test coding agent\"")
+    );
+    assert_eq!(
+        prompts.developer,
+        "test-coder|test-coder|test-coder|mock-llm-v1|A test coding agent"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers for ability/domain tool exposure tests
 // ---------------------------------------------------------------------------
@@ -363,16 +410,14 @@ fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
     AbilityManifest {
         id: Uuid::new_v4(),
         name: name.into(),
-        tool_name: name.replace('-', "_"),
-        path: String::new(),
-        display_name: None,
+        path: None,
         description: Some(format!("{name} ability")),
         activation_condition: format!("when {name} is needed"),
         prompt_config: AbilityPromptConfig {
             developer_prompt: format!("You are the {name} ability."),
         },
         platform_scopes: scopes.into_iter().map(String::from).collect(),
-        mcp_server_ids: vec![],
+        mcp_servers: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -383,8 +428,8 @@ fn domain_manifest_with_config(
     name: &str,
     developer_prompt_addon: Option<&str>,
     platform_scopes: Vec<String>,
-    ability_ids: Vec<Uuid>,
-    mcp_server_ids: Vec<Uuid>,
+    abilities: Vec<String>,
+    mcp_servers: Vec<Slug>,
 ) -> DomainManifest {
     DomainManifest {
         id: Uuid::new_v4(),
@@ -394,8 +439,8 @@ fn domain_manifest_with_config(
         description: Some(format!("{name} domain")),
         command: name.into(),
         platform_scopes,
-        ability_ids,
-        mcp_server_ids,
+        abilities,
+        mcp_servers,
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: developer_prompt_addon.map(str::to_string),
         },
@@ -403,8 +448,8 @@ fn domain_manifest_with_config(
 }
 
 fn manifest_with_abilities_and_domains(
-    agent_abilities: Vec<Uuid>,
-    agent_domains: Vec<Uuid>,
+    agent_abilities: Vec<String>,
+    agent_domains: Vec<Slug>,
     agent_scopes: Vec<&str>,
     abilities: Vec<AbilityManifest>,
     domains: Vec<DomainManifest>,
@@ -436,11 +481,11 @@ fn manifest_with_abilities_and_domains(
             ..Default::default()
         },
         color: None,
-        model_id: Some(model.id),
-        domain_ids: agent_domains,
+        model: Some(Slug::derive(&model.name)),
+        domains: agent_domains,
         platform_scopes: agent_scopes.into_iter().map(String::from).collect(),
-        mcp_server_ids: vec![],
-        ability_ids: agent_abilities,
+        mcp_servers: vec![],
+        abilities: agent_abilities,
         prompt_locked: false,
         heartbeat: None,
     };
@@ -453,7 +498,7 @@ fn manifest_with_abilities_and_domains(
         projects: vec![ProjectManifest {
             id: Uuid::new_v4(),
             name: "test-project".into(),
-            slug: "test-project".into(),
+            slug: Slug::derive("test-project"),
             description: None,
             settings: serde_json::Value::Null,
         }],
@@ -469,7 +514,7 @@ fn manifest_with_abilities_and_domains(
 async fn ability_agent_has_ability_invoke_tool_only() {
     let ability = ability_manifest("writer", vec!["agents:write"]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.id],
+        vec![ability.name.clone()],
         vec![],
         vec!["projects:read"],
         vec![ability],
@@ -485,7 +530,7 @@ async fn ability_agent_has_ability_invoke_tool_only() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -496,40 +541,48 @@ async fn ability_agent_has_ability_invoke_tool_only() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"writer"),
-        "base agent should have assigned ability tool, got: {tool_names:?}"
+        tool_names.contains(&"list_abilities"),
+        "base agent should have ability discovery tool, got: {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"use_ability"),
+        "base agent should have ability invocation tool, got: {tool_names:?}"
+    );
+    assert!(
+        !tool_names.contains(&"writer"),
+        "assigned ability name should not be a top-level tool, got: {tool_names:?}"
     );
 
-    let writer_spec = specs
+    let use_ability_spec = specs
         .iter()
-        .find(|spec| spec.name == "writer")
-        .expect("missing writer ability tool");
+        .find(|spec| spec.name == "use_ability")
+        .expect("missing use_ability tool");
     assert!(
-        writer_spec.description.contains("writer ability"),
-        "ability tool description should include ability description, got: {}",
-        writer_spec.description
+        !use_ability_spec.description.contains("writer ability"),
+        "use_ability description should not include ability description, got: {}",
+        use_ability_spec.description
     );
     assert!(
-        writer_spec.description.contains("when writer is needed"),
-        "ability tool description should include activation condition, got: {}",
-        writer_spec.description
+        !use_ability_spec
+            .description
+            .contains("when writer is needed"),
+        "use_ability description should not include activation condition, got: {}",
+        use_ability_spec.description
     );
 }
 
 #[tokio::test]
-async fn assigned_abilities_register_distinct_tool_names() {
+async fn duplicate_ability_ids_are_rejected() {
     let mut frontend = ability_manifest("review", vec!["projects:read"]);
-    frontend.path = "frontend".into();
-    frontend.tool_name = "frontend_review".into();
-    let frontend_id = frontend.id;
+    frontend.path = Some("frontend".into());
+    let frontend_name = frontend.name.clone();
 
     let mut backend = ability_manifest("review", vec!["projects:read"]);
-    backend.path = "backend".into();
-    backend.tool_name = "backend_review".into();
-    let backend_id = backend.id;
+    backend.path = Some("backend".into());
+    let backend_name = backend.name.clone();
 
     let manifest = manifest_with_abilities_and_domains(
-        vec![frontend_id, backend_id],
+        vec![frontend_name, backend_name],
         vec![],
         vec!["projects:read"],
         vec![frontend, backend],
@@ -544,19 +597,16 @@ async fn assigned_abilities_register_distinct_tool_names() {
         .await
         .unwrap();
 
-    let runner = provider
-        .agent_by_name("test-agent")
-        .await
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
+    let runner = provider.agent("test-agent").await.unwrap().build().await;
 
-    let specs = runner.instance().tool_specs();
-    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-
-    assert!(tool_names.contains(&"frontend_review"));
-    assert!(tool_names.contains(&"backend_review"));
+    let error = match runner {
+        Ok(_) => panic!("duplicate ability ids should fail agent build"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("duplicate ability_id 'review'"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -573,7 +623,7 @@ async fn agent_without_abilities_has_no_ability_tools() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -585,6 +635,10 @@ async fn agent_without_abilities_has_no_ability_tools() {
     assert!(
         !tool_names.contains(&"writer"),
         "agent without abilities should not have ability tools, got: {tool_names:?}"
+    );
+    assert!(
+        !tool_names.contains(&"list_abilities") && !tool_names.contains(&"use_ability"),
+        "agent without abilities should not have ability broker tools, got: {tool_names:?}"
     );
 }
 
@@ -603,7 +657,7 @@ async fn domain_expansion_preserves_tool_set() {
     );
     let manifest = manifest_with_abilities_and_domains(
         vec![],
-        vec![domain.id],
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![],
         vec![domain],
@@ -618,7 +672,7 @@ async fn domain_expansion_preserves_tool_set() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -657,8 +711,8 @@ async fn domain_expansion_preserves_existing_abilities() {
     let domain =
         domain_manifest_with_config("reviewer", Some("Review mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.id],
-        vec![domain.id],
+        vec![ability.name.clone()],
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![ability.clone()],
         vec![domain],
@@ -673,7 +727,7 @@ async fn domain_expansion_preserves_existing_abilities() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -682,27 +736,20 @@ async fn domain_expansion_preserves_existing_abilities() {
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"code_review"));
+    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"use_ability"));
+    assert!(!tool_names.contains(&"code_review"));
 
     let domain_runner = runner.domain_expansion("reviewer").await.unwrap();
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"code_review"),
-        "domain expansion should preserve assigned ability tools, got: {tool_names:?}"
+        tool_names.contains(&"list_abilities") && tool_names.contains(&"use_ability"),
+        "domain expansion should preserve ability broker tools, got: {tool_names:?}"
     );
+    assert!(!tool_names.contains(&"code_review"));
 
-    let ability_names: Vec<&str> = domain_runner
-        .instance()
-        .prompt_context()
-        .available_abilities
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect();
-    assert!(
-        ability_names.contains(&"code-review"),
-        "domain expansion should preserve assigned abilities, got: {ability_names:?}"
-    );
+    // Ability availability is exposed through the broker tools, not prompt context.
 }
 
 #[tokio::test]
@@ -710,8 +757,8 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     let ability = ability_manifest("deployer", vec!["projects:read"]);
     let domain = domain_manifest_with_config("ops", Some("Ops mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.id],
-        vec![domain.id],
+        vec![ability.name.clone()],
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![ability.clone()],
         vec![domain],
@@ -726,7 +773,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -737,7 +784,9 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(tool_names.contains(&"deployer"));
+    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"use_ability"));
+    assert!(!tool_names.contains(&"deployer"));
     assert_eq!(
         domain_runner
             .instance()
@@ -752,14 +801,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
         Some("Ops mode")
     );
 
-    let ability_names: Vec<&str> = domain_runner
-        .instance()
-        .prompt_context()
-        .available_abilities
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect();
-    assert!(ability_names.contains(&"deployer"));
+    // Ability availability is exposed through the broker tools, not prompt context.
 }
 
 #[tokio::test]
@@ -768,8 +810,8 @@ async fn domain_expansion_preserves_existing_ability_without_duplication() {
     let domain =
         domain_manifest_with_config("creator", Some("Creator mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.id], // agent already has this ability
-        vec![domain.id],
+        vec![ability.name.clone()], // agent already has this ability
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![ability],
         vec![domain],
@@ -784,7 +826,7 @@ async fn domain_expansion_preserves_existing_ability_without_duplication() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -793,14 +835,16 @@ async fn domain_expansion_preserves_existing_ability_without_duplication() {
 
     let domain_runner = runner.domain_expansion("creator").await.unwrap();
 
-    let ability_count = domain_runner
-        .instance()
-        .prompt_context()
-        .available_abilities
-        .iter()
-        .filter(|a| a.name == "writer")
-        .count();
-    assert_eq!(ability_count, 1, "should not duplicate existing abilities");
+    let specs = domain_runner.instance().tool_specs();
+    let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        tool_names
+            .iter()
+            .filter(|tool_name| **tool_name == "use_ability")
+            .count(),
+        1,
+        "should not duplicate ability broker tools"
+    );
 }
 
 #[tokio::test]
@@ -811,12 +855,12 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
         "review",
         Some("Review mode"),
         vec!["projects:write".into()],
-        vec![domain_ability.id],
+        vec![domain_ability.name.clone()],
         vec![],
     );
     let manifest = manifest_with_abilities_and_domains(
-        vec![assigned_ability.id],
-        vec![domain.id],
+        vec![assigned_ability.name.clone()],
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![assigned_ability, domain_ability],
         vec![domain],
@@ -831,7 +875,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -840,43 +884,36 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
 
     let domain_runner = runner.domain_expansion("review").await.unwrap();
 
-    assert!(
+    assert_eq!(
         domain_runner
             .instance()
             .prompt_context()
-            .platform_scopes
-            .iter()
-            .any(|scope| scope == "projects:write")
+            .active_domain
+            .as_ref()
+            .map(|domain| domain.domain_name.as_str()),
+        Some("review")
     );
-
-    let ability_names: Vec<&str> = domain_runner
-        .instance()
-        .prompt_context()
-        .available_abilities
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect();
-    assert!(ability_names.contains(&"writer"));
-    assert!(ability_names.contains(&"reviewer"));
 
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"writer"));
+    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"use_ability"));
+    assert!(!tool_names.contains(&"writer"));
 }
 
 #[tokio::test]
-async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
+async fn domain_expansion_tracks_active_domain_without_available_context() {
     let github_id = Uuid::new_v4();
     let domain = domain_manifest_with_config(
         "github",
         Some("GitHub mode"),
         vec![],
         vec![],
-        vec![github_id],
+        vec![Slug::derive("github")],
     );
     let mut manifest = manifest_with_abilities_and_domains(
         vec![],
-        vec![domain.id],
+        vec![Slug::derive(&domain.name)],
         vec!["projects:read"],
         vec![],
         vec![domain],
@@ -907,7 +944,7 @@ async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("test-agent")
+        .agent("test-agent")
         .await
         .unwrap()
         .build()
@@ -915,12 +952,11 @@ async fn domain_expansion_adds_domain_mcp_metadata_without_duplication() {
         .unwrap();
 
     let domain_runner = runner.domain_expansion("github").await.unwrap();
-    let mcp_names: Vec<&str> = domain_runner
+    let active_domain = domain_runner
         .instance()
         .prompt_context()
-        .mcp_server_info
-        .iter()
-        .map(|entry| entry.0.as_str())
-        .collect();
-    assert!(mcp_names.contains(&"GitHub"));
+        .active_domain
+        .as_ref()
+        .map(|domain| domain.domain_name.as_str());
+    assert_eq!(active_domain, Some("github"));
 }

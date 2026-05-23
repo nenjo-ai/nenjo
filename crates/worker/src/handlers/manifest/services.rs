@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use nenjo::Slug;
 use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo_events::ResourceType;
 use uuid::Uuid;
@@ -37,7 +38,7 @@ pub trait ManifestStore: Send + Sync {
         &self,
         manifest: &nenjo::Manifest,
         resource_type: ResourceType,
-        _resource_id: Uuid,
+        _resource: &Slug,
     ) -> Result<()> {
         self.persist_resource(manifest, resource_type).await
     }
@@ -47,7 +48,8 @@ pub trait ManifestStore: Send + Sync {
     async fn cleanup_deleted_resource(
         &self,
         _resource_type: ResourceType,
-        _resource_id: Uuid,
+        _resource: &Slug,
+        _resource_id: Option<Uuid>,
         _payload: Option<&serde_json::Value>,
     ) -> Result<()> {
         Ok(())
@@ -60,7 +62,7 @@ pub trait ManifestStore: Send + Sync {
     async fn sync_document_metadata(
         &self,
         _client: &NenjoClient,
-        _document_id: Uuid,
+        _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         Ok(())
@@ -70,7 +72,7 @@ pub trait ManifestStore: Send + Sync {
     async fn sync_document(
         &self,
         _client: &NenjoClient,
-        _document_id: Uuid,
+        _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         Ok(())
@@ -79,22 +81,21 @@ pub trait ManifestStore: Send + Sync {
     /// Remove document content from the host's local cache.
     async fn remove_document(
         &self,
-        _document_id: Uuid,
+        _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
         Ok(())
     }
 
     /// Sync a whole library knowledge pack into the host's local cache.
-    async fn sync_knowledge_pack(&self, _client: &NenjoClient, _pack_id: Uuid) -> Result<()> {
+    async fn sync_knowledge_pack(&self, _client: &NenjoClient, _pack: &Slug) -> Result<()> {
         Ok(())
     }
 
     /// Write decrypted document content into the host's local cache.
     fn write_document_content(
         &self,
-        _pack_id: Uuid,
-        _pack_slug: Option<&str>,
+        _pack: &Slug,
         _relative_path: &str,
         _content: &str,
     ) -> Result<()> {
@@ -145,10 +146,22 @@ where
         &self,
         manifest: &nenjo::Manifest,
         resource_type: ResourceType,
-        resource_id: Uuid,
+        resource: &Slug,
     ) -> Result<()> {
         (**self)
-            .remove_resource(manifest, resource_type, resource_id)
+            .remove_resource(manifest, resource_type, resource)
+            .await
+    }
+
+    async fn cleanup_deleted_resource(
+        &self,
+        resource_type: ResourceType,
+        resource: &Slug,
+        resource_id: Option<Uuid>,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        (**self)
+            .cleanup_deleted_resource(resource_type, resource, resource_id, payload)
             .await
     }
 
@@ -159,43 +172,36 @@ where
     async fn sync_document_metadata(
         &self,
         client: &NenjoClient,
-        document_id: Uuid,
+        doc: &Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        (**self)
-            .sync_document_metadata(client, document_id, metadata)
-            .await
+        (**self).sync_document_metadata(client, doc, metadata).await
     }
 
     async fn sync_document(
         &self,
         client: &NenjoClient,
-        document_id: Uuid,
+        doc: &Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
-        (**self).sync_document(client, document_id, metadata).await
+        (**self).sync_document(client, doc, metadata).await
     }
 
-    async fn remove_document(
-        &self,
-        document_id: Uuid,
-        metadata: Option<&DocumentSyncMeta>,
-    ) -> Result<()> {
-        (**self).remove_document(document_id, metadata).await
+    async fn remove_document(&self, doc: &Slug, metadata: Option<&DocumentSyncMeta>) -> Result<()> {
+        (**self).remove_document(doc, metadata).await
     }
 
-    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack_id: Uuid) -> Result<()> {
-        (**self).sync_knowledge_pack(client, pack_id).await
+    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack: &Slug) -> Result<()> {
+        (**self).sync_knowledge_pack(client, pack).await
     }
 
     fn write_document_content(
         &self,
-        pack_id: Uuid,
-        pack_slug: Option<&str>,
+        pack: &Slug,
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        (**self).write_document_content(pack_id, pack_slug, relative_path, content)
+        (**self).write_document_content(pack, relative_path, content)
     }
 }
 

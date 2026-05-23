@@ -5,6 +5,8 @@
 //! packs present the same API to agents.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -14,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    KnowledgeDocAuthority, KnowledgeDocFilter, KnowledgeDocKind, KnowledgeDocManifest,
-    KnowledgeDocSearchHit, KnowledgeDocStatus, KnowledgePack, KnowledgePackManifest,
+    KnowledgeDocFilter, KnowledgeDocManifest, KnowledgeDocNeighbor, KnowledgeDocSearchHit,
+    KnowledgePack, KnowledgePackManifest,
 };
 
 #[async_trait]
@@ -24,48 +26,208 @@ pub trait KnowledgeRegistry: Send + Sync {
     async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KnowledgeName(String);
+
+impl KnowledgeName {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref().trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return Err(anyhow!("knowledge name cannot be empty"));
+        }
+        if value.starts_with(['_', '-']) || value.ends_with(['_', '-']) {
+            return Err(anyhow!(
+                "knowledge name cannot start or end with a separator"
+            ));
+        }
+        if !value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+        {
+            return Err(anyhow!(
+                "knowledge name may contain only lowercase letters, numbers, underscores, and hyphens"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn prompt_segment(&self) -> String {
+        normalize_var_segment(&self.0)
+    }
+}
+
+impl fmt::Display for KnowledgeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackageKnowledgeName(Vec<KnowledgeName>);
+
+impl PackageKnowledgeName {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let raw = value.as_ref().trim();
+        let raw = raw.strip_prefix('@').unwrap_or(raw);
+        let segments = raw
+            .split(['.', '/'])
+            .map(KnowledgeName::parse)
+            .collect::<Result<Vec<_>>>()?;
+        if segments.is_empty() {
+            return Err(anyhow!("package knowledge name cannot be empty"));
+        }
+        Ok(Self(segments))
+    }
+
+    pub fn prompt_path(&self) -> String {
+        self.0
+            .iter()
+            .map(KnowledgeName::prompt_segment)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    pub fn selector_name(&self) -> String {
+        self.0
+            .iter()
+            .map(KnowledgeName::as_str)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+impl fmt::Display for PackageKnowledgeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.selector_name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KnowledgeRef {
+    Library { pack: KnowledgeName },
+    Package { package: PackageKnowledgeName },
+    Local { pack: KnowledgeName },
+}
+
+impl KnowledgeRef {
+    pub fn library(pack: impl AsRef<str>) -> Result<Self> {
+        Ok(Self::Library {
+            pack: KnowledgeName::parse(pack)?,
+        })
+    }
+
+    pub fn package(package: impl AsRef<str>) -> Result<Self> {
+        Ok(Self::Package {
+            package: PackageKnowledgeName::parse(package)?,
+        })
+    }
+
+    pub fn local(pack: impl AsRef<str>) -> Result<Self> {
+        Ok(Self::Local {
+            pack: KnowledgeName::parse(pack)?,
+        })
+    }
+
+    pub fn selector(&self) -> String {
+        self.to_string()
+    }
+
+    pub fn prompt_prefix(&self) -> String {
+        match self {
+            Self::Library { pack } => format!("lib.{}", pack.prompt_segment()),
+            Self::Package { package } => format!("pkg.{}.knowledge", package.prompt_path()),
+            Self::Local { pack } => format!("local.{}", pack.prompt_segment()),
+        }
+    }
+
+    fn relative_doc_path<'a>(&self, doc: &'a KnowledgeDocManifest) -> &'a str {
+        doc.source_path
+            .strip_prefix("docs/")
+            .unwrap_or(doc.source_path.as_str())
+            .trim_matches('/')
+    }
+}
+
+impl fmt::Display for KnowledgeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Library { pack } => write!(f, "lib:{pack}"),
+            Self::Package { package } => write!(f, "pkg:{package}:knowledge"),
+            Self::Local { pack } => write!(f, "local:{pack}"),
+        }
+    }
+}
+
+impl FromStr for KnowledgeRef {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if let Some(pack) = value.strip_prefix("lib:") {
+            return Self::library(pack);
+        }
+        if let Some(pack) = value.strip_prefix("local:") {
+            return Self::local(pack);
+        }
+        if let Some(package) = value
+            .strip_prefix("pkg:")
+            .and_then(|value| value.strip_suffix(":knowledge"))
+        {
+            return Self::package(package);
+        }
+        Err(anyhow!(
+            "invalid knowledge selector '{value}'; expected lib:<pack>, pkg:<package>:knowledge, or local:<pack>"
+        ))
+    }
+}
+
 #[derive(Clone)]
 pub struct KnowledgePackEntry {
-    selector: String,
+    knowledge_ref: KnowledgeRef,
     pack: Arc<dyn KnowledgePack>,
 }
 
 impl KnowledgePackEntry {
-    pub fn new(selector: impl Into<String>, pack: impl KnowledgePack + 'static) -> Self {
+    pub fn new(knowledge_ref: KnowledgeRef, pack: impl KnowledgePack + 'static) -> Self {
         Self {
-            selector: selector.into(),
+            knowledge_ref,
             pack: Arc::new(pack),
         }
     }
 
-    pub fn selector(&self) -> &str {
-        &self.selector
+    pub fn library(pack_name: impl AsRef<str>, pack: impl KnowledgePack + 'static) -> Result<Self> {
+        Ok(Self::new(KnowledgeRef::library(pack_name)?, pack))
+    }
+
+    pub fn package(
+        package_name: impl AsRef<str>,
+        pack: impl KnowledgePack + 'static,
+    ) -> Result<Self> {
+        Ok(Self::new(KnowledgeRef::package(package_name)?, pack))
+    }
+
+    pub fn local(pack_name: impl AsRef<str>, pack: impl KnowledgePack + 'static) -> Result<Self> {
+        Ok(Self::new(KnowledgeRef::local(pack_name)?, pack))
+    }
+
+    pub fn knowledge_ref(&self) -> &KnowledgeRef {
+        &self.knowledge_ref
+    }
+
+    pub fn selector(&self) -> String {
+        self.knowledge_ref.selector()
     }
 
     pub fn pack(&self) -> &Arc<dyn KnowledgePack> {
         &self.pack
     }
 
-    fn into_parts(self) -> (String, Arc<dyn KnowledgePack>) {
-        (self.selector, self.pack)
-    }
-}
-
-impl<P> From<(&str, P)> for KnowledgePackEntry
-where
-    P: KnowledgePack + 'static,
-{
-    fn from((selector, pack): (&str, P)) -> Self {
-        Self::new(selector, pack)
-    }
-}
-
-impl<P> From<(String, P)> for KnowledgePackEntry
-where
-    P: KnowledgePack + 'static,
-{
-    fn from((selector, pack): (String, P)) -> Self {
-        Self::new(selector, pack)
+    fn into_parts(self) -> (KnowledgeRef, Arc<dyn KnowledgePack>) {
+        (self.knowledge_ref, self.pack)
     }
 }
 
@@ -85,8 +247,8 @@ impl StaticKnowledgeRegistry {
     }
 
     pub fn with_entry(self, entry: KnowledgePackEntry) -> Self {
-        let (selector, pack) = entry.into_parts();
-        self.with_pack(selector, pack)
+        let (knowledge_ref, pack) = entry.into_parts();
+        self.with_pack(knowledge_ref.selector(), pack)
     }
 
     pub fn with_entries(mut self, entries: impl IntoIterator<Item = KnowledgePackEntry>) -> Self {
@@ -143,13 +305,6 @@ impl KnowledgePackSummary {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct KnowledgeListArgs {
-    pub pack: String,
-    #[serde(flatten)]
-    pub filter: KnowledgeFilterArgs,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct KnowledgeReadArgs {
     pub pack: String,
     pub path: String,
@@ -164,12 +319,6 @@ pub struct KnowledgeSearchArgs {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct KnowledgeTreeArgs {
-    pub pack: String,
-    pub prefix: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct KnowledgeNeighborArgs {
     pub pack: String,
     pub path: String,
@@ -181,59 +330,75 @@ pub struct KnowledgeFilterArgs {
     #[serde(default)]
     pub tags: Vec<String>,
     pub kind: Option<String>,
-    pub authority: Option<String>,
-    pub status: Option<String>,
     pub path_prefix: Option<String>,
     pub related_to: Option<String>,
     pub edge_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct KnowledgeDocManifestResult {
+pub struct KnowledgeDocMetadataResult {
+    /// Stable document identifier within the pack.
     pub id: String,
-    pub pack: String,
-    pub virtual_path: String,
-    pub source_path: String,
+    /// Agent-visible path used for lookup and traversal.
+    pub path: String,
+    /// Human-readable title.
     pub title: String,
+    /// Short summary used for selection.
     pub summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    /// Open-ended document category.
     pub kind: String,
-    pub authority: String,
-    pub status: String,
+    /// Lightweight classification labels.
     pub tags: Vec<String>,
-    pub aliases: Vec<String>,
-    pub keywords: Vec<String>,
+    /// Outbound graph edge pointers. Call `list_knowledge_neighbors` to expand them.
+    pub related: Vec<KnowledgeDocRelatedResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeDocRelatedResult {
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    /// Target document id or path.
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeDocReadResult {
-    pub manifest: KnowledgeDocManifestResult,
+    /// Slim document metadata.
+    pub document: KnowledgeDocMetadataResult,
+    /// Full document body.
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeDocSearchResult {
-    pub id: String,
-    pub pack: String,
-    pub virtual_path: String,
-    pub title: String,
-    pub summary: String,
-    pub kind: String,
-    pub authority: String,
-    pub tags: Vec<String>,
+    /// Slim document metadata for the matched document.
+    pub document: KnowledgeDocMetadataResult,
+    /// Simple relevance score derived from metadata matches.
     pub score: usize,
+    /// Metadata fields that matched the query.
     pub matched: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeDocNeighborsResult {
+    /// Source document metadata.
+    pub document: KnowledgeDocMetadataResult,
+    /// Resolved outbound neighbor edges.
+    pub edges: Vec<KnowledgeDocNeighborEdgeResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeDocNeighborEdgeResult {
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    /// Resolved target document metadata.
+    pub target: KnowledgeDocMetadataResult,
 }
 
 pub fn knowledge_filter(filter: KnowledgeFilterArgs) -> Result<KnowledgeDocFilter> {
     Ok(KnowledgeDocFilter {
         tags: filter.tags,
         kind: parse_knowledge_enum(filter.kind)?,
-        authority: parse_knowledge_enum(filter.authority)?,
-        status: parse_knowledge_enum(filter.status)?,
         path_prefix: filter.path_prefix,
         related_to: filter.related_to,
         edge_type: parse_knowledge_enum(filter.edge_type)?,
@@ -252,55 +417,59 @@ where
         .transpose()
 }
 
-pub fn knowledge_manifest_result(
-    pack: &str,
-    doc: &KnowledgeDocManifest,
-) -> KnowledgeDocManifestResult {
-    KnowledgeDocManifestResult {
+pub fn knowledge_document_metadata(doc: &KnowledgeDocManifest) -> KnowledgeDocMetadataResult {
+    KnowledgeDocMetadataResult {
         id: doc.id.clone(),
-        pack: pack.to_string(),
-        virtual_path: doc.virtual_path.clone(),
-        source_path: doc.source_path.clone(),
+        path: doc.path.clone(),
         title: doc.title.clone(),
         summary: doc.summary.clone(),
-        description: doc.description.clone(),
         kind: doc.kind.as_str().to_string(),
-        authority: doc.authority.as_str().to_string(),
-        status: doc.status.as_str().to_string(),
         tags: doc.tags.clone(),
-        aliases: doc.aliases.clone(),
-        keywords: doc.keywords.clone(),
+        related: doc
+            .related
+            .iter()
+            .map(|edge| KnowledgeDocRelatedResult {
+                edge_type: edge.edge_type.as_str().to_string(),
+                target: edge.target.clone(),
+            })
+            .collect(),
     }
 }
 
-pub fn knowledge_search_result(pack: &str, hit: KnowledgeDocSearchHit) -> KnowledgeDocSearchResult {
+pub fn knowledge_search_result(hit: KnowledgeDocSearchHit) -> KnowledgeDocSearchResult {
     KnowledgeDocSearchResult {
-        id: hit.id,
-        pack: pack.to_string(),
-        virtual_path: hit.virtual_path,
-        title: hit.title,
-        summary: hit.summary,
-        kind: hit.kind.as_str().to_string(),
-        authority: hit.authority.as_str().to_string(),
-        tags: hit.tags,
+        document: knowledge_document_metadata(&hit.document),
         score: hit.score,
         matched: hit.matched,
-        content: hit.content,
+    }
+}
+
+pub fn knowledge_neighbors_result(neighbors: KnowledgeDocNeighbor) -> KnowledgeDocNeighborsResult {
+    KnowledgeDocNeighborsResult {
+        document: knowledge_document_metadata(&neighbors.document),
+        edges: neighbors
+            .edges
+            .into_iter()
+            .map(|edge| KnowledgeDocNeighborEdgeResult {
+                edge_type: edge.edge_type.as_str().to_string(),
+                target: knowledge_document_metadata(&edge.target),
+            })
+            .collect(),
     }
 }
 
 pub fn knowledge_document_metadata_vars(
-    pack_prefix: &str,
+    knowledge_ref: &KnowledgeRef,
     pack: &dyn KnowledgePack,
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
     for doc in pack.manifest().docs() {
         let metadata = doc_metadata(doc);
         vars.insert(
-            knowledge_document_var_key(pack_prefix, doc),
+            knowledge_document_var_key(knowledge_ref, doc),
             metadata.clone(),
         );
-        for key in knowledge_document_alias_var_keys(pack_prefix, doc) {
+        for key in knowledge_document_alias_var_keys(knowledge_ref, doc) {
             vars.entry(key).or_insert_with(|| metadata.clone());
         }
     }
@@ -308,56 +477,47 @@ pub fn knowledge_document_metadata_vars(
 }
 
 pub fn knowledge_pack_prompt_vars(
-    selector: &str,
+    knowledge_ref: &KnowledgeRef,
     pack: &dyn KnowledgePack,
 ) -> HashMap<String, String> {
-    let prefix = knowledge_pack_var_prefix(selector);
+    let prefix = knowledge_ref.prompt_prefix();
     let mut vars = HashMap::new();
-    vars.insert(prefix.clone(), knowledge_pack_summary(selector, pack));
-    vars.extend(knowledge_document_metadata_vars(&prefix, pack));
+    vars.insert(prefix, knowledge_pack_summary(knowledge_ref, pack));
+    vars.extend(knowledge_document_metadata_vars(knowledge_ref, pack));
     vars
 }
 
-pub fn knowledge_pack_var_prefix(selector: &str) -> String {
-    if let Some(slug) = selector.strip_prefix("lib:") {
-        format!("lib.{}", normalize_var_segment(slug))
-    } else if selector == "lib" {
-        "lib".to_string()
-    } else if let Some(git_selector) = selector.strip_prefix("git://") {
-        let segments = git_selector
-            .split('/')
-            .map(normalize_var_segment)
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        if segments.is_empty() {
-            "git".to_string()
-        } else {
-            format!("git.{}", segments.join("."))
-        }
-    } else {
-        selector.replace(':', ".").replace('-', "_")
-    }
-}
-
-pub fn knowledge_pack_summary(selector: &str, pack: &dyn KnowledgePack) -> String {
+pub fn knowledge_pack_summary(knowledge_ref: &KnowledgeRef, pack: &dyn KnowledgePack) -> String {
     let manifest = pack.manifest();
-    let mut source_name = selector.splitn(2, ':');
-    let source = source_name.next().unwrap_or(selector);
-    let name = source_name.next().unwrap_or(manifest.pack_id());
+    let selector = knowledge_ref.selector();
+    let namespace = match knowledge_ref {
+        KnowledgeRef::Library { .. } => "lib",
+        KnowledgeRef::Package { .. } => "pkg",
+        KnowledgeRef::Local { .. } => "local",
+    };
     let ctx = KnowledgePackSummaryContext {
-        source,
-        name,
+        selector: selector.as_str(),
+        namespace,
+        name: manifest.pack_id(),
         root: manifest.root_uri(),
         usage: "Use the knowledge tools to search, inspect metadata, expand graph neighbors, and read documents from this pack when relevant.",
         docs: manifest
             .docs()
             .iter()
             .map(|doc| KnowledgeDocumentSummaryContext {
-                path: doc.virtual_path.as_str(),
+                path: doc.path.as_str(),
                 id: doc.id.as_str(),
                 kind: doc.kind.as_str(),
                 title: doc.title.as_str(),
                 summary: doc.summary.as_str(),
+                related: doc
+                    .related
+                    .iter()
+                    .map(|edge| KnowledgeDocumentRelatedSummaryContext {
+                        edge_type: edge.edge_type.as_str(),
+                        target: edge.target.as_str(),
+                    })
+                    .collect(),
             })
             .collect(),
     };
@@ -368,8 +528,10 @@ pub fn knowledge_pack_summary(selector: &str, pack: &dyn KnowledgePack) -> Strin
 #[derive(Debug, Serialize)]
 #[serde(rename = "knowledge_pack")]
 struct KnowledgePackSummaryContext<'a> {
-    #[serde(rename = "@source")]
-    source: &'a str,
+    #[serde(rename = "@selector")]
+    selector: &'a str,
+    #[serde(rename = "@namespace")]
+    namespace: &'a str,
     #[serde(rename = "@name")]
     name: &'a str,
     #[serde(rename = "@root")]
@@ -390,12 +552,25 @@ struct KnowledgeDocumentSummaryContext<'a> {
     kind: &'a str,
     title: &'a str,
     summary: &'a str,
+    #[serde(rename = "related", skip_serializing_if = "Vec::is_empty", default)]
+    related: Vec<KnowledgeDocumentRelatedSummaryContext<'a>>,
 }
 
-pub fn knowledge_document_var_key(pack_prefix: &str, doc: &KnowledgeDocManifest) -> String {
-    let relative = pack_relative_path(pack_prefix, doc)
-        .unwrap_or(doc.virtual_path.as_str())
-        .trim_matches('/');
+#[derive(Debug, Serialize)]
+#[serde(rename = "related")]
+struct KnowledgeDocumentRelatedSummaryContext<'a> {
+    #[serde(rename = "@type")]
+    edge_type: &'a str,
+    #[serde(rename = "@target")]
+    target: &'a str,
+}
+
+pub fn knowledge_document_var_key(
+    knowledge_ref: &KnowledgeRef,
+    doc: &KnowledgeDocManifest,
+) -> String {
+    let pack_prefix = knowledge_ref.prompt_prefix();
+    let relative = knowledge_ref.relative_doc_path(doc);
     let path = relative
         .strip_suffix(".md")
         .unwrap_or(relative)
@@ -406,17 +581,19 @@ pub fn knowledge_document_var_key(pack_prefix: &str, doc: &KnowledgeDocManifest)
         .collect::<Vec<_>>()
         .join(".");
     if path.is_empty() {
-        pack_prefix.to_string()
+        pack_prefix
     } else {
         format!("{pack_prefix}.{path}")
     }
 }
 
-fn knowledge_document_alias_var_keys(pack_prefix: &str, doc: &KnowledgeDocManifest) -> Vec<String> {
+fn knowledge_document_alias_var_keys(
+    knowledge_ref: &KnowledgeRef,
+    doc: &KnowledgeDocManifest,
+) -> Vec<String> {
     let mut keys = Vec::new();
-    let Some(relative) = pack_relative_path(pack_prefix, doc) else {
-        return keys;
-    };
+    let pack_prefix = knowledge_ref.prompt_prefix();
+    let relative = knowledge_ref.relative_doc_path(doc);
     let Some((parent, _leaf)) = relative
         .strip_suffix(".md")
         .unwrap_or(relative)
@@ -451,53 +628,6 @@ fn knowledge_document_alias_var_keys(pack_prefix: &str, doc: &KnowledgeDocManife
     keys
 }
 
-fn pack_relative_path<'a>(pack_prefix: &str, doc: &'a KnowledgeDocManifest) -> Option<&'a str> {
-    match pack_prefix {
-        "lib" => doc
-            .virtual_path
-            .strip_prefix("library://")
-            .and_then(|rest| rest.split_once('/').map(|(_, path)| path)),
-        _ if pack_prefix.starts_with("lib.") => {
-            let slug = pack_prefix.trim_start_matches("lib.");
-            let prefix = format!("library://{slug}/");
-            doc.virtual_path.strip_prefix(&prefix)
-        }
-        _ if pack_prefix.starts_with("git.") => {
-            let mut path = doc.virtual_path.strip_prefix("git://")?;
-            for expected in pack_prefix.trim_start_matches("git.").split('.') {
-                let (segment, rest) = path.split_once('/').unwrap_or((path, ""));
-                if normalize_var_segment(segment) != expected {
-                    return None;
-                }
-                path = rest;
-            }
-            Some(path)
-        }
-        _ if pack_prefix.starts_with("pkg.") => {
-            let mut pkg_segments = pack_prefix.trim_start_matches("pkg.").split('.');
-            let scope = pkg_segments.next()?;
-            let name = pkg_segments.next()?;
-            let mut path = doc.virtual_path.strip_prefix("git://")?;
-            let (_owner, rest) = path.split_once('/')?;
-            path = rest;
-            let (repo, rest) = path.split_once('/')?;
-            if repo != "packages" {
-                return None;
-            }
-            path = rest;
-            for expected in [scope, name] {
-                let (segment, rest) = path.split_once('/').unwrap_or((path, ""));
-                if normalize_var_segment(segment) != expected {
-                    return None;
-                }
-                path = rest;
-            }
-            Some(path)
-        }
-        _ => None,
-    }
-}
-
 fn normalize_var_segment(segment: &str) -> String {
     let mut normalized = String::new();
     let mut last_was_underscore = false;
@@ -522,20 +652,10 @@ struct KnowledgeDocMetadataContext<'a> {
     #[serde(rename = "@title")]
     title: &'a str,
     #[serde(rename = "@kind")]
-    kind: KnowledgeDocKind,
-    #[serde(rename = "@authority")]
-    authority: KnowledgeDocAuthority,
-    #[serde(rename = "@status")]
-    status: KnowledgeDocStatus,
+    kind: &'a str,
     summary: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     tags: Vec<&'a str>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    aliases: Vec<&'a str>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    keywords: Vec<&'a str>,
 }
 
 fn doc_metadata(doc: &KnowledgeDocManifest) -> String {
@@ -544,33 +664,28 @@ fn doc_metadata(doc: &KnowledgeDocManifest) -> String {
         path: &path,
         title: &doc.title,
         summary: &doc.summary,
-        description: doc.description.as_deref(),
-        kind: doc.kind,
-        authority: doc.authority,
-        status: doc.status,
+        kind: doc.kind.as_str(),
         tags: doc.tags.iter().map(String::as_str).collect(),
-        aliases: doc.aliases.iter().map(String::as_str).collect(),
-        keywords: doc.keywords.iter().map(String::as_str).collect(),
     };
     nenjo_xml::to_xml_pretty(&ctx, 2)
 }
 
 fn prompt_doc_path(doc: &KnowledgeDocManifest) -> String {
-    if doc.virtual_path.starts_with("library://") {
-        doc.virtual_path
+    if doc.path.starts_with("library://") {
+        doc.path
             .splitn(4, '/')
             .nth(3)
-            .unwrap_or(&doc.virtual_path)
+            .unwrap_or(&doc.path)
             .to_string()
     } else {
-        doc.virtual_path.clone()
+        doc.path.clone()
     }
 }
 
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Knowledge pack selector such as lib:<pack_slug> or git://owner/repo/package."
+        "description": "Knowledge pack selector: lib:<pack>, pkg:<package>:knowledge, or local:<pack>."
     })
 }
 
@@ -588,14 +703,6 @@ fn knowledge_filter_schema(
         "kind": {
             "type": "string",
             "description": "Optional kind filter such as guide or reference"
-        },
-        "authority": {
-            "type": "string",
-            "description": "Optional authority filter such as canonical, reference, or advisory"
-        },
-        "status": {
-            "type": "string",
-            "description": "Optional status filter such as stable, draft, or deprecated"
         },
         "path_prefix": {
             "type": "string",
@@ -635,7 +742,7 @@ fn knowledge_lookup_schema() -> serde_json::Value {
             "pack": pack_schema(),
             "path": {
                 "type": "string",
-                "description": "Document path, id, alias, or virtual path within the selected pack"
+                "description": "Document path, id, alias, or path within the selected pack"
             }
         },
         "required": ["pack", "path"],
@@ -656,40 +763,14 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "list_knowledge_docs".into(),
-            description: "List compact document metadata from one knowledge pack without loading document bodies.".into(),
-            parameters: knowledge_filter_schema(None, &["pack"]),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
             name: "read_knowledge_doc".into(),
             description: "Read one full document body from a knowledge pack by path.".into(),
             parameters: knowledge_lookup_schema(),
             category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "read_knowledge_doc_manifest".into(),
-            description: "Read one document's metadata from a knowledge pack by path without loading the body.".into(),
-            parameters: knowledge_lookup_schema(),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
             name: "search_knowledge".into(),
-            description: "Search a knowledge pack and return matches with body content. Use this when you need to inspect or quote matching text.".into(),
-            parameters: knowledge_filter_schema(
-                Some(json!({
-                    "query": {
-                        "type": "string",
-                        "description": "Search query, path, title, tag, summary, or body text"
-                    }
-                })),
-                &["pack", "query"],
-            ),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "search_knowledge_paths".into(),
-            description: "Search a knowledge pack using metadata only and return compact results without body content.".into(),
+            description: "Search a knowledge pack and return candidate document metadata without loading document bodies.".into(),
             parameters: knowledge_filter_schema(
                 Some(json!({
                     "query": {
@@ -702,32 +783,15 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "list_knowledge_tree".into(),
-            description: "List the document tree for a knowledge pack, optionally under a prefix.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pack": pack_schema(),
-                    "prefix": {
-                        "type": "string",
-                        "description": "Optional virtual or pack-relative path prefix"
-                    }
-                },
-                "required": ["pack"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
             name: "list_knowledge_neighbors".into(),
-            description: "List graph neighbors for one document in a knowledge pack.".into(),
+            description: "List outbound graph neighbors for one document in a knowledge pack.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pack": pack_schema(),
                     "path": {
                         "type": "string",
-                        "description": "Document path, id, alias, or virtual path within the selected pack"
+                        "description": "Document path, id, alias, or path within the selected pack"
                     },
                     "edge_type": {
                         "type": "string",
@@ -781,17 +845,6 @@ impl Tool for KnowledgeTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let output = match self.name() {
             "list_knowledge_packs" => serde_json::to_value(self.registry.list_packs().await?)?,
-            "list_knowledge_docs" => {
-                let args: KnowledgeListArgs = serde_json::from_value(args)?;
-                let pack = self.registry.resolve_pack(&args.pack).await?;
-                let filter = knowledge_filter(args.filter)?;
-                let docs = pack
-                    .list_docs(filter)
-                    .into_iter()
-                    .map(|doc| knowledge_manifest_result(&args.pack, doc))
-                    .collect::<Vec<_>>();
-                serde_json::to_value(docs)?
-            }
             "read_knowledge_doc" => {
                 let args: KnowledgeReadArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
@@ -803,54 +856,33 @@ impl Tool for KnowledgeTool {
                     )
                 })?;
                 serde_json::to_value(KnowledgeDocReadResult {
-                    manifest: knowledge_manifest_result(&args.pack, &doc.manifest),
+                    document: knowledge_document_metadata(&doc.manifest),
                     content: doc.content,
                 })?
-            }
-            "read_knowledge_doc_manifest" => {
-                let args: KnowledgeReadArgs = serde_json::from_value(args)?;
-                let pack = self.registry.resolve_pack(&args.pack).await?;
-                let doc = pack.read_manifest(&args.path).ok_or_else(|| {
-                    anyhow!(
-                        "knowledge document '{}' not found in pack '{}'",
-                        args.path,
-                        args.pack
-                    )
-                })?;
-                serde_json::to_value(knowledge_manifest_result(&args.pack, doc))?
             }
             "search_knowledge" => {
                 let args: KnowledgeSearchArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
                 let filter = knowledge_filter(args.filter)?;
                 let hits = pack
-                    .search_docs(&args.query, filter)
+                    .search(&args.query, filter)
                     .into_iter()
-                    .map(|hit| knowledge_search_result(&args.pack, hit))
+                    .map(knowledge_search_result)
                     .collect::<Vec<_>>();
                 serde_json::to_value(hits)?
-            }
-            "search_knowledge_paths" => {
-                let args: KnowledgeSearchArgs = serde_json::from_value(args)?;
-                let pack = self.registry.resolve_pack(&args.pack).await?;
-                let filter = knowledge_filter(args.filter)?;
-                let hits = pack
-                    .search_paths(&args.query, filter)
-                    .into_iter()
-                    .map(|hit| knowledge_search_result(&args.pack, hit))
-                    .collect::<Vec<_>>();
-                serde_json::to_value(hits)?
-            }
-            "list_knowledge_tree" => {
-                let args: KnowledgeTreeArgs = serde_json::from_value(args)?;
-                let pack = self.registry.resolve_pack(&args.pack).await?;
-                serde_json::to_value(pack.list_tree(args.prefix.as_deref()))?
             }
             "list_knowledge_neighbors" => {
                 let args: KnowledgeNeighborArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
                 let edge_type = parse_knowledge_enum(args.edge_type)?;
-                serde_json::to_value(pack.neighbors(&args.path, edge_type))?
+                let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+                    anyhow!(
+                        "knowledge document '{}' not found in pack '{}'",
+                        args.path,
+                        args.pack
+                    )
+                })?;
+                serde_json::to_value(knowledge_neighbors_result(neighbors))?
             }
             name => return Err(anyhow!("unknown knowledge tool '{name}'")),
         };
@@ -865,88 +897,254 @@ impl Tool for KnowledgeTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{knowledge_document_var_key, knowledge_pack_var_prefix};
-    use crate::{
-        KnowledgeDocAuthority, KnowledgeDocKind, KnowledgeDocManifest, KnowledgeDocStatus,
-    };
+    use std::borrow::Cow;
 
-    #[test]
-    fn library_knowledge_uses_lib_template_namespace() {
-        assert_eq!(
-            knowledge_pack_var_prefix("lib:Product Docs"),
-            "lib.product_docs"
-        );
-        assert_eq!(knowledge_pack_var_prefix("lib"), "lib");
+    use super::{
+        KnowledgeDocReadResult, KnowledgeRef, knowledge_document_var_key,
+        knowledge_neighbors_result, knowledge_search_result, knowledge_tools,
+    };
+    use crate::{
+        KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest,
+        KnowledgePack, KnowledgePackManifest, KnowledgePackManifestData,
+    };
+    use serde_json::json;
+
+    struct TestPack {
+        manifest: KnowledgePackManifestData,
+    }
+
+    impl KnowledgePack for TestPack {
+        fn manifest(&self) -> &dyn KnowledgePackManifest {
+            &self.manifest
+        }
+
+        fn doc_content(&self, manifest: &KnowledgeDocManifest) -> Option<Cow<'_, str>> {
+            Some(Cow::Owned(format!("body for {}", manifest.title)))
+        }
+    }
+
+    fn test_doc(
+        id: &str,
+        path: &str,
+        title: &str,
+        related: Vec<KnowledgeDocEdge>,
+    ) -> KnowledgeDocManifest {
+        KnowledgeDocManifest {
+            id: id.into(),
+            path: path.into(),
+            source_path: path.trim_start_matches("library://test/").into(),
+            title: title.into(),
+            summary: format!("{title} summary"),
+            kind: KnowledgeDocKind::new("routing-guide"),
+            tags: vec!["core".into()],
+            related,
+            updated_at: String::new(),
+        }
+    }
+
+    fn test_pack() -> TestPack {
+        TestPack {
+            manifest: KnowledgePackManifestData {
+                pack_id: "test".into(),
+                pack_version: "1".into(),
+                schema_version: 1,
+                root_uri: "library://test/".into(),
+                content_hash: String::new(),
+                docs: vec![
+                    test_doc(
+                        "root",
+                        "library://test/root.md",
+                        "Root",
+                        vec![KnowledgeDocEdge {
+                            edge_type: KnowledgeDocEdgeType::DependsOn,
+                            target: "library://test/leaf.md".into(),
+                            description: Some("root to leaf".into()),
+                        }],
+                    ),
+                    test_doc(
+                        "leaf",
+                        "library://test/leaf.md",
+                        "Leaf",
+                        vec![KnowledgeDocEdge {
+                            edge_type: KnowledgeDocEdgeType::References,
+                            target: "library://test/root.md".into(),
+                            description: Some("reverse edge".into()),
+                        }],
+                    ),
+                ],
+            },
+        }
     }
 
     #[test]
-    fn git_knowledge_uses_owner_qualified_template_namespace() {
+    fn default_knowledge_tool_registry_exposes_graph_first_tools_only() {
+        let names = knowledge_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
         assert_eq!(
-            knowledge_pack_var_prefix("git://acme/docs/platform"),
-            "git.acme.docs.platform"
+            names,
+            vec![
+                "list_knowledge_packs",
+                "read_knowledge_doc",
+                "search_knowledge",
+                "list_knowledge_neighbors",
+            ]
         );
+    }
+
+    #[test]
+    fn pack_prompt_summary_includes_compact_related_edges() {
+        let pack = TestPack {
+            manifest: KnowledgePackManifestData {
+                pack_id: "test".into(),
+                pack_version: "1".into(),
+                schema_version: 1,
+                root_uri: "file:///tmp/test/".into(),
+                content_hash: String::new(),
+                docs: vec![
+                    test_doc(
+                        "root",
+                        "docs/root.md",
+                        "Root",
+                        vec![KnowledgeDocEdge {
+                            edge_type: KnowledgeDocEdgeType::DependsOn,
+                            target: "docs/leaf.md".into(),
+                            description: Some("root to leaf".into()),
+                        }],
+                    ),
+                    test_doc(
+                        "leaf",
+                        "docs/leaf.md",
+                        "Leaf",
+                        vec![KnowledgeDocEdge {
+                            edge_type: KnowledgeDocEdgeType::References,
+                            target: "docs/root.md".into(),
+                            description: Some("reverse edge".into()),
+                        }],
+                    ),
+                ],
+            },
+        };
+        let knowledge_ref = KnowledgeRef::local("test").unwrap();
+        let summary = super::knowledge_pack_summary(&knowledge_ref, &pack);
+
+        assert!(summary.contains(r#"selector="local:test""#));
+        assert!(summary.contains(r#"<related type="depends_on" target="docs/leaf.md""#));
+        assert!(summary.contains(r#"<related type="references" target="docs/root.md""#));
+        assert!(!summary.contains("root to leaf"));
+        assert!(!summary.contains("reverse edge"));
+    }
+
+    #[test]
+    fn neighbor_traversal_returns_outbound_edges_with_slim_target_metadata() {
+        let pack = test_pack();
+        let result = pack
+            .neighbors("root", None)
+            .map(knowledge_neighbors_result)
+            .expect("root neighbors");
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_eq!(value["document"]["path"], "library://test/root.md");
+        assert_eq!(value["document"]["related"][0]["type"], "depends_on");
         assert_eq!(
-            knowledge_pack_var_prefix("git://trailofbits/skills-curated/x-research"),
-            "git.trailofbits.skills_curated.x_research"
+            value["document"]["related"][0]["target"],
+            "library://test/leaf.md"
         );
+        assert_eq!(value["edges"].as_array().unwrap().len(), 1);
+        assert_eq!(value["edges"][0]["type"], "depends_on");
+        assert_eq!(
+            value["edges"][0]["target"]["path"],
+            "library://test/leaf.md"
+        );
+        assert_eq!(value["edges"][0]["target"]["kind"], "routing_guide");
+        assert!(value["edges"][0]["target"].get("source_path").is_none());
+        assert!(value["edges"][0].get("note").is_none());
+    }
+
+    #[test]
+    fn search_returns_slim_metadata_without_content() {
+        let pack = test_pack();
+        let value = serde_json::to_value(
+            pack.search("Leaf", Default::default())
+                .into_iter()
+                .map(knowledge_search_result)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        assert_eq!(value[0]["document"]["path"], "library://test/leaf.md");
+        assert_eq!(value[0]["document"]["related"][0]["type"], "references");
+        assert_eq!(
+            value[0]["document"]["related"][0]["target"],
+            "library://test/root.md"
+        );
+        assert!(
+            value[0]["matched"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("title"))
+        );
+        assert!(
+            !value[0]["matched"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("content"))
+        );
+        assert!(value[0].get("content").is_none());
+        assert!(value[0]["document"].get("aliases").is_none());
+    }
+
+    #[test]
+    fn read_knowledge_doc_result_keeps_full_content_explicit() {
+        let pack = test_pack();
+        let doc = pack.read_doc("leaf").expect("leaf doc");
+        let value = serde_json::to_value(KnowledgeDocReadResult {
+            document: super::knowledge_document_metadata(&doc.manifest),
+            content: doc.content,
+        })
+        .unwrap();
+
+        assert_eq!(value["document"]["path"], "library://test/leaf.md");
+        assert_eq!(
+            value["document"]["related"][0]["target"],
+            "library://test/root.md"
+        );
+        assert_eq!(value["content"], "body for Leaf");
+    }
+
+    #[test]
+    fn library_knowledge_uses_lib_template_namespace() {
+        let knowledge_ref = KnowledgeRef::library("product-docs").unwrap();
+        assert_eq!(knowledge_ref.selector(), "lib:product-docs");
+        assert_eq!(knowledge_ref.prompt_prefix(), "lib.product_docs");
     }
 
     #[test]
     fn pkg_knowledge_uses_package_template_namespace() {
-        assert_eq!(
-            knowledge_pack_var_prefix("pkg.nenjo.core.knowledge"),
-            "pkg.nenjo.core.knowledge"
-        );
-    }
-
-    #[test]
-    fn git_knowledge_document_vars_use_pack_relative_paths() {
-        let doc = KnowledgeDocManifest {
-            id: "acme.guide.agents".into(),
-            virtual_path: "git://acme/docs/platform/guide/agents.md".into(),
-            source_path: "docs/guide/agents.md".into(),
-            title: "Agents".into(),
-            summary: String::new(),
-            description: None,
-            kind: KnowledgeDocKind::Guide,
-            authority: KnowledgeDocAuthority::Canonical,
-            status: KnowledgeDocStatus::Stable,
-            tags: Vec::new(),
-            aliases: Vec::new(),
-            keywords: Vec::new(),
-            related: Vec::new(),
-            size_bytes: 0,
-            updated_at: String::new(),
-        };
-
-        assert_eq!(
-            knowledge_document_var_key("git.acme.docs.platform", &doc),
-            "git.acme.docs.platform.guide.agents"
-        );
+        let knowledge_ref = KnowledgeRef::package("@nenjo/core").unwrap();
+        assert_eq!(knowledge_ref.selector(), "pkg:nenjo.core:knowledge");
+        assert_eq!(knowledge_ref.prompt_prefix(), "pkg.nenjo.core.knowledge");
     }
 
     #[test]
     fn pkg_knowledge_document_vars_use_package_relative_paths() {
+        let knowledge_ref = KnowledgeRef::package("nenjo.core").unwrap();
         let doc = KnowledgeDocManifest {
             id: "nenjo.guide.agents".into(),
-            virtual_path: "git://nenjo-ai/packages/nenjo/core/guide/agents.md".into(),
+            path: "pkg://nenjo.core/knowledge/guide/agents.md".into(),
             source_path: "docs/guide/agents.md".into(),
             title: "Agents".into(),
             summary: String::new(),
-            description: None,
-            kind: KnowledgeDocKind::Guide,
-            authority: KnowledgeDocAuthority::Canonical,
-            status: KnowledgeDocStatus::Stable,
+            kind: KnowledgeDocKind::new("guide"),
             tags: Vec::new(),
-            aliases: Vec::new(),
-            keywords: Vec::new(),
             related: Vec::new(),
-            size_bytes: 0,
             updated_at: String::new(),
         };
 
         assert_eq!(
-            knowledge_document_var_key("pkg.nenjo.core.knowledge", &doc),
+            knowledge_document_var_key(&knowledge_ref, &doc),
             "pkg.nenjo.core.knowledge.guide.agents"
         );
     }

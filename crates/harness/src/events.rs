@@ -12,26 +12,45 @@ pub enum HarnessEvent {
         domain_name: String,
     },
     /// A raw provider turn event after harness session/trace processing.
-    Turn(nenjo::TurnEvent),
+    Turn {
+        session_id: Uuid,
+        turn_id: Option<Uuid>,
+        event: nenjo::TurnEvent,
+    },
     /// A routine event after harness session/trace processing.
-    Routine(nenjo::RoutineEvent),
+    Routine {
+        session_id: Uuid,
+        execution_run_id: Uuid,
+        event: nenjo::RoutineEvent,
+    },
 }
 
 /// Events emitted by scheduled cron and heartbeat handles.
 #[derive(Debug, Clone)]
 pub enum HarnessScheduleEvent {
     Scheduled {
+        session_id: Uuid,
         id: Uuid,
         next_run_at: DateTime<Utc>,
     },
     Started {
+        session_id: Uuid,
         id: Uuid,
         execution_id: Uuid,
         scheduled_for: DateTime<Utc>,
     },
-    Cron(nenjo::RoutineEvent),
-    Heartbeat(nenjo::TurnEvent),
+    Cron {
+        session_id: Uuid,
+        execution_id: Uuid,
+        event: nenjo::RoutineEvent,
+    },
+    Heartbeat {
+        session_id: Uuid,
+        execution_id: Uuid,
+        event: nenjo::TurnEvent,
+    },
     Completed {
+        session_id: Uuid,
         id: Uuid,
         execution_id: Uuid,
         success: bool,
@@ -42,12 +61,14 @@ pub enum HarnessScheduleEvent {
         next_run_at: DateTime<Utc>,
     },
     Failed {
+        session_id: Uuid,
         id: Uuid,
         execution_id: Option<Uuid>,
         error: String,
         next_run_at: DateTime<Utc>,
     },
     Stopped {
+        session_id: Uuid,
         id: Uuid,
     },
 }

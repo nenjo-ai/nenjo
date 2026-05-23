@@ -6,7 +6,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::agents::prompts::{self as prompts, PromptContext};
+use crate::agents::prompts::PromptContext;
 use crate::config::AgentConfig;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, ModelManifest, PromptConfig};
@@ -247,7 +247,7 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         }
 
         // Agent (self)
-        ctx._self.id = self.agent_id();
+        ctx._self.slug = crate::Slug::derive(self.name()).to_string();
         ctx._self.role = self.name().to_string();
         ctx._self.display_name = self.name().to_string();
         ctx._self.model_name = self.model.model_name.clone();
@@ -281,31 +281,6 @@ impl<P: ProviderRuntime> AgentInstance<P> {
                 })
             },
         };
-
-        // 2. Populate available collections (exclude self from agents)
-        let self_id = self.agent_id();
-        ctx.available_agents = self
-            .prompt
-            .context
-            .available_agents
-            .iter()
-            .filter(|a| a.id != self_id)
-            .map(prompts::render_agent)
-            .collect();
-        ctx.available_abilities = self
-            .prompt
-            .context
-            .available_abilities
-            .iter()
-            .map(prompts::render_ability)
-            .collect();
-        ctx.available_domains = self
-            .prompt
-            .context
-            .available_domains
-            .iter()
-            .map(prompts::render_domain)
-            .collect();
 
         // Memories and artifacts
         ctx.memory_vars = memory_vars

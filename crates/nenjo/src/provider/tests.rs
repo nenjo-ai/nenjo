@@ -5,8 +5,7 @@ use crate::manifest::PromptConfig;
 use crate::manifest::{ContextBlockManifest, ManifestLoader, RoutineManifest};
 use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgeRegistry};
 use nenjo_knowledge::{
-    KnowledgeDocAuthority, KnowledgeDocFilter, KnowledgeDocManifest, KnowledgeDocStatus,
-    KnowledgePack, KnowledgePackManifestData,
+    KnowledgeDocFilter, KnowledgeDocManifest, KnowledgePack, KnowledgePackManifestData,
 };
 
 struct MockProvider;
@@ -60,11 +59,11 @@ fn test_manifest() -> Manifest {
         description: Some("test".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -74,7 +73,7 @@ fn test_manifest() -> Manifest {
         projects: vec![ProjectManifest {
             id: Uuid::new_v4(),
             name: "p".into(),
-            slug: "p".into(),
+            slug: Slug::derive("p"),
             description: None,
             settings: serde_json::Value::Null,
         }],
@@ -89,7 +88,7 @@ struct TestKnowledgePack {
 }
 
 impl TestKnowledgePack {
-    fn new(pack_id: &str, root_uri: &str, doc_id: &str, virtual_path: &str) -> Self {
+    fn new(pack_id: &str, root_uri: &str, doc_id: &str, path: &str) -> Self {
         Self {
             manifest: KnowledgePackManifestData {
                 pack_id: pack_id.to_string(),
@@ -99,19 +98,13 @@ impl TestKnowledgePack {
                 content_hash: format!("{pack_id}-hash"),
                 docs: vec![KnowledgeDocManifest {
                     id: doc_id.to_string(),
-                    virtual_path: virtual_path.to_string(),
-                    source_path: virtual_path.to_string(),
+                    path: path.to_string(),
+                    source_path: path.to_string(),
                     title: doc_id.to_string(),
                     summary: format!("{doc_id} summary"),
-                    description: None,
-                    kind: nenjo_knowledge::KnowledgeDocKind::Guide,
-                    authority: KnowledgeDocAuthority::Canonical,
-                    status: KnowledgeDocStatus::Stable,
+                    kind: nenjo_knowledge::KnowledgeDocKind::new("guide"),
                     tags: vec![],
-                    aliases: vec![],
-                    keywords: vec![],
                     related: vec![],
-                    size_bytes: 0,
                     updated_at: String::new(),
                 }],
             },
@@ -134,8 +127,6 @@ impl KnowledgePack for TestKnowledgePack {
 async fn from_manifest_and_agent_lookup() {
     let manifest = test_manifest();
     let name = manifest.agents[0].name.clone();
-    let id = manifest.agents[0].id;
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockFactory)
@@ -144,9 +135,8 @@ async fn from_manifest_and_agent_lookup() {
         .await
         .unwrap();
 
-    assert!(provider.agent_by_name(&name).await.is_ok());
-    assert!(provider.agent_by_id(id).await.is_ok());
-    assert!(provider.agent_by_name("missing").await.is_err());
+    assert!(provider.agent(&name).await.is_ok());
+    assert!(provider.agent("missing").await.is_err());
 }
 
 #[tokio::test]
@@ -162,21 +152,22 @@ async fn project_context_renders_template_and_knowledge_vars() {
         .with_manifest(manifest)
         .with_model_factory(MockFactory)
         .with_tool_factory(NoopToolFactory)
-        .with_knowledge_packs([KnowledgePackEntry::new(
-            "lib:product",
+        .with_knowledge_packs([KnowledgePackEntry::library(
+            "product",
             TestKnowledgePack::new(
                 "product",
                 "library://product/",
                 "first_doc",
                 "library://product/first.md",
             ),
-        )])
+        )
+        .unwrap()])
         .build()
         .await
         .unwrap();
 
     let runner = provider
-        .agent_by_name("agent")
+        .agent("agent")
         .await
         .unwrap()
         .with_project_context(&project)
@@ -202,31 +193,33 @@ async fn provider_registers_multiple_knowledge_packs() {
         .with_model_factory(MockFactory)
         .with_tool_factory(NoopToolFactory)
         .with_knowledge_packs([
-            KnowledgePackEntry::new(
-                "local:first",
+            KnowledgePackEntry::local(
+                "first",
                 TestKnowledgePack::new(
                     "first",
                     "local://first/",
                     "first_doc",
                     "local://first/first.md",
                 ),
-            ),
-            KnowledgePackEntry::new(
-                "local:second",
+            )
+            .unwrap(),
+            KnowledgePackEntry::local(
+                "second",
                 TestKnowledgePack::new(
                     "second",
                     "local://second/",
                     "second_doc",
                     "local://second/second.md",
                 ),
-            ),
+            )
+            .unwrap(),
         ])
         .build()
         .await
         .unwrap();
 
     let runner = provider
-        .agent_by_name("agent")
+        .agent("agent")
         .await
         .unwrap()
         .build()
@@ -275,7 +268,7 @@ async fn builder_via_loader() {
         .await
         .unwrap();
 
-    assert!(provider.agent_by_name(&name).await.is_ok());
+    assert!(provider.agent(&name).await.is_ok());
 }
 
 #[tokio::test]
@@ -283,7 +276,7 @@ async fn blank_provider_builds_without_manifest_or_factories() {
     let provider = Provider::builder().build().await.unwrap();
 
     assert!(provider.manifest().agents.is_empty());
-    assert!(provider.agent_by_name("missing").await.is_err());
+    assert!(provider.agent("missing").await.is_err());
 }
 
 #[tokio::test]
@@ -319,7 +312,7 @@ async fn builder_can_preserve_typed_model_factory() {
         .await
         .unwrap();
 
-    assert!(provider.agent_by_name(&name).await.is_ok());
+    assert!(provider.agent(&name).await.is_ok());
 }
 
 #[tokio::test]
@@ -359,7 +352,7 @@ async fn multiple_loaders_merge() {
 #[tokio::test]
 async fn agent_without_model_fails() {
     let mut manifest = test_manifest();
-    manifest.agents[0].model_id = None;
+    manifest.agents[0].model = None;
 
     let provider = Provider::builder()
         .with_manifest(manifest)
@@ -368,7 +361,7 @@ async fn agent_without_model_fails() {
         .build()
         .await
         .unwrap();
-    assert!(provider.agent_by_name("agent").await.is_err());
+    assert!(provider.agent("agent").await.is_err());
 }
 
 #[tokio::test]
@@ -393,11 +386,11 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         description: Some("old".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -407,11 +400,11 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         description: Some("new".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -423,11 +416,12 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         metadata: crate::manifest::RoutineMetadata::default(),
         steps: vec![crate::manifest::RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("routine"),
             name: "step".into(),
             step_type: crate::manifest::RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(original_agent_id),
+            council: None,
+            agent: Some(Slug::derive("agent-old")),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -441,7 +435,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         projects: vec![ProjectManifest {
             id: Uuid::new_v4(),
             name: "p".into(),
-            slug: "p".into(),
+            slug: Slug::derive("p"),
             description: None,
             settings: serde_json::Value::Null,
         }],
@@ -456,22 +450,22 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         .await
         .unwrap();
 
-    let original_runner = provider.routine_by_id(routine_id).unwrap();
+    let original_runner = provider.routine("routine").unwrap();
 
     let mut updated_manifest = provider.manifest().clone();
     updated_manifest.agents = vec![updated_agent.clone()];
-    updated_manifest.routines[0].steps[0].agent_id = Some(updated_agent_id);
+    updated_manifest.routines[0].steps[0].agent = Some(Slug::derive("agent-new"));
 
     let updated_provider = provider.with_manifest(updated_manifest);
-    let updated_runner = updated_provider.routine_by_id(routine_id).unwrap();
+    let updated_runner = updated_provider.routine("routine").unwrap();
 
     assert_eq!(
-        original_runner.routine().steps[0].agent_id,
-        Some(original_agent_id)
+        original_runner.routine().steps[0].agent,
+        Some(Slug::derive("agent-old"))
     );
     assert_eq!(
-        updated_runner.routine().steps[0].agent_id,
-        Some(updated_agent_id)
+        updated_runner.routine().steps[0].agent,
+        Some(Slug::derive("agent-new"))
     );
     assert_eq!(
         original_runner.provider().manifest().agents[0].name,

@@ -1,10 +1,9 @@
 use nenjo::{ToolCategory, ToolSpec};
 
-fn routine_id_schema() -> serde_json::Value {
+fn routine_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target routine."
+        "description": "Routine slug."
     })
 }
 
@@ -26,15 +25,13 @@ fn routine_step_schema() -> serde_json::Value {
                 "enum": ["agent", "council", "cron", "gate", "terminal", "terminal_fail"],
                 "description": "Execution kind for this step."
             },
-            "council_id": {
+            "council": {
                 "type": ["string", "null"],
-                "format": "uuid",
-                "description": "Council id for council steps."
+                "description": "Council slug for council steps."
             },
-            "agent_id": {
+            "agent": {
                 "type": ["string", "null"],
-                "format": "uuid",
-                "description": "Agent id for agent steps."
+                "description": "Agent slug for agent steps."
             },
             "config": {
                 "type": "object",
@@ -53,15 +50,15 @@ fn routine_step_schema() -> serde_json::Value {
 fn routine_edge_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["source_step_id", "target_step_id", "condition"],
+        "required": ["source_step", "target_step", "condition"],
         "properties": {
-            "source_step_id": {
+            "source_step": {
                 "type": "string",
-                "description": "Source step id. Must reference one of the provided steps."
+                "description": "Source step slug. Must reference one of the provided steps."
             },
-            "target_step_id": {
+            "target_step": {
                 "type": "string",
-                "description": "Target step id. Must reference one of the provided steps."
+                "description": "Target step slug. Must reference one of the provided steps."
             },
             "condition": {
                 "type": "string",
@@ -167,19 +164,19 @@ pub fn routine_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_routines".to_string(),
-            description: "List routines so you can find a routine id before reading, updating, or deleting one."
+            description: "List routines so you can find a routine slug before reading, updating, or deleting one."
                 .to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_routine".to_string(),
-            description: "Get one routine's name, description, trigger, metadata, steps, and edges by id."
+            description: "Get one routine's name, description, trigger, metadata, steps, and edges by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": routine_id_schema() },
+                "required": ["routine"],
+                "properties": { "routine": routine_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -198,13 +195,13 @@ pub fn routine_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_routine".to_string(),
-            description: "Update one routine's name, description, trigger, metadata, and optionally replace its full workflow graph by id."
+            description: "Update one routine's name, description, trigger, metadata, and optionally replace its full workflow graph by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["routine"],
                 "properties": {
-                    "id": routine_id_schema(),
+                    "routine": routine_ref_schema(),
                     "name": routine_update_schema()["properties"]["name"].clone(),
                     "description": routine_update_schema()["properties"]["description"].clone(),
                     "trigger": routine_update_schema()["properties"]["trigger"].clone(),
@@ -217,12 +214,12 @@ pub fn routine_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_routine".to_string(),
-            description: "Delete one routine by id when you want it removed from the manifest."
+            description: "Delete one routine by slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": routine_id_schema() },
+                "required": ["routine"],
+                "properties": { "routine": routine_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,

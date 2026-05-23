@@ -21,6 +21,7 @@ pub mod local_documents;
 pub mod marketplace;
 pub mod package_manifests;
 pub mod providers;
+pub mod resource_resolver;
 pub mod runtime;
 pub mod security;
 pub mod sessions;

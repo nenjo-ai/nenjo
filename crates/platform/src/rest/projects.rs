@@ -1,11 +1,10 @@
 use nenjo::{ToolCategory, ToolSpec};
 use serde_json::json;
 
-fn project_id_schema() -> serde_json::Value {
+fn slug_schema(description: &str) -> serde_json::Value {
     json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target project."
+        "description": description
     })
 }
 
@@ -34,17 +33,17 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "project_id": project_id_schema(),
+                    "project": slug_schema("The target project slug."),
                     "status": {"type": "string"},
                     "priority": {"type": "string"},
                     "type": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
-                    "routine_id": {"type": "string", "format": "uuid"},
-                    "assigned_agent_id": {"type": "string", "format": "uuid"},
+                    "routine": slug_schema("Optional routine slug filter."),
+                    "agent": slug_schema("Optional assigned agent slug filter."),
                     "limit": {"type": "integer"},
                     "offset": {"type": "integer"}
                 },
-                "required": ["project_id"],
+                "required": ["project"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -68,7 +67,7 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "project_id": project_id_schema(),
+                    "project": slug_schema("The target project slug."),
                     "tasks": {
                         "type": "array",
                         "items": {
@@ -84,8 +83,8 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                                 "tags": {"type": "array", "items": {"type": "string"}},
                                 "required_tags": {"type": "array", "items": {"type": "string"}},
                                 "order_index": {"type": "integer"},
-                                "assigned_agent_id": {"type": "string", "format": "uuid"},
-                                "routine_id": {"type": "string", "format": "uuid"},
+                                "agent": slug_schema("Optional assigned agent slug."),
+                                "routine": slug_schema("Optional routine slug."),
                                 "metadata": {"type": "object"}
                             },
                             "required": ["title"],
@@ -93,7 +92,7 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                         }
                     }
                 },
-                "required": ["project_id", "tasks"],
+                "required": ["project", "tasks"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
@@ -115,8 +114,8 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "required_tags": {"type": "array", "items": {"type": "string"}},
                     "order_index": {"type": "integer"},
-                    "assigned_agent_id": {"type": "string", "format": "uuid"},
-                    "routine_id": {"type": "string", "format": "uuid"},
+                    "agent": slug_schema("Optional assigned agent slug."),
+                    "routine": slug_schema("Optional routine slug."),
                     "metadata": {"type": "object"}
                 },
                 "required": ["task_id"],
@@ -143,14 +142,14 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "project_id": project_id_schema(),
-                    "agent_id": {"type": "string", "format": "uuid"},
-                    "routine_id": {"type": "string", "format": "uuid"},
+                    "project": slug_schema("The target project slug."),
+                    "agent": slug_schema("Optional agent slug filter."),
+                    "routine": slug_schema("Optional routine slug filter."),
                     "status": {"type": "string"},
                     "limit": {"type": "integer"},
                     "offset": {"type": "integer"}
                 },
-                "required": ["project_id"],
+                "required": ["project"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -174,12 +173,12 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "project_id": project_id_schema(),
+                    "project": slug_schema("The target project slug."),
                     "config": {"type": "object"},
                     "model_count": {"type": "integer"},
                     "parallel_count": {"type": "integer"}
                 },
-                "required": ["project_id"],
+                "required": ["project"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,

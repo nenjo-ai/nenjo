@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
+use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
 };
@@ -93,11 +94,11 @@ fn test_manifest() -> Manifest {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -105,7 +106,7 @@ fn test_manifest() -> Manifest {
     let project = ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     };
@@ -140,7 +141,7 @@ async fn provider_with_memory_adds_tools() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("memory-agent")
+        .agent("memory-agent")
         .await
         .unwrap()
         .build()
@@ -186,7 +187,7 @@ async fn provider_without_memory_has_no_memory_tools() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("memory-agent")
+        .agent("memory-agent")
         .await
         .unwrap()
         .build()
@@ -617,16 +618,14 @@ async fn ability_inherits_memory_vars() {
     let ability = AbilityManifest {
         id: Uuid::new_v4(),
         name: "code-review".into(),
-        tool_name: "code_review".into(),
-        path: String::new(),
-        display_name: None,
+        path: None,
         description: Some("Reviews code".into()),
         activation_condition: "when code review is needed".into(),
         prompt_config: AbilityPromptConfig {
             developer_prompt: "You review code.".into(),
         },
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
+        mcp_servers: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -648,11 +647,11 @@ async fn ability_inherits_memory_vars() {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![ability.id],
+        mcp_servers: vec![],
+        abilities: vec![ability.name.clone()],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -660,7 +659,7 @@ async fn ability_inherits_memory_vars() {
     let project = nenjo::manifest::ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     };
@@ -685,17 +684,25 @@ async fn ability_inherits_memory_vars() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("ability-agent")
+        .agent("ability-agent")
         .await
         .unwrap()
         .build()
         .await
         .unwrap();
 
-    // The agent should have per-ability tool
+    // The agent should have the ability broker tools, not a per-ability tool.
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"code_review"), "should have code_review");
+    assert!(
+        names.contains(&"list_abilities"),
+        "should have list_abilities"
+    );
+    assert!(names.contains(&"use_ability"), "should have use_ability");
+    assert!(
+        !names.contains(&"code_review"),
+        "should not expose per-ability tool"
+    );
     assert!(names.contains(&"save_memory"), "should have save_memory");
 
     // Memory vars should be empty on the instance (loaded at execution time)
@@ -740,8 +747,8 @@ async fn domain_expansion_preserves_memory() {
         description: Some("Product requirements".into()),
         command: "/prd".into(),
         platform_scopes: vec![],
-        ability_ids: vec![],
-        mcp_server_ids: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some("PRD mode".into()),
         },
@@ -763,11 +770,11 @@ async fn domain_expansion_preserves_memory() {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model.id),
-        domain_ids: vec![domain.id],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![Slug::derive(&domain.name)],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -775,7 +782,7 @@ async fn domain_expansion_preserves_memory() {
     let project = nenjo::manifest::ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     };
@@ -800,7 +807,7 @@ async fn domain_expansion_preserves_memory() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("domain-agent")
+        .agent("domain-agent")
         .await
         .unwrap()
         .build()
@@ -855,7 +862,7 @@ async fn runner_with_memory_executes() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("memory-agent")
+        .agent("memory-agent")
         .await
         .unwrap()
         .build()

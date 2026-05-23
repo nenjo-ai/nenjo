@@ -16,6 +16,6 @@ pub use event_store::{
 };
 pub use record_store::FileSessionStore;
 pub use runtime::{
-    CronSessionRecovery, DomainSessionRecovery, FileSessionRecoveryHandler, FileSessionRuntime,
-    HeartbeatSessionRecovery,
+    CronSessionRecovery, DomainSessionRecovery, FileSessionRuntime, HeartbeatSessionRecovery,
+    SessionRecoveryHandler,
 };

@@ -15,10 +15,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::events::HarnessEvent;
-use crate::execution_context::{agent_name, project_slug, summarize_turn_event};
+use crate::execution_context::{project_slug, summarize_turn_event};
 use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
-use crate::request::{AgentRef, ChatRequest};
+use crate::request::ChatRequest;
 use crate::session::{
     TurnEventContext, chat_message_to_transcript, replay_transcript_history,
     session_runtime_events_from_turn_event,
@@ -71,10 +71,10 @@ where
 struct PreparedChatExecution {
     session_id: Uuid,
     turn_id: Uuid,
-    agent: AgentRef,
+    agent: nenjo::Slug,
     agent_id: Uuid,
     agent_name: String,
-    project_id: Option<Uuid>,
+    project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
     effective_domain_session_id: Option<Uuid>,
@@ -96,7 +96,7 @@ where
         session_id,
         agent,
         message,
-        project_id,
+        project,
         domain_session_id,
         domain_activation,
     } = request;
@@ -104,7 +104,6 @@ where
     let sessions = harness.sessions();
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
-    let effective_project_id = project_id.unwrap_or(Uuid::nil());
     let effective_content = if message.trim().is_empty() {
         match &domain_activation {
             Some(activation) => activation.domain_command.clone(),
@@ -118,9 +117,12 @@ where
         .map(|activation| activation.domain_session_id)
         .or(domain_session_id);
     let turn_id = Uuid::new_v4();
-    let agent_id = resolve_agent_id(provider.as_ref(), &agent)?;
-    let slug = project_slug(&manifest, effective_project_id);
-    let aname = agent_name(&manifest, agent_id);
+    let agent_manifest = provider
+        .find_agent_manifest(&agent)
+        .ok_or_else(|| anyhow!("agent not found: {}", agent))?;
+    let agent_id = agent_manifest.id;
+    let aname = agent_manifest.name.clone();
+    let slug = project_slug(project.as_ref());
     let worker_id = "harness".to_string();
 
     if let Some(activation) = &domain_activation {
@@ -128,8 +130,7 @@ where
             harness,
             ActivateDomainForChat {
                 worker_id: &worker_id,
-                project_id: effective_project_id,
-                agent_id,
+                agent_slug: &agent,
                 domain_command: &activation.domain_command,
                 domain_session_id: activation.domain_session_id,
                 agent_name: &aname,
@@ -162,8 +163,8 @@ where
         harness,
         ChatSessionRecord {
             session_id,
-            project_id,
-            agent_id,
+            project: project.clone(),
+            agent: agent.clone(),
             project_slug: slug.clone(),
             agent_name: aname.clone(),
             status: SessionStatus::Active,
@@ -226,7 +227,7 @@ where
         .await?;
     info!(
         agent = %aname,
-        agent_id = %agent_id,
+        agent_slug = %agent,
         session = %session_id,
         domain_session = ?effective_domain_session_id,
         history_len = history.len(),
@@ -239,7 +240,7 @@ where
         agent,
         agent_id,
         agent_name: aname,
-        project_id,
+        project,
         project_slug: slug,
         effective_content,
         effective_domain_session_id,
@@ -258,7 +259,6 @@ where
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
     let provider = harness.provider();
-    let manifest = provider.manifest_snapshot();
 
     let runner = if let Some(dsid) = prepared.effective_domain_session_id {
         if !harness.domains().contains_key(&dsid) {
@@ -275,12 +275,12 @@ where
 
         match harness.domains().get_mut(&dsid) {
             Some(session) => {
-                let agent_id = session.agent_id;
-                let project_id = session.project_id;
+                let agent = session.agent.clone();
+                let project = session.project.clone();
                 let domain_command = session.domain_command.clone();
                 drop(session);
                 let rebuilt = harness
-                    .rebuild_domain_session(dsid, agent_id, project_id, &domain_command)
+                    .rebuild_domain_session(dsid, agent, project, &domain_command)
                     .await?;
                 let mut instance = rebuilt.runner.instance().clone();
                 instance.set_active_domain_session_id(prepared.session_id);
@@ -306,8 +306,8 @@ where
                     harness,
                     ChatSessionRecord {
                         session_id: prepared.session_id,
-                        project_id: prepared.project_id,
-                        agent_id: prepared.agent_id,
+                        project: prepared.project.clone(),
+                        agent: prepared.agent.clone(),
                         project_slug: prepared.project_slug.clone(),
                         agent_name: prepared.agent_name.clone(),
                         status: SessionStatus::Failed,
@@ -321,25 +321,15 @@ where
             }
         }
     } else {
-        let mut builder = match &prepared.agent {
-            AgentRef::Id(agent_id) => provider
-                .build_agent_by_id(*agent_id)
-                .await
-                .map_err(anyhow::Error::from)?,
-            AgentRef::Name(agent_name) => provider
-                .build_agent_by_name(agent_name)
-                .await
-                .map_err(anyhow::Error::from)?,
-        };
-        if let Some(project_id) = prepared.project_id {
-            if let Some(project) = manifest
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-            {
+        let mut builder = provider
+            .agent(&prepared.agent)
+            .await
+            .map_err(anyhow::Error::from)?;
+        if let Some(project_slug) = &prepared.project {
+            if let Some(project) = provider.find_project(project_slug) {
                 builder = builder.with_project_context(project);
             } else {
-                warn!(%project_id, agent_id = %prepared.agent_id, "Project not found in manifest for chat session");
+                warn!(project = %project_slug, agent = %prepared.agent, "Project not found in manifest for chat session");
             }
         }
         match harness
@@ -375,14 +365,16 @@ where
         let PreparedChatExecution {
             session_id,
             turn_id,
+            agent,
             agent_id,
             agent_name,
-            project_id,
+            project,
             project_slug,
             events_tx,
             worker_id,
             ..
         } = prepared;
+        let prepared_agent_for_record = agent;
 
         loop {
             tokio::select! {
@@ -403,7 +395,11 @@ where
                             };
                             let runtime_events =
                                 session_runtime_events_from_turn_event(&session_event_context, &ev);
-                            let _ = events_tx.send(HarnessEvent::Turn(ev));
+                            let _ = events_tx.send(HarnessEvent::Turn {
+                                session_id,
+                                turn_id: Some(turn_id),
+                                event: ev,
+                            });
                             harness
                                 .sessions()
                                 .record_events(runtime_events, session_id);
@@ -429,8 +425,8 @@ where
                             &harness,
                             ChatSessionRecord {
                                 session_id,
-                                project_id,
-                                agent_id,
+                                project: project.clone(),
+                                agent: prepared_agent_for_record.clone(),
                                 project_slug: project_slug.clone(),
                                 agent_name: agent_name.clone(),
                                 status: SessionStatus::Cancelled,
@@ -469,8 +465,8 @@ where
             &harness,
             ChatSessionRecord {
                 session_id,
-                project_id,
-                agent_id,
+                project,
+                agent: prepared_agent_for_record,
                 project_slug,
                 agent_name: agent_name.clone(),
                 status: SessionStatus::Completed,
@@ -481,19 +477,6 @@ where
 
         Ok(output)
     })
-}
-
-fn resolve_agent_id<P>(provider: &P, agent: &AgentRef) -> Result<Uuid>
-where
-    P: ProviderRuntime,
-{
-    match agent {
-        AgentRef::Id(agent_id) => Ok(*agent_id),
-        AgentRef::Name(agent_name) => provider
-            .find_agent_manifest(agent_name)
-            .map(|agent| agent.id)
-            .ok_or_else(|| anyhow!("agent not found: {agent_name}")),
-    }
 }
 
 fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
@@ -519,8 +502,8 @@ fn domain_name_for_command(manifest: &nenjo::manifest::Manifest, domain_command:
 
 struct ChatSessionRecord {
     session_id: Uuid,
-    project_id: Option<Uuid>,
-    agent_id: Uuid,
+    project: Option<nenjo::Slug>,
+    agent: nenjo::Slug,
     project_slug: String,
     agent_name: String,
     status: SessionStatus,
@@ -542,8 +525,8 @@ async fn upsert_chat_session_record<P, SessionRt>(
 {
     let ChatSessionRecord {
         session_id,
-        project_id,
-        agent_id,
+        project,
+        agent,
         project_slug,
         agent_name,
         status,
@@ -552,12 +535,13 @@ async fn upsert_chat_session_record<P, SessionRt>(
     let upsert = ChatSessionUpsert {
         session_id,
         status,
-        project_id,
-        agent_id,
+        project: project.as_ref().map(ToString::to_string),
+        agent: agent.to_string(),
         memory_namespace: Some(memory_namespace.clone()),
         metadata: json!({
             "source": "harness_chat",
             "agent_name": agent_name,
+            "agent_slug": agent.to_string(),
             "project_slug": project_slug,
         }),
     };
@@ -604,16 +588,28 @@ where
     let Some(domain) = persisted.domain else {
         return Ok(false);
     };
-    let Some(agent_id) = persisted.agent_id else {
-        return Err(anyhow!("domain session missing agent_id"));
+    let Some(agent_slug) = persisted
+        .metadata
+        .get("agent_slug")
+        .and_then(|value| value.as_str())
+        .map(nenjo::Slug::parse)
+        .transpose()?
+    else {
+        return Err(anyhow!("domain session missing agent_slug"));
     };
-    let project_id = persisted.project_id.unwrap_or_else(Uuid::nil);
+    let project_slug = persisted
+        .metadata
+        .get("project_slug")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(nenjo::Slug::parse)
+        .transpose()?;
 
     let session = harness
         .rebuild_domain_session(
             persisted.session_id,
-            agent_id,
-            project_id,
+            agent_slug,
+            project_slug,
             &domain.domain_command,
         )
         .await?;
@@ -625,8 +621,7 @@ where
 
 struct ActivateDomainForChat<'a> {
     worker_id: &'a str,
-    project_id: Uuid,
-    agent_id: Uuid,
+    agent_slug: &'a nenjo::Slug,
     domain_command: &'a str,
     domain_session_id: Uuid,
     agent_name: &'a str,
@@ -643,8 +638,7 @@ where
 {
     let ActivateDomainForChat {
         worker_id,
-        project_id,
-        agent_id,
+        agent_slug,
         domain_command,
         domain_session_id,
         agent_name,
@@ -659,14 +653,20 @@ where
         .upsert_domain(DomainSessionUpsert {
             session_id: domain_session_id,
             status: SessionStatus::Active,
-            project_id: if project_id.is_nil() {
+            project: if project_slug.is_empty() {
                 None
             } else {
-                Some(project_id)
+                Some(project_slug.to_string())
             },
-            agent_id,
+            agent: agent_slug.to_string(),
             worker_id: worker_id.to_string(),
             memory_namespace: Some(chat_memory_namespace(agent_name, project_slug)),
+            metadata: json!({
+                "source": "harness_domain",
+                "agent_name": agent_name,
+                "agent_slug": agent_slug.to_string(),
+                "project_slug": project_slug,
+            }),
             domain: Some(DomainState {
                 domain_command: domain_command.to_string(),
             }),

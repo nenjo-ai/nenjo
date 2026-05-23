@@ -3,12 +3,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::Slug;
 use crate::provider::ProviderRuntime;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 
 use super::format::ResultFormat;
 use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle, SubAgentTask};
-use super::slug::SubAgentSlug;
 
 pub(crate) fn parent_tools<P: ProviderRuntime>(
     handle: SubAgentHandle<P>,
@@ -159,7 +159,7 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
                 return Ok(error("agent, task.description, and task.goal are required"));
             }
             let slug = match agent.slug {
-                Some(raw) => Some(SubAgentSlug::parse(raw).map_err(|err| anyhow::anyhow!(err))?),
+                Some(raw) => Some(Slug::parse(raw)?),
                 None => None,
             };
             let result_format = match agent.result_format {
@@ -253,7 +253,7 @@ impl<P: ProviderRuntime> Tool for SendSubAgentsTool<P> {
         let parsed: SendArgs = serde_json::from_value(args)?;
         let mut messages = Vec::with_capacity(parsed.messages.len());
         for message in parsed.messages {
-            messages.push((SubAgentSlug::parse(message.slug)?, message.message));
+            messages.push((Slug::parse(message.slug)?, message.message));
         }
         Ok(ok(json!({ "sent": self.handle.send(messages).await })))
     }
@@ -303,7 +303,7 @@ impl<P: ProviderRuntime> Tool for InspectSubAgentsTool<P> {
         let slugs = parsed
             .sub_agents
             .into_iter()
-            .map(SubAgentSlug::parse)
+            .map(Slug::parse)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ok(json!({
             "sub_agents": self.handle.inspect(slugs, parsed.include_transcript, parsed.limit).await
@@ -348,7 +348,7 @@ impl<P: ProviderRuntime> Tool for StopSubAgentsTool<P> {
         let slugs = parsed
             .sub_agents
             .into_iter()
-            .map(SubAgentSlug::parse)
+            .map(Slug::parse)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ok(
             json!({ "stopped": self.handle.stop(slugs, parsed.reason).await }),

@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// vars used for system/developer prompts.
 ///
 /// The rendered output is returned as a map of dotted keys
-/// (e.g. `"nenjo.available_agents"`) to rendered strings.
+/// (e.g. `"nenjo.project"`) to rendered strings.
 #[derive(Clone)]
 pub struct ContextRenderer {
     blocks: Arc<[super::types::RenderContextBlock]>,

@@ -1,10 +1,9 @@
 use nenjo::{ToolCategory, ToolSpec};
 
-fn model_id_schema() -> serde_json::Value {
+fn model_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target model."
+        "description": "The slug of the target model."
     })
 }
 
@@ -55,19 +54,19 @@ pub fn model_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_models".to_string(),
-            description: "List models so you can find a model id before reading, updating, or deleting one."
+            description: "List models so you can find a model slug before reading, updating, or deleting one."
                 .to_string(),
             parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_model".to_string(),
-            description: "Get one model's name, description, model identifier, provider, temperature, tags, and base_url by id."
+            description: "Get one model's name, description, model identifier, provider, temperature, tags, and base_url by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": model_id_schema() },
+                "required": ["model"],
+                "properties": { "model": model_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -86,13 +85,13 @@ pub fn model_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_model".to_string(),
-            description: "Update one model's name, description, model, model_provider, temperature, tags, or base_url by id using top-level fields."
+            description: "Update one model's name, description, model, model_provider, temperature, tags, or base_url by slug using top-level fields."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["model"],
                 "properties": {
-                    "id": model_id_schema(),
+                    "model": model_ref_schema(),
                     "name": model_update_schema()["properties"]["name"].clone(),
                     "description": model_update_schema()["properties"]["description"].clone(),
                     "model": model_update_schema()["properties"]["model"].clone(),
@@ -107,12 +106,12 @@ pub fn model_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_model".to_string(),
-            description: "Delete one model by id when you want it removed from the manifest."
+            description: "Delete one model by slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
-                "properties": { "id": model_id_schema() },
+                "required": ["model"],
+                "properties": { "model": model_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,

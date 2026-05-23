@@ -47,10 +47,10 @@ pub struct DecodingError {
     pub message: String,
     /// Session associated with the failed command when available.
     pub session_id: Option<Uuid>,
-    /// Project associated with the failed command when available.
-    pub project_id: Option<Uuid>,
-    /// Agent associated with the failed command when available.
-    pub agent_id: Option<Uuid>,
+    /// Project slug associated with the failed command when available.
+    pub project: Option<String>,
+    /// Agent slug associated with the failed command when available.
+    pub agent: Option<String>,
 }
 
 /// Result of decoding an inbound command envelope.

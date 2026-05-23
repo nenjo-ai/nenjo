@@ -217,8 +217,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::ChatMessage {
             id,
             content,
-            project_id,
-            agent_id,
+            project,
+            agent,
             session_id,
             domain_session_id,
             domain_activation,
@@ -230,8 +230,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     ChatCommandRequest {
                         message_id: id.as_deref(),
                         content: &content,
-                        project_id,
-                        agent_id,
+                        project: project.as_deref(),
+                        agent: agent.as_deref(),
                         session_id,
                         domain_session_id,
                         domain_activation,
@@ -240,36 +240,32 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::ChatCancel {
-            project_id,
-            agent_id,
-        } => {
+        Command::ChatCancel { project, agent } => {
             ctx.harness
-                .handle_chat_cancel(&ctx.chat_context(), project_id, agent_id)
+                .handle_chat_cancel(&ctx.chat_context(), &project, agent.as_deref())
                 .await
         }
 
         Command::ChatSessionDelete {
-            project_id,
-            agent_id,
+            project,
+            agent,
             session_id,
         } => {
             ctx.harness
-                .handle_session_delete(&ctx.chat_context(), project_id, agent_id, session_id)
+                .handle_session_delete(&ctx.chat_context(), &project, &agent, session_id)
                 .await
         }
 
         Command::ChatDomainExit {
-            project_id,
-            agent_id,
+            project: _,
+            agent,
             domain_session_id,
             chat_session_id,
         } => {
-            let _ = project_id;
             ctx.harness
                 .handle_domain_exit(
                     &domain_context(&ctx),
-                    agent_id,
+                    &agent,
                     domain_session_id,
                     chat_session_id,
                 )
@@ -278,9 +274,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
         Command::TaskExecute {
             task_id,
-            project_id,
-            routine_id,
-            assigned_agent_id,
+            project,
+            routine,
+            agent,
             execution_run_id,
             payload,
             ..
@@ -293,9 +289,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.task_context(),
                     TaskExecuteRequest {
                         task_id,
-                        project_id,
-                        routine_id,
-                        assigned_agent_id,
+                        project: &project,
+                        routine: routine.as_deref(),
+                        agent: agent.as_deref(),
                         execution_run_id,
                         title: &payload.title,
                         description: payload.description.as_deref().unwrap_or(""),
@@ -330,16 +326,16 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::CronEnable {
-            routine_id,
-            project_id,
+            routine,
+            project,
             schedule,
             timezone,
         } => {
             ctx.harness
                 .handle_cron_enable(
                     &ctx.cron_context(),
-                    routine_id,
-                    project_id,
+                    &routine,
+                    project.as_deref(),
                     &schedule,
                     timezone.as_deref(),
                     None,
@@ -347,31 +343,29 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::CronDisable { routine_id } => {
+        Command::CronDisable { routine } => {
             ctx.harness
-                .handle_cron_disable(&ctx.cron_context(), routine_id)
+                .handle_cron_disable(&ctx.cron_context(), &routine)
                 .await
         }
 
         Command::CronTrigger {
-            routine_id,
-            project_id,
-            ..
+            routine, project, ..
         } => {
             ctx.harness
-                .handle_cron_trigger(&ctx.cron_context(), routine_id, project_id)
+                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref())
                 .await
         }
 
         Command::AgentHeartbeatEnable {
-            agent_id,
+            agent,
             interval,
             timezone,
         } => {
             ctx.harness
                 .handle_agent_heartbeat_enable(
                     &ctx.heartbeat_context(),
-                    agent_id,
+                    &agent,
                     &interval,
                     timezone.as_deref(),
                     None,
@@ -379,31 +373,31 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::AgentHeartbeatDisable { agent_id } => {
+        Command::AgentHeartbeatDisable { agent } => {
             ctx.harness
-                .handle_agent_heartbeat_disable(&ctx.heartbeat_context(), agent_id)
+                .handle_agent_heartbeat_disable(&ctx.heartbeat_context(), &agent)
                 .await
         }
 
-        Command::AgentHeartbeatTrigger { agent_id } => {
+        Command::AgentHeartbeatTrigger { agent } => {
             ctx.harness
-                .handle_agent_heartbeat_trigger(&ctx.heartbeat_context(), agent_id)
+                .handle_agent_heartbeat_trigger(&ctx.heartbeat_context(), &agent)
                 .await
         }
 
         Command::RepoSync {
-            project_id,
+            project,
             repo_url,
             target_branch,
         } => {
             ctx.harness
-                .handle_repo_sync(&repo_context(&ctx), project_id, &repo_url, &target_branch)
+                .handle_repo_sync(&repo_context(&ctx), &project, &repo_url, &target_branch)
                 .await
         }
 
-        Command::RepoUnsync { project_id } => {
+        Command::RepoUnsync { project } => {
             ctx.harness
-                .handle_repo_unsync(&repo_context(&ctx), project_id)
+                .handle_repo_unsync(&repo_context(&ctx), &project)
                 .await
         }
 
@@ -420,9 +414,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
         Command::ManifestChanged {
             resource_type,
-            resource_id,
+            resource,
             action,
-            project_id,
+            project,
             payload,
             encrypted_payload,
         } => ctx
@@ -431,9 +425,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 &ctx.manifest_context(),
                 ManifestChangedCommand {
                     resource_type,
-                    resource_id,
+                    resource: nenjo::Slug::parse(resource)?,
                     action,
-                    project_id,
+                    project: project.map(nenjo::Slug::parse).transpose()?,
                     payload,
                     encrypted_payload,
                 },

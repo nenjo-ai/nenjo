@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
+use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
 };
@@ -49,7 +50,7 @@ fn make_model() -> ModelManifest {
     }
 }
 
-fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest {
+fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
         name: name.into(),
@@ -66,11 +67,11 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -100,13 +101,13 @@ async fn memory_store_writes_to_correct_scope() {
     let project = ProjectManifest {
         id: Uuid::new_v4(),
         name: "webapp".into(),
-        slug: "webapp".into(),
+        slug: Slug::derive("webapp"),
         description: None,
         settings: serde_json::Value::Null,
     };
     let agent = make_agent(
         "coder",
-        model.id,
+        &model,
         "You are a helpful assistant.\n\
          When the user tells you to remember something, use save_memory with scope 'project'.\n\
          Always respond concisely.",
@@ -129,7 +130,7 @@ async fn memory_store_writes_to_correct_scope() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .with_project_context(&project)
@@ -189,13 +190,13 @@ async fn save_artifact_writes_to_workspace() {
     let project = ProjectManifest {
         id: Uuid::new_v4(),
         name: "webapp".into(),
-        slug: "webapp".into(),
+        slug: Slug::derive("webapp"),
         description: None,
         settings: serde_json::Value::Null,
     };
     let agent = make_agent(
         "architect",
-        model.id,
+        &model,
         "You are a helpful assistant.\n\
          When the user asks you to create a document, use save_artifact with scope 'project'.\n\
          Always respond concisely.",
@@ -218,7 +219,7 @@ async fn save_artifact_writes_to_workspace() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("architect")
+        .agent("architect")
         .await
         .unwrap()
         .with_project_context(&project)

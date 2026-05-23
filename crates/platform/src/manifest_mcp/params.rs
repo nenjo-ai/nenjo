@@ -1,6 +1,7 @@
 //! Request parameter types for manifest MCP tools.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
@@ -9,22 +10,23 @@ use super::types::{
     AbilityCreateDocument, AbilityUpdateDocument, AgentCreateDocument, AgentUpdateDocument,
     ContextBlockCreateDocument, ContextBlockUpdateDocument, CouncilCreateDocument,
     CouncilCreateMemberDocument, CouncilMemberUpdateDocument, CouncilUpdateDocument,
-    DomainCreateDocument, DomainUpdateDocument, KnowledgeItemCreateDocument, ModelCreateDocument,
-    ModelUpdateDocument, ProjectCreateDocument, ProjectUpdateDocument, RoutineCreateDocument,
-    RoutineUpdateDocument,
+    DomainCreateDocument, DomainUpdateDocument, KnowledgeDocCreateDocument,
+    KnowledgeDocUpdateDocument, ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument,
+    ProjectUpdateDocument, RoutineCreateDocument, RoutineUpdateDocument,
 };
+use nenjo::Slug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_agent`.
 pub struct AgentsGetParams {
-    pub id: Uuid,
+    pub agent: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_agent_prompt`.
 pub struct AgentPromptGetParams {
-    /// Target agent ID.
-    pub id: Uuid,
+    /// Target agent slug.
+    pub agent: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,8 +39,8 @@ pub struct AgentCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_agent`.
 pub struct AgentUpdateParams {
-    /// Target agent ID.
-    pub id: Uuid,
+    /// Target agent slug.
+    pub agent: Slug,
     #[serde(flatten)]
     pub data: AgentUpdateDocument,
 }
@@ -46,8 +48,8 @@ pub struct AgentUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_agent_prompt`.
 pub struct AgentPromptUpdateParams {
-    /// Target agent ID.
-    pub id: Uuid,
+    /// Target agent slug.
+    pub agent: Slug,
     /// Partial prompt configuration patch for this agent.
     #[serde(default)]
     pub prompt_config: Option<serde_json::Value>,
@@ -56,19 +58,19 @@ pub struct AgentPromptUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_agent`.
 pub struct AgentDeleteParams {
-    pub id: Uuid,
+    pub agent: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_ability`.
 pub struct AbilitiesGetParams {
-    pub id: Uuid,
+    pub ability: ResourceRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_ability_prompt`.
 pub struct AbilityPromptGetParams {
-    pub id: Uuid,
+    pub ability: ResourceRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +83,7 @@ pub struct AbilityCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_ability`.
 pub struct AbilityUpdateParams {
-    pub id: Uuid,
+    pub ability: ResourceRef,
     #[serde(flatten)]
     pub data: AbilityUpdateDocument,
 }
@@ -89,26 +91,26 @@ pub struct AbilityUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_ability_prompt`.
 pub struct AbilityPromptUpdateParams {
-    pub id: Uuid,
+    pub ability: ResourceRef,
     pub prompt_config: AbilityPromptConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_ability`.
 pub struct AbilityDeleteParams {
-    pub id: Uuid,
+    pub ability: ResourceRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_domain`.
 pub struct DomainsGetParams {
-    pub id: Uuid,
+    pub domain: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_domain_prompt`.
 pub struct DomainPromptGetParams {
-    pub id: Uuid,
+    pub domain: Slug,
 }
 
 /// Alias used by the current contract for domain prompt retrieval.
@@ -124,7 +126,7 @@ pub struct DomainCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_domain`.
 pub struct DomainUpdateParams {
-    pub id: Uuid,
+    pub domain: Slug,
     #[serde(flatten)]
     pub data: DomainUpdateDocument,
 }
@@ -132,7 +134,7 @@ pub struct DomainUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_domain_prompt`.
 pub struct DomainPromptUpdateParams {
-    pub id: Uuid,
+    pub domain: Slug,
     pub prompt_config: DomainPromptConfig,
 }
 
@@ -142,13 +144,13 @@ pub type DomainManifestUpdateParams = DomainPromptUpdateParams;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_domain`.
 pub struct DomainDeleteParams {
-    pub id: Uuid,
+    pub domain: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_project`.
 pub struct ProjectsGetParams {
-    pub id: Uuid,
+    pub project: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,7 +163,7 @@ pub struct ProjectCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_project`.
 pub struct ProjectUpdateParams {
-    pub id: Uuid,
+    pub project: Slug,
     #[serde(flatten)]
     pub data: ProjectUpdateDocument,
 }
@@ -169,35 +171,36 @@ pub struct ProjectUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_project`.
 pub struct ProjectDeleteParams {
-    pub id: Uuid,
+    pub project: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_knowledge_item`.
-pub struct KnowledgeItemCreateParams {
+/// Parameters for `create_knowledge_doc`.
+pub struct KnowledgeDocCreateParams {
     #[serde(flatten)]
-    pub data: KnowledgeItemCreateDocument,
+    pub data: KnowledgeDocCreateDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_knowledge_item_content`.
-pub struct KnowledgeItemContentUpdateParams {
-    pub pack_id: Uuid,
-    pub item_id: Uuid,
-    pub content: String,
+/// Parameters for `update_knowledge_doc`.
+pub struct KnowledgeDocUpdateParams {
+    pub pack: Slug,
+    pub doc: Slug,
+    #[serde(flatten)]
+    pub data: KnowledgeDocUpdateDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_knowledge_item`.
-pub struct KnowledgeItemDeleteParams {
-    pub pack_id: Uuid,
-    pub item_id: Uuid,
+/// Parameters for `delete_knowledge_doc`.
+pub struct KnowledgeDocDeleteParams {
+    pub pack: Slug,
+    pub doc: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_routine`.
 pub struct RoutinesGetParams {
-    pub id: Uuid,
+    pub routine: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +213,7 @@ pub struct RoutineCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_routine`.
 pub struct RoutineUpdateParams {
-    pub id: Uuid,
+    pub routine: Slug,
     #[serde(flatten)]
     pub data: RoutineUpdateDocument,
 }
@@ -218,13 +221,13 @@ pub struct RoutineUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_routine`.
 pub struct RoutineDeleteParams {
-    pub id: Uuid,
+    pub routine: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_model`.
 pub struct ModelsGetParams {
-    pub id: Uuid,
+    pub model: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,7 +240,7 @@ pub struct ModelCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_model`.
 pub struct ModelUpdateParams {
-    pub id: Uuid,
+    pub model: Slug,
     #[serde(flatten)]
     pub data: ModelUpdateDocument,
 }
@@ -245,13 +248,13 @@ pub struct ModelUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_model`.
 pub struct ModelDeleteParams {
-    pub id: Uuid,
+    pub model: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_council`.
 pub struct CouncilsGetParams {
-    pub id: Uuid,
+    pub council: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,7 +267,7 @@ pub struct CouncilCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_council`.
 pub struct CouncilUpdateParams {
-    pub id: Uuid,
+    pub council: Slug,
     #[serde(flatten)]
     pub data: CouncilUpdateDocument,
 }
@@ -272,13 +275,13 @@ pub struct CouncilUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_council`.
 pub struct CouncilDeleteParams {
-    pub id: Uuid,
+    pub council: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `add_council_member`.
 pub struct CouncilAddMemberParams {
-    pub council_id: Uuid,
+    pub council: Slug,
     #[serde(flatten)]
     pub data: CouncilCreateMemberDocument,
 }
@@ -286,8 +289,8 @@ pub struct CouncilAddMemberParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_council_member`.
 pub struct CouncilUpdateMemberParams {
-    pub council_id: Uuid,
-    pub agent_id: Uuid,
+    pub council: Slug,
+    pub agent: Slug,
     #[serde(flatten)]
     pub data: CouncilMemberUpdateDocument,
 }
@@ -295,20 +298,20 @@ pub struct CouncilUpdateMemberParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `remove_council_member`.
 pub struct CouncilRemoveMemberParams {
-    pub council_id: Uuid,
-    pub agent_id: Uuid,
+    pub council: Slug,
+    pub agent: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_context_block`.
 pub struct ContextBlocksGetParams {
-    pub id: Uuid,
+    pub context_block: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_context_block_content`.
 pub struct ContextBlockContentGetParams {
-    pub id: Uuid,
+    pub context_block: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,7 +324,7 @@ pub struct ContextBlockCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_context_block`.
 pub struct ContextBlockUpdateParams {
-    pub id: Uuid,
+    pub context_block: Slug,
     #[serde(flatten)]
     pub data: ContextBlockUpdateDocument,
 }
@@ -329,7 +332,7 @@ pub struct ContextBlockUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_context_block_content`.
 pub struct ContextBlockContentUpdateParams {
-    pub id: Uuid,
+    pub context_block: Slug,
     #[serde(default)]
     pub template: Option<String>,
 }
@@ -337,5 +340,29 @@ pub struct ContextBlockContentUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_context_block`.
 pub struct ContextBlockDeleteParams {
-    pub id: Uuid,
+    pub context_block: Slug,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResourceRef {
+    Id(Uuid),
+    Slug(String),
+}
+
+impl ResourceRef {
+    pub fn as_path_segment(&self) -> String {
+        match self {
+            Self::Id(id) => id.to_string(),
+            Self::Slug(slug) => slug.clone(),
+        }
+    }
+}
+
+impl fmt::Display for ResourceRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Id(id) => write!(f, "{id}"),
+            Self::Slug(slug) => f.write_str(slug),
+        }
+    }
 }

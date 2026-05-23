@@ -145,22 +145,19 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .as_ref()
             .map(|provider| provider.manifest_snapshot());
 
-        // If the agent has abilities, register one tool per assigned ability
-        // resolved from the canonical manifest.
+        // If the agent has abilities, register the ability discovery and
+        // invocation broker tools resolved from the canonical manifest.
         if let Some(active_abilities) = manifest
             .as_ref()
             .filter(|_| instance.runtime.execution_mode == AgentExecutionMode::Parent)
             .map(|manifest| resolve_active_abilities(manifest, Some(instance.agent_id()), None))
             .filter(|abilities| !abilities.is_empty())
         {
-            let m = manifest
-                .clone()
-                .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name().into()))?;
             let base_instance = Arc::new(instance.clone());
             instance
                 .runtime
                 .tools
-                .extend(build_ability_tools(&active_abilities, base_instance, m));
+                .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
 
         let instance = Arc::new(instance);
@@ -219,29 +216,42 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     /// Activate a domain by name, returning a new runner with expanded config.
     ///
     /// The domain is looked up from the agent's assigned domains. The returned
-    /// runner appends the domain's `system_addon` to the developer prompt and
-    /// layers in any domain-scoped ability, scope, and MCP activations.
+    /// runner appends the domain's prompt addon and layers in any domain-scoped
+    /// ability and MCP activations.
     ///
     /// ```ignore
     /// let domain_runner = runner.domain_expansion("prd")?;
     /// let output = domain_runner.chat("Create a PRD for auth").await?;
     /// ```
     pub async fn domain_expansion(&self, domain_name: &str) -> Result<AgentRunner<P>> {
-        let domain = self
-            .instance
-            .prompt
-            .context
-            .available_domains
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            super::error::AgentError::MissingManifest(self.instance.name().into())
+        })?;
+        let agent = manifest
+            .agents
             .iter()
-            .find(|d| d.name == domain_name || d.command == domain_name)
-            .with_context(|| {
-                let available: Vec<&str> = self
-                    .instance
-                    .prompt
-                    .context
-                    .available_domains
+            .find(|agent| agent.id == self.instance.agent_id())
+            .ok_or_else(|| {
+                super::error::AgentError::MissingManifest(self.instance.name().into())
+            })?;
+        let assigned_domains: Vec<&DomainManifest> = agent
+            .domains
+            .iter()
+            .filter_map(|domain_slug| {
+                manifest
+                    .domains
                     .iter()
-                    .map(|d| d.name.as_str())
+                    .find(|domain| crate::Slug::derive(&domain.name) == *domain_slug)
+            })
+            .collect();
+        let domain = assigned_domains
+            .iter()
+            .find(|domain| domain.name == domain_name || domain.command == domain_name)
+            .copied()
+            .with_context(|| {
+                let available: Vec<&str> = assigned_domains
+                    .iter()
+                    .map(|domain| domain.name.as_str())
                     .collect();
                 format!("domain '{domain_name}' not found. Available: {available:?}")
             })?;
@@ -258,43 +268,23 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         // Clone the instance and apply domain expansion.
         let mut instance = (*self.instance).clone();
-        let manifest = self
-            .manifest
-            .as_ref()
-            .ok_or_else(|| super::error::AgentError::MissingManifest(instance.name().into()))?;
-
-        merge_domain_scopes(
-            &mut instance.prompt.context.platform_scopes,
-            &session_manifest.platform_scopes,
-        );
-        merge_domain_abilities(
-            &mut instance.prompt.context.available_abilities,
-            manifest,
-            &session_manifest.ability_ids,
-        );
-        merge_domain_mcp_servers(
-            &mut instance.prompt.context.mcp_server_info,
-            manifest,
-            &session_manifest.mcp_server_ids,
-        );
         instance.prompt.context.active_domain = Some(active_domain);
 
         let active_abilities =
             resolve_active_abilities(manifest, Some(instance.agent_id()), Some(&session_manifest));
 
-        // Rebuild assigned ability tools so the visible set matches the
+        // Rebuild ability broker tools so the visible set matches the
         // effective domain-expanded ability assignments.
         instance
             .runtime
             .tools
-            .retain(|tool| !is_ability_tool(tool.name(), &active_abilities));
+            .retain(|tool| !is_ability_tool(tool.name()));
         if !active_abilities.is_empty() {
             let base_instance = Arc::new(instance.clone());
-            instance.runtime.tools.extend(build_ability_tools(
-                &active_abilities,
-                base_instance,
-                manifest.clone(),
-            ));
+            instance
+                .runtime
+                .tools
+                .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
 
         info!(
@@ -326,7 +316,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.run_stream(AgentRun::chat(ChatInput {
             message: message.to_string(),
             history,
-            project_id: None,
+            project: None,
         }))
         .await
     }
@@ -490,8 +480,22 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         };
         messages.push(ChatMessage::user(&user_message));
 
+        let task_id = match &run.kind {
+            AgentRunKind::Task(task) => Some(task.task_id),
+            AgentRunKind::Cron(crate::input::CronInput {
+                task: Some(task), ..
+            }) => Some(task.task_id),
+            AgentRunKind::Gate(crate::input::GateInput {
+                task: Some(task), ..
+            }) => Some(task.task_id),
+            _ => None,
+        };
+
         let join = tokio::spawn(async move {
-            turn_loop::run(&inst, messages, Some(events_tx), Some(loop_pause)).await
+            let mut output =
+                turn_loop::run(&inst, messages, Some(events_tx), Some(loop_pause)).await?;
+            output.task_id = task_id;
+            Ok(output)
         });
 
         Ok(ExecutionHandle {
@@ -533,80 +537,32 @@ fn resolve_active_abilities(
     agent_id: Option<Uuid>,
     active_domain: Option<&DomainManifest>,
 ) -> Vec<AbilityManifest> {
-    let mut ability_ids = Vec::new();
+    let mut abilities = Vec::new();
 
     if let Some(agent_id) = agent_id
         && let Some(agent) = manifest.agents.iter().find(|agent| agent.id == agent_id)
     {
-        ability_ids.extend(agent.ability_ids.iter().copied());
+        abilities.extend(agent.abilities.iter().cloned());
     }
 
     if let Some(domain) = active_domain {
-        for ability_id in &domain.ability_ids {
-            if !ability_ids.contains(ability_id) {
-                ability_ids.push(*ability_id);
+        for ability_name in &domain.abilities {
+            if !abilities.contains(ability_name) {
+                abilities.push(ability_name.clone());
             }
         }
     }
 
-    ability_ids
+    abilities
         .into_iter()
-        .filter_map(|ability_id| {
+        .filter_map(|ability_name| {
             manifest
                 .abilities
                 .iter()
-                .find(|ability| ability.id == ability_id)
+                .find(|ability| ability.name == ability_name)
                 .cloned()
         })
         .collect()
-}
-
-fn merge_domain_scopes(target: &mut Vec<String>, additional_scopes: &[String]) {
-    for scope in additional_scopes {
-        if !target.iter().any(|existing| existing == scope) {
-            target.push(scope.clone());
-        }
-    }
-}
-
-fn merge_domain_abilities(
-    target: &mut Vec<AbilityManifest>,
-    manifest: &Manifest,
-    activated_ids: &[Uuid],
-) {
-    for ability_id in activated_ids {
-        if let Some(ability) = manifest
-            .abilities
-            .iter()
-            .find(|candidate| &candidate.id == ability_id)
-            .cloned()
-            && !target.iter().any(|existing| existing.id == ability.id)
-        {
-            target.push(ability);
-        }
-    }
-}
-
-fn merge_domain_mcp_servers(
-    target: &mut Vec<(String, String)>,
-    manifest: &Manifest,
-    activated_ids: &[Uuid],
-) {
-    for server_id in activated_ids {
-        if let Some(server) = manifest
-            .mcp_servers
-            .iter()
-            .find(|candidate| &candidate.id == server_id)
-        {
-            let entry = (
-                server.display_name.clone(),
-                server.description.clone().unwrap_or_default(),
-            );
-            if !target.iter().any(|existing| existing.0 == entry.0) {
-                target.push(entry);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

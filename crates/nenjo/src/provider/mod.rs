@@ -2,7 +2,7 @@
 //!
 //! Holds the bootstrap manifest, LLM provider factory, tool factory, memory
 //! backend, and provider-level knowledge packs. Build manifest-backed agents
-//! via [`Provider::agent_by_id`] or [`Provider::agent_by_name`], or start a
+//! via [`Provider::agent`], or start a
 //! blank agent builder with [`Provider::new_agent`].
 
 pub mod builder;
@@ -10,7 +10,7 @@ pub mod error;
 pub mod runtime;
 pub mod tool_factory;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -31,6 +31,7 @@ use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
 use crate::tools::Tool;
 use crate::types::RenderContextVars;
+use crate::{IntoSlug, Slug};
 use tracing::debug;
 
 // ---------------------------------------------------------------------------
@@ -40,8 +41,7 @@ use tracing::debug;
 /// The root object for the Nenjo SDK.
 ///
 /// Created via [`ProviderBuilder`]. Holds the bootstrap manifest and runtime
-/// factories. Use [`agent_by_id`](Self::agent_by_id) or
-/// [`agent_by_name`](Self::agent_by_name) for manifest-backed agents, or
+/// factories. Use [`agent`](Self::agent) for manifest-backed agents, or
 /// [`new_agent`](Self::new_agent) when the caller supplies an agent manifest
 /// and model explicitly.
 pub struct Provider<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
@@ -71,133 +71,78 @@ pub(crate) struct ProviderInner<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, M
 
 pub(crate) struct ManifestIndex {
     manifest: Arc<Manifest>,
-    agents_by_id: HashMap<Uuid, usize>,
-    agents_by_name: HashMap<String, usize>,
-    models_by_id: HashMap<Uuid, usize>,
-    routines_by_id: HashMap<Uuid, usize>,
-    projects_by_id: HashMap<Uuid, usize>,
-    projects_by_slug: HashMap<String, usize>,
-    abilities_by_id: HashMap<Uuid, usize>,
-    domains_by_id: HashMap<Uuid, usize>,
-    mcp_servers_by_id: HashMap<Uuid, usize>,
+    agents: HashMap<Slug, usize>,
+    models: HashMap<Slug, usize>,
+    routines: HashMap<Slug, usize>,
+    projects: HashMap<Slug, usize>,
+    councils: HashMap<Slug, usize>,
 }
 
 impl ManifestIndex {
     fn new(manifest: Arc<Manifest>) -> Self {
         Self {
-            agents_by_id: index_by_id(manifest.agents.iter().map(|agent| agent.id)),
-            agents_by_name: index_by_name(manifest.agents.iter().map(|agent| agent.name.as_str())),
-            models_by_id: index_by_id(manifest.models.iter().map(|model| model.id)),
-            routines_by_id: index_by_id(manifest.routines.iter().map(|routine| routine.id)),
-            projects_by_id: index_by_id(manifest.projects.iter().map(|project| project.id)),
-            projects_by_slug: index_by_name(
+            agents: index_by_name(manifest.agents.iter().map(|agent| agent.name.as_str())),
+            models: index_by_name(manifest.models.iter().map(|model| model.name.as_str())),
+            routines: index_by_name(
                 manifest
-                    .projects
+                    .routines
                     .iter()
-                    .map(|project| project.slug.as_str()),
+                    .map(|routine| routine.name.as_str()),
             ),
-            abilities_by_id: index_by_id(manifest.abilities.iter().map(|ability| ability.id)),
-            domains_by_id: index_by_id(manifest.domains.iter().map(|domain| domain.id)),
-            mcp_servers_by_id: index_by_id(manifest.mcp_servers.iter().map(|server| server.id)),
+            projects: index_by_slug(manifest.projects.iter().map(|project| &project.slug)),
+            councils: index_by_name(
+                manifest
+                    .councils
+                    .iter()
+                    .map(|council| council.name.as_str()),
+            ),
             manifest,
         }
     }
 
-    fn agent_by_id(&self, id: Uuid) -> Option<&AgentManifest> {
-        self.agents_by_id
-            .get(&id)
+    fn agent(&self, slug: &Slug) -> Option<&AgentManifest> {
+        self.agents
+            .get(slug)
             .map(|index| &self.manifest.agents[*index])
     }
 
-    fn agent_by_name(&self, name: &str) -> Option<&AgentManifest> {
-        self.agents_by_name
-            .get(name)
-            .map(|index| &self.manifest.agents[*index])
-    }
-
-    fn model_by_id(&self, id: Uuid) -> Option<&ModelManifest> {
-        self.models_by_id
-            .get(&id)
+    fn model(&self, slug: &Slug) -> Option<&ModelManifest> {
+        self.models
+            .get(slug)
             .map(|index| &self.manifest.models[*index])
     }
 
-    fn routine_by_id(&self, id: Uuid) -> Option<&crate::manifest::RoutineManifest> {
-        self.routines_by_id
-            .get(&id)
+    fn routine(&self, slug: &Slug) -> Option<&crate::manifest::RoutineManifest> {
+        self.routines
+            .get(slug)
             .map(|index| &self.manifest.routines[*index])
     }
 
-    fn project_by_id(&self, id: Uuid) -> Option<&ProjectManifest> {
-        self.projects_by_id
-            .get(&id)
-            .map(|index| &self.manifest.projects[*index])
-    }
-
-    fn project_by_slug(&self, slug: &str) -> Option<&ProjectManifest> {
-        self.projects_by_slug
+    fn project(&self, slug: &Slug) -> Option<&ProjectManifest> {
+        self.projects
             .get(slug)
             .map(|index| &self.manifest.projects[*index])
     }
 
-    fn abilities_by_ids(&self, ids: &[Uuid]) -> Vec<crate::manifest::AbilityManifest> {
-        let mut seen = HashSet::with_capacity(ids.len());
-        ids.iter()
-            .filter_map(|id| {
-                if !seen.insert(*id) {
-                    return None;
-                }
-                self.abilities_by_id
-                    .get(id)
-                    .map(|index| self.manifest.abilities[*index].clone())
-            })
-            .collect()
-    }
-
-    fn domains_by_ids(&self, ids: &[Uuid]) -> Vec<crate::manifest::DomainManifest> {
-        let mut seen = HashSet::with_capacity(ids.len());
-        ids.iter()
-            .filter_map(|id| {
-                if !seen.insert(*id) {
-                    return None;
-                }
-                self.domains_by_id
-                    .get(id)
-                    .map(|index| self.manifest.domains[*index].clone())
-            })
-            .collect()
-    }
-
-    fn mcp_server_info_by_ids(&self, ids: &[Uuid]) -> Vec<(String, String)> {
-        let mut seen = HashSet::with_capacity(ids.len());
-        ids.iter()
-            .filter_map(|id| {
-                if !seen.insert(*id) {
-                    return None;
-                }
-                self.mcp_servers_by_id.get(id).map(|index| {
-                    let server = &self.manifest.mcp_servers[*index];
-                    (
-                        server.display_name.clone(),
-                        server.description.clone().unwrap_or_default(),
-                    )
-                })
-            })
-            .collect()
+    fn council(&self, slug: &Slug) -> Option<&crate::manifest::CouncilManifest> {
+        self.councils
+            .get(slug)
+            .map(|index| &self.manifest.councils[*index])
     }
 }
 
-fn index_by_id(ids: impl Iterator<Item = Uuid>) -> HashMap<Uuid, usize> {
+fn index_by_slug<'a>(slugs: impl Iterator<Item = &'a Slug>) -> HashMap<Slug, usize> {
     let mut index = HashMap::new();
-    for (position, id) in ids.enumerate() {
-        index.entry(id).or_insert(position);
+    for (position, slug) in slugs.enumerate() {
+        index.entry(slug.clone()).or_insert(position);
     }
     index
 }
 
-fn index_by_name<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<String, usize> {
+fn index_by_name<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<Slug, usize> {
     let mut index = HashMap::new();
     for (position, name) in names.enumerate() {
-        index.entry(name.to_string()).or_insert(position);
+        index.entry(Slug::derive(name)).or_insert(position);
     }
     index
 }
@@ -279,24 +224,14 @@ where
         }
     }
 
-    /// Get an agent builder by agent ID.
-    pub async fn agent_by_id(&self, id: Uuid) -> Result<AgentBuilder<Self>, ProviderError> {
+    /// Get an agent builder by agent slug.
+    pub async fn agent(&self, slug: impl IntoSlug) -> Result<AgentBuilder<Self>, ProviderError> {
+        let slug = slug.into_slug();
         let agent = self
             .inner
             .manifest
-            .agent_by_id(id)
-            .ok_or_else(|| ProviderError::AgentNotFound(id.to_string()))?;
-
-        self.build_agent(agent).await
-    }
-
-    /// Get an agent builder by agent name.
-    pub async fn agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError> {
-        let agent = self
-            .inner
-            .manifest
-            .agent_by_name(name)
-            .ok_or_else(|| ProviderError::AgentNotFound(name.to_string()))?;
+            .agent(&slug)
+            .ok_or_else(|| ProviderError::AgentNotFound(slug.to_string()))?;
 
         self.build_agent(agent).await
     }
@@ -333,37 +268,64 @@ where
         self.inner.services.tool_factory.as_ref()
     }
 
-    pub(crate) fn find_agent_manifest(&self, name: &str) -> Option<&AgentManifest> {
-        self.inner.manifest.agent_by_name(name)
+    pub(crate) fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {
+        self.inner.manifest.agent(slug)
     }
 
-    pub(crate) fn find_project(&self, id: Uuid) -> Option<&ProjectManifest> {
-        self.inner.manifest.project_by_id(id)
+    pub(crate) fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest> {
+        self.inner.manifest.project(slug)
     }
 
     /// Look up a project manifest by slug from the indexed bootstrap manifest.
-    pub fn project_by_slug(&self, slug: &str) -> Option<&ProjectManifest> {
-        self.inner.manifest.project_by_slug(slug)
+    pub fn project(&self, slug: impl IntoSlug) -> Result<&ProjectManifest, ProviderError> {
+        let slug = slug.into_slug();
+        self.inner
+            .manifest
+            .project(&slug)
+            .ok_or_else(|| ProviderError::ProjectNotFound(slug.to_string()))
+    }
+
+    /// Look up a model manifest by slug from the indexed bootstrap manifest.
+    pub fn model(&self, slug: impl IntoSlug) -> Result<&ModelManifest, ProviderError> {
+        let slug = slug.into_slug();
+        self.inner
+            .manifest
+            .model(&slug)
+            .ok_or_else(|| ProviderError::ModelNotFound(slug.to_string()))
+    }
+
+    /// Look up a council manifest by slug from the indexed bootstrap manifest.
+    pub fn council(
+        &self,
+        slug: impl IntoSlug,
+    ) -> Result<&crate::manifest::CouncilManifest, ProviderError> {
+        let slug = slug.into_slug();
+        self.inner
+            .manifest
+            .council(&slug)
+            .ok_or_else(|| ProviderError::CouncilNotFound(slug.to_string()))
     }
 
     // -----------------------------------------------------------------------
     // Routine execution
     // -----------------------------------------------------------------------
 
-    /// Look up a routine by ID and return a builder for configuring execution.
+    /// Look up a routine by slug and return a builder for configuring execution.
     ///
     /// ```ignore
-    /// let task = nenjo::TaskInput::new(project_id, task_id, "Fix auth", "Repair the login flow");
-    /// let result = provider.routine_by_id(id)?
+    /// let task = nenjo::TaskInput::new("demo_project", "Fix auth", "Repair the login flow")
+    ///     .with_task_id(task_id);
+    /// let result = provider.routine("triage")?
     ///     .run(task)
     ///     .await?;
     /// ```
-    pub fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError> {
+    pub fn routine(&self, slug: impl IntoSlug) -> Result<RoutineRunner<Self>, ProviderError> {
+        let slug = slug.into_slug();
         let routine = self
             .inner
             .manifest
-            .routine_by_id(routine_id)
-            .ok_or_else(|| ProviderError::RoutineNotFound(routine_id.to_string()))?
+            .routine(&slug)
+            .ok_or_else(|| ProviderError::RoutineNotFound(slug.to_string()))?
             .clone();
 
         Ok(RoutineRunner::new(self.clone(), routine))
@@ -434,32 +396,23 @@ where
     }
 
     fn resolve_model(&self, agent: &AgentManifest) -> Result<ModelManifest, ProviderError> {
-        let model_id = agent.model_id.ok_or_else(|| {
+        let model_slug = agent.model.as_ref().ok_or_else(|| {
             ProviderError::ModelNotFound(format!("agent '{}' has no model assigned", agent.name))
         })?;
 
         self.inner
             .manifest
-            .model_by_id(model_id)
+            .model(model_slug)
             .cloned()
             .ok_or_else(|| {
                 ProviderError::ModelNotFound(format!(
-                    "model {model_id} not found (agent '{}')",
+                    "model {model_slug} not found (agent '{}')",
                     agent.name
                 ))
             })
     }
 
     fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext {
-        let abilities: Vec<_> = self.inner.manifest.abilities_by_ids(&agent.ability_ids);
-
-        let domains: Vec<_> = self.inner.manifest.domains_by_ids(&agent.domain_ids);
-
-        let mcp_server_info: Vec<(String, String)> = self
-            .inner
-            .manifest
-            .mcp_server_info_by_ids(&agent.mcp_server_ids);
-
         let current_project = self
             .inner
             .manifest
@@ -470,7 +423,7 @@ where
             .unwrap_or_else(|| ProjectManifest {
                 id: Uuid::nil(),
                 name: String::new(),
-                slug: String::new(),
+                slug: Slug::derive("project"),
                 description: None,
                 settings: serde_json::Value::Null,
             });
@@ -478,13 +431,7 @@ where
         PromptContext {
             agent_name: agent.name.clone(),
             agent_description: agent.description.clone().unwrap_or_default(),
-            available_agents: self.inner.manifest.manifest.agents.clone(),
-            available_routines: self.inner.manifest.manifest.routines.clone(),
             current_project,
-            available_abilities: abilities,
-            available_domains: domains,
-            mcp_server_info,
-            platform_scopes: agent.platform_scopes.clone(),
             active_domain: None,
             append_active_domain_addon: true,
             docs_base_dir: Some(self.inner.services.tool_factory.workspace_dir()),
@@ -542,12 +489,12 @@ where
         self.tool_factory()
     }
 
-    fn find_agent_manifest(&self, name: &str) -> Option<&AgentManifest> {
-        Provider::find_agent_manifest(self, name)
+    fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {
+        Provider::find_agent_manifest(self, slug)
     }
 
-    fn find_project(&self, id: Uuid) -> Option<&ProjectManifest> {
-        Provider::find_project(self, id)
+    fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest> {
+        Provider::find_project(self, slug)
     }
 
     fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>> {
@@ -569,16 +516,12 @@ where
         Provider::new_agent(self)
     }
 
-    async fn build_agent_by_id(&self, id: Uuid) -> Result<AgentBuilder<Self>, ProviderError> {
-        Provider::agent_by_id(self, id).await
+    async fn agent(&self, slug: &Slug) -> Result<AgentBuilder<Self>, ProviderError> {
+        Provider::agent(self, slug.as_str()).await
     }
 
-    async fn build_agent_by_name(&self, name: &str) -> Result<AgentBuilder<Self>, ProviderError> {
-        Provider::agent_by_name(self, name).await
-    }
-
-    fn routine_by_id(&self, routine_id: Uuid) -> Result<RoutineRunner<Self>, ProviderError> {
-        Provider::routine_by_id(self, routine_id)
+    fn routine(&self, slug: &Slug) -> Result<RoutineRunner<Self>, ProviderError> {
+        Provider::routine(self, slug.as_str())
     }
 }
 

@@ -15,7 +15,7 @@ use nenjo::manifest::{
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-use nenjo::{Tool, ToolCategory, ToolResult};
+use nenjo::{Slug, Tool, ToolCategory, ToolResult};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -88,6 +88,25 @@ fn get_api_key() -> Option<String> {
     }
 }
 
+fn skip_on_provider_rate_limit(
+    result: Result<nenjo::TurnOutput>,
+    context: &str,
+) -> Option<nenjo::TurnOutput> {
+    match result {
+        Ok(output) => Some(output),
+        Err(error) if is_provider_rate_limit(&error) => {
+            eprintln!("{context}: provider rate limited — skipping: {error}");
+            None
+        }
+        Err(error) => panic!("{context}: {error:?}"),
+    }
+}
+
+fn is_provider_rate_limit(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("429 too many requests") || message.contains("rate limit")
+}
+
 fn make_model() -> ModelManifest {
     ModelManifest {
         id: Uuid::new_v4(),
@@ -104,13 +123,13 @@ fn make_project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     }
 }
 
-fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest {
+fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
         name: name.into(),
@@ -127,11 +146,11 @@ fn make_agent(name: &str, model_id: Uuid, system_prompt: &str) -> AgentManifest 
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(Slug::derive(&model.name)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -154,7 +173,7 @@ async fn tool_call_round_trip() {
     let model = make_model();
     let agent = make_agent(
         "weather-agent",
-        model.id,
+        &model,
         "You are a helpful weather assistant. When asked about the weather, \
          use the get_weather tool to look it up. After getting the result, \
          summarize it for the user.",
@@ -176,7 +195,7 @@ async fn tool_call_round_trip() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("weather-agent")
+        .agent("weather-agent")
         .await
         .unwrap()
         .build()
@@ -187,10 +206,15 @@ async fn tool_call_round_trip() {
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "get_weather");
 
-    let output = runner
-        .chat("What's the weather like in San Francisco?")
-        .await
-        .expect("chat should succeed");
+    let output = match skip_on_provider_rate_limit(
+        runner
+            .chat("What's the weather like in San Francisco?")
+            .await,
+        "chat should succeed",
+    ) {
+        Some(output) => output,
+        None => return,
+    };
 
     println!("--- Tool Call Test ---");
     println!("Response: {}", output.text);
@@ -230,7 +254,7 @@ async fn memory_store_recall_with_real_llm() {
     let project = make_project();
     let agent = make_agent(
         "memory-agent",
-        model.id,
+        &model,
         "You are a helpful assistant with persistent memory.\n\
          When the user tells you something to remember, use save_memory with scope 'project'.\n\
          When asked what you know, use recall_memory first.\n\
@@ -258,7 +282,7 @@ async fn memory_store_recall_with_real_llm() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("memory-agent")
+        .agent("memory-agent")
         .await
         .unwrap()
         .with_project_context(&project)
@@ -279,10 +303,15 @@ async fn memory_store_recall_with_real_llm() {
     );
 
     // Ask the agent to store something
-    let output = runner
-        .chat("Remember that my favorite programming language is Rust. Category: preferences. Scope: project.")
-        .await
-        .expect("store chat should succeed");
+    let output = match skip_on_provider_rate_limit(
+        runner
+            .chat("Remember that my favorite programming language is Rust. Category: preferences. Scope: project.")
+            .await,
+        "store chat should succeed",
+    ) {
+        Some(output) => output,
+        None => return,
+    };
 
     println!("--- Memory Store ---");
     println!("Response: {}", output.text);
@@ -322,10 +351,15 @@ async fn memory_store_recall_with_real_llm() {
     assert!(has_rust, "stored fact should mention Rust");
 
     // Now ask the agent to forget it
-    let output = runner
-        .chat("Forget what you stored about my favorite programming language. Scope: project.")
-        .await
-        .expect("forget chat should succeed");
+    let output = match skip_on_provider_rate_limit(
+        runner
+            .chat("Forget what you stored about my favorite programming language. Scope: project.")
+            .await,
+        "forget chat should succeed",
+    ) {
+        Some(output) => output,
+        None => return,
+    };
 
     println!("--- Memory Forget ---");
     println!("Response: {}", output.text);
@@ -366,24 +400,20 @@ async fn assigned_ability_tool_with_real_llm() {
     };
 
     let model = make_model();
-    let code_review_ability_id = Uuid::new_v4();
-
     // Agent with an ability assigned
     let mut agent = make_agent(
         "developer",
-        model.id,
+        &model,
         "You are a senior software developer. \
          When asked to review code, use the code_review ability.",
     );
-    agent.ability_ids = vec![code_review_ability_id];
+    agent.abilities = vec!["code_review".into()];
 
     // The ability: code review with specific instructions
     let ability = AbilityManifest {
-        id: code_review_ability_id,
+        id: Uuid::new_v4(),
         name: "code_review".into(),
-        tool_name: "code_review".into(),
-        path: String::new(),
-        display_name: Some("Code Review".into()),
+        path: None,
         description: Some("Reviews code for bugs, style issues, and improvements".into()),
         activation_condition: "When the user asks for a code review".into(),
         prompt_config: AbilityPromptConfig {
@@ -395,7 +425,7 @@ async fn assigned_ability_tool_with_real_llm() {
                 .into(),
         },
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
+        mcp_servers: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -418,26 +448,39 @@ async fn assigned_ability_tool_with_real_llm() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("developer")
+        .agent("developer")
         .await
         .unwrap()
         .build()
         .await
         .unwrap();
 
-    // Verify per-ability tool is present
+    // Verify assigned abilities are exposed through broker tools.
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"code_review"),
-        "should have code_review tool, got: {tool_names:?}"
+        tool_names.contains(&"list_abilities"),
+        "should have list_abilities tool, got: {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"use_ability"),
+        "should have use_ability tool, got: {tool_names:?}"
+    );
+    assert!(
+        !tool_names.contains(&"code_review"),
+        "ability name should not be a top-level tool, got: {tool_names:?}"
     );
 
     // Ask the agent to review some code — it should activate the code_review ability
-    let output = runner
-        .chat("Please review this code:\n\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n```")
-        .await
-        .expect("chat should succeed");
+    let output = match skip_on_provider_rate_limit(
+        runner
+            .chat("Please review this code:\n\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n```")
+            .await,
+        "chat should succeed",
+    ) {
+        Some(output) => output,
+        None => return,
+    };
 
     println!("--- Assigned Ability Tool Test ---");
     println!("Response: {}", output.text);
@@ -501,10 +544,10 @@ async fn domain_expansion_with_real_llm() {
     // Agent with a domain assigned
     let mut agent = make_agent(
         "product-manager",
-        model.id,
+        &model,
         "You are a product manager. You can enter domain modes for specialized work.",
     );
-    agent.domain_ids = vec![prd_domain_id];
+    agent.domains = vec![Slug::derive("prd")];
 
     // The PRD domain with specific prompt overlay and guidelines
     let domain = DomainManifest {
@@ -515,8 +558,8 @@ async fn domain_expansion_with_real_llm() {
         description: Some("Write product requirements documents".into()),
         command: "/prd".into(),
         platform_scopes: vec![],
-        ability_ids: vec![],
-        mcp_server_ids: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some("You are now in PRD writing mode. Structure your response as a PRD with sections: Problem Statement, Goals, Non-Goals, User Stories, and Success Metrics. Be concise — one sentence per bullet point.".into()),
         },
@@ -539,7 +582,7 @@ async fn domain_expansion_with_real_llm() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("product-manager")
+        .agent("product-manager")
         .await
         .unwrap()
         .build()
@@ -559,10 +602,15 @@ async fn domain_expansion_with_real_llm() {
 
     // Ask the agent to write a PRD — the domain's prompt overlay should
     // guide it to produce structured output
-    let output = prd_runner
-        .chat("Write a PRD for a user authentication system with SSO support")
-        .await
-        .expect("chat should succeed");
+    let output = match skip_on_provider_rate_limit(
+        prd_runner
+            .chat("Write a PRD for a user authentication system with SSO support")
+            .await,
+        "chat should succeed",
+    ) {
+        Some(output) => output,
+        None => return,
+    };
 
     println!("--- Domain Expansion Test ---");
     println!("Response: {}", output.text);
@@ -596,7 +644,7 @@ async fn domain_expansion_unknown_domain_fails() {
 
     let model = make_model();
     let manifest = Manifest {
-        agents: vec![make_agent("agent", model.id, "You are a test agent.")],
+        agents: vec![make_agent("agent", &model, "You are a test agent.")],
         models: vec![model],
         projects: vec![make_project()],
         ..Default::default()
@@ -611,7 +659,7 @@ async fn domain_expansion_unknown_domain_fails() {
         .unwrap();
 
     let runner = provider
-        .agent_by_name("agent")
+        .agent("agent")
         .await
         .unwrap()
         .build()

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use nenjo::Slug;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -12,8 +13,8 @@ use crate::{Harness, ProviderRuntime};
 /// An active domain session holding the domain-expanded runner and state.
 pub struct DomainSession<P: ProviderRuntime = nenjo::provider::ErasedProvider> {
     pub runner: nenjo::AgentRunner<P>,
-    pub agent_id: Uuid,
-    pub project_id: Uuid,
+    pub agent: Slug,
+    pub project: Option<Slug>,
     pub domain_command: String,
 }
 
@@ -29,22 +30,17 @@ where
     pub async fn rebuild_domain_session(
         &self,
         session_id: Uuid,
-        agent_id: Uuid,
-        project_id: Uuid,
+        agent: Slug,
+        project: Option<Slug>,
         domain_command: &str,
     ) -> Result<DomainSession<P>> {
         let provider = self.provider();
-        let mut builder = provider.build_agent_by_id(agent_id).await?;
-        if !project_id.is_nil() {
-            let manifest = provider.manifest_snapshot();
-            if let Some(project) = manifest
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-            {
-                builder = builder.with_project_context(project);
+        let mut builder = provider.agent(&agent).await?;
+        if let Some(project_slug) = &project {
+            if let Some(project_manifest) = provider.find_project(project_slug) {
+                builder = builder.with_project_context(project_manifest);
             } else {
-                warn!(%project_id, %agent_id, "Project not found in manifest for domain session rebuild");
+                warn!(project = %project_slug, agent = %agent, "Project not found in manifest for domain session rebuild");
             }
         }
         let base_runner = builder.build().await?;
@@ -61,8 +57,8 @@ where
 
         Ok(DomainSession {
             runner,
-            agent_id,
-            project_id,
+            agent,
+            project,
             domain_command: domain_command.to_string(),
         })
     }

@@ -258,7 +258,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
         self.render_ctx_extra.knowledge_vars.extend(
             nenjo_knowledge::tools::knowledge_pack_prompt_vars(
-                entry.selector(),
+                entry.knowledge_ref(),
                 entry.pack().as_ref(),
             ),
         );

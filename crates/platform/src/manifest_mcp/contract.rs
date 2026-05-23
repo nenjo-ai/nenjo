@@ -13,11 +13,10 @@ use super::params::{
     CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainPromptGetParams, DomainPromptUpdateParams, DomainUpdateParams,
-    DomainsGetParams, KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams,
-    KnowledgeItemDeleteParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
-    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
-    ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
-    RoutinesGetParams,
+    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
+    ProjectDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
+    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
 };
 use super::tools::all_tools;
 
@@ -145,14 +144,8 @@ impl ManifestMcpContract {
                 }
                 to_json(backend.list_knowledge_packs().await?)
             }
-            "list_knowledge_docs" => to_json(backend.list_knowledge_docs(params).await?),
-            "read_knowledge_doc_manifest" => {
-                to_json(backend.read_knowledge_doc_manifest(params).await?)
-            }
             "read_knowledge_doc" => to_json(backend.read_knowledge_doc(params).await?),
             "search_knowledge" => to_json(backend.search_knowledge(params).await?),
-            "search_knowledge_paths" => to_json(backend.search_knowledge_paths(params).await?),
-            "list_knowledge_tree" => to_json(backend.list_knowledge_tree(params).await?),
             "list_knowledge_neighbors" => to_json(backend.list_knowledge_neighbors(params).await?),
             "list_projects" => {
                 if !params.is_null() {
@@ -179,17 +172,17 @@ impl ManifestMcpContract {
                 let args: ProjectDeleteParams = serde_json::from_value(params)?;
                 to_json(backend.delete_project(args).await?)
             }
-            "create_knowledge_item" => {
-                let args: KnowledgeItemCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_knowledge_item(args).await?)
+            "create_knowledge_doc" => {
+                let args: KnowledgeDocCreateParams = serde_json::from_value(params)?;
+                to_json(backend.create_knowledge_doc(args).await?)
             }
-            "update_knowledge_item_content" => {
-                let args: KnowledgeItemContentUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_knowledge_item_content(args).await?)
+            "update_knowledge_doc" => {
+                let args: KnowledgeDocUpdateParams = serde_json::from_value(params)?;
+                to_json(backend.update_knowledge_doc(args).await?)
             }
-            "delete_knowledge_item" => {
-                let args: KnowledgeItemDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_knowledge_item(args).await?)
+            "delete_knowledge_doc" => {
+                let args: KnowledgeDocDeleteParams = serde_json::from_value(params)?;
+                to_json(backend.delete_knowledge_doc(args).await?)
             }
             "list_routines" => {
                 if !params.is_null() {

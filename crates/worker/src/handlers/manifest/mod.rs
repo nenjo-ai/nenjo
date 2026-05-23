@@ -8,8 +8,7 @@ mod services;
 
 use std::sync::Arc;
 
-use uuid::Uuid;
-
+use nenjo::Slug;
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
 use nenjo_harness::{Harness, HarnessError, ProviderRuntime, Result};
 
@@ -31,9 +30,9 @@ where
 
 pub struct ManifestChangedCommand {
     pub resource_type: ResourceType,
-    pub resource_id: Uuid,
+    pub resource: Slug,
     pub action: ResourceAction,
-    pub project_id: Option<Uuid>,
+    pub project: Option<Slug>,
     pub payload: Option<serde_json::Value>,
     pub encrypted_payload: Option<EncryptedPayload>,
 }
@@ -74,9 +73,9 @@ where
     ) -> Result<()> {
         let ManifestChangedCommand {
             resource_type,
-            resource_id,
+            resource,
             action,
-            project_id,
+            project,
             payload,
             encrypted_payload,
         } = command;
@@ -87,9 +86,9 @@ where
             &self.manifests().snapshot(),
             ManifestChange {
                 resource_type,
-                resource_id,
+                resource,
                 action,
-                project_id,
+                project,
                 payload,
                 encrypted_payload,
             },
