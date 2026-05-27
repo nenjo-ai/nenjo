@@ -48,15 +48,18 @@ impl ManifestStore for RecordingManifestStore {
         Ok(())
     }
 
-    async fn full_refresh(&self, _client: &nenjo::client::NenjoClient) -> Result<Manifest> {
+    async fn full_refresh(
+        &self,
+        _client: &nenjo_platform::api_client::ApiClient,
+    ) -> Result<Manifest> {
         Ok(Manifest::default())
     }
 
     async fn sync_document_metadata(
         &self,
-        _client: &nenjo::client::NenjoClient,
+        _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo::client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
     ) -> Result<()> {
         self.metadata_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -64,9 +67,9 @@ impl ManifestStore for RecordingManifestStore {
 
     async fn sync_document(
         &self,
-        _client: &nenjo::client::NenjoClient,
+        _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo::client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
     ) -> Result<()> {
         self.content_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -75,7 +78,7 @@ impl ManifestStore for RecordingManifestStore {
     async fn remove_document(
         &self,
         doc: &Slug,
-        _metadata: Option<&nenjo::client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
     ) -> Result<()> {
         self.removals.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -164,7 +167,7 @@ impl TestHarness {
         &self,
     ) -> ManifestCommandContext<Arc<RecordingManifestStore>, Arc<RecordingMcpRuntime>> {
         ManifestCommandContext {
-            client: Arc::new(nenjo::client::NenjoClient::new(
+            client: Arc::new(nenjo_platform::api_client::ApiClient::new(
                 "http://127.0.0.1:9",
                 "test",
             )),

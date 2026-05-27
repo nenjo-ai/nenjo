@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta, NenjoClient};
+use crate::api_client::{ApiClient, DocumentSyncEdge, DocumentSyncMeta};
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo_platform::library_knowledge::{
@@ -161,7 +161,7 @@ pub fn compute_diff(
 /// Network/API errors are logged and skipped (soft-fail).
 /// Filesystem errors are propagated (hard-fail).
 pub async fn sync_all(
-    api: &NenjoClient,
+    api: &ApiClient,
     nenjo_home: &Path,
     state_dir: &Path,
     _projects: &[nenjo::manifest::ProjectManifest],
@@ -209,7 +209,7 @@ pub async fn sync_all(
 
 /// Sync one library knowledge pack by slug.
 pub async fn sync_pack_by_slug(
-    api: &NenjoClient,
+    api: &ApiClient,
     nenjo_home: &Path,
     state_dir: &Path,
     pack_slug: &nenjo::Slug,
@@ -236,7 +236,7 @@ pub async fn sync_pack_by_slug(
 
 /// Sync knowledge documents for a single pack.
 pub async fn sync_pack(
-    api: &NenjoClient,
+    api: &ApiClient,
     pack_dir: &Path,
     pack_slug: &str,
     state_dir: &Path,
@@ -456,7 +456,7 @@ fn reconcile_document_file_location(pack_dir: &Path, from: &str, to: &str) -> Re
 }
 
 pub async fn sync_document(
-    api: &NenjoClient,
+    api: &ApiClient,
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
     state_dir: &Path,
@@ -499,7 +499,7 @@ pub async fn sync_document(
 }
 
 pub async fn sync_document_metadata(
-    api: &NenjoClient,
+    api: &ApiClient,
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
     metadata: Option<&DocumentSyncMeta>,

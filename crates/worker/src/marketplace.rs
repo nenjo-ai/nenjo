@@ -8,9 +8,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
-use nenjo::client::KnowledgePackSyncMeta;
 use nenjo::manifest::{AbilityManifest, AbilityPromptConfig, McpServerManifest};
 use nenjo_knowledge::{KnowledgeDocEdge, KnowledgeDocKind, KnowledgeDocManifest};
+use nenjo_platform::api_client::KnowledgePackSyncMeta;
 use nenjo_platform::library_knowledge::{
     LIBRARY_KNOWLEDGE_MANIFEST_FILENAME, LibraryKnowledgePackManifest,
     write_library_knowledge_manifest,

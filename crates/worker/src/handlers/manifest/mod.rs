@@ -15,7 +15,7 @@ use nenjo_harness::{Harness, HarnessError, ProviderRuntime, Result};
 use apply::{ManifestChange, apply_manifest_change};
 pub use services::{ManifestStore, McpRuntime, NoopManifestStore, NoopMcpRuntime};
 
-use crate::api_client::NenjoClient;
+use crate::api_client::ApiClient;
 
 #[derive(Clone)]
 pub struct ManifestCommandContext<StoreRt, McpRt>
@@ -23,7 +23,7 @@ where
     StoreRt: ManifestStore,
     McpRt: McpRuntime,
 {
-    pub client: Arc<NenjoClient>,
+    pub client: Arc<ApiClient>,
     pub store: StoreRt,
     pub mcp: Option<McpRt>,
 }

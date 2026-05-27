@@ -1,6 +1,6 @@
 //! Error types for the API client.
 
-/// Errors returned by [`super::NenjoClient`] operations.
+/// Errors returned by [`super::ApiClient`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiClientError {
     /// Network / transport error from reqwest.

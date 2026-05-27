@@ -1,14 +1,14 @@
 use anyhow::Result;
 use nenjo::Manifest;
-use nenjo::client::NenjoClient;
 use nenjo_events::ResourceType;
+use nenjo_platform::api_client::ApiClient;
 use tracing::debug;
 use uuid::Uuid;
 
 /// Fetch a single resource from the API and upsert it into the manifest.
 pub(super) async fn apply_upsert(
     manifest: &mut Manifest,
-    client: &NenjoClient,
+    client: &ApiClient,
     rt: ResourceType,
     id: Uuid,
 ) -> Result<()> {

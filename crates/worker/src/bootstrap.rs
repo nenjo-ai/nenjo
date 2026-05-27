@@ -20,10 +20,10 @@ use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
-use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
 use nenjo_platform::ManifestKind;
+use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -331,7 +331,7 @@ impl ManifestLoader for LocalManifestLoader {
 /// On network / API errors the function logs a warning and returns `Ok(())`
 /// so the worker can still start. Filesystem errors are propagated.
 pub async fn sync(
-    api: &NenjoClient,
+    api: &ApiClient,
     manifests_dir: &Path,
     workspace_dir: &Path,
     state_dir: &Path,
@@ -407,7 +407,7 @@ pub async fn sync(
 }
 
 async fn hydrate_bootstrap_manifest(
-    api: &NenjoClient,
+    api: &ApiClient,
     bootstrap: serde_json::Value,
     state_dir: &Path,
     nenjo_home: &Path,
@@ -668,7 +668,7 @@ impl WorkerManifestCache {
         }
     }
 
-    pub async fn full_refresh(&self, api: &NenjoClient) -> Result<nenjo::Manifest> {
+    pub async fn full_refresh(&self, api: &ApiClient) -> Result<nenjo::Manifest> {
         sync(
             api,
             &self.manifests_dir,
@@ -784,13 +784,13 @@ impl ManifestStore for WorkerManifestCache {
         Ok(())
     }
 
-    async fn full_refresh(&self, client: &NenjoClient) -> Result<nenjo::Manifest> {
+    async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest> {
         WorkerManifestCache::full_refresh(self, client).await
     }
 
     async fn sync_document_metadata(
         &self,
-        client: &NenjoClient,
+        client: &ApiClient,
         doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -803,7 +803,7 @@ impl ManifestStore for WorkerManifestCache {
 
     async fn sync_document(
         &self,
-        client: &NenjoClient,
+        client: &ApiClient,
         doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -832,7 +832,7 @@ impl ManifestStore for WorkerManifestCache {
         }
     }
 
-    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack: &nenjo::Slug) -> Result<()> {
+    async fn sync_knowledge_pack(&self, client: &ApiClient, pack: &nenjo::Slug) -> Result<()> {
         crate::local_documents::sync_pack_by_slug(client, &self.config_dir, &self.state_dir, pack)
             .await
     }
@@ -867,7 +867,7 @@ fn deleted_resource_metadata(
 }
 
 async fn ensure_worker_ack(
-    api: &NenjoClient,
+    api: &ApiClient,
     state_dir: &Path,
     ack_actor_user_id: Option<Uuid>,
     api_key_id: Option<Uuid>,
@@ -890,7 +890,7 @@ async fn ensure_worker_ack(
 }
 
 async fn resolve_bootstrap_prompt_config(
-    api: &NenjoClient,
+    api: &ApiClient,
     agent: &BootstrapAgentManifest,
     state_dir: &Path,
 ) -> Result<PromptConfig> {

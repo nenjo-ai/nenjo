@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use nenjo::client::NenjoClient;
+use nenjo_platform::api_client::ApiClient;
 use uuid::Uuid;
 
 use crate::{ContentKey, ContentScope, WorkerAuthProvider};
@@ -32,7 +32,7 @@ pub trait EnvelopeKeyProvider: Send + Sync + 'static {
 /// Default worker-side [`EnvelopeKeyProvider`] backed by enrollment state.
 pub struct EnrollmentBackedKeyProvider {
     auth_provider: Arc<WorkerAuthProvider>,
-    api: Arc<NenjoClient>,
+    api: Arc<ApiClient>,
     api_key_id: Uuid,
     bootstrap_user_id: Uuid,
 }
@@ -42,7 +42,7 @@ impl EnrollmentBackedKeyProvider {
     /// platform API client for on-demand refresh.
     pub fn new(
         auth_provider: impl Into<Arc<WorkerAuthProvider>>,
-        api: impl Into<Arc<NenjoClient>>,
+        api: impl Into<Arc<ApiClient>>,
         api_key_id: Uuid,
         bootstrap_user_id: Uuid,
     ) -> Self {

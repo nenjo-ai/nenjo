@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nenjo::client::PayloadCodec;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
@@ -11,12 +10,13 @@ use nenjo_harness::Harness;
 use nenjo_knowledge::KnowledgePack;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_platform::PlatformManifestClient;
+use nenjo_platform::api_client::PayloadCodec;
 use nenjo_platform::library_knowledge::LibraryKnowledgePack;
 use nenjo_secure_envelope::SecureEnvelopeCodec;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::api_client::NenjoClient;
+use crate::api_client::ApiClient;
 use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth};
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
@@ -36,7 +36,7 @@ pub type WorkerHarness = Harness<WorkerProvider, WorkerSessionRuntime>;
 /// Fully assembled worker dependencies around the execution harness.
 pub struct WorkerAssembly {
     pub harness: WorkerHarness,
-    pub api: NenjoClient,
+    pub api: ApiClient,
     pub auth_provider: Arc<WorkerAuthProvider>,
     pub session_runtime: WorkerSessionRuntime,
     pub session_stores: WorkerSessionStores,
@@ -55,7 +55,7 @@ impl WorkerCryptoContext {
     pub fn from_bootstrap_auth(
         auth: &BootstrapAuth,
         auth_provider: Arc<WorkerAuthProvider>,
-        enrollment_api: NenjoClient,
+        enrollment_api: ApiClient,
     ) -> Result<Self> {
         let api_key_id = auth.api_key_id.ok_or_else(|| {
             anyhow::anyhow!(
@@ -78,7 +78,7 @@ impl WorkerCryptoContext {
         })
     }
 
-    pub fn configure_api_client(&self, client: NenjoClient) -> NenjoClient {
+    pub fn configure_api_client(&self, client: ApiClient) -> ApiClient {
         let payload_codec: Arc<dyn PayloadCodec> = self.codec.clone();
         client.with_shared_payload_codec(payload_codec)
     }
@@ -88,7 +88,7 @@ impl WorkerAssembly {
     pub async fn from_bootstrapped(
         config: &Config,
         auth_provider: Arc<WorkerAuthProvider>,
-        api: NenjoClient,
+        api: ApiClient,
     ) -> Result<Self> {
         let loader = LocalManifestStore::new(&config.manifests_dir);
         let manifest = ManifestLoader::load(&loader).await?;

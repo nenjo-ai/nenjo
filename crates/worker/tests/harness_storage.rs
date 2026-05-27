@@ -13,7 +13,7 @@ use serde_json::json;
 use tempfile::tempdir;
 use uuid::Uuid;
 
-use nenjo_worker::api_client::{DocumentSyncMeta, NenjoClient};
+use nenjo_worker::api_client::{ApiClient, DocumentSyncMeta};
 use nenjo_worker::bootstrap::WorkerManifestCache;
 use nenjo_worker::handlers::manifest::ManifestStore;
 use nenjo_worker::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
@@ -102,7 +102,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     let provider = provider_with_manifest(manifest.clone()).await;
     let harness = nenjo_harness::Harness::builder(provider).build();
 
-    let api = NenjoClient::new("http://127.0.0.1:9", "test-api-key");
+    let api = ApiClient::new("http://127.0.0.1:9", "test-api-key");
     let cache = WorkerManifestCache {
         manifests_dir: manifests_dir.clone(),
         workspace_dir: workspace_dir.clone(),

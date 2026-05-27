@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::Slug;
-use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo_events::ResourceType;
+use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use uuid::Uuid;
 
 /// Host-owned manifest persistence and document side-effect hooks.
@@ -56,12 +56,12 @@ pub trait ManifestStore: Send + Sync {
     }
 
     /// Rebuild the full manifest cache from the platform client.
-    async fn full_refresh(&self, client: &NenjoClient) -> Result<nenjo::Manifest>;
+    async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest>;
 
     /// Sync document metadata after an inline manifest update.
     async fn sync_document_metadata(
         &self,
-        _client: &NenjoClient,
+        _client: &ApiClient,
         _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -71,7 +71,7 @@ pub trait ManifestStore: Send + Sync {
     /// Sync document content after a fetched manifest update.
     async fn sync_document(
         &self,
-        _client: &NenjoClient,
+        _client: &ApiClient,
         _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -88,7 +88,7 @@ pub trait ManifestStore: Send + Sync {
     }
 
     /// Sync a whole library knowledge pack into the host's local cache.
-    async fn sync_knowledge_pack(&self, _client: &NenjoClient, _pack: &Slug) -> Result<()> {
+    async fn sync_knowledge_pack(&self, _client: &ApiClient, _pack: &Slug) -> Result<()> {
         Ok(())
     }
 
@@ -116,7 +116,7 @@ impl ManifestStore for NoopManifestStore {
         Ok(())
     }
 
-    async fn full_refresh(&self, _client: &NenjoClient) -> Result<nenjo::Manifest> {
+    async fn full_refresh(&self, _client: &ApiClient) -> Result<nenjo::Manifest> {
         Ok(nenjo::Manifest::default())
     }
 }
@@ -165,13 +165,13 @@ where
             .await
     }
 
-    async fn full_refresh(&self, client: &NenjoClient) -> Result<nenjo::Manifest> {
+    async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest> {
         (**self).full_refresh(client).await
     }
 
     async fn sync_document_metadata(
         &self,
-        client: &NenjoClient,
+        client: &ApiClient,
         doc: &Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -180,7 +180,7 @@ where
 
     async fn sync_document(
         &self,
-        client: &NenjoClient,
+        client: &ApiClient,
         doc: &Slug,
         metadata: Option<&DocumentSyncMeta>,
     ) -> Result<()> {
@@ -191,7 +191,7 @@ where
         (**self).remove_document(doc, metadata).await
     }
 
-    async fn sync_knowledge_pack(&self, client: &NenjoClient, pack: &Slug) -> Result<()> {
+    async fn sync_knowledge_pack(&self, client: &ApiClient, pack: &Slug) -> Result<()> {
         (**self).sync_knowledge_pack(client, pack).await
     }
 

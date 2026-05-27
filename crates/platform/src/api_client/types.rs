@@ -7,8 +7,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::Slug;
-use crate::manifest::{
+use nenjo::Slug;
+use nenjo::manifest::{
     AgentHeartbeatManifest, AgentManifest, CouncilDelegationStrategy, CouncilManifest,
     CouncilMemberManifest, DomainManifest, DomainPromptConfig, PromptConfig, RoutineEdgeCondition,
     RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
@@ -113,7 +113,7 @@ pub struct ProjectDetailResponse {
     pub encrypted_payload: Option<EncryptedPayload>,
 }
 
-impl From<ProjectDetailResponse> for crate::manifest::ProjectManifest {
+impl From<ProjectDetailResponse> for nenjo::manifest::ProjectManifest {
     fn from(project: ProjectDetailResponse) -> Self {
         Self {
             id: project.id,
