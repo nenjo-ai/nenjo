@@ -1962,7 +1962,6 @@ dependencies = [
  "nenjo-tool-api",
  "nenjo-xml",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -2157,7 +2156,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2174,6 +2175,7 @@ dependencies = [
  "nenjo-crypto-auth",
  "nenjo-eventbus",
  "nenjo-events",
+ "nenjo-platform",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

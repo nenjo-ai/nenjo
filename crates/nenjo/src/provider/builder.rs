@@ -16,14 +16,11 @@ use nenjo_knowledge::tools::KnowledgePackEntry;
 
 /// Builder for creating a [`Provider`].
 ///
-/// # Quick start (with NenjoClient)
+/// # Quick start
 ///
 /// ```ignore
-/// use nenjo_api_client::NenjoClient;
-///
-/// let client = NenjoClient::new("https://api.nenjo.dev", "nj_sk_...");
 /// let provider = Provider::builder()
-///     .with_loader(client)
+///     .with_loader(loader)
 ///     .with_model_factory(my_factory)
 ///     .build()
 ///     .await?;
@@ -130,11 +127,10 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     /// returns a partial manifest that is merged into the result. Later
     /// loaders override earlier ones on name collision (for context blocks).
     ///
-    /// `NenjoClient` from `nenjo-api-client` implements `ManifestLoader`,
-    /// so you can pass it directly:
+    /// Any type implementing `ManifestLoader` can be passed directly:
     ///
     /// ```ignore
-    /// builder.with_loader(NenjoClient::new(url, api_key))
+    /// builder.with_loader(loader)
     /// ```
     pub fn with_loader<Loader>(
         self,

@@ -1,8 +1,8 @@
 use anyhow::Result;
-use nenjo::client::{DocumentSyncMeta, NenjoClient};
 use nenjo::manifest::{context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
+use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -38,7 +38,7 @@ enum ManifestApplySource {
 }
 
 pub(super) async fn apply_manifest_change<StoreRt, McpRt>(
-    client: &NenjoClient,
+    client: &ApiClient,
     store: &StoreRt,
     mcp: Option<&McpRt>,
     current: &Manifest,
@@ -239,7 +239,7 @@ struct DocumentSideEffectContext<'a, StoreRt>
 where
     StoreRt: ManifestStore,
 {
-    client: &'a NenjoClient,
+    client: &'a ApiClient,
     store: &'a StoreRt,
     resource: &'a Slug,
     action: ResourceAction,

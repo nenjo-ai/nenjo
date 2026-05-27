@@ -2,9 +2,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta};
 use anyhow::{Context, Result};
 use nenjo::Slug;
-use nenjo::client::{DocumentSyncEdge, DocumentSyncMeta};
 use nenjo_knowledge::{
     KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocFilter, KnowledgeDocKind,
     KnowledgeDocManifest, KnowledgePack, KnowledgePackManifest,

@@ -326,7 +326,7 @@ impl SecureEnvelopeCodec {
 }
 
 #[async_trait]
-impl nenjo::client::PayloadCodec for SecureEnvelopeCodec {
+impl nenjo_platform::api_client::PayloadCodec for SecureEnvelopeCodec {
     async fn decode_text(&self, payload: &EncryptedPayload) -> Result<Option<String>> {
         Ok(Some(
             SecureEnvelopeCodec::decode_payload_text(self, payload).await?,

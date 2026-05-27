@@ -27,11 +27,11 @@ pub mod security;
 pub mod sessions;
 pub mod tools;
 
-pub use nenjo::client as api_client;
+pub use nenjo_platform::api_client;
 
 use std::time::Duration;
 
-use crate::api_client::NenjoClient;
+use crate::api_client::ApiClient;
 use crate::assembly::{WorkerAssembly, WorkerCryptoContext};
 use crate::config::Config;
 use crate::crypto::{EnrollmentStatus, WorkerAuthProvider};
@@ -205,7 +205,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(
         config.state_dir.join("crypto"),
     )?);
-    let bootstrap_api = NenjoClient::new(config.backend_api_url(), &config.api_key);
+    let bootstrap_api = ApiClient::new(config.backend_api_url(), &config.api_key);
 
     crate::bootstrap::sync(
         &bootstrap_api,
@@ -409,7 +409,7 @@ fn is_safe_nats_url(url: &str) -> bool {
 }
 
 async fn wait_for_enrollment_approval(
-    api: &nenjo::client::NenjoClient,
+    api: &nenjo_platform::api_client::ApiClient,
     auth_provider: &WorkerAuthProvider,
     api_key_id: uuid::Uuid,
     ack_actor_user_id: uuid::Uuid,
@@ -442,13 +442,13 @@ async fn wait_for_enrollment_approval(
 
         match api.fetch_worker_enrollment_status(api_key_id).await {
             Ok(Some(status)) => match status.state {
-                nenjo::client::WorkerEnrollmentState::Active => {
+                nenjo_platform::api_client::WorkerEnrollmentState::Active => {
                     auth_provider.apply_backend_enrollment(&status).await?;
                     info!(%api_key_id, "Worker enrollment approved");
                     return Ok(());
                 }
-                nenjo::client::WorkerEnrollmentState::Pending => {}
-                nenjo::client::WorkerEnrollmentState::Revoked => {
+                nenjo_platform::api_client::WorkerEnrollmentState::Pending => {}
+                nenjo_platform::api_client::WorkerEnrollmentState::Revoked => {
                     return Err(anyhow::anyhow!(
                         "Worker enrollment was revoked before approval completed"
                     ));

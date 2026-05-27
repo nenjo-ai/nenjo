@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::api_client::NenjoClient;
+use crate::api_client::ApiClient;
 use crate::assembly::{WorkerAssembly, WorkerHarness, WorkerProvider};
 use crate::config::{Config, SessionConfig};
 use crate::crypto::WorkerAuthProvider;
@@ -74,7 +74,7 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 /// Responses are sent via `response_tx` (never touch the bus directly).
 pub struct CommandContext {
     pub harness: WorkerHarness,
-    pub api: Arc<NenjoClient>,
+    pub api: Arc<ApiClient>,
     pub actor_user_id: Uuid,
     pub response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
@@ -93,7 +93,7 @@ pub struct CommandContext {
 pub struct WorkerRuntime {
     harness: WorkerHarness,
     config: Config,
-    api: Arc<NenjoClient>,
+    api: Arc<ApiClient>,
     auth_provider: Arc<WorkerAuthProvider>,
     external_mcp: Arc<ExternalMcpPool>,
     worker_name: String,
@@ -239,7 +239,7 @@ impl WorkerRuntime {
         self.harness.provider()
     }
 
-    pub fn api(&self) -> Arc<NenjoClient> {
+    pub fn api(&self) -> Arc<ApiClient> {
         self.api.clone()
     }
 
@@ -336,7 +336,7 @@ mod tests {
     use crate::external_mcp::ExternalMcpPool;
     use crate::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
     use nenjo::LocalManifestStore;
-    use nenjo::client::NenjoClient;
+    use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -355,7 +355,7 @@ mod tests {
         };
         let auth_provider =
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
-        let api = NenjoClient::new(config.backend_api_url(), &config.api_key);
+        let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let provider = build_provider(
             &config,

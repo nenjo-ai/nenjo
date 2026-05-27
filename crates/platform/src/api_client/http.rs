@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::error::ApiClientError;
 use super::types::*;
-use crate::manifest::*;
+use nenjo::manifest::*;
 
 /// Result alias for client operations.
 pub type Result<T> = std::result::Result<T, ApiClientError>;
@@ -60,23 +60,23 @@ fn merge_json_object(
 ///
 /// Every request automatically includes the `X-API-Key` header.
 #[derive(Clone)]
-pub struct NenjoClient {
+pub struct ApiClient {
     http: Client,
     base_url: String,
     api_key: String,
     payload_codec: Arc<dyn PayloadCodec>,
 }
 
-impl std::fmt::Debug for NenjoClient {
+impl std::fmt::Debug for ApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NenjoClient")
+        f.debug_struct("ApiClient")
             .field("base_url", &self.base_url)
             .field("payload_codec", &"<configured>")
             .finish_non_exhaustive()
     }
 }
 
-impl NenjoClient {
+impl ApiClient {
     /// Create a new client pointing at the given backend URL.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         let http = Client::builder()
@@ -621,19 +621,19 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = NenjoClient::new("http://localhost:8080", "test-key");
+        let client = ApiClient::new("http://localhost:8080", "test-key");
         assert_eq!(client.base_url(), "http://localhost:8080");
     }
 
     #[test]
     fn test_trailing_slash_stripped() {
-        let client = NenjoClient::new("http://localhost:8080/", "key");
+        let client = ApiClient::new("http://localhost:8080/", "key");
         assert_eq!(client.base_url(), "http://localhost:8080");
     }
 
     #[test]
     fn test_auth_headers() {
-        let client = NenjoClient::new("http://localhost", "my-secret");
+        let client = ApiClient::new("http://localhost", "my-secret");
         let headers = client.auth_headers();
         assert_eq!(
             headers.get("X-API-Key").unwrap().to_str().unwrap(),
@@ -645,7 +645,7 @@ mod tests {
     async fn decode_project_settings_merges_decrypted_payload() {
         let id = Uuid::new_v4();
         let client =
-            NenjoClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
+            ApiClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
                 plaintext: Some(
                     serde_json::json!({
                         "context": "Use this private context.",

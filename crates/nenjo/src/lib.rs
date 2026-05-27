@@ -17,7 +17,6 @@
 //! ```
 
 pub mod agents;
-pub mod client;
 pub mod config;
 pub mod context;
 pub mod input;
@@ -64,9 +63,6 @@ pub use nenjo_events::StreamEvent;
 
 // Re-export the XML/template crate for downstream consumers.
 pub use nenjo_xml as xml;
-
-// Re-export the API client.
-pub use client::{ApiClientError, NenjoClient};
 
 // Re-export routine types.
 pub use routines::{RoutineEvent, RoutineExecutionHandle, RoutineInput, StepResult};
