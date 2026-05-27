@@ -10,7 +10,6 @@
 //! Other resource types remain as flat JSON arrays.
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,7 +98,6 @@ pub struct BootstrapPackages {
     pub schema: String,
     pub nenpm_yml: String,
     pub nenpm_lock_yml: String,
-    pub checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,7 +331,6 @@ impl ManifestLoader for LocalManifestLoader {
 pub async fn sync(
     api: &ApiClient,
     manifests_dir: &Path,
-    workspace_dir: &Path,
     state_dir: &Path,
     nenjo_home: &Path,
 ) -> Result<()> {
@@ -364,8 +361,7 @@ pub async fn sync(
     )
     .await
     .context("Worker enrollment missing ACK required for bootstrap decrypt")?;
-    let runtime_assets_home = workspace_dir.join(".nenjo");
-    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir, &runtime_assets_home).await?;
+    let data = hydrate_bootstrap_manifest(api, bootstrap, state_dir).await?;
     let manifest = &data.manifest;
 
     info!(
@@ -410,7 +406,6 @@ async fn hydrate_bootstrap_manifest(
     api: &ApiClient,
     bootstrap: serde_json::Value,
     state_dir: &Path,
-    nenjo_home: &Path,
 ) -> Result<HydratedBootstrap> {
     let bootstrap: BootstrapManifestResponse = match serde_json::from_value(bootstrap.clone()) {
         Ok(value) => value,
@@ -464,16 +459,6 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
-    let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
-    for ability in bootstrap.abilities {
-        abilities.push(crate::marketplace::hydrate_skill_ability(ability, nenjo_home).await?);
-    }
-
-    let mut mcp_servers = Vec::with_capacity(bootstrap.mcp_servers.len());
-    for server in bootstrap.mcp_servers {
-        mcp_servers.push(crate::marketplace::hydrate_plugin_mcp_server(server, nenjo_home).await?);
-    }
-
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
         manifest: Manifest {
@@ -483,8 +468,8 @@ async fn hydrate_bootstrap_manifest(
             councils: bootstrap.councils,
             domains: bootstrap.domains,
             projects,
-            mcp_servers,
-            abilities,
+            mcp_servers: bootstrap.mcp_servers,
+            abilities: bootstrap.abilities,
             context_blocks,
         },
         nats: bootstrap.nats,
@@ -492,15 +477,17 @@ async fn hydrate_bootstrap_manifest(
     })
 }
 
-async fn sync_platform_packages(nenjo_home: &Path, packages: &BootstrapPackages) -> Result<()> {
+pub(crate) async fn sync_platform_packages(
+    nenjo_home: &Path,
+    packages: &BootstrapPackages,
+) -> Result<PlatformPackageSyncStatus> {
     if packages.schema != "nenjo.platform_packages.v1" {
         warn!(
             schema = %packages.schema,
             "Ignoring unsupported platform package bootstrap schema"
         );
-        return Ok(());
+        return Ok(PlatformPackageSyncStatus::UnsupportedSchema);
     }
-    verify_platform_package_checksum(packages)?;
     let root = nenjo_home.join("platform_pkgs");
     write_text_if_changed(&root, "nenpm.yml", &packages.nenpm_yml)?;
     write_text_if_changed(&root, "nenpm.lock.yml", &packages.nenpm_lock_yml)?;
@@ -515,24 +502,13 @@ async fn sync_platform_packages(nenjo_home: &Path, packages: &BootstrapPackages)
     .await
     .context("platform package install task failed")?
     .context("failed to install platform packages")?;
-    Ok(())
+    Ok(PlatformPackageSyncStatus::Applied)
 }
 
-fn verify_platform_package_checksum(packages: &BootstrapPackages) -> Result<()> {
-    let checksum = platform_package_checksum(&packages.nenpm_yml, &packages.nenpm_lock_yml);
-    if checksum != packages.checksum {
-        anyhow::bail!("platform package manifest checksum mismatch");
-    }
-    Ok(())
-}
-
-fn platform_package_checksum(nenpm_yml: &str, nenpm_lock_yml: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"nenpm.yml\0");
-    hasher.update(nenpm_yml.as_bytes());
-    hasher.update(b"\0nenpm.lock.yml\0");
-    hasher.update(nenpm_lock_yml.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlatformPackageSyncStatus {
+    Applied,
+    UnsupportedSchema,
 }
 
 fn write_text_if_changed(dir: &Path, filename: &str, content: &str) -> Result<()> {
@@ -669,68 +645,22 @@ impl WorkerManifestCache {
     }
 
     pub async fn full_refresh(&self, api: &ApiClient) -> Result<nenjo::Manifest> {
-        sync(
-            api,
-            &self.manifests_dir,
-            &self.workspace_dir,
-            &self.state_dir,
-            &self.config_dir,
-        )
-        .await?;
+        sync(api, &self.manifests_dir, &self.state_dir, &self.config_dir).await?;
         let loader = nenjo::LocalManifestStore::new(&self.manifests_dir);
         nenjo::ManifestLoader::load(&loader).await
     }
 
     fn knowledge_pack_dir(&self, metadata: &DocumentSyncMeta) -> PathBuf {
-        self.platform_library_root().join(metadata.pack_slug.trim())
+        self.library_root().join(metadata.pack_slug.trim())
     }
 
-    fn platform_library_root(&self) -> PathBuf {
-        self.config_dir.join("library").join("platform")
+    fn library_root(&self) -> PathBuf {
+        self.config_dir.join("library")
     }
 }
 
 #[async_trait::async_trait]
 impl ManifestStore for WorkerManifestCache {
-    async fn prepare_resource(
-        &self,
-        manifest: &mut nenjo::Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()> {
-        match resource_type {
-            ResourceType::Ability => {
-                let abilities = std::mem::take(&mut manifest.abilities);
-                let mut hydrated = Vec::with_capacity(abilities.len());
-                for ability in abilities {
-                    hydrated.push(
-                        crate::marketplace::hydrate_skill_ability(
-                            ability,
-                            &self.workspace_dir.join(".nenjo"),
-                        )
-                        .await?,
-                    );
-                }
-                manifest.abilities = hydrated;
-            }
-            ResourceType::McpServer => {
-                let servers = std::mem::take(&mut manifest.mcp_servers);
-                let mut hydrated = Vec::with_capacity(servers.len());
-                for server in servers {
-                    hydrated.push(
-                        crate::marketplace::hydrate_plugin_mcp_server(
-                            server,
-                            &self.workspace_dir.join(".nenjo"),
-                        )
-                        .await?,
-                    );
-                }
-                manifest.mcp_servers = hydrated;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     async fn persist_resource(
         &self,
         manifest: &nenjo::Manifest,
@@ -746,42 +676,6 @@ impl ManifestStore for WorkerManifestCache {
         _resource: &nenjo::Slug,
     ) -> Result<()> {
         WorkerManifestCache::persist_resource(self, manifest, resource_type)
-    }
-
-    async fn cleanup_deleted_resource(
-        &self,
-        resource_type: ResourceType,
-        resource: &nenjo::Slug,
-        resource_id: Option<Uuid>,
-        payload: Option<&serde_json::Value>,
-    ) -> Result<()> {
-        let nenjo_home = self.workspace_dir.join(".nenjo");
-        match resource_type {
-            ResourceType::Ability => {
-                let Some(metadata) = deleted_resource_metadata(payload, "skill") else {
-                    return Ok(());
-                };
-                let Some(resource_id) = resource_id else {
-                    warn!(%resource, "Deleted skill ability did not include a resolvable id; skipping uninstall");
-                    return Ok(());
-                };
-                crate::marketplace::uninstall_skill_ability(resource_id, metadata, &nenjo_home)
-                    .await?;
-            }
-            ResourceType::McpServer => {
-                let Some(metadata) = deleted_resource_metadata(payload, "plugin") else {
-                    return Ok(());
-                };
-                let Some(resource_id) = resource_id else {
-                    warn!(%resource, "Deleted plugin MCP server did not include a resolvable id; skipping uninstall");
-                    return Ok(());
-                };
-                crate::marketplace::uninstall_plugin_mcp_server(resource_id, metadata, &nenjo_home)
-                    .await?;
-            }
-            _ => {}
-        }
-        Ok(())
     }
 
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest> {
@@ -843,27 +737,9 @@ impl ManifestStore for WorkerManifestCache {
         relative_path: &str,
         content: &str,
     ) -> Result<()> {
-        let pack_dir = self.platform_library_root().join(pack.as_str());
+        let pack_dir = self.library_root().join(pack.as_str());
         crate::local_documents::write_document_content(&pack_dir, relative_path, content)
     }
-}
-
-fn deleted_resource_metadata(
-    payload: Option<&serde_json::Value>,
-    expected_source_type: &str,
-) -> Option<serde_json::Value> {
-    let payload = payload?;
-    if payload
-        .get("source_type")
-        .and_then(serde_json::Value::as_str)
-        != Some(expected_source_type)
-    {
-        return None;
-    }
-    payload
-        .get("metadata")
-        .cloned()
-        .or_else(|| payload.get("install_metadata").cloned())
 }
 
 async fn ensure_worker_ack(
@@ -1173,15 +1049,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn platform_package_checksum_covers_lockfile() {
-        let first = platform_package_checksum("dependencies: {}\n", "packages: []\n");
-        let second = platform_package_checksum("dependencies: {}\n", "packages: [changed]\n");
-
-        assert_ne!(first, second);
-        assert!(first.starts_with("sha256:"));
-    }
-
     #[tokio::test]
     async fn sync_platform_packages_writes_lockfile_and_installs_locked_tree() {
         let package_root = tempfile::tempdir().unwrap();
@@ -1191,41 +1058,20 @@ mod tests {
         let nenjo_home = tempfile::tempdir().unwrap();
         let packages = BootstrapPackages {
             schema: "nenjo.platform_packages.v1".to_string(),
-            checksum: platform_package_checksum(&nenpm_yml, &nenpm_lock_yml),
             nenpm_yml,
             nenpm_lock_yml,
         };
 
-        sync_platform_packages(nenjo_home.path(), &packages)
+        let status = sync_platform_packages(nenjo_home.path(), &packages)
             .await
             .unwrap();
+        assert_eq!(status, PlatformPackageSyncStatus::Applied);
 
         let root = nenjo_home.path().join("platform_pkgs");
         assert!(root.join("nenpm.yml").exists());
         assert!(root.join("nenpm.lock.yml").exists());
         assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
         assert!(root.join(".nenpm-index.json").exists());
-    }
-
-    #[tokio::test]
-    async fn sync_platform_packages_rejects_lockfile_checksum_mismatch() {
-        let packages = BootstrapPackages {
-            schema: "nenjo.platform_packages.v1".to_string(),
-            nenpm_yml: "schema: nenjo.dependencies.v1\ndependencies: {}\n".to_string(),
-            nenpm_lock_yml: "schema: nenjo.lock.v1\npackages: []\n".to_string(),
-            checksum: platform_package_checksum(
-                "schema: nenjo.dependencies.v1\ndependencies: {}\n",
-                "schema: nenjo.lock.v1\npackages: [tampered]\n",
-            ),
-        };
-        let nenjo_home = tempfile::tempdir().unwrap();
-
-        let err = sync_platform_packages(nenjo_home.path(), &packages)
-            .await
-            .expect_err("checksum mismatch should be rejected")
-            .to_string();
-
-        assert!(err.contains("checksum mismatch"));
     }
 
     fn write_test_package(root: &Path) {

@@ -64,7 +64,7 @@ Tool selector:
 Worker syncs platform-uploaded packs into:
 
 ```text
-<workspace>/.nenjo/library/platform/<slug>
+<workspace>/.nenjo/library/<slug>
 ```
 
 Worker registers each pack as:

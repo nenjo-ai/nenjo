@@ -335,11 +335,7 @@ where
     }
 
     async fn workspace_library_dir(&self, pack_slug: &str) -> Result<PathBuf> {
-        Ok(self
-            .workspace_dir()?
-            .join("library")
-            .join("platform")
-            .join(pack_slug))
+        Ok(self.workspace_dir()?.join("library").join(pack_slug))
     }
 
     async fn library_knowledge_pack(&self, pack_slug: &str) -> Result<LibraryKnowledgePack> {
@@ -357,57 +353,13 @@ where
                 .await
                 .map(ResolvedKnowledgePack::Library);
         }
-        if let KnowledgeRef::Package { package } = selector.parse::<KnowledgeRef>()? {
-            let library_dir = self.workspace_dir()?.join("library").join("repos");
-            return find_package_knowledge_pack(&library_dir, &package.to_string())
-                .map(ResolvedKnowledgePack::Library)
-                .ok_or_else(|| anyhow!("knowledge pack '{selector}' is not cached locally"));
+        if let KnowledgeRef::Package { .. } = selector.parse::<KnowledgeRef>()? {
+            return Err(anyhow!(
+                "package knowledge pack '{selector}' must be loaded from installed packages"
+            ));
         }
         Err(unknown_pack(selector))
     }
-}
-
-fn find_package_knowledge_pack(root: &Path, package_name: &str) -> Option<LibraryKnowledgePack> {
-    let entries = std::fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        if let Some(pack) = LibraryKnowledgePack::load(&path) {
-            if pack.manifest().pack_id() == package_name {
-                return Some(pack);
-            }
-        } else if let Some(pack) = find_package_knowledge_pack(&path, package_name) {
-            return Some(pack);
-        }
-    }
-    None
-}
-
-fn list_repo_knowledge_packs(root: &Path) -> Vec<LibraryKnowledgePack> {
-    let mut packs = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return packs;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        if let Some(pack) = LibraryKnowledgePack::load(&path) {
-            packs.push(pack);
-        } else {
-            packs.extend(list_repo_knowledge_packs(&path));
-        }
-    }
-    packs
 }
 
 #[async_trait]
@@ -419,7 +371,7 @@ where
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
         let mut packs = Vec::new();
         if self.workspace_dir.is_some() {
-            let library_dir = self.workspace_dir()?.join("library").join("platform");
+            let library_dir = self.workspace_dir()?.join("library");
             if let Ok(entries) = std::fs::read_dir(library_dir) {
                 for entry in entries.flatten() {
                     let Ok(file_type) = entry.file_type() else {
@@ -436,15 +388,6 @@ where
                         continue;
                     };
                     packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
-                }
-            }
-            let repos_dir = self.workspace_dir()?.join("library").join("repos");
-            for pack in list_repo_knowledge_packs(&repos_dir) {
-                if let Ok(knowledge_ref) = KnowledgeRef::package(pack.manifest().pack_id()) {
-                    packs.push(KnowledgePackSummary::new(
-                        knowledge_ref.selector(),
-                        pack.manifest(),
-                    ));
                 }
             }
         }
@@ -1827,10 +1770,7 @@ mod tests {
         let workspace_dir = temp.path().join("workspace");
         let project_id = Uuid::new_v4();
         let pack_slug = "graph-eval";
-        let library_dir = workspace_dir
-            .join("library")
-            .join("platform")
-            .join(pack_slug);
+        let library_dir = workspace_dir.join("library").join(pack_slug);
         std::fs::create_dir_all(library_dir.join("docs"))?;
 
         let store = Arc::new(LocalManifestStore::new(manifests_dir));

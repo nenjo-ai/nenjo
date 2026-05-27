@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod domain;
 pub mod heartbeat;
 pub mod manifest;
+pub mod packages;
 pub mod repo;
 pub mod task;
 
@@ -28,6 +29,7 @@ use crate::handlers::heartbeat::{HeartbeatCommandContext, WorkerHeartbeatHarness
 use crate::handlers::manifest::{
     ManifestChangedCommand, ManifestCommandContext, WorkerManifestHarnessExt,
 };
+use crate::handlers::packages::handle_package_graph_changed;
 use crate::handlers::repo::{RepoCommandContext, WorkerRepoHarnessExt};
 use crate::handlers::task::{
     TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager, WorkerTaskHarnessExt,
@@ -434,6 +436,10 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             )
             .await
             .map_err(Into::into),
+
+        Command::PackageGraphChanged { packages } => {
+            handle_package_graph_changed(&ctx, packages).await
+        }
     }
 }
 

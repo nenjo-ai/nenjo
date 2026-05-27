@@ -18,7 +18,6 @@ pub mod event_loop;
 pub mod external_mcp;
 pub mod handlers;
 pub mod local_documents;
-pub mod marketplace;
 pub mod package_manifests;
 pub mod providers;
 pub mod resource_resolver;
@@ -210,7 +209,6 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     crate::bootstrap::sync(
         &bootstrap_api,
         &config.manifests_dir,
-        &config.workspace_dir,
         &config.state_dir,
         &config.config_dir,
     )
