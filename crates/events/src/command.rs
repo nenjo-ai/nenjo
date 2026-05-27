@@ -35,6 +35,13 @@ pub struct DomainActivation {
     pub domain_command: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageGraphUpdate {
+    pub schema: String,
+    pub nenpm_yml: String,
+    pub nenpm_lock_yml: String,
+}
+
 /// A command dispatched to an agent harness.
 ///
 /// Discriminated by the `type` field in JSON.
@@ -234,6 +241,12 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
     },
+
+    /// Notifies workers that platform-managed packages changed. Workers should
+    /// materialize the supplied locked package graph and rebuild runtime package
+    /// manifests from the installed package tree.
+    #[serde(rename = "package.graph_changed")]
+    PackageGraphChanged { packages: PackageGraphUpdate },
 }
 
 impl std::fmt::Display for Command {
@@ -286,6 +299,7 @@ impl std::fmt::Display for Command {
                 action,
                 ..
             } => write!(f, "manifest.changed({resource_type}, {action:?})"),
+            Self::PackageGraphChanged { .. } => write!(f, "package.graph_changed"),
         }
     }
 }
@@ -318,6 +332,7 @@ impl Command {
             Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
             Command::ManifestChanged { .. } => Capability::Manifest,
+            Command::PackageGraphChanged { .. } => Capability::Manifest,
 
             Command::RepoSync { .. } | Command::RepoUnsync { .. } => Capability::Repo,
         }
@@ -327,6 +342,7 @@ impl Command {
     pub fn delivery(&self) -> CommandDelivery {
         match self {
             Command::ManifestChanged { .. }
+            | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
             | Command::RepoUnsync { .. } => CommandDelivery::Broadcast,
             Command::WorkerAccountKeyUpdated { .. } => CommandDelivery::Targeted,
@@ -425,6 +441,17 @@ mod tests {
                 project: "demo_project".into(),
                 repo_url: "https://example.test/repo.git".into(),
                 target_branch: "main".into(),
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::PackageGraphChanged {
+                packages: PackageGraphUpdate {
+                    schema: "nenjo.platform_packages.v1".into(),
+                    nenpm_yml: "schema: nenjo.dependencies.v1\n".into(),
+                    nenpm_lock_yml: "schema: nenjo.lock.v1\n".into(),
+                },
             }
             .delivery(),
             CommandDelivery::Broadcast

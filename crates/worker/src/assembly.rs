@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use nenjo::Manifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
-use nenjo_knowledge::KnowledgePack;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::api_client::PayloadCodec;
@@ -152,15 +152,9 @@ pub(crate) async fn build_provider(
 
     Provider::builder()
         .with_loader(loader)
-        .with_loader(PackageManifestLoader::with_packages_dir(
-            config.config_dir.clone(),
-            config.config_dir.join("packages"),
-        ))
-        .with_loader(PackageManifestLoader::with_packages_dir(
-            config.config_dir.join("platform_pkgs"),
-            config.config_dir.join("platform_pkgs"),
-        ))
-        .with_loader(PackageManifestLoader::new(config.workspace_dir.clone()))
+        .with_loader(global_package_manifest_loader(config))
+        .with_loader(platform_package_manifest_loader(config))
+        .with_loader(workspace_package_manifest_loader(config))
         .with_model_factory(provider_registry)
         .with_tool_factory(tool_factory)
         .with_memory(mem)
@@ -171,10 +165,35 @@ pub(crate) async fn build_provider(
         .context("Failed to build Provider")
 }
 
+pub(crate) async fn load_runtime_manifest(config: &Config) -> Result<Manifest> {
+    let loader = LocalManifestStore::new(&config.manifests_dir);
+    let mut manifest = ManifestLoader::load(&loader).await?;
+    manifest.merge(global_package_manifest_loader(config).load().await?);
+    manifest.merge(platform_package_manifest_loader(config).load().await?);
+    manifest.merge(workspace_package_manifest_loader(config).load().await?);
+    Ok(manifest)
+}
+
+fn global_package_manifest_loader(config: &Config) -> PackageManifestLoader {
+    PackageManifestLoader::with_packages_dir(
+        config.config_dir.clone(),
+        config.config_dir.join("packages"),
+    )
+}
+
+fn platform_package_manifest_loader(config: &Config) -> PackageManifestLoader {
+    let root = config.config_dir.join("platform_pkgs");
+    PackageManifestLoader::with_packages_dir(root.clone(), root)
+}
+
+fn workspace_package_manifest_loader(config: &Config) -> PackageManifestLoader {
+    PackageManifestLoader::new(config.workspace_dir.clone())
+}
+
 fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
     let mut packs = Vec::new();
-    let platform_dir = nenjo_home.join("library").join("platform");
-    if let Ok(entries) = std::fs::read_dir(&platform_dir) {
+    let library_dir = nenjo_home.join("library");
+    if let Ok(entries) = std::fs::read_dir(&library_dir) {
         for entry in entries.flatten() {
             let Ok(file_type) = entry.file_type() else {
                 continue;
@@ -190,17 +209,6 @@ fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
             }
         }
     }
-
-    let repos_dir = nenjo_home.join("library").join("repos");
-    for pack_dir in find_library_pack_dirs(&repos_dir) {
-        let Some(pack) = LibraryKnowledgePack::load(&pack_dir) else {
-            continue;
-        };
-        let package_name = pack.manifest().pack_id().to_string();
-        if let Ok(entry) = KnowledgePackEntry::package(package_name, pack) {
-            packs.push(entry);
-        }
-    }
     packs
 }
 
@@ -213,28 +221,6 @@ fn provider_knowledge_packs(
     } else {
         load_library_knowledge_packs(nenjo_home)
     }
-}
-
-fn find_library_pack_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        if LibraryKnowledgePack::load(&path).is_some() {
-            found.push(path);
-        } else {
-            found.extend(find_library_pack_dirs(&path));
-        }
-    }
-    found
 }
 
 fn build_platform_tool_services(
@@ -268,7 +254,7 @@ mod tests {
     use super::*;
 
     fn write_library_pack(root: &Path) {
-        let pack_dir = root.join("library").join("platform").join("demo");
+        let pack_dir = root.join("library").join("demo");
         let docs_dir = pack_dir.join("docs");
         std::fs::create_dir_all(&docs_dir).unwrap();
         std::fs::write(docs_dir.join("intro.md"), "# Intro").unwrap();

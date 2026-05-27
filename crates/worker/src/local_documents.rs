@@ -166,12 +166,11 @@ pub async fn sync_all(
     state_dir: &Path,
     _projects: &[nenjo::manifest::ProjectManifest],
 ) -> Result<()> {
-    let library_root = nenjo_home.join("library");
-    let platform_library_dir = library_root.join("platform");
-    std::fs::create_dir_all(&platform_library_dir).with_context(|| {
+    let library_dir = nenjo_home.join("library");
+    std::fs::create_dir_all(&library_dir).with_context(|| {
         format!(
             "Failed to create platform library directory: {}",
-            platform_library_dir.display()
+            library_dir.display()
         )
     })?;
 
@@ -187,10 +186,15 @@ pub async fn sync_all(
     };
 
     for pack in packs {
-        let pack_dir = platform_library_dir.join(&pack.slug);
         let result = if pack.source_type == "github" {
-            crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
+            warn!(
+                pack_id = %pack.id,
+                pack_slug = %pack.slug,
+                "Skipping legacy GitHub knowledge pack; external knowledge should be installed through packages"
+            );
+            Ok(())
         } else {
+            let pack_dir = library_dir.join(&pack.slug);
             sync_pack(api, &pack_dir, &pack.slug, state_dir).await
         };
         if let Err(e) = result {
@@ -227,9 +231,14 @@ pub async fn sync_pack_by_slug(
     };
 
     if pack.source_type == "github" {
-        crate::marketplace::hydrate_github_knowledge_pack(&pack, nenjo_home).await
+        warn!(
+            pack_id = %pack.id,
+            pack_slug = %pack.slug,
+            "Skipping legacy GitHub knowledge pack; external knowledge should be installed through packages"
+        );
+        Ok(())
     } else {
-        let pack_dir = nenjo_home.join("library").join("platform").join(&pack.slug);
+        let pack_dir = nenjo_home.join("library").join(&pack.slug);
         sync_pack(api, &pack_dir, &pack.slug, state_dir).await
     }
 }

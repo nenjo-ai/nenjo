@@ -129,7 +129,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
         )
         .await
         .expect("sync document metadata");
-    let pack_dir = config_dir.join("library").join("platform").join("alpha");
+    let pack_dir = config_dir.join("library").join("alpha");
     assert!(pack_dir.join("manifest.json").exists());
     assert!(
         !workspace_dir
