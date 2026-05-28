@@ -752,7 +752,6 @@ mod tests {
                         },
                     }),
                     append_active_domain_addon: true,
-                    docs_base_dir: None,
                     render_ctx_extra: Default::default(),
                 },
                 renderer: ContextRenderer::from_blocks(&[]),

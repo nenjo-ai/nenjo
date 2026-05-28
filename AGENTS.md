@@ -285,8 +285,7 @@ path-like name and MiniJinja template content. They render through the same
 template variable system as prompts.
 
 Common variables include `{{ self }}`, `{{ chat.message }}`, `{{ task }}`,
-`{{ project }}`, `{{ project.documents }}`, `{{ builtin.nenjo }}`,
-`{{ available_agents }}`, `{{ available_abilities }}`,
+`{{ project }}`, `{{ available_agents }}`, `{{ available_abilities }}`,
 `{{ available_domains }}`, `{{ memories }}`, `{{ artifacts }}`,
 `{{ routine }}`, `{{ gate.criteria }}`, and `{{ global.timestamp }}`.
 

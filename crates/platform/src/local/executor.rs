@@ -268,10 +268,10 @@ where
         let args: KnowledgeReadArgs =
             serde_json::from_value(params).map_err(anyhow::Error::from)?;
         let pack = local_knowledge_pack(&args.pack)?;
-        let doc = pack.read_doc(&args.path).ok_or_else(|| {
+        let doc = pack.read_doc(&args.selector).ok_or_else(|| {
             anyhow!(
                 "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
+                args.selector,
                 args.pack
             )
         })?;
@@ -304,10 +304,10 @@ where
             serde_json::from_value(params).map_err(anyhow::Error::from)?;
         let pack = local_knowledge_pack(&args.pack)?;
         let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+        let neighbors = pack.neighbors(&args.selector, edge_type).ok_or_else(|| {
             anyhow!(
                 "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
+                args.selector,
                 args.pack
             )
         })?;
