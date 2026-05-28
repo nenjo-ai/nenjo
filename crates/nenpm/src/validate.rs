@@ -188,6 +188,7 @@ fn validate_package(package: &ResolvedPackage) -> Result<()> {
     for module in unique_modules(package) {
         validate_module_imports(package, module)?;
         validate_prompt_selectors(module, &current_selector, &dependency_selectors)?;
+        validate_knowledge_selectors(module)?;
     }
     validate_context_graph(package)?;
     Ok(())
@@ -255,6 +256,84 @@ fn validate_prompt_selectors(
                     module.path
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_knowledge_selectors(module: &ResolvedModule) -> Result<()> {
+    if module.kind != PackageKind::Knowledge {
+        return Ok(());
+    }
+    let docs = module
+        .manifest
+        .manifest
+        .get("docs")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("{} knowledge manifest must define docs", module.path))?;
+    let mut selectors = BTreeSet::new();
+    for (index, doc) in docs.iter().enumerate() {
+        let selector = doc
+            .get("selector")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} knowledge doc at index {} must define selector",
+                    module.path,
+                    index
+                )
+            })?;
+        validate_jinja_selector(selector).with_context(|| {
+            format!(
+                "{} knowledge doc selector '{}' is not Jinja-compatible",
+                module.path, selector
+            )
+        })?;
+        if !selectors.insert(selector.to_string()) {
+            bail!(
+                "{} declares duplicate knowledge selector '{}'",
+                module.path,
+                selector
+            );
+        }
+        for edge in doc
+            .get("related")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(target) = edge.get("target").and_then(serde_json::Value::as_str) {
+                validate_jinja_selector(target).with_context(|| {
+                    format!(
+                        "{} knowledge doc selector '{}' has invalid related target '{}'",
+                        module.path, selector, target
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_jinja_selector(selector: &str) -> Result<()> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        bail!("selector cannot be empty");
+    }
+    for segment in selector.split('.') {
+        if segment.is_empty() {
+            bail!("selector cannot contain empty segments");
+        }
+        let mut chars = segment.chars();
+        let first = chars.next().expect("segment is not empty");
+        if !(first == '_' || first.is_ascii_alphabetic()) {
+            bail!("selector segment '{segment}' must start with a letter or underscore");
+        }
+        if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+            bail!(
+                "selector segment '{segment}' may contain only letters, numbers, and underscores"
+            );
         }
     }
     Ok(())
@@ -487,9 +566,12 @@ fn scan_selector(value: &str, prefix: &str, segment_count: usize) -> Vec<Vec<Str
     let mut index = 0;
     while let Some(offset) = value[index..].find(prefix) {
         let start = index + offset;
-        if start > 0 && is_ident_continue(bytes[start - 1] as char) {
-            index = start + prefix.len();
-            continue;
+        if start > 0 {
+            let previous = bytes[start - 1] as char;
+            if is_ident_continue(previous) || previous == '.' {
+                index = start + prefix.len();
+                continue;
+            }
         }
         let mut cursor = start + prefix.len();
         let mut segments = Vec::new();

@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(manifest.docs.len(), 1);
         assert_eq!(manifest.docs[0].summary, "Just a test document");
         assert_eq!(
-            manifest.docs[0].path,
+            manifest.docs[0].selector,
             "library://test/domain/path/random.md"
         );
     }

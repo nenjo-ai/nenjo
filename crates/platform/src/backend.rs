@@ -416,10 +416,10 @@ where
         let args: KnowledgeReadArgs =
             serde_json::from_value(params).context("invalid read_knowledge_doc args")?;
         let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let doc = pack.read_doc(&args.path).ok_or_else(|| {
+        let doc = pack.read_doc(&args.selector).ok_or_else(|| {
             anyhow!(
                 "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
+                args.selector,
                 args.pack
             )
         })?;
@@ -452,10 +452,10 @@ where
             serde_json::from_value(params).context("invalid list_knowledge_neighbors args")?;
         let pack = self.resolve_knowledge_pack(&args.pack).await?;
         let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+        let neighbors = pack.neighbors(&args.selector, edge_type).ok_or_else(|| {
             anyhow!(
                 "unknown knowledge doc '{}' in pack '{}'",
-                args.path,
+                args.selector,
                 args.pack
             )
         })?;
@@ -1790,14 +1790,14 @@ mod tests {
         let unrelated_path = format!("library://{pack_slug}/docs/unrelated.md");
         let manifest = json!({
             "pack_id": format!("library-knowledge-{pack_slug}"),
-            "pack_version": "1",
+            "version": "1",
             "schema_version": 1,
             "root_uri": format!("library://{pack_slug}/"),
             "synced_at": "2026-01-01T00:00:00Z",
             "docs": [
                 {
                     "id": "overview",
-                    "path": overview_path,
+                    "selector": overview_path,
                     "source_path": "docs/overview.md",
                     "title": "Overview",
                     "summary": "Library overview",
@@ -1813,7 +1813,7 @@ mod tests {
                 },
                 {
                     "id": "routine",
-                    "path": routine_path,
+                    "selector": routine_path,
                     "source_path": "docs/routine.md",
                     "title": "Routine",
                     "summary": "Routine design",
@@ -1829,7 +1829,7 @@ mod tests {
                 },
                 {
                     "id": "gate",
-                    "path": gate_path,
+                    "selector": gate_path,
                     "source_path": "docs/gate.md",
                     "title": "Gate",
                     "summary": "Gate design",
@@ -1839,7 +1839,7 @@ mod tests {
                 },
                 {
                     "id": "unrelated",
-                    "path": unrelated_path,
+                    "selector": unrelated_path,
                     "source_path": "docs/unrelated.md",
                     "title": "Unrelated",
                     "summary": "Unrelated document",
@@ -2061,14 +2061,14 @@ mod tests {
         let value = backend
             .read_knowledge_doc(json!({
                 "pack": format!("lib:{pack_slug}"),
-                "path": "routine"
+                "selector": "routine"
             }))
             .await
             .unwrap();
 
         assert_eq!(value["content"], "# routine.md\n");
         assert_eq!(
-            value["document"]["path"],
+            value["document"]["selector"],
             format!("library://{pack_slug}/docs/routine.md")
         );
     }
@@ -2082,29 +2082,29 @@ mod tests {
         let value = backend
             .list_knowledge_neighbors(json!({
                 "pack": format!("lib:{pack_slug}"),
-                "path": "routine"
+                "selector": "routine"
             }))
             .await
             .unwrap();
-        assert_eq!(value["document"]["path"], routine_path);
+        assert_eq!(value["document"]["selector"], routine_path);
         let edges = value["edges"].as_array().expect("edges array");
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["type"], "depends_on");
-        assert_eq!(edges[0]["target"]["path"], gate_path);
+        assert_eq!(edges[0]["target"]["selector"], gate_path);
         assert_eq!(edges[0]["target"]["title"], "Gate");
         assert!(edges[0].get("note").is_none());
 
         let filtered = backend
             .list_knowledge_neighbors(json!({
                 "pack": format!("lib:{pack_slug}"),
-                "path": routine_path,
+                "selector": routine_path,
                 "edge_type": "depends_on"
             }))
             .await
             .unwrap();
         let filtered = filtered["edges"].as_array().expect("filtered edges array");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["target"]["path"], gate_path);
+        assert_eq!(filtered[0]["target"]["selector"], gate_path);
         assert_eq!(filtered[0]["type"], "depends_on");
     }
 

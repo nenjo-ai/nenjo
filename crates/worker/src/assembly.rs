@@ -262,7 +262,7 @@ mod tests {
             pack_dir.join(LibraryKnowledgePack::MANIFEST_FILENAME),
             r#"{
               "pack_id": "demo",
-              "pack_version": "1",
+              "version": "1",
               "schema_version": 1,
               "root_uri": "library://demo/",
               "content_hash": "",
@@ -270,7 +270,7 @@ mod tests {
               "docs": [
                 {
                   "id": "intro",
-                  "path": "library://demo/intro.md",
+                  "selector": "library://demo/intro.md",
                   "source_path": "docs/intro.md",
                   "title": "Intro",
                   "summary": "Intro doc",

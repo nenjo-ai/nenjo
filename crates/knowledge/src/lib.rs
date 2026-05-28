@@ -17,16 +17,16 @@ pub mod tools;
 /// their own sync/cache mutation methods on their concrete types.
 pub trait KnowledgePackManifest: Send + Sync {
     fn pack_id(&self) -> &str;
-    fn pack_version(&self) -> &str;
+    fn version(&self) -> &str;
     fn schema_version(&self) -> u32;
     fn root_uri(&self) -> &str;
     fn content_hash(&self) -> &str;
     fn docs(&self) -> &[KnowledgeDocManifest];
 
-    fn read_doc_manifest(&self, path: &str) -> Option<&KnowledgeDocManifest> {
-        self.docs()
-            .iter()
-            .find(|doc| doc.id == path || doc.path == path || doc.source_path == path)
+    fn read_doc_manifest(&self, selector: &str) -> Option<&KnowledgeDocManifest> {
+        self.docs().iter().find(|doc| {
+            doc.id == selector || doc.selector == selector || doc.source_path == selector
+        })
     }
 }
 
@@ -38,7 +38,7 @@ pub trait KnowledgePackManifest: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgePackManifestData {
     pub pack_id: String,
-    pub pack_version: String,
+    pub version: String,
     pub schema_version: u32,
     pub root_uri: String,
     #[serde(default)]
@@ -51,8 +51,8 @@ impl KnowledgePackManifest for KnowledgePackManifestData {
         &self.pack_id
     }
 
-    fn pack_version(&self) -> &str {
-        &self.pack_version
+    fn version(&self) -> &str {
+        &self.version
     }
 
     fn schema_version(&self) -> u32 {
@@ -81,8 +81,8 @@ impl KnowledgePackManifest for KnowledgePackManifestData {
 pub struct KnowledgeDocManifest {
     /// Stable document identifier within the pack.
     pub id: String,
-    /// Agent-visible document path used for lookup and graph traversal.
-    pub path: String,
+    /// Agent-visible selector used for lookup and graph traversal.
+    pub selector: String,
     /// Pack-local file path used to load the document body.
     pub source_path: String,
     /// Human-readable title.
@@ -131,7 +131,7 @@ pub struct KnowledgeDocEdge {
 pub struct KnowledgeDocFilter {
     pub tags: Vec<String>,
     pub kind: Option<KnowledgeDocKind>,
-    pub path_prefix: Option<String>,
+    pub selector_prefix: Option<String>,
     pub related_to: Option<String>,
     pub edge_type: Option<KnowledgeDocEdgeType>,
 }
@@ -176,7 +176,7 @@ pub struct KnowledgeDocTree {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocTreeEntry {
-    pub path: String,
+    pub selector: String,
     pub title: String,
     pub kind: KnowledgeDocKind,
     pub tags: Vec<String>,
@@ -235,12 +235,12 @@ pub trait KnowledgePack: Send + Sync {
 
         edges.sort_by(|left, right| {
             left.target
-                .path
-                .cmp(&right.target.path)
+                .selector
+                .cmp(&right.target.selector)
                 .then_with(|| left.edge_type.as_str().cmp(right.edge_type.as_str()))
         });
         edges.dedup_by(|left, right| {
-            left.edge_type == right.edge_type && left.target.path == right.target.path
+            left.edge_type == right.edge_type && left.target.selector == right.target.selector
         });
 
         Some(KnowledgeDocNeighbor {
@@ -341,7 +341,7 @@ fn search_pack<P: KnowledgePack + ?Sized>(
         let mut matched = BTreeSet::new();
 
         score += score_field(&needle, &manifest.id, 100, "id", &mut matched);
-        score += score_field(&needle, &manifest.path, 90, "path", &mut matched);
+        score += score_field(&needle, &manifest.selector, 90, "selector", &mut matched);
         score += score_field(&needle, &manifest.title, 80, "title", &mut matched);
         score += score_field(&needle, &manifest.summary, 60, "summary", &mut matched);
 
@@ -361,7 +361,7 @@ fn search_pack<P: KnowledgePack + ?Sized>(
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
-            .then_with(|| a.document.path.cmp(&b.document.path))
+            .then_with(|| a.document.selector.cmp(&b.document.selector))
     });
     hits
 }
@@ -376,8 +376,8 @@ fn matches_filter<P: KnowledgePack + ?Sized>(
     {
         return false;
     }
-    if let Some(prefix) = &filter.path_prefix
-        && !doc.path.starts_with(prefix)
+    if let Some(prefix) = &filter.selector_prefix
+        && !doc.selector.starts_with(prefix)
     {
         return false;
     }
@@ -394,7 +394,7 @@ fn matches_filter<P: KnowledgePack + ?Sized>(
             let edge_matches_target = edge.target == *target
                 || pack
                     .read_manifest(&edge.target)
-                    .map(|edge_target| edge_target.id == *target || edge_target.path == *target)
+                    .map(|edge_target| edge_target.id == *target || edge_target.selector == *target)
                     .unwrap_or(false);
             edge_matches_target
                 && filter

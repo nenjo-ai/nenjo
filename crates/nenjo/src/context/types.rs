@@ -181,40 +181,6 @@ pub struct ArtifactsContext {
 }
 
 // ---------------------------------------------------------------------------
-// Documents (project document listing)
-// ---------------------------------------------------------------------------
-
-/// A single document entry in the project listing.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "doc")]
-pub struct DocumentContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "@title", skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(rename = "@path", skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(rename = "@kind", skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(rename = "@size", skip_serializing_if = "String::is_empty")]
-    pub size: String,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-}
-
-/// Project documents listing.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "project_documents")]
-pub struct ProjectDocumentsContext {
-    #[serde(rename = "@path")]
-    pub path: String,
-    #[serde(rename = "doc")]
-    pub documents: Vec<DocumentContext>,
-}
-
-// ---------------------------------------------------------------------------
 // Task (current/active) cron, gate
 // ---------------------------------------------------------------------------
 

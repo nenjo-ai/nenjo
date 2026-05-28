@@ -6,7 +6,7 @@ Platform-backed manifest and REST API operations for Nenjo workers and tooling.
 
 This crate bridges local Nenjo manifest state with platform APIs. It provides:
 
-- `PlatformManifestClient` for HTTP access to platform manifest, project document, task, and execution endpoints
+- `PlatformManifestClient` for HTTP access to platform manifest, library knowledge document, task, and execution endpoints
 - `ManifestMcpContract` and manifest MCP tool definitions for exposing manifest operations as tools
 - `PlatformManifestBackend` for read-through/write-through manifest synchronization
 - `LocalManifestMcpBackend` for in-process tests and local manifest execution

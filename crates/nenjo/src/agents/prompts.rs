@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::context::types::RenderContextBlock;
 pub use crate::manifest::PromptConfig;
 
@@ -18,8 +16,6 @@ pub struct PromptContext {
     pub active_domain: Option<ActiveDomain>,
     /// Whether the active domain's developer prompt addon should be appended.
     pub append_active_domain_addon: bool,
-    /// Workspace directory containing project document subdirs.
-    pub docs_base_dir: Option<PathBuf>,
     /// Routine/project-level context fields injected by the executor.
     pub render_ctx_extra: RenderContextVars,
 }

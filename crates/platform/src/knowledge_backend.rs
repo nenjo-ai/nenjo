@@ -68,7 +68,7 @@ pub(crate) fn parse_library_pack_selector(selector: &str) -> Result<&str> {
 
 pub(crate) fn unknown_pack(selector: &str) -> anyhow::Error {
     anyhow!(
-        "unknown knowledge pack '{selector}'; use 'lib:<pack>', 'pkg:<package>:knowledge', or 'local:<pack>'"
+        "unknown knowledge pack '{selector}'; use 'lib:<pack>', 'pkg:<package>', or 'local:<pack>'"
     )
 }
 

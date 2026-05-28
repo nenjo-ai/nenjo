@@ -139,16 +139,9 @@ impl KnowledgeRef {
     pub fn prompt_prefix(&self) -> String {
         match self {
             Self::Library { pack } => format!("lib.{}", pack.prompt_segment()),
-            Self::Package { package } => format!("pkg.{}.knowledge", package.prompt_path()),
+            Self::Package { package } => format!("pkg.{}", package.prompt_path()),
             Self::Local { pack } => format!("local.{}", pack.prompt_segment()),
         }
-    }
-
-    fn relative_doc_path<'a>(&self, doc: &'a KnowledgeDocManifest) -> &'a str {
-        doc.source_path
-            .strip_prefix("docs/")
-            .unwrap_or(doc.source_path.as_str())
-            .trim_matches('/')
     }
 }
 
@@ -156,7 +149,7 @@ impl fmt::Display for KnowledgeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Library { pack } => write!(f, "lib:{pack}"),
-            Self::Package { package } => write!(f, "pkg:{package}:knowledge"),
+            Self::Package { package } => write!(f, "pkg:{package}"),
             Self::Local { pack } => write!(f, "local:{pack}"),
         }
     }
@@ -173,14 +166,11 @@ impl FromStr for KnowledgeRef {
         if let Some(pack) = value.strip_prefix("local:") {
             return Self::local(pack);
         }
-        if let Some(package) = value
-            .strip_prefix("pkg:")
-            .and_then(|value| value.strip_suffix(":knowledge"))
-        {
+        if let Some(package) = value.strip_prefix("pkg:") {
             return Self::package(package);
         }
         Err(anyhow!(
-            "invalid knowledge selector '{value}'; expected lib:<pack>, pkg:<package>:knowledge, or local:<pack>"
+            "invalid knowledge selector '{value}'; expected lib:<pack>, pkg:<package>, or local:<pack>"
         ))
     }
 }
@@ -287,7 +277,7 @@ impl KnowledgeRegistry for StaticKnowledgeRegistry {
 pub struct KnowledgePackSummary {
     pub pack: String,
     pub pack_id: String,
-    pub pack_version: String,
+    pub version: String,
     pub root_uri: String,
     pub document_count: usize,
 }
@@ -297,7 +287,7 @@ impl KnowledgePackSummary {
         Self {
             pack: pack.into(),
             pack_id: manifest.pack_id().to_string(),
-            pack_version: manifest.pack_version().to_string(),
+            version: manifest.version().to_string(),
             root_uri: manifest.root_uri().to_string(),
             document_count: manifest.docs().len(),
         }
@@ -307,7 +297,7 @@ impl KnowledgePackSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct KnowledgeReadArgs {
     pub pack: String,
-    pub path: String,
+    pub selector: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -321,7 +311,7 @@ pub struct KnowledgeSearchArgs {
 #[derive(Debug, Clone, Deserialize)]
 pub struct KnowledgeNeighborArgs {
     pub pack: String,
-    pub path: String,
+    pub selector: String,
     pub edge_type: Option<String>,
 }
 
@@ -330,7 +320,7 @@ pub struct KnowledgeFilterArgs {
     #[serde(default)]
     pub tags: Vec<String>,
     pub kind: Option<String>,
-    pub path_prefix: Option<String>,
+    pub selector_prefix: Option<String>,
     pub related_to: Option<String>,
     pub edge_type: Option<String>,
 }
@@ -339,8 +329,8 @@ pub struct KnowledgeFilterArgs {
 pub struct KnowledgeDocMetadataResult {
     /// Stable document identifier within the pack.
     pub id: String,
-    /// Agent-visible path used for lookup and traversal.
-    pub path: String,
+    /// Agent-visible selector used for lookup and traversal.
+    pub selector: String,
     /// Human-readable title.
     pub title: String,
     /// Short summary used for selection.
@@ -399,7 +389,7 @@ pub fn knowledge_filter(filter: KnowledgeFilterArgs) -> Result<KnowledgeDocFilte
     Ok(KnowledgeDocFilter {
         tags: filter.tags,
         kind: parse_knowledge_enum(filter.kind)?,
-        path_prefix: filter.path_prefix,
+        selector_prefix: filter.selector_prefix,
         related_to: filter.related_to,
         edge_type: parse_knowledge_enum(filter.edge_type)?,
     })
@@ -420,7 +410,7 @@ where
 pub fn knowledge_document_metadata(doc: &KnowledgeDocManifest) -> KnowledgeDocMetadataResult {
     KnowledgeDocMetadataResult {
         id: doc.id.clone(),
-        path: doc.path.clone(),
+        selector: doc.selector.clone(),
         title: doc.title.clone(),
         summary: doc.summary.clone(),
         kind: doc.kind.as_str().to_string(),
@@ -505,7 +495,7 @@ pub fn knowledge_pack_summary(knowledge_ref: &KnowledgeRef, pack: &dyn Knowledge
             .docs()
             .iter()
             .map(|doc| KnowledgeDocumentSummaryContext {
-                path: doc.path.as_str(),
+                selector: doc.selector.as_str(),
                 id: doc.id.as_str(),
                 kind: doc.kind.as_str(),
                 title: doc.title.as_str(),
@@ -544,8 +534,8 @@ struct KnowledgePackSummaryContext<'a> {
 #[derive(Debug, Serialize)]
 #[serde(rename = "doc")]
 struct KnowledgeDocumentSummaryContext<'a> {
-    #[serde(rename = "@path")]
-    path: &'a str,
+    #[serde(rename = "@selector")]
+    selector: &'a str,
     #[serde(rename = "@id")]
     id: &'a str,
     #[serde(rename = "@kind")]
@@ -570,11 +560,11 @@ pub fn knowledge_document_var_key(
     doc: &KnowledgeDocManifest,
 ) -> String {
     let pack_prefix = knowledge_ref.prompt_prefix();
-    let relative = knowledge_ref.relative_doc_path(doc);
-    let path = relative
+    let selector = prompt_doc_selector(doc);
+    let path = selector
         .strip_suffix(".md")
-        .unwrap_or(relative)
-        .split('/')
+        .unwrap_or(selector.as_str())
+        .split(['.', '/'])
         .filter(|segment| !segment.is_empty())
         .map(normalize_var_segment)
         .filter(|segment| !segment.is_empty())
@@ -593,16 +583,16 @@ fn knowledge_document_alias_var_keys(
 ) -> Vec<String> {
     let mut keys = Vec::new();
     let pack_prefix = knowledge_ref.prompt_prefix();
-    let relative = knowledge_ref.relative_doc_path(doc);
-    let Some((parent, _leaf)) = relative
+    let selector = prompt_doc_selector(doc);
+    let Some((parent, _leaf)) = selector
         .strip_suffix(".md")
-        .unwrap_or(relative)
-        .rsplit_once('/')
+        .unwrap_or(selector.as_str())
+        .rsplit_once(['.', '/'])
     else {
         return keys;
     };
     let parent = parent
-        .split('/')
+        .split(['.', '/'])
         .filter(|segment| !segment.is_empty())
         .map(normalize_var_segment)
         .filter(|segment| !segment.is_empty())
@@ -647,8 +637,8 @@ fn normalize_var_segment(segment: &str) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename = "knowledge_doc")]
 struct KnowledgeDocMetadataContext<'a> {
-    #[serde(rename = "@path")]
-    path: &'a str,
+    #[serde(rename = "@selector")]
+    selector: &'a str,
     #[serde(rename = "@title")]
     title: &'a str,
     #[serde(rename = "@kind")]
@@ -659,9 +649,9 @@ struct KnowledgeDocMetadataContext<'a> {
 }
 
 fn doc_metadata(doc: &KnowledgeDocManifest) -> String {
-    let path = prompt_doc_path(doc);
+    let selector = prompt_doc_selector(doc);
     let ctx = KnowledgeDocMetadataContext {
-        path: &path,
+        selector: &selector,
         title: &doc.title,
         summary: &doc.summary,
         kind: doc.kind.as_str(),
@@ -670,22 +660,22 @@ fn doc_metadata(doc: &KnowledgeDocManifest) -> String {
     nenjo_xml::to_xml_pretty(&ctx, 2)
 }
 
-fn prompt_doc_path(doc: &KnowledgeDocManifest) -> String {
-    if doc.path.starts_with("library://") {
-        doc.path
+fn prompt_doc_selector(doc: &KnowledgeDocManifest) -> String {
+    if doc.selector.starts_with("library://") {
+        doc.selector
             .splitn(4, '/')
             .nth(3)
-            .unwrap_or(&doc.path)
+            .unwrap_or(&doc.selector)
             .to_string()
     } else {
-        doc.path.clone()
+        doc.selector.clone()
     }
 }
 
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Knowledge pack selector: lib:<pack>, pkg:<package>:knowledge, or local:<pack>."
+        "description": "Knowledge pack selector: lib:<pack>, pkg:<package>, or local:<pack>."
     })
 }
 
@@ -704,13 +694,13 @@ fn knowledge_filter_schema(
             "type": "string",
             "description": "Optional kind filter such as guide or reference"
         },
-        "path_prefix": {
+        "selector_prefix": {
             "type": "string",
-            "description": "Optional virtual or pack-relative path prefix"
+            "description": "Optional virtual or pack-relative selector prefix"
         },
         "related_to": {
             "type": "string",
-            "description": "Optional path of a document this result must be related to"
+            "description": "Optional selector of a document this result must be related to"
         },
         "edge_type": {
             "type": "string",
@@ -740,12 +730,12 @@ fn knowledge_lookup_schema() -> serde_json::Value {
         "type": "object",
         "properties": {
             "pack": pack_schema(),
-            "path": {
+            "selector": {
                 "type": "string",
-                "description": "Document path, id, alias, or path within the selected pack"
+                "description": "Document selector or id within the selected pack"
             }
         },
-        "required": ["pack", "path"],
+        "required": ["pack", "selector"],
         "additionalProperties": false
     })
 }
@@ -789,16 +779,16 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "pack": pack_schema(),
-                    "path": {
+                    "selector": {
                         "type": "string",
-                        "description": "Document path, id, alias, or path within the selected pack"
+                        "description": "Document selector or id within the selected pack"
                     },
                     "edge_type": {
                         "type": "string",
                         "description": "Optional relationship type filter such as references or depends_on"
                     }
                 },
-                "required": ["pack", "path"],
+                "required": ["pack", "selector"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -848,10 +838,10 @@ impl Tool for KnowledgeTool {
             "read_knowledge_doc" => {
                 let args: KnowledgeReadArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
-                let doc = pack.read_doc(&args.path).ok_or_else(|| {
+                let doc = pack.read_doc(&args.selector).ok_or_else(|| {
                     anyhow!(
                         "knowledge document '{}' not found in pack '{}'",
-                        args.path,
+                        args.selector,
                         args.pack
                     )
                 })?;
@@ -875,10 +865,10 @@ impl Tool for KnowledgeTool {
                 let args: KnowledgeNeighborArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
                 let edge_type = parse_knowledge_enum(args.edge_type)?;
-                let neighbors = pack.neighbors(&args.path, edge_type).ok_or_else(|| {
+                let neighbors = pack.neighbors(&args.selector, edge_type).ok_or_else(|| {
                     anyhow!(
                         "knowledge document '{}' not found in pack '{}'",
-                        args.path,
+                        args.selector,
                         args.pack
                     )
                 })?;
@@ -931,7 +921,7 @@ mod tests {
     ) -> KnowledgeDocManifest {
         KnowledgeDocManifest {
             id: id.into(),
-            path: path.into(),
+            selector: path.into(),
             source_path: path.trim_start_matches("library://test/").into(),
             title: title.into(),
             summary: format!("{title} summary"),
@@ -946,7 +936,7 @@ mod tests {
         TestPack {
             manifest: KnowledgePackManifestData {
                 pack_id: "test".into(),
-                pack_version: "1".into(),
+                version: "1".into(),
                 schema_version: 1,
                 root_uri: "library://test/".into(),
                 content_hash: String::new(),
@@ -999,7 +989,7 @@ mod tests {
         let pack = TestPack {
             manifest: KnowledgePackManifestData {
                 pack_id: "test".into(),
-                pack_version: "1".into(),
+                version: "1".into(),
                 schema_version: 1,
                 root_uri: "file:///tmp/test/".into(),
                 content_hash: String::new(),
@@ -1046,7 +1036,7 @@ mod tests {
             .expect("root neighbors");
         let value = serde_json::to_value(result).unwrap();
 
-        assert_eq!(value["document"]["path"], "library://test/root.md");
+        assert_eq!(value["document"]["selector"], "library://test/root.md");
         assert_eq!(value["document"]["related"][0]["type"], "depends_on");
         assert_eq!(
             value["document"]["related"][0]["target"],
@@ -1055,7 +1045,7 @@ mod tests {
         assert_eq!(value["edges"].as_array().unwrap().len(), 1);
         assert_eq!(value["edges"][0]["type"], "depends_on");
         assert_eq!(
-            value["edges"][0]["target"]["path"],
+            value["edges"][0]["target"]["selector"],
             "library://test/leaf.md"
         );
         assert_eq!(value["edges"][0]["target"]["kind"], "routing_guide");
@@ -1074,7 +1064,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(value[0]["document"]["path"], "library://test/leaf.md");
+        assert_eq!(value[0]["document"]["selector"], "library://test/leaf.md");
         assert_eq!(value[0]["document"]["related"][0]["type"], "references");
         assert_eq!(
             value[0]["document"]["related"][0]["target"],
@@ -1106,7 +1096,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(value["document"]["path"], "library://test/leaf.md");
+        assert_eq!(value["document"]["selector"], "library://test/leaf.md");
         assert_eq!(
             value["document"]["related"][0]["target"],
             "library://test/root.md"
@@ -1124,17 +1114,17 @@ mod tests {
     #[test]
     fn pkg_knowledge_uses_package_template_namespace() {
         let knowledge_ref = KnowledgeRef::package("@nenjo/core").unwrap();
-        assert_eq!(knowledge_ref.selector(), "pkg:nenjo.core:knowledge");
-        assert_eq!(knowledge_ref.prompt_prefix(), "pkg.nenjo.core.knowledge");
+        assert_eq!(knowledge_ref.selector(), "pkg:nenjo.core");
+        assert_eq!(knowledge_ref.prompt_prefix(), "pkg.nenjo.core");
     }
 
     #[test]
     fn pkg_knowledge_document_vars_use_package_relative_paths() {
         let knowledge_ref = KnowledgeRef::package("nenjo.core").unwrap();
         let doc = KnowledgeDocManifest {
-            id: "nenjo.guide.agents".into(),
-            path: "pkg://nenjo.core/knowledge/guide/agents.md".into(),
-            source_path: "docs/guide/agents.md".into(),
+            id: "nenjo.resources.agents".into(),
+            selector: "resources.agents".into(),
+            source_path: "docs/resources/agents.md".into(),
             title: "Agents".into(),
             summary: String::new(),
             kind: KnowledgeDocKind::new("guide"),
@@ -1145,7 +1135,7 @@ mod tests {
 
         assert_eq!(
             knowledge_document_var_key(&knowledge_ref, &doc),
-            "pkg.nenjo.core.knowledge.guide.agents"
+            "pkg.nenjo.core.resources.agents"
         );
     }
 }

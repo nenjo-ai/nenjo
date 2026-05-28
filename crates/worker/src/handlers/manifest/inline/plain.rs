@@ -111,7 +111,7 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                         } else {
                             manifest.projects.push(item);
                         }
-                        debug!(%rt, %id, "Applied inline project document payload");
+                        debug!(%rt, %id, "Applied inline project resource payload");
                         true
                     }
                     Err(e) => {

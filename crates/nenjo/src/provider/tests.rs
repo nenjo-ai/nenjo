@@ -92,13 +92,13 @@ impl TestKnowledgePack {
         Self {
             manifest: KnowledgePackManifestData {
                 pack_id: pack_id.to_string(),
-                pack_version: "1".to_string(),
+                version: "1".to_string(),
                 schema_version: 1,
                 root_uri: root_uri.to_string(),
                 content_hash: format!("{pack_id}-hash"),
                 docs: vec![KnowledgeDocManifest {
                     id: doc_id.to_string(),
-                    path: path.to_string(),
+                    selector: path.to_string(),
                     source_path: path.to_string(),
                     title: doc_id.to_string(),
                     summary: format!("{doc_id} summary"),

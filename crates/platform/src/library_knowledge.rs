@@ -41,8 +41,8 @@ pub const LIBRARY_KNOWLEDGE_MANIFEST_FILENAME: &str = "manifest.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryKnowledgePackManifest {
     pub pack_id: String,
-    #[serde(default = "default_library_pack_version")]
-    pub pack_version: String,
+    #[serde(default = "default_library_version")]
+    pub version: String,
     pub schema_version: u32,
     pub root_uri: String,
     #[serde(default)]
@@ -52,7 +52,7 @@ pub struct LibraryKnowledgePackManifest {
     pub docs: Vec<KnowledgeDocManifest>,
 }
 
-fn default_library_pack_version() -> String {
+fn default_library_version() -> String {
     "1".to_string()
 }
 
@@ -61,8 +61,8 @@ impl KnowledgePackManifest for LibraryKnowledgePackManifest {
         &self.pack_id
     }
 
-    fn pack_version(&self) -> &str {
-        &self.pack_version
+    fn version(&self) -> &str {
+        &self.version
     }
 
     fn schema_version(&self) -> u32 {
@@ -86,7 +86,7 @@ impl LibraryKnowledgePackManifest {
     pub fn library_pack(pack_slug: &str) -> Self {
         Self {
             pack_id: pack_slug.to_string(),
-            pack_version: "1".to_string(),
+            version: "1".to_string(),
             schema_version: 1,
             root_uri: format!("library://{pack_slug}/"),
             content_hash: String::new(),
@@ -105,7 +105,7 @@ impl LibraryKnowledgePackManifest {
             .docs
             .iter()
             .filter(|doc| doc.id == doc_id)
-            .map(|doc| doc.path.clone())
+            .map(|doc| doc.selector.clone())
             .collect();
         let original_len = self.docs.len();
         self.docs.retain(|doc| doc.id != doc_id);
@@ -135,7 +135,7 @@ impl LibraryKnowledgePackManifest {
             self.docs
                 .iter()
                 .find(|doc| doc.id == target_id.as_str())
-                .map(|doc| doc.path.clone())
+                .map(|doc| doc.selector.clone())
         });
         if let Some(pos) = self.docs.iter().position(|doc| doc.id == next.id) {
             self.docs[pos] = next;
@@ -164,7 +164,8 @@ impl LibraryKnowledgePackManifest {
                 }
             }
         }
-        self.docs.sort_by(|left, right| left.path.cmp(&right.path));
+        self.docs
+            .sort_by(|left, right| left.selector.cmp(&right.selector));
         self.touch();
     }
 }
@@ -218,10 +219,10 @@ pub fn build_library_knowledge_manifest(
             })
         })
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries.sort_by(|left, right| left.selector.cmp(&right.selector));
     LibraryKnowledgePackManifest {
         pack_id: pack_slug.to_string(),
-        pack_version: "1".to_string(),
+        version: "1".to_string(),
         schema_version: 1,
         root_uri: format!("library://{pack_slug}/"),
         content_hash: String::new(),
@@ -289,7 +290,7 @@ fn library_knowledge_doc(
     let relative_path = library_doc_relative_path(doc);
     KnowledgeDocManifest {
         id: doc.slug.clone(),
-        path: library_doc_path(pack_slug, doc),
+        selector: library_doc_path(pack_slug, doc),
         source_path: format!("docs/{relative_path}"),
         title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
         summary: doc
@@ -346,8 +347,9 @@ impl KnowledgePack for LibraryKnowledgePack {
         let normalized = normalize_library_doc_lookup(path, &self.manifest.root_uri);
         self.manifest.docs.iter().find(|doc| {
             doc.id == path
-                || doc.path == path
-                || normalize_library_doc_lookup(&doc.path, &self.manifest.root_uri) == normalized
+                || doc.selector == path
+                || normalize_library_doc_lookup(&doc.selector, &self.manifest.root_uri)
+                    == normalized
                 || doc
                     .source_path
                     .strip_prefix("docs/")
@@ -361,14 +363,14 @@ impl KnowledgePack for LibraryKnowledgePack {
     }
 
     fn list_docs(&self, mut filter: KnowledgeDocFilter) -> Vec<&KnowledgeDocManifest> {
-        filter.path_prefix = filter
-            .path_prefix
+        filter.selector_prefix = filter
+            .selector_prefix
             .as_deref()
-            .map(|prefix| normalize_library_path_prefix(prefix, &self.manifest.root_uri));
+            .map(|prefix| normalize_library_selector_prefix(prefix, &self.manifest.root_uri));
         if let Some(related_to) = filter.related_to.as_deref()
             && let Some(target) = self.read_manifest(related_to)
         {
-            filter.related_to = Some(target.path.clone());
+            filter.related_to = Some(target.selector.clone());
         }
         self.manifest
             .docs
@@ -388,8 +390,8 @@ fn matches_library_filter(
     {
         return false;
     }
-    if let Some(prefix) = &filter.path_prefix
-        && !doc.path.starts_with(prefix)
+    if let Some(prefix) = &filter.selector_prefix
+        && !doc.selector.starts_with(prefix)
     {
         return false;
     }
@@ -406,7 +408,7 @@ fn matches_library_filter(
             let edge_matches_target = edge.target == *target
                 || pack
                     .read_manifest(&edge.target)
-                    .map(|edge_target| edge_target.id == *target || edge_target.path == *target)
+                    .map(|edge_target| edge_target.id == *target || edge_target.selector == *target)
                     .unwrap_or(false);
             edge_matches_target
                 && filter
@@ -431,7 +433,7 @@ fn normalize_library_doc_lookup(value: &str, root_uri: &str) -> String {
         .to_string()
 }
 
-fn normalize_library_path_prefix(value: &str, root_uri: &str) -> String {
+fn normalize_library_selector_prefix(value: &str, root_uri: &str) -> String {
     let trimmed = value.trim().trim_matches('/');
     if trimmed.is_empty() {
         return root_uri.to_string();
@@ -464,14 +466,14 @@ mod tests {
     fn library_manifest() -> LibraryKnowledgePackManifest {
         LibraryKnowledgePackManifest {
             pack_id: "library-test".into(),
-            pack_version: "1".into(),
+            version: "1".into(),
             schema_version: 1,
             root_uri: "library://test/".into(),
             content_hash: String::new(),
             synced_at: String::new(),
             docs: vec![KnowledgeDocManifest {
                 id: "doc-1".into(),
-                path: "library://test/architecture.md".into(),
+                selector: "library://test/architecture.md".into(),
                 source_path: "docs/architecture.md".into(),
                 title: "Architecture".into(),
                 summary: "System architecture".into(),
@@ -508,20 +510,20 @@ mod tests {
     }
 
     #[test]
-    fn library_pack_ignores_legacy_manifest_metadata_fields() {
+    fn library_pack_reads_clean_manifest_metadata_fields() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(LibraryKnowledgePack::MANIFEST_FILENAME),
             r#"{
               "pack_id": "library-test",
-              "pack_version": "1",
+              "version": "1",
               "schema_version": 1,
               "root_uri": "library://test/",
               "content_hash": "",
               "docs": [
                 {
                   "id": "doc-1",
-                  "path": "library://test/draft.md",
+                  "selector": "library://test/draft.md",
                   "source_path": "docs/draft.md",
                   "title": "Draft",
                   "summary": "Draft document",
@@ -576,6 +578,9 @@ mod tests {
         );
 
         assert_eq!(manifest.root_uri, "library://product/");
-        assert_eq!(manifest.docs[0].path, "library://product/docs/overview.md");
+        assert_eq!(
+            manifest.docs[0].selector,
+            "library://product/docs/overview.md"
+        );
     }
 }

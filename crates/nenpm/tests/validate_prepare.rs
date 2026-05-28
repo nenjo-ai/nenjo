@@ -134,6 +134,65 @@ manifest:
 }
 
 #[test]
+fn validate_does_not_treat_package_context_selector_as_local_context() {
+    let workspace = temp_workspace("validate-package-context-selector");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "agent": packages/agent/nenjo.package.yaml
+  "context": packages/context/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/context/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "context"
+version: "0.1.0"
+modules:
+  - knowledge.yml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/context/knowledge.yml",
+        r#"schema: nenjo.context_block.v1
+manifest:
+  name: knowledge_routing
+  template: "Use knowledge carefully."
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agent/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "agent"
+version: "0.1.0"
+dependencies:
+  context: "^0.1.0"
+modules:
+  - agent.yml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agent/agent.yml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: agent
+  prompt_config:
+    developer_prompt: |
+      {{ pkg.nenjo.context.knowledge.knowledge_routing }}
+"#,
+    );
+
+    validate(ValidateOptions::new(&workspace)).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn validate_rejects_context_import_cycles() {
     let workspace = temp_workspace("validate-context-cycle");
     write_file(

@@ -434,7 +434,6 @@ where
             current_project,
             active_domain: None,
             append_active_domain_addon: true,
-            docs_base_dir: Some(self.inner.services.tool_factory.workspace_dir()),
             render_ctx_extra: self.inner.services.render_ctx_extra.clone(),
         }
     }

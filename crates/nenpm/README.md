@@ -209,7 +209,7 @@ manifest:
 ```
 
 Package dependencies are declared only in `nenjo.package.v1`. Prompt selectors
-such as `{{ pkg.nenjo.knowledge.knowledge }}` are valid only when the
+such as `{{ pkg.nenjo.knowledge }}` are valid only when the
 referenced package is the current package or a declared package dependency.
 
 `prepare` runs the same validation and writes `.nenpm/registry-compiled.json`
