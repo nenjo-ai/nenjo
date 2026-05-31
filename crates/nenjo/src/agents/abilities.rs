@@ -485,6 +485,8 @@ where
         let mut scoped_agent = caller.manifest.clone();
         scoped_agent.platform_scopes = ability_scopes.clone();
         scoped_agent.mcp_servers = merged_mcp_servers.clone();
+        scoped_agent.abilities.clear();
+        scoped_agent.domains.clear();
         provider
             .tool_factory()
             .create_tools_with_security(&scoped_agent, scoped_security.clone())
@@ -504,6 +506,7 @@ where
     // Build a prompt context without ability recursion.
     let mut prompt_context = caller.prompt.context.clone();
     prompt_context.agent_name = format!("{}:{}", caller.name(), ability.name);
+    prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
 
     let mut scoped_manifest = caller.manifest.clone();
@@ -517,6 +520,8 @@ where
     scoped_manifest.prompt_config = prompt_config;
     scoped_manifest.platform_scopes = ability_scopes;
     scoped_manifest.mcp_servers = merged_mcp_servers;
+    scoped_manifest.abilities.clear();
+    scoped_manifest.domains.clear();
 
     AgentInstance {
         manifest: scoped_manifest,
@@ -614,6 +619,7 @@ mod tests {
 
     struct TestTool {
         name: &'static str,
+        origin: ToolOrigin,
     }
 
     #[async_trait::async_trait]
@@ -636,6 +642,10 @@ mod tests {
 
         fn category(&self) -> ToolCategory {
             ToolCategory::ReadWrite
+        }
+
+        fn origin(&self) -> ToolOrigin {
+            self.origin
         }
 
         async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
@@ -661,7 +671,10 @@ mod tests {
             agent: &AgentManifest,
             _security: Arc<ToolSecurity>,
         ) -> Vec<Arc<dyn Tool>> {
-            let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestTool { name: "shell" })];
+            let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            })];
             if agent
                 .platform_scopes
                 .iter()
@@ -669,6 +682,7 @@ mod tests {
             {
                 tools.push(Arc::new(TestTool {
                     name: "list_agents",
+                    origin: ToolOrigin::Platform,
                 }));
             }
             if agent
@@ -678,6 +692,7 @@ mod tests {
             {
                 tools.push(Arc::new(TestTool {
                     name: "create_agent",
+                    origin: ToolOrigin::Platform,
                 }));
             }
             tools
@@ -783,7 +798,9 @@ mod tests {
 
     #[tokio::test]
     async fn ability_sub_instance_uses_ability_prompt_without_domain_addon() {
-        let caller = test_instance_with_active_domain();
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
@@ -811,6 +828,10 @@ mod tests {
         assert_eq!(prompts.developer, "ability developer");
         assert!(!prompts.developer.contains("domain addon"));
         assert!(!sub_instance.prompt.context.append_active_domain_addon);
+        assert!(sub_instance.prompt.context.active_domain.is_none());
+        assert_eq!(sub_instance.manifest.platform_scopes, vec!["agents:write"]);
+        assert!(sub_instance.manifest.abilities.is_empty());
+        assert!(sub_instance.manifest.domains.is_empty());
         let tool_names: Vec<_> = sub_instance
             .runtime
             .tools
@@ -819,6 +840,44 @@ mod tests {
             .collect();
         assert!(tool_names.contains(&"list_agents"));
         assert!(tool_names.contains(&"create_agent"));
+    }
+
+    #[tokio::test]
+    async fn ability_sub_instance_does_not_inherit_caller_scopes_or_assignments() {
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.platform_scopes = vec!["agents:read".into()];
+        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.domains = vec![crate::Slug::derive("creator")];
+        let ability = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "isolated".into(),
+            path: Some("nenjo/platform".into()),
+            description: Some("Runs isolated".into()),
+            activation_condition: "When isolation is needed".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "ability developer".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        let sub_instance = build_ability_instance(&caller, &ability).await;
+        let tool_names: Vec<_> = sub_instance
+            .runtime
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+
+        assert!(!tool_names.contains(&"list_agents"));
+        assert!(!tool_names.contains(&"create_agent"));
+        assert!(sub_instance.manifest.platform_scopes.is_empty());
+        assert!(sub_instance.manifest.abilities.is_empty());
+        assert!(sub_instance.manifest.domains.is_empty());
+        assert!(sub_instance.prompt.context.active_domain.is_none());
     }
 
     #[tokio::test]
@@ -875,9 +934,13 @@ mod tests {
     async fn ability_sub_instance_preserves_non_factory_tools_without_duplicates() {
         let mut caller = test_instance_with_active_domain();
         caller.runtime.tools = vec![
-            Arc::new(TestTool { name: "shell" }),
+            Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            }),
             Arc::new(TestTool {
                 name: "remember_fact",
+                origin: ToolOrigin::Host,
             }),
         ];
         let ability = AbilityManifest {
@@ -909,6 +972,49 @@ mod tests {
             1
         );
         assert!(tool_names.contains(&"remember_fact"));
+    }
+
+    #[tokio::test]
+    async fn ability_sub_instance_does_not_inherit_caller_mcp_tools() {
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.mcp_servers = vec![crate::Slug::derive("caller-mcp")];
+        caller.runtime.tools = vec![
+            Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            }),
+            Arc::new(TestTool {
+                name: "caller_mcp_tool",
+                origin: ToolOrigin::Mcp,
+            }),
+        ];
+        let ability = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "agent_builder".into(),
+            path: Some("nenjo/platform".into()),
+            description: Some("Builds agents".into()),
+            activation_condition: "When building agents".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "ability developer".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        let sub_instance = build_ability_instance(&caller, &ability).await;
+        let tool_names: Vec<_> = sub_instance
+            .runtime
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+
+        assert!(tool_names.contains(&"shell"));
+        assert!(!tool_names.contains(&"caller_mcp_tool"));
+        assert!(sub_instance.manifest.mcp_servers.is_empty());
     }
 
     #[test]

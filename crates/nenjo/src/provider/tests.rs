@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 
 use super::*;
-use crate::manifest::PromptConfig;
+use crate::manifest::{
+    AbilityManifest, AbilityPromptConfig, DomainManifest, DomainPromptConfig, PromptConfig,
+};
 use crate::manifest::{ContextBlockManifest, ManifestLoader, RoutineManifest};
 use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgeRegistry};
 use nenjo_knowledge::{
@@ -56,7 +58,7 @@ fn test_manifest() -> Manifest {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "agent".into(),
-        slug: None,
+        slug: Some(Slug::derive("agent")),
         description: Some("test".into()),
         prompt_config: PromptConfig::default(),
         color: None,
@@ -128,9 +130,9 @@ impl KnowledgePack for TestKnowledgePack {
 }
 
 #[tokio::test]
-async fn from_manifest_and_agent_lookup() {
+async fn from_manifest_and_agent_slug_lookup() {
     let manifest = test_manifest();
-    let name = manifest.agents[0].name.clone();
+    let slug = manifest.agents[0].slug.clone().unwrap();
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockFactory)
@@ -139,7 +141,7 @@ async fn from_manifest_and_agent_lookup() {
         .await
         .unwrap();
 
-    assert!(provider.agent(&name).await.is_ok());
+    assert!(provider.agent(&slug).await.is_ok());
     assert!(provider.agent("missing").await.is_err());
 }
 
@@ -159,6 +161,57 @@ async fn manifest_index_uses_agent_slug_not_name_when_present() {
 
     assert!(provider.agent("worker").await.is_ok());
     assert!(provider.agent("display-agent").await.is_err());
+}
+
+#[tokio::test]
+async fn manifest_index_finds_abilities_and_domains_without_scanning() {
+    let mut manifest = test_manifest();
+    let ability = AbilityManifest {
+        id: Uuid::new_v4(),
+        name: "Code Review".into(),
+        path: Some("review".into()),
+        description: None,
+        activation_condition: "when code needs review".into(),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: "review code".into(),
+        },
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
+    };
+    let domain = DomainManifest {
+        id: Uuid::new_v4(),
+        name: "creator".into(),
+        path: "nenjo".into(),
+        display_name: "Creator".into(),
+        description: None,
+        command: "#creator".into(),
+        platform_scopes: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
+        prompt_config: DomainPromptConfig::default(),
+    };
+    let domain_slug = domain.slug();
+    manifest.abilities.push(ability.clone());
+    manifest.domains.push(domain.clone());
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    assert_eq!(provider.find_ability("Code Review").unwrap().id, ability.id);
+    assert_eq!(
+        provider.find_domain(domain_slug.as_str()).unwrap().id,
+        domain.id
+    );
+    assert_eq!(provider.find_domain("creator").unwrap().id, domain.id);
+    assert_eq!(provider.find_domain("#creator").unwrap().id, domain.id);
 }
 
 #[tokio::test]
@@ -281,7 +334,7 @@ async fn provider_registers_multiple_knowledge_packs() {
 #[tokio::test]
 async fn builder_via_loader() {
     let manifest = test_manifest();
-    let name = manifest.agents[0].name.clone();
+    let slug = manifest.agents[0].slug.clone().unwrap();
 
     let provider = Provider::builder()
         .with_loader(StaticLoader(manifest))
@@ -290,7 +343,7 @@ async fn builder_via_loader() {
         .await
         .unwrap();
 
-    assert!(provider.agent(&name).await.is_ok());
+    assert!(provider.agent(&slug).await.is_ok());
 }
 
 #[tokio::test]
@@ -325,7 +378,7 @@ async fn new_agent_uses_provider_model_factory() {
 #[tokio::test]
 async fn builder_can_preserve_typed_model_factory() {
     let manifest = test_manifest();
-    let name = manifest.agents[0].name.clone();
+    let slug = manifest.agents[0].slug.clone().unwrap();
 
     let provider: Provider<MockFactory, NoopToolFactory, builder::NoMemory> = Provider::builder()
         .with_loader(StaticLoader(manifest))
@@ -334,7 +387,7 @@ async fn builder_can_preserve_typed_model_factory() {
         .await
         .unwrap();
 
-    assert!(provider.agent(&name).await.is_ok());
+    assert!(provider.agent(&slug).await.is_ok());
 }
 
 #[tokio::test]

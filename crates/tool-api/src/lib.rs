@@ -150,9 +150,11 @@ pub struct ToolResult {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOrigin {
-    /// Host/runtime tools such as shell, files, git, web, memory, and MCP host tools.
+    /// Host/runtime tools such as shell, files, git, web, and memory.
     #[default]
     Host,
+    /// External MCP server tools governed by an agent or ability MCP assignment.
+    Mcp,
     /// Platform resource tools whose availability is governed by platform scopes.
     Platform,
     /// Harness orchestration tools such as ability or sub-agent control.

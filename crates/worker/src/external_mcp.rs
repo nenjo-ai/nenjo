@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use nenjo::manifest::McpServerManifest;
-use nenjo::{Slug, Tool, ToolCategory, ToolResult};
+use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -537,6 +537,10 @@ impl Tool for ExternalMcpTool {
     fn category(&self) -> ToolCategory {
         // External tools are always write — conservative default
         ToolCategory::Write
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Mcp
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

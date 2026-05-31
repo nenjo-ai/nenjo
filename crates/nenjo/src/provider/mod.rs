@@ -27,7 +27,10 @@ use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
-use crate::manifest::{AgentManifest, HasManifestSlug, Manifest, ModelManifest, ProjectManifest};
+use crate::manifest::{
+    AbilityManifest, AgentManifest, DomainManifest, HasManifestSlug, Manifest, ModelManifest,
+    ProjectManifest,
+};
 use crate::memory::Memory;
 use crate::tools::Tool;
 use crate::types::RenderContextVars;
@@ -72,6 +75,9 @@ pub(crate) struct ProviderInner<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, M
 pub(crate) struct ManifestIndex {
     manifest: Arc<Manifest>,
     agents_by_slug: HashMap<Slug, usize>,
+    abilities_by_name: HashMap<String, usize>,
+    domains_by_slug: HashMap<Slug, usize>,
+    domains_by_command: HashMap<String, usize>,
     models_by_slug: HashMap<Slug, usize>,
     routines_by_slug: HashMap<Slug, usize>,
     projects_by_slug: HashMap<Slug, usize>,
@@ -82,6 +88,9 @@ impl ManifestIndex {
     fn new(manifest: Arc<Manifest>) -> Self {
         Self {
             agents_by_slug: index_by_manifest_slug(&manifest.agents),
+            abilities_by_name: index_abilities_by_name(&manifest.abilities),
+            domains_by_slug: index_domains_by_slug(&manifest.domains),
+            domains_by_command: index_domains_by_command(&manifest.domains),
             models_by_slug: index_by_manifest_slug(&manifest.models),
             routines_by_slug: index_by_manifest_slug(&manifest.routines),
             projects_by_slug: index_by_manifest_slug(&manifest.projects),
@@ -94,6 +103,19 @@ impl ManifestIndex {
         self.agents_by_slug
             .get(slug)
             .map(|index| &self.manifest.agents[*index])
+    }
+
+    fn ability(&self, name: &str) -> Option<&AbilityManifest> {
+        self.abilities_by_name
+            .get(name)
+            .map(|index| &self.manifest.abilities[*index])
+    }
+
+    fn domain(&self, selector: &str) -> Option<&DomainManifest> {
+        self.domains_by_command
+            .get(selector)
+            .or_else(|| self.domains_by_slug.get(&Slug::derive(selector)))
+            .map(|index| &self.manifest.domains[*index])
     }
 
     fn model(&self, slug: &Slug) -> Option<&ModelManifest> {
@@ -125,6 +147,31 @@ fn index_by_manifest_slug<T: HasManifestSlug>(items: &[T]) -> HashMap<Slug, usiz
     let mut index = HashMap::new();
     for (position, item) in items.iter().enumerate() {
         index.entry(item.manifest_slug()).or_insert(position);
+    }
+    index
+}
+
+fn index_abilities_by_name(items: &[AbilityManifest]) -> HashMap<String, usize> {
+    let mut index = HashMap::new();
+    for (position, item) in items.iter().enumerate() {
+        index.entry(item.name.clone()).or_insert(position);
+    }
+    index
+}
+
+fn index_domains_by_slug(items: &[DomainManifest]) -> HashMap<Slug, usize> {
+    let mut index = HashMap::new();
+    for (position, item) in items.iter().enumerate() {
+        index.entry(item.manifest_slug()).or_insert(position);
+        index.entry(Slug::derive(&item.name)).or_insert(position);
+    }
+    index
+}
+
+fn index_domains_by_command(items: &[DomainManifest]) -> HashMap<String, usize> {
+    let mut index = HashMap::new();
+    for (position, item) in items.iter().enumerate() {
+        index.entry(item.command.clone()).or_insert(position);
     }
     index
 }
@@ -252,6 +299,14 @@ where
 
     pub(crate) fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {
         self.inner.manifest.agent(slug)
+    }
+
+    pub(crate) fn find_ability(&self, name: &str) -> Option<&AbilityManifest> {
+        self.inner.manifest.ability(name)
+    }
+
+    pub(crate) fn find_domain(&self, selector: &str) -> Option<&DomainManifest> {
+        self.inner.manifest.domain(selector)
     }
 
     pub(crate) fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest> {
@@ -472,6 +527,14 @@ where
 
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {
         Provider::find_agent_manifest(self, slug)
+    }
+
+    fn find_ability(&self, name: &str) -> Option<&AbilityManifest> {
+        Provider::find_ability(self, name)
+    }
+
+    fn find_domain(&self, selector: &str) -> Option<&DomainManifest> {
+        Provider::find_domain(self, selector)
     }
 
     fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest> {

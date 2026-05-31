@@ -22,6 +22,7 @@ use anyhow::Context;
 use nenjo_models::ModelProvider;
 
 use super::instance::AgentInstance;
+use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, ChatInput, TaskInput};
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, MemoryScope};
@@ -148,10 +149,12 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         // If the agent has abilities, register the ability discovery and
         // invocation broker tools resolved from the canonical manifest.
-        if let Some(active_abilities) = manifest
+        if let Some(active_abilities) = instance
+            .runtime
+            .provider_runtime
             .as_ref()
             .filter(|_| instance.runtime.execution_mode == AgentExecutionMode::Parent)
-            .map(|manifest| resolve_active_abilities(manifest, Some(instance.agent_id()), None))
+            .map(|provider| resolve_active_abilities(provider, &instance.manifest.abilities, None))
             .filter(|abilities| !abilities.is_empty())
         {
             let base_instance = Arc::new(instance.clone());
@@ -225,33 +228,24 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     /// let output = domain_runner.chat("Create a PRD for auth").await?;
     /// ```
     pub async fn domain_expansion(&self, domain_name: &str) -> Result<AgentRunner<P>> {
-        let manifest = self.manifest.as_ref().ok_or_else(|| {
-            super::error::AgentError::MissingManifest(self.instance.name().into())
-        })?;
-        let agent = manifest
-            .agents
-            .iter()
-            .find(|agent| agent.id == self.instance.agent_id())
+        let provider = self
+            .instance
+            .runtime
+            .provider_runtime
+            .as_ref()
             .ok_or_else(|| {
                 super::error::AgentError::MissingManifest(self.instance.name().into())
             })?;
-        let assigned_domains: Vec<&DomainManifest> = agent
-            .domains
-            .iter()
-            .filter_map(|domain_slug| {
-                manifest
+        let domain = provider
+            .find_domain(domain_name)
+            .filter(|domain| domain_is_assigned(&self.instance.manifest.domains, domain))
+            .with_context(|| {
+                let available: Vec<&str> = self
+                    .instance
+                    .manifest
                     .domains
                     .iter()
-                    .find(|domain| crate::Slug::derive(&domain.name) == *domain_slug)
-            })
-            .collect();
-        let domain = assigned_domains
-            .iter()
-            .find(|domain| domain.name == domain_name || domain.command == domain_name)
-            .copied()
-            .with_context(|| {
-                let available: Vec<&str> = assigned_domains
-                    .iter()
+                    .filter_map(|domain_slug| provider.find_domain(domain_slug.as_str()))
                     .map(|domain| domain.name.as_str())
                     .collect();
                 format!("domain '{domain_name}' not found. Available: {available:?}")
@@ -271,8 +265,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         let mut instance = (*self.instance).clone();
         instance.prompt.context.active_domain = Some(active_domain);
 
-        let active_abilities =
-            resolve_active_abilities(manifest, Some(instance.agent_id()), Some(&session_manifest));
+        let active_abilities = resolve_active_abilities(
+            provider,
+            &instance.manifest.abilities,
+            Some(&session_manifest),
+        );
 
         // Rebuild ability broker tools so the visible set matches the
         // effective domain-expanded ability assignments.
@@ -541,18 +538,20 @@ fn raw_user_message(run: &AgentRun) -> String {
     }
 }
 
-fn resolve_active_abilities(
-    manifest: &Manifest,
-    agent_id: Option<Uuid>,
+fn domain_is_assigned(assigned_domains: &[Slug], domain: &DomainManifest) -> bool {
+    let manifest_slug = domain.slug();
+    let name_slug = Slug::derive(&domain.name);
+    assigned_domains
+        .iter()
+        .any(|assigned| assigned == &manifest_slug || assigned == &name_slug)
+}
+
+fn resolve_active_abilities<P: ProviderRuntime>(
+    provider: &P,
+    agent_abilities: &[String],
     active_domain: Option<&DomainManifest>,
 ) -> Vec<AbilityManifest> {
-    let mut abilities = Vec::new();
-
-    if let Some(agent_id) = agent_id
-        && let Some(agent) = manifest.agents.iter().find(|agent| agent.id == agent_id)
-    {
-        abilities.extend(agent.abilities.iter().cloned());
-    }
+    let mut abilities = agent_abilities.to_vec();
 
     if let Some(domain) = active_domain {
         for ability_name in &domain.abilities {
@@ -564,13 +563,7 @@ fn resolve_active_abilities(
 
     abilities
         .into_iter()
-        .filter_map(|ability_name| {
-            manifest
-                .abilities
-                .iter()
-                .find(|ability| ability.name == ability_name)
-                .cloned()
-        })
+        .filter_map(|ability_name| provider.find_ability(&ability_name).cloned())
         .collect()
 }
 

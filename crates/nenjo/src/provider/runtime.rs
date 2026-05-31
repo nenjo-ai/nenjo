@@ -4,7 +4,9 @@ use super::{ProviderError, RoutineRunner, ToolFactory, builder};
 use crate::Slug;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
-use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use crate::manifest::{
+    AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
+};
 use crate::memory::Memory;
 use crate::tools::Tool;
 use anyhow::Result;
@@ -97,6 +99,12 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
 
     /// Find an agent manifest by slug.
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest>;
+
+    /// Find an ability manifest by exact assigned ability name.
+    fn find_ability(&self, name: &str) -> Option<&AbilityManifest>;
+
+    /// Find a domain manifest by slug, name, or command selector.
+    fn find_domain(&self, selector: &str) -> Option<&DomainManifest>;
 
     /// Find a project manifest by slug.
     fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest>;
