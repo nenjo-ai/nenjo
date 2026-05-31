@@ -542,7 +542,7 @@ async fn ability_agent_has_ability_invoke_tool_only() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"list_abilities"),
+        tool_names.contains(&"list_assigned_abilities"),
         "base agent should have ability discovery tool, got: {tool_names:?}"
     );
     assert!(
@@ -638,7 +638,7 @@ async fn agent_without_abilities_has_no_ability_tools() {
         "agent without abilities should not have ability tools, got: {tool_names:?}"
     );
     assert!(
-        !tool_names.contains(&"list_abilities") && !tool_names.contains(&"use_ability"),
+        !tool_names.contains(&"list_assigned_abilities") && !tool_names.contains(&"use_ability"),
         "agent without abilities should not have ability broker tools, got: {tool_names:?}"
     );
 }
@@ -737,7 +737,7 @@ async fn domain_expansion_preserves_existing_abilities() {
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"list_assigned_abilities"));
     assert!(tool_names.contains(&"use_ability"));
     assert!(!tool_names.contains(&"code_review"));
 
@@ -745,7 +745,7 @@ async fn domain_expansion_preserves_existing_abilities() {
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        tool_names.contains(&"list_abilities") && tool_names.contains(&"use_ability"),
+        tool_names.contains(&"list_assigned_abilities") && tool_names.contains(&"use_ability"),
         "domain expansion should preserve ability broker tools, got: {tool_names:?}"
     );
     assert!(!tool_names.contains(&"code_review"));
@@ -785,7 +785,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"list_assigned_abilities"));
     assert!(tool_names.contains(&"use_ability"));
     assert!(!tool_names.contains(&"deployer"));
     assert_eq!(
@@ -909,7 +909,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
 
     let specs = domain_runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(tool_names.contains(&"list_abilities"));
+    assert!(tool_names.contains(&"list_assigned_abilities"));
     assert!(tool_names.contains(&"use_ability"));
     assert!(!tool_names.contains(&"writer"));
 }

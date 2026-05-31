@@ -536,7 +536,7 @@ pub struct AbilityManifest {
     /// Human-readable summary of what this ability does.
     #[builder(default, setter(strip_option))]
     pub description: Option<String>,
-    /// Condition shown by `list_abilities` to help the model decide when to invoke this ability.
+    /// Condition shown by `list_assigned_abilities` to help the model decide when to invoke this ability.
     #[builder(default)]
     pub activation_condition: String,
     /// Developer prompt applied while the ability sub-execution runs.

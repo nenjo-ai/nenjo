@@ -698,8 +698,8 @@ async fn ability_inherits_memory_vars() {
     let specs = runner.instance().tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
-        names.contains(&"list_abilities"),
-        "should have list_abilities"
+        names.contains(&"list_assigned_abilities"),
+        "should have list_assigned_abilities"
     );
     assert!(names.contains(&"use_ability"), "should have use_ability");
     assert!(

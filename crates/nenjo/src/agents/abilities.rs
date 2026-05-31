@@ -1,7 +1,7 @@
 //! Ability invocation tools.
 //!
 //! Assigned abilities are exposed through a stable broker pair:
-//! `list_abilities` discovers available abilities and `use_ability` invokes
+//! `list_assigned_abilities` discovers available abilities and `use_ability` invokes
 //! one by its model-facing ability id.
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -21,7 +21,7 @@ use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
 
-pub const LIST_ABILITIES_TOOL_NAME: &str = "list_abilities";
+pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
 
 #[derive(Debug, Clone)]
@@ -76,20 +76,20 @@ struct AbilityListItem<'a> {
 }
 
 /// Discover abilities assigned to the current agent.
-pub struct ListAbilitiesTool {
+pub struct ListAssignedAbilitiesTool {
     registry: Arc<AbilityRegistry>,
 }
 
-impl ListAbilitiesTool {
+impl ListAssignedAbilitiesTool {
     fn new(registry: Arc<AbilityRegistry>) -> Self {
         Self { registry }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for ListAbilitiesTool {
+impl Tool for ListAssignedAbilitiesTool {
     fn name(&self) -> &str {
-        LIST_ABILITIES_TOOL_NAME
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -155,7 +155,7 @@ where
     }
 
     fn description(&self) -> &str {
-        "Invoke one ability assigned to this agent by name. Use list_abilities to discover available ability names before calling this tool."
+        "Invoke one ability assigned to this agent by name. Use list_assigned_abilities to discover available ability names before calling this tool."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -164,7 +164,7 @@ where
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The stable ability name returned by list_abilities."
+                    "description": "The stable ability name returned by list_assigned_abilities."
                 },
                 "input": {
                     "type": "string",
@@ -411,13 +411,16 @@ where
 {
     let registry = Arc::new(AbilityRegistry::new(abilities)?);
     Ok(vec![
-        Arc::new(ListAbilitiesTool::new(registry.clone())) as Arc<dyn Tool>,
+        Arc::new(ListAssignedAbilitiesTool::new(registry.clone())) as Arc<dyn Tool>,
         Arc::new(UseAbilityTool::new(registry, instance)) as Arc<dyn Tool>,
     ])
 }
 
 pub(crate) fn is_ability_tool(name: &str) -> bool {
-    matches!(name, LIST_ABILITIES_TOOL_NAME | USE_ABILITY_TOOL_NAME)
+    matches!(
+        name,
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME | USE_ABILITY_TOOL_NAME
+    )
 }
 
 fn ability_id(ability: &AbilityManifest) -> String {
@@ -941,7 +944,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_abilities_returns_all_assigned_ability_metadata() {
+    async fn list_assigned_abilities_returns_all_assigned_ability_metadata() {
         let review = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "Code Review".into(),
@@ -973,7 +976,7 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let registry = Arc::new(AbilityRegistry::new(&[review, docs]).unwrap());
-        let tool = ListAbilitiesTool::new(registry);
+        let tool = ListAssignedAbilitiesTool::new(registry);
 
         let result = tool.execute(serde_json::json!({})).await.unwrap();
         let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
@@ -987,6 +990,13 @@ mod tests {
             "When code review is needed"
         );
         assert_eq!(output["abilities"][1]["name"], "Search Docs!");
+    }
+
+    #[test]
+    fn ability_tool_filter_does_not_match_manifest_resource_list_tool() {
+        assert!(is_ability_tool("list_assigned_abilities"));
+        assert!(is_ability_tool("use_ability"));
+        assert!(!is_ability_tool("list_abilities"));
     }
 
     #[test]
