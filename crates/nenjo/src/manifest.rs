@@ -108,7 +108,7 @@ fn merge_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: Vec<T>) {
     }
 }
 
-trait HasManifestSlug {
+pub(crate) trait HasManifestSlug {
     fn manifest_slug(&self) -> Slug;
 }
 
@@ -299,7 +299,37 @@ pub struct ModelManifest {
 
 impl HasManifestSlug for ModelManifest {
     fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
+        model_manifest_slug(&self.model_provider, &self.model)
+    }
+}
+
+pub fn model_manifest_slug(model_provider: &str, model: &str) -> Slug {
+    Slug::derive(format!(
+        "{}_{}",
+        slug_segment(model_provider, "provider"),
+        slug_segment(model, "model")
+    ))
+}
+
+fn slug_segment(value: &str, fallback: &str) -> String {
+    let mut segment = String::new();
+    let mut previous_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            segment.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !segment.is_empty() {
+            segment.push('_');
+            previous_separator = true;
+        }
+    }
+    while segment.ends_with('_') {
+        segment.pop();
+    }
+    if segment.is_empty() {
+        fallback.to_string()
+    } else {
+        segment
     }
 }
 
@@ -332,10 +362,13 @@ pub struct PromptTemplates {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryProfile {
     /// What this role wants remembered as core (cross-project) knowledge.
+    #[serde(default)]
     pub core_focus: Vec<String>,
     /// What this role wants remembered as project-specific knowledge.
+    #[serde(default)]
     pub project_focus: Vec<String>,
     /// What this role should store in shared scope for other agents to reference.
+    #[serde(default)]
     pub shared_focus: Vec<String>,
 }
 
@@ -370,6 +403,9 @@ pub struct AgentManifest {
     #[builder(default = "Uuid::new_v4()")]
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub slug: Option<Slug>,
     #[builder(default, setter(strip_option))]
     pub description: Option<String>,
     pub prompt_config: PromptConfig,
@@ -402,6 +438,11 @@ impl AgentManifest {
     pub fn builder() -> AgentManifestBuilder {
         AgentManifestBuilder::default()
     }
+
+    /// Return the canonical selector slug for this agent.
+    pub fn slug(&self) -> Slug {
+        self.manifest_slug()
+    }
 }
 
 impl AgentManifestBuilder {
@@ -432,7 +473,9 @@ impl AgentManifestBuilder {
 
 impl HasManifestSlug for AgentManifest {
     fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
+        self.slug
+            .clone()
+            .unwrap_or_else(|| Slug::derive(&self.name))
     }
 }
 
@@ -753,4 +796,17 @@ pub enum ManifestResourceKind {
     McpServer,
     Ability,
     ContextBlock,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_manifest_slug_uses_provider_and_model_identity() {
+        assert_eq!(
+            model_manifest_slug("openrouter", "anthropic/claude-3.5-sonnet").as_str(),
+            "openrouter_anthropic_claude_3_5_sonnet"
+        );
+    }
 }

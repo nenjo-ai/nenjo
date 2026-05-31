@@ -39,9 +39,9 @@ Resolved instance key, used for provenance and lock/cache/debugging:
 pkg:<real-package-name>@<version>:<resource-kind>:<module-path>#<resource-name>
 ```
 
-Logical IDs intentionally do not include scope, version, org id, source id, or
-install id. Package upgrades should keep dashboard/routine/chat references
-stable. Version and scope belong in metadata.
+Logical IDs intentionally do not include version, org id, source id, or install
+id. Package upgrades should keep dashboard/routine/chat references stable.
+Version belongs in metadata.
 
 Side-by-side versions require explicit aliases in `nenpm.yml`; aliases become
 the logical package name for those installed instances.
@@ -52,8 +52,12 @@ the logical package name for those installed instances.
 - Create deterministic read-only DB handles in normal resource tables so package
   agents/abilities/domains/routines are selectable and referenceable.
 - Mark package handles `source_type = package` and `read_only = true`.
-- Generate inline `nenpm.yml` and `nenpm.lock.yml` in worker bootstrap from
-  active package installs.
+- Store the resolved package dependency contribution in the package install lock
+  when a package is installed: package requirements plus the registry source
+  needed to resolve them.
+- Generate one inline `nenpm.yml` per platform-managed package root by merging
+  current install locks into a single `registries` list and `dependencies` map,
+  then run the normal `nenpm` resolver to produce `nenpm.lock.yml`.
 - Do not make copied DB manifest content the runtime source of truth.
 
 ## Worker Responsibilities
@@ -71,13 +75,13 @@ the logical package name for those installed instances.
 
 - Treat `source_type = package` as managed/read-only.
 - Continue using DB handles for chat, routine, assignment, and picker UX.
-- Display package name, version, scope, and provenance from metadata.
+- Display package name, version, and provenance from metadata.
 
 ## Implementation Order
 
 1. Add shared logical/instance key and deterministic ID helpers.
 2. Update platform package install rows to use stable IDs and `source_type = package`.
-3. Add bootstrap inline platform `nenpm.yml`.
+3. Save lock-backed platform package dependency manifests.
 4. Add worker bootstrap write/install to `~/.nenjo/platform_pkgs`.
 5. Add package manifest loader.
 6. Change manifest merge to upsert by ID.

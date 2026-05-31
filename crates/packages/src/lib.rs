@@ -18,6 +18,7 @@ mod identity;
 mod local;
 mod module;
 mod package;
+mod reader;
 mod resolved;
 mod schema;
 
@@ -33,12 +34,16 @@ pub(crate) use identity::{validate_relative_module_import_path, validate_resourc
 pub use local::LocalPackageResolver;
 pub use module::{ModuleBundle, ModuleImport, ModuleIndexManifest, ResourceManifest};
 pub(crate) use module::{
-    module_file_schema, module_reference_is_directory, normalize_module_reference,
-    parse_module_file,
+    complete_package_resource_manifest, module_file_schema, module_reference_is_directory,
+    normalize_module_reference, parse_module_file,
 };
 pub use package::{
     ModulePackageManifest, PackageCatalog, PackageDescriptor, PackageEntry, PackageModule,
     PackageRegistryManifest, ResourceDependency,
+};
+pub use reader::{
+    PackageFileReader, resolve_module_package_graph_from_reader,
+    resolve_module_package_manifest_from_reader,
 };
 pub use resolved::{
     ResolvedModule, ResolvedPackage, ResolvedPackageGraph, ResolvedResource, ResolvedResourceGraph,

@@ -289,6 +289,22 @@ manifest:
 }
 
 #[test]
+fn rejects_wrapper_slug_for_package_resource_manifests() {
+    let err = parse_module_file(
+        r#"
+schema: nenjo.agent.v1
+slug: authored-slug
+manifest:
+  name: Nenji
+"#,
+        "agents/nenji.yaml",
+    )
+    .unwrap_err();
+    let err = format!("{err:?}");
+    assert!(err.contains("must not define wrapper slug"), "{err}");
+}
+
+#[test]
 fn allows_authored_path_for_non_path_derived_resource_manifests() {
     let content = r#"
 schema: nenjo.agent.v1

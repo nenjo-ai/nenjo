@@ -56,10 +56,14 @@ fn test_manifest() -> Manifest {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "agent".into(),
+        slug: None,
         description: Some("test".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(crate::manifest::model_manifest_slug(
+            &model.model_provider,
+            &model.model,
+        )),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -137,6 +141,24 @@ async fn from_manifest_and_agent_lookup() {
 
     assert!(provider.agent(&name).await.is_ok());
     assert!(provider.agent("missing").await.is_err());
+}
+
+#[tokio::test]
+async fn manifest_index_uses_agent_slug_not_name_when_present() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].name = "Display Agent".into();
+    manifest.agents[0].slug = Some(Slug::derive("worker"));
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    assert!(provider.agent("worker").await.is_ok());
+    assert!(provider.agent("display-agent").await.is_err());
 }
 
 #[tokio::test]
@@ -383,10 +405,14 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
     let original_agent = AgentManifest {
         id: original_agent_id,
         name: "agent-old".into(),
+        slug: None,
         description: Some("old".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(crate::manifest::model_manifest_slug(
+            &model.model_provider,
+            &model.model,
+        )),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -397,10 +423,14 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
     let updated_agent = AgentManifest {
         id: updated_agent_id,
         name: "agent-new".into(),
+        slug: None,
         description: Some("new".into()),
         prompt_config: PromptConfig::default(),
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(crate::manifest::model_manifest_slug(
+            &model.model_provider,
+            &model.model,
+        )),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],

@@ -181,6 +181,7 @@ fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
     AgentManifest {
         id,
         name: name.into(),
+        slug: None,
         description: Some(format!("{name} description")),
         prompt_config: PromptConfig {
             developer_prompt: prompt.into(),

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, Manifest, ModelManifest,
-    ProjectManifest, PromptConfig, PromptTemplates,
+    ProjectManifest, PromptConfig, PromptTemplates, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
@@ -142,6 +142,7 @@ fn test_manifest() -> Manifest {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "test-coder".into(),
+        slug: None,
         description: Some("A test coding agent".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a helpful coding assistant.".into(),
@@ -158,7 +159,7 @@ fn test_manifest() -> Manifest {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -384,7 +385,6 @@ async fn instance_renders_self_prompt_var() {
 
     assert!(prompts.system.contains("<agent "));
     assert!(prompts.system.contains("slug=\"test-coder\""));
-    assert!(prompts.system.contains("role=\"test-coder\""));
     assert!(prompts.system.contains("name=\"test-coder\""));
     assert!(prompts.system.contains("llm_model_name=\"mock-llm-v1\""));
     assert!(
@@ -394,7 +394,7 @@ async fn instance_renders_self_prompt_var() {
     );
     assert_eq!(
         prompts.developer,
-        "test-coder|test-coder|test-coder|mock-llm-v1|A test coding agent"
+        "test-coder||test-coder|mock-llm-v1|A test coding agent"
     );
 }
 
@@ -467,6 +467,7 @@ fn manifest_with_abilities_and_domains(
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "test-agent".into(),
+        slug: None,
         description: Some("Test agent".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a test agent.".into(),
@@ -481,7 +482,7 @@ fn manifest_with_abilities_and_domains(
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: agent_domains,
         platform_scopes: agent_scopes.into_iter().map(String::from).collect(),
         mcp_servers: vec![],
@@ -799,6 +800,18 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
                 .developer_prompt_addon
                 .as_deref()),
         Some("Ops mode")
+    );
+    let prompts = domain_runner
+        .instance()
+        .build_prompts(&nenjo::AgentRun::chat(nenjo::ChatInput {
+            message: "Deploy it".into(),
+            history: vec![],
+            project: None,
+        }));
+    assert!(
+        prompts.developer.contains("Ops mode"),
+        "domain developer prompt addon must be rendered before the turn loop starts, got: {}",
+        prompts.developer
     );
 
     // Ability availability is exposed through the broker tools, not prompt context.

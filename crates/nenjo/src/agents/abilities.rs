@@ -12,7 +12,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::tools::{Tool, ToolCategory, ToolResult};
+use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
 use super::runner::types::TurnEvent;
@@ -108,6 +108,10 @@ impl Tool for ListAbilitiesTool {
         ToolCategory::Read
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
     async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
         let abilities: Vec<_> = self
             .registry
@@ -178,6 +182,10 @@ where
 
     fn category(&self) -> ToolCategory {
         ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
@@ -440,18 +448,18 @@ where
         .runtime
         .tools
         .iter()
-        .filter(|tool| !is_ability_tool(tool.name()))
+        .filter(|tool| tool.origin() == ToolOrigin::Host)
         .cloned()
         .collect();
 
-    let mut merged_scopes = caller.manifest.platform_scopes.clone();
+    let mut ability_scopes = Vec::new();
     for scope in &ability.platform_scopes {
-        if !merged_scopes.contains(scope) {
-            merged_scopes.push(scope.clone());
+        if !ability_scopes.contains(scope) {
+            ability_scopes.push(scope.clone());
         }
     }
 
-    let mut merged_mcp_servers = caller.manifest.mcp_servers.clone();
+    let mut merged_mcp_servers = Vec::new();
     for server_id in &ability.mcp_servers {
         if !merged_mcp_servers.contains(server_id) {
             merged_mcp_servers.push(server_id.clone());
@@ -472,7 +480,7 @@ where
 
     let mut tools = if let Some(provider) = caller.runtime.provider_runtime.as_ref() {
         let mut scoped_agent = caller.manifest.clone();
-        scoped_agent.platform_scopes = merged_scopes.clone();
+        scoped_agent.platform_scopes = ability_scopes.clone();
         scoped_agent.mcp_servers = merged_mcp_servers.clone();
         provider
             .tool_factory()
@@ -504,7 +512,7 @@ where
             .unwrap_or_else(|| caller.description().to_string()),
     );
     scoped_manifest.prompt_config = prompt_config;
-    scoped_manifest.platform_scopes = merged_scopes;
+    scoped_manifest.platform_scopes = ability_scopes;
     scoped_manifest.mcp_servers = merged_mcp_servers;
 
     AgentInstance {
@@ -654,7 +662,7 @@ mod tests {
             if agent
                 .platform_scopes
                 .iter()
-                .any(|scope| scope == "agents:read")
+                .any(|scope| scope == "agents:read" || scope == "agents:write")
             {
                 tools.push(Arc::new(TestTool {
                     name: "list_agents",
@@ -690,6 +698,7 @@ mod tests {
             manifest: AgentManifest {
                 id: uuid::Uuid::new_v4(),
                 name: "nenji".into(),
+                slug: Some(crate::Slug::derive("nenji")),
                 description: Some("system agent".into()),
                 prompt_config: PromptConfig {
                     system_prompt: "caller system".into(),
@@ -817,12 +826,12 @@ mod tests {
             RenderContextBlock {
                 name: "methodology".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<methodology>{{ agent.role }}</methodology>".into(),
+                template: "<methodology>{{ agent.name }}</methodology>".into(),
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<tool_usage>{{ agent.role }}</tool_usage>".into(),
+                template: "<tool_usage>{{ agent.name }}</tool_usage>".into(),
             },
         ]);
         let ability = AbilityManifest {

@@ -10,11 +10,11 @@ fn routine_ref_schema() -> serde_json::Value {
 fn routine_step_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["step_id", "name", "step_type", "order_index"],
+        "required": ["slug", "name", "step_type", "order_index"],
         "properties": {
-            "step_id": {
+            "slug": {
                 "type": "string",
-                "description": "Stable step identifier within this graph payload. Edges and entry_step_ids must reference these values."
+                "description": "Stable step slug within this routine. Edges and entry_steps must reference these values."
             },
             "name": {
                 "type": "string",
@@ -31,7 +31,7 @@ fn routine_step_schema() -> serde_json::Value {
             },
             "agent": {
                 "type": ["string", "null"],
-                "description": "Agent slug for agent steps."
+                "description": "Agent slug for agent, gate, or cron steps. Required for agent and gate steps unless a cron step uses a council."
             },
             "config": {
                 "type": "object",
@@ -54,16 +54,21 @@ fn routine_edge_schema() -> serde_json::Value {
         "properties": {
             "source_step": {
                 "type": "string",
-                "description": "Source step slug. Must reference one of the provided steps."
+                "description": "Source step slug. Must match a provided step slug."
             },
             "target_step": {
                 "type": "string",
-                "description": "Target step slug. Must reference one of the provided steps."
+                "description": "Target step slug. Must match a provided step slug."
             },
             "condition": {
                 "type": "string",
                 "enum": ["always", "on_pass", "on_fail"],
                 "description": "Routing condition for this edge."
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional edge metadata such as max_attempts or on_exhausted for gate failure retry edges.",
+                "additionalProperties": true
             }
         },
         "additionalProperties": false
@@ -75,10 +80,10 @@ fn routine_graph_schema() -> serde_json::Value {
         "type": "object",
         "required": ["steps", "edges"],
         "properties": {
-            "entry_step_ids": {
+            "entry_steps": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Ordered set of step_ids that should act as entry points for this graph."
+                "description": "Ordered set of step slugs that should act as entry points for this graph."
             },
             "steps": {
                 "type": "array",

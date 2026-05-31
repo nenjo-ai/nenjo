@@ -33,6 +33,10 @@ fn resolves_realistic_local_package_graph_dependency_first() {
         core.modules["knowledge/core.yaml"].kind,
         PackageKind::Knowledge
     );
+    assert_eq!(
+        core.modules["knowledge/core.yaml"].manifest.root_uri(),
+        Some("pkg://acme.core/")
+    );
     assert_eq!(core.modules["knowledge/core.yaml"].name(), "core_knowledge");
     assert_eq!(
         core.modules["context_blocks/methodology.yaml"].kind,

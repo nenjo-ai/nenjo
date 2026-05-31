@@ -1,33 +1,47 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
     CheckpointQuery, DomainState, ExecutionPhase, ScheduleState, SchedulerRuntimeSnapshot,
-    SessionCheckpoint, SessionKind, SessionRecord, SessionRefs, SessionStatus,
+    SessionCheckpoint, SessionKind, SessionLeaseGrant, SessionRecord, SessionRefs, SessionStatus,
     SessionTranscriptEvent, SessionTranscriptEventPayload, TraceEvent, TranscriptQuery,
     TranscriptState, WorktreeSnapshot,
 };
 
 /// Host-facing session persistence abstraction.
 ///
-/// Harnesses emit normalized session events through this trait. Concrete hosts
-/// decide whether those events go to local files, a platform API, a database, or
-/// nowhere. Implementors may handle only [`record`] for append-only capture, or
-/// override the typed helpers to support richer session lookup, recovery, and
-/// transcript/checkpoint reads.
-///
-/// Methods that return `bool` should return `true` when the requested session
-/// state was created or updated and `false` when the runtime intentionally did
-/// not apply the update, such as a no-op runtime or a failed compare-and-swap.
+/// The harness owns turn orchestration and must acquire a session lease before
+/// running an agent turn. Runtimes own storage, lease enforcement, and ordered
+/// application of session events.
 #[async_trait]
 pub trait SessionRuntime: Send + Sync {
-    /// Record a normalized session event emitted by the harness.
-    ///
-    /// This is the minimum required write surface. Rich runtimes usually route
-    /// each variant to the corresponding session, transcript, trace, or
-    /// checkpoint store. No-op runtimes can accept and drop the event.
-    async fn record(&self, event: SessionRuntimeEvent) -> Result<()>;
+    /// Acquire exclusive ownership for a session before an agent turn starts.
+    async fn acquire_session_lease(
+        &self,
+        request: SessionLeaseRequest,
+    ) -> Result<SessionLeaseGrant>;
+
+    /// Extend an active lease. Returns `false` when the lease no longer owns
+    /// the session.
+    async fn renew_session_lease(&self, grant: &SessionLeaseGrant, ttl: Duration) -> Result<bool>;
+
+    /// Release an active lease. Runtimes should ignore stale lease tokens.
+    async fn release_session_lease(&self, grant: SessionLeaseGrant) -> Result<()>;
+
+    /// Record one normalized session event under an active lease.
+    async fn record(&self, grant: &SessionLeaseGrant, event: SessionRuntimeEvent) -> Result<()> {
+        self.record_batch(grant, vec![event]).await?;
+        Ok(())
+    }
+
+    /// Record an ordered batch of normalized session events under an active lease.
+    async fn record_batch(
+        &self,
+        grant: &SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome>;
 
     /// Load the canonical session record for `session_id`, if it exists.
     async fn get_session(&self, _session_id: Uuid) -> Result<Option<SessionRecord>> {
@@ -53,17 +67,6 @@ pub trait SessionRuntime: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Append a transcript event and return the persisted event when available.
-    ///
-    /// Returning `None` means the runtime accepted no durable append, or cannot
-    /// report the assigned sequence and timestamp.
-    async fn append_transcript(
-        &self,
-        _append: SessionTranscriptAppend,
-    ) -> Result<Option<SessionTranscriptEvent>> {
-        Ok(None)
-    }
-
     /// Load the newest checkpoint for a session matching `query`.
     async fn load_latest_checkpoint(
         &self,
@@ -71,74 +74,6 @@ pub trait SessionRuntime: Send + Sync {
         _query: CheckpointQuery,
     ) -> Result<Option<SessionCheckpoint>> {
         Ok(None)
-    }
-
-    /// Save or merge checkpoint state for a session.
-    async fn update_checkpoint(&self, _update: SessionCheckpointUpdate) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Transition a session to a new execution phase and/or lifecycle status.
-    async fn transition_session(&self, _transition: SessionTransition) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Create or update a scheduler-owned session such as cron or heartbeat.
-    async fn upsert_scheduler_session(&self, _upsert: SchedulerSessionUpsert) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Create or update a chat session record.
-    async fn upsert_chat_session(&self, upsert: ChatSessionUpsert) -> Result<bool> {
-        self.record(SessionRuntimeEvent::SessionUpsert(SessionUpsert {
-            session_id: upsert.session_id,
-            kind: SessionKind::Chat,
-            status: upsert.status,
-            agent: Some(upsert.agent),
-            project: upsert.project,
-            task_id: None,
-            routine: None,
-            execution_run_id: None,
-            parent_session_id: None,
-            lease: None,
-            memory_namespace: upsert.memory_namespace.clone(),
-            refs: SessionRefs {
-                memory_namespace: upsert.memory_namespace,
-                ..Default::default()
-            },
-            metadata: upsert.metadata,
-        }))
-        .await?;
-        Ok(true)
-    }
-
-    /// Create or update a task session record.
-    async fn upsert_task_session(&self, upsert: TaskSessionUpsert) -> Result<bool> {
-        self.record(SessionRuntimeEvent::SessionUpsert(SessionUpsert {
-            session_id: upsert.task_id,
-            kind: SessionKind::Task,
-            status: upsert.status,
-            agent: upsert.agent,
-            project: Some(upsert.project),
-            task_id: Some(upsert.task_id),
-            routine: upsert.routine,
-            execution_run_id: Some(upsert.execution_run_id),
-            parent_session_id: None,
-            lease: None,
-            memory_namespace: upsert.memory_namespace.clone(),
-            refs: SessionRefs {
-                memory_namespace: upsert.memory_namespace,
-                ..Default::default()
-            },
-            metadata: upsert.metadata,
-        }))
-        .await?;
-        Ok(true)
-    }
-
-    /// Create or update a domain-expanded chat session record.
-    async fn upsert_domain_session(&self, _upsert: DomainSessionUpsert) -> Result<bool> {
-        Ok(false)
     }
 
     /// Resolve the memory namespace currently bound to a session.
@@ -155,8 +90,27 @@ impl<T> SessionRuntime for std::sync::Arc<T>
 where
     T: SessionRuntime + ?Sized,
 {
-    async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
-        (**self).record(event).await
+    async fn acquire_session_lease(
+        &self,
+        request: SessionLeaseRequest,
+    ) -> Result<SessionLeaseGrant> {
+        (**self).acquire_session_lease(request).await
+    }
+
+    async fn renew_session_lease(&self, grant: &SessionLeaseGrant, ttl: Duration) -> Result<bool> {
+        (**self).renew_session_lease(grant, ttl).await
+    }
+
+    async fn release_session_lease(&self, grant: SessionLeaseGrant) -> Result<()> {
+        (**self).release_session_lease(grant).await
+    }
+
+    async fn record_batch(
+        &self,
+        grant: &SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        (**self).record_batch(grant, events).await
     }
 
     async fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
@@ -179,43 +133,12 @@ where
         (**self).read_transcript(session_id, query).await
     }
 
-    async fn append_transcript(
-        &self,
-        append: SessionTranscriptAppend,
-    ) -> Result<Option<SessionTranscriptEvent>> {
-        (**self).append_transcript(append).await
-    }
-
     async fn load_latest_checkpoint(
         &self,
         session_id: Uuid,
         query: CheckpointQuery,
     ) -> Result<Option<SessionCheckpoint>> {
         (**self).load_latest_checkpoint(session_id, query).await
-    }
-
-    async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
-        (**self).update_checkpoint(update).await
-    }
-
-    async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
-        (**self).transition_session(transition).await
-    }
-
-    async fn upsert_scheduler_session(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
-        (**self).upsert_scheduler_session(upsert).await
-    }
-
-    async fn upsert_chat_session(&self, upsert: ChatSessionUpsert) -> Result<bool> {
-        (**self).upsert_chat_session(upsert).await
-    }
-
-    async fn upsert_task_session(&self, upsert: TaskSessionUpsert) -> Result<bool> {
-        (**self).upsert_task_session(upsert).await
-    }
-
-    async fn upsert_domain_session(&self, upsert: DomainSessionUpsert) -> Result<bool> {
-        (**self).upsert_domain_session(upsert).await
     }
 
     async fn session_memory_namespace(&self, session_id: Uuid) -> Result<Option<String>> {
@@ -226,9 +149,79 @@ where
 #[derive(Debug, Clone)]
 pub enum SessionRuntimeEvent {
     SessionUpsert(SessionUpsert),
+    SchedulerUpsert(SchedulerSessionUpsert),
+    DomainUpsert(DomainSessionUpsert),
     Transcript(SessionTranscriptRecord),
+    TranscriptAppend(SessionTranscriptAppend),
     Trace(TraceEvent),
     Checkpoint(CheckpointRecord),
+    CheckpointUpdate(SessionCheckpointUpdate),
+    Transition(SessionTransition),
+}
+
+impl SessionRuntimeEvent {
+    pub fn session_id(&self) -> Uuid {
+        match self {
+            Self::SessionUpsert(event) => event.session_id,
+            Self::SchedulerUpsert(event) => event.session_id,
+            Self::DomainUpsert(event) => event.session_id,
+            Self::Transcript(event) => event.session_id,
+            Self::TranscriptAppend(event) => event.session_id,
+            Self::Trace(event) => event.session_id,
+            Self::Checkpoint(event) => event.session_id,
+            Self::CheckpointUpdate(event) => event.session_id,
+            Self::Transition(event) => event.session_id,
+        }
+    }
+
+    pub fn event_type(&self) -> SessionRuntimeEventType {
+        match self {
+            Self::SessionUpsert(_) => SessionRuntimeEventType::SessionUpsert,
+            Self::SchedulerUpsert(_) => SessionRuntimeEventType::SchedulerUpsert,
+            Self::DomainUpsert(_) => SessionRuntimeEventType::DomainUpsert,
+            Self::Transcript(_) => SessionRuntimeEventType::Transcript,
+            Self::TranscriptAppend(_) => SessionRuntimeEventType::TranscriptAppend,
+            Self::Trace(_) => SessionRuntimeEventType::Trace,
+            Self::Checkpoint(_) => SessionRuntimeEventType::Checkpoint,
+            Self::CheckpointUpdate(_) => SessionRuntimeEventType::CheckpointUpdate,
+            Self::Transition(_) => SessionRuntimeEventType::Transition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRuntimeEventType {
+    SessionUpsert,
+    SchedulerUpsert,
+    DomainUpsert,
+    Transcript,
+    TranscriptAppend,
+    Trace,
+    Checkpoint,
+    CheckpointUpdate,
+    Transition,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionLeaseRequest {
+    pub session_id: Uuid,
+    pub worker_id: String,
+    pub owner_kind: SessionOwnerKind,
+    pub ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOwnerKind {
+    Chat,
+    Task,
+    Cron,
+    Heartbeat,
+    Domain,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionWriteOutcome {
+    pub applied: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +332,39 @@ pub struct NoopSessionRuntime;
 
 #[async_trait]
 impl SessionRuntime for NoopSessionRuntime {
-    async fn record(&self, _event: SessionRuntimeEvent) -> Result<()> {
+    async fn acquire_session_lease(
+        &self,
+        request: SessionLeaseRequest,
+    ) -> Result<SessionLeaseGrant> {
+        Ok(SessionLeaseGrant {
+            session_id: request.session_id,
+            worker_id: request.worker_id,
+            lease_token: Uuid::new_v4(),
+            lease_expires_at: chrono::Utc::now()
+                + chrono::Duration::from_std(request.ttl)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(30)),
+        })
+    }
+
+    async fn renew_session_lease(
+        &self,
+        _grant: &SessionLeaseGrant,
+        _ttl: Duration,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn release_session_lease(&self, _grant: SessionLeaseGrant) -> Result<()> {
         Ok(())
+    }
+
+    async fn record_batch(
+        &self,
+        _grant: &SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        Ok(SessionWriteOutcome {
+            applied: events.len(),
+        })
     }
 }

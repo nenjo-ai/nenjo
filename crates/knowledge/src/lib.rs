@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod tools;
@@ -250,6 +252,137 @@ pub trait KnowledgePack: Send + Sync {
     }
 }
 
+/// Filesystem-backed package knowledge pack loaded from an installed package
+/// knowledge manifest.
+#[derive(Debug, Clone)]
+pub struct PackageKnowledgePack {
+    content_root: PathBuf,
+    selector: Option<String>,
+    manifest: KnowledgePackManifestData,
+}
+
+impl PackageKnowledgePack {
+    pub fn load(path: &Path, package_version: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read knowledge manifest {}", path.display()))?;
+        let file: PackageKnowledgeManifestFile =
+            serde_yaml::from_str(&content).context("invalid package knowledge manifest")?;
+        let root_uri = file
+            .manifest
+            .root_uri
+            .or(file.root_uri)
+            .unwrap_or_else(|| format!("pkg://{}/", file.manifest.pack_id));
+        let pack_id = file.manifest.pack_id;
+        let docs = file
+            .manifest
+            .docs
+            .into_iter()
+            .map(|doc| doc.into_manifest(&pack_id))
+            .collect();
+        Ok(Self {
+            content_root: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            selector: file.manifest.selector.or(file.selector),
+            manifest: KnowledgePackManifestData {
+                pack_id,
+                version: file
+                    .manifest
+                    .version
+                    .unwrap_or_else(|| package_version.to_string()),
+                schema_version: file.manifest.schema_version.unwrap_or(1),
+                root_uri,
+                content_hash: file.manifest.content_hash.unwrap_or_default(),
+                docs,
+            },
+        })
+    }
+
+    pub fn selector(&self) -> Option<&str> {
+        self.selector.as_deref()
+    }
+}
+
+impl KnowledgePack for PackageKnowledgePack {
+    fn manifest(&self) -> &dyn KnowledgePackManifest {
+        &self.manifest
+    }
+
+    fn doc_content(&self, manifest: &KnowledgeDocManifest) -> Option<Cow<'_, str>> {
+        let content =
+            std::fs::read_to_string(self.content_root.join(&manifest.source_path)).ok()?;
+        Some(Cow::Owned(content))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageKnowledgeManifestFile {
+    selector: Option<String>,
+    root_uri: Option<String>,
+    manifest: PackageKnowledgeManifestBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageKnowledgeManifestBody {
+    pack_id: String,
+    selector: Option<String>,
+    version: Option<String>,
+    schema_version: Option<u32>,
+    root_uri: Option<String>,
+    content_hash: Option<String>,
+    #[serde(default)]
+    docs: Vec<PackageKnowledgeDoc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageKnowledgeDoc {
+    id: Option<String>,
+    selector: Option<String>,
+    source_path: String,
+    title: String,
+    summary: String,
+    #[serde(default)]
+    kind: KnowledgeDocKind,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    related: Vec<KnowledgeDocEdge>,
+    #[serde(default)]
+    updated_at: String,
+}
+
+impl PackageKnowledgeDoc {
+    fn into_manifest(self, pack_id: &str) -> KnowledgeDocManifest {
+        let id_hint = self.id.as_deref().unwrap_or_default();
+        let selector = self
+            .selector
+            .unwrap_or_else(|| selector_from_source_path(&self.source_path, pack_id, id_hint));
+        let id = self.id.unwrap_or_else(|| format!("{pack_id}.{selector}"));
+        KnowledgeDocManifest {
+            id,
+            selector,
+            source_path: self.source_path,
+            title: self.title,
+            summary: self.summary,
+            kind: self.kind,
+            tags: self.tags,
+            related: self.related,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+fn selector_from_source_path(source_path: &str, pack_id: &str, id: &str) -> String {
+    let trimmed = source_path.strip_prefix("docs/").unwrap_or(source_path);
+    let trimmed = trimmed.strip_suffix(".md").unwrap_or(trimmed);
+    let selector = trimmed.replace('/', ".");
+    if selector.is_empty() {
+        id.strip_prefix(&format!("{pack_id}."))
+            .unwrap_or(id)
+            .to_string()
+    } else {
+        selector
+    }
+}
+
 impl KnowledgeDocEdgeType {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -434,4 +567,52 @@ fn score_field(
 
 fn normalize(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn package_knowledge_manifest_accepts_selector_without_doc_id() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nenjo-knowledge-package-manifest-{pid}-{unique}",
+            pid = std::process::id()
+        ));
+        let docs_dir = dir.join("docs/domain");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            r#"
+schema: nenjo.knowledge.v1
+manifest:
+  pack_id: nenjo.core
+  version: 0.1.0
+  docs:
+    - selector: domain.nenjo
+      source_path: docs/domain/nenjo.md
+      title: Nenjo
+      summary: Platform overview.
+      kind: domain
+      tags: [domain:nenjo]
+      related: []
+"#,
+        )
+        .unwrap();
+        std::fs::write(docs_dir.join("nenjo.md"), "# Nenjo\n\nKnowledge content.").unwrap();
+
+        let pack = PackageKnowledgePack::load(&dir.join("manifest.yaml"), "0.1.0").unwrap();
+        let doc = pack.read_doc("domain.nenjo").unwrap();
+
+        assert_eq!(doc.manifest.selector, "domain.nenjo");
+        assert_eq!(doc.manifest.id, "nenjo.core.domain.nenjo");
+        assert!(doc.content.contains("Knowledge content"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -53,7 +53,7 @@ pub mod knowledge {
 }
 
 // Re-export the Tool API for custom tool implementations.
-pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolResult, ToolSecurity, ToolSpec};
+pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolOrigin, ToolResult, ToolSecurity, ToolSpec};
 
 // Re-export the model provider trait for custom model implementations.
 pub use nenjo_models::ModelProvider;

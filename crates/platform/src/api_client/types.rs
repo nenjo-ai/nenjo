@@ -158,6 +158,7 @@ impl From<AgentDetailResponse> for AgentManifest {
         Self {
             id: d.id,
             name: d.name,
+            slug: d.slug.map(Slug::derive),
             description: d.description,
             prompt_config: PromptConfig::default(),
             color: Some(d.color),
@@ -321,9 +322,9 @@ pub struct RoutineStepDetailResponse {
     pub name: String,
     pub step_type: RoutineStepType,
     #[serde(default)]
-    pub council: Option<Slug>,
+    pub council: Option<String>,
     #[serde(default)]
-    pub agent: Option<Slug>,
+    pub agent: Option<String>,
     #[serde(default)]
     pub config: serde_json::Value,
     #[serde(default)]
@@ -334,8 +335,8 @@ pub struct RoutineStepDetailResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoutineEdgeDetailResponse {
     pub id: Uuid,
-    pub source_step: Slug,
-    pub target_step: Slug,
+    pub source_step: String,
+    pub target_step: String,
     pub condition: RoutineEdgeCondition,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -365,8 +366,8 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                     routine: routine_slug.clone(),
                     name: step.name,
                     step_type: step.step_type,
-                    council: step.council,
-                    agent: step.agent,
+                    council: step.council.map(Slug::derive),
+                    agent: step.agent.map(Slug::derive),
                     config: step.config,
                     order_index: step.order_index,
                 })
@@ -377,8 +378,8 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                 .map(|edge| RoutineEdgeManifest {
                     id: edge.id,
                     routine: routine_slug.clone(),
-                    source_step: edge.source_step,
-                    target_step: edge.target_step,
+                    source_step: Slug::derive(edge.source_step),
+                    target_step: Slug::derive(edge.target_step),
                     condition: edge.condition,
                     metadata: edge.metadata,
                 })

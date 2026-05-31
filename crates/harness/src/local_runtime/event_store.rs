@@ -114,11 +114,13 @@ impl FileTranscriptStore {
 #[async_trait]
 impl TranscriptStore for FileTranscriptStore {
     async fn append(&self, mut event: SessionTranscriptEvent) -> Result<u64> {
-        let mut events = read_jsonl::<SessionTranscriptEvent>(&self.path(event.session_id))?;
-        let seq = events.last().map(|event| event.seq + 1).unwrap_or(1);
-        event.seq = seq;
-        events.push(event);
-        write_jsonl(&self.path(events[0].session_id), &events)?;
+        let path = self.path(event.session_id);
+        if event.seq == 0 {
+            let events = read_jsonl::<SessionTranscriptEvent>(&path)?;
+            event.seq = events.last().map(|event| event.seq + 1).unwrap_or(1);
+        }
+        let seq = event.seq;
+        append_jsonl(&path, &event)?;
         Ok(seq)
     }
 
@@ -287,29 +289,6 @@ where
     use std::io::Write;
     file.write_all(&line)?;
     file.flush()?;
-    Ok(())
-}
-
-fn write_jsonl<T>(path: &Path, values: &[T]) -> Result<()>
-where
-    T: serde::Serialize,
-{
-    safe_existing_path(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("jsonl.tmp");
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        for value in values {
-            serde_json::to_writer(&mut file, value)?;
-            use std::io::Write;
-            file.write_all(b"\n")?;
-        }
-        use std::io::Write;
-        file.flush()?;
-    }
-    std::fs::rename(tmp, path)?;
     Ok(())
 }
 

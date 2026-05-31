@@ -14,8 +14,6 @@ use serde::Serialize;
 pub struct AgentContext {
     #[serde(rename = "@slug")]
     pub slug: String,
-    #[serde(rename = "@role")]
-    pub role: String,
     #[serde(rename = "@name")]
     pub display_name: String,
     #[serde(rename = "@llm_model_name")]
@@ -397,13 +395,12 @@ mod tests {
     fn test_agent_context_xml() {
         let agent = AgentContext {
             slug: "coder".into(),
-            role: "coder".into(),
             display_name: "Cody".into(),
             model_name: "gpt-4".into(),
             description: Some("Writes code".into()),
         };
         let xml = nenjo_xml::to_xml(&agent);
-        assert!(xml.contains("role=\"coder\""));
+        assert!(xml.contains("slug=\"coder\""));
         assert!(xml.contains("name=\"Cody\""));
         assert!(xml.contains("description=\"Writes code\""));
     }

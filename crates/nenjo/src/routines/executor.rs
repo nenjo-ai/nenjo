@@ -22,6 +22,8 @@ use super::RoutineEvent;
 use super::types::{CronMode, CronStepConfig, RoutineState};
 use crate::context::{RoutineContext, RoutineStepContext};
 
+const DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS: u32 = 3;
+
 /// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
 fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContext) {
     let routine = RoutineContext {
@@ -291,20 +293,30 @@ where
         match next_edge {
             Some(edge) => {
                 let traversal_count = edge_traversals.entry(edge.id).or_default();
-                if let Some(max_attempts) = edge_max_attempts(edge)
+                if let Some(max_attempts) = edge_max_attempts(&current_step, edge)
                     && *traversal_count >= max_attempts
                 {
-                    last_result = StepResult {
-                        passed: false,
-                        output: format!(
-                            "Routine edge {} exhausted after {} attempts",
-                            edge.id, max_attempts
-                        ),
-                        step_id: current_step.id,
-                        step_name: current_step.name.clone(),
-                        ..Default::default()
-                    };
-                    break;
+                    if let Some(exhausted_step_id) = edge_on_exhausted_step_id(edge) {
+                        current_step = steps
+                            .iter()
+                            .find(|s| s.id == exhausted_step_id)
+                            .with_context(|| {
+                                format!("Edge exhausted target step {exhausted_step_id} not found")
+                            })?
+                            .clone();
+                    } else {
+                        last_result = StepResult {
+                            passed: false,
+                            output: format!(
+                                "Routine edge {} exhausted after {} attempts",
+                                edge.id, max_attempts
+                            ),
+                            step_id: current_step.id,
+                            step_name: current_step.name.clone(),
+                            ..Default::default()
+                        };
+                        break;
+                    }
                 } else {
                     *traversal_count += 1;
                     current_step = steps
@@ -331,11 +343,28 @@ where
     Ok(last_result)
 }
 
-fn edge_max_attempts(edge: &RoutineEdgeManifest) -> Option<u32> {
-    edge.metadata
+fn edge_max_attempts(
+    current_step: &RoutineStepManifest,
+    edge: &RoutineEdgeManifest,
+) -> Option<u32> {
+    let configured = edge
+        .metadata
         .get("max_attempts")
         .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
+        .and_then(|value| u32::try_from(value).ok());
+
+    configured.or_else(|| {
+        (current_step.step_type == RoutineStepType::Gate
+            && edge.condition == RoutineEdgeCondition::OnFail)
+            .then_some(DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS)
+    })
+}
+
+fn edge_on_exhausted_step_id(edge: &RoutineEdgeManifest) -> Option<Uuid> {
+    edge.metadata
+        .get("on_exhausted_step_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
 }
 
 fn choose_next_edge<'a>(

@@ -7,8 +7,9 @@ use serde_json::Map;
 
 use crate::schema::parse_package_file_schema;
 use crate::{
-    ManifestSchemaVersion, PackageKind, PackageModule, ResourceSchema, parse_json_or_yaml,
-    validate_relative_module_import_path, validate_resource_name, validate_source_path,
+    ManifestSchemaVersion, ModulePackageManifest, PackageKind, PackageModule, ResourceSchema,
+    parse_json_or_yaml, validate_relative_module_import_path, validate_resource_name,
+    validate_source_path,
 };
 
 pub(crate) fn parse_module_file(content: &str, source_path: &str) -> Result<Vec<ResourceManifest>> {
@@ -252,6 +253,11 @@ impl ResourceManifest {
     /// Validate canonical module wrapper shape.
     pub fn validate_wrapper(&self) -> Result<()> {
         let kind = self.kind()?;
+        if self.slug.is_some() {
+            bail!(
+                "resource manifests must not define wrapper slug; package resolution derives slug from manifest.name"
+            );
+        }
         if self
             .manifest
             .get("imports")
@@ -280,6 +286,47 @@ impl ResourceManifest {
         }
         Ok(())
     }
+}
+
+pub(crate) fn complete_package_resource_manifest(
+    mut resource: ResourceManifest,
+    package: &ModulePackageManifest,
+) -> Result<ResourceManifest> {
+    if resource.kind()? == PackageKind::Knowledge {
+        if resource.root_uri.is_none() {
+            resource.root_uri = knowledge_root_uri(&resource, package)?;
+        }
+        if resource.selector.is_none() {
+            resource.selector = resource
+                .manifest
+                .get("selector")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
+        }
+    }
+    Ok(resource)
+}
+
+fn knowledge_root_uri(
+    resource: &ResourceManifest,
+    package: &ModulePackageManifest,
+) -> Result<Option<String>> {
+    if let Some(root_uri) = resource
+        .manifest
+        .get("root_uri")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(Some(root_uri.to_string()));
+    }
+    let pack_id = resource
+        .manifest
+        .get("pack_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(package.name.as_str());
+    Ok(Some(format!("pkg://{}/", pack_id.trim().trim_matches('/'))))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

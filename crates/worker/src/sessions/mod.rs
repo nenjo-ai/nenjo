@@ -4,6 +4,5 @@ pub use nenjo_harness::local_runtime::{
     CronSessionRecovery, DomainSessionRecovery, FileCheckpointStore,
     FileSessionRuntime as WorkerSessionRuntime, FileSessionStore,
     FileSessionStores as WorkerSessionStores, FileTraceStore, FileTranscriptStore,
-    HeartbeatSessionRecovery, LocalSessionCoordinator,
-    SessionRecoveryHandler as WorkerSessionRecoveryHandler,
+    HeartbeatSessionRecovery, SessionRecoveryHandler as WorkerSessionRecoveryHandler,
 };

@@ -33,6 +33,7 @@ fn test_platform_services(
         PlatformPayloadEncoder::new(auth_provider),
         None,
         config.workspace_dir.clone(),
+        Vec::new(),
     )
 }
 
@@ -55,6 +56,7 @@ async fn scoped_backend(
     let visible_agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "visible-agent".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -69,6 +71,7 @@ async fn scoped_backend(
     let hidden_agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "hidden-agent".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -191,6 +194,7 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "tester".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -284,6 +288,7 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "tester".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,

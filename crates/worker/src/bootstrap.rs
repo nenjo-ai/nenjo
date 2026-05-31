@@ -35,7 +35,7 @@ static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct BootstrapManifestResponse {
     auth: BootstrapAuth,
     #[serde(default)]
-    routines: Vec<nenjo::manifest::RoutineManifest>,
+    routines: Vec<BootstrapRoutineManifest>,
     #[serde(default)]
     models: Vec<nenjo::manifest::ModelManifest>,
     #[serde(default)]
@@ -184,6 +184,8 @@ struct BootstrapAuthEnvelope {
 struct BootstrapAgentManifest {
     id: Uuid,
     name: String,
+    #[serde(default)]
+    slug: Option<Slug>,
     description: Option<String>,
     color: Option<String>,
     model: Option<Slug>,
@@ -227,6 +229,52 @@ struct BootstrapProjectManifest {
     settings: serde_json::Value,
     #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapRoutineManifest {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    #[serde(default)]
+    trigger: nenjo::manifest::RoutineTrigger,
+    #[serde(default)]
+    metadata: nenjo::manifest::RoutineMetadata,
+    #[serde(default)]
+    steps: Vec<BootstrapRoutineStepManifest>,
+    #[serde(default)]
+    edges: Vec<BootstrapRoutineEdgeManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapRoutineStepManifest {
+    id: Uuid,
+    #[serde(default)]
+    slug: Option<Slug>,
+    #[serde(default)]
+    routine: Option<Slug>,
+    name: String,
+    step_type: nenjo::manifest::RoutineStepType,
+    #[serde(default)]
+    council: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    order_index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapRoutineEdgeManifest {
+    id: Uuid,
+    #[serde(default)]
+    routine: Option<Slug>,
+    source_step: String,
+    target_step: String,
+    condition: nenjo::manifest::RoutineEdgeCondition,
+    #[serde(default)]
+    metadata: serde_json::Value,
 }
 
 /// Trait for manifest items that can be stored as tree files.
@@ -421,6 +469,7 @@ async fn hydrate_bootstrap_manifest(
         agents.push(nenjo::manifest::AgentManifest {
             id: agent.id,
             name: agent.name,
+            slug: agent.slug,
             description: agent.description,
             prompt_config,
             color: agent.color,
@@ -459,10 +508,16 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let routines = bootstrap
+        .routines
+        .into_iter()
+        .map(bootstrap_routine_manifest)
+        .collect();
+
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
         manifest: Manifest {
-            routines: bootstrap.routines,
+            routines,
             models: bootstrap.models,
             agents,
             councils: bootstrap.councils,
@@ -587,7 +642,7 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
         };
     }
 
-    check_section!("routines", Vec<nenjo::manifest::RoutineManifest>);
+    check_section!("routines", Vec<BootstrapRoutineManifest>);
     check_section!("models", Vec<nenjo::manifest::ModelManifest>);
     check_section!("agents", Vec<BootstrapAgentManifest>);
     check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
@@ -596,6 +651,46 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
     check_section!("mcp_servers", Vec<nenjo::manifest::McpServerManifest>);
     check_section!("abilities", Vec<nenjo::manifest::AbilityManifest>);
     check_section!("context_blocks", Vec<BootstrapContextBlockManifest>);
+}
+
+fn bootstrap_routine_manifest(
+    routine: BootstrapRoutineManifest,
+) -> nenjo::manifest::RoutineManifest {
+    let routine_slug = Slug::derive(&routine.name);
+    nenjo::manifest::RoutineManifest {
+        id: routine.id,
+        name: routine.name,
+        description: routine.description,
+        trigger: routine.trigger,
+        metadata: routine.metadata,
+        steps: routine
+            .steps
+            .into_iter()
+            .map(|step| nenjo::manifest::RoutineStepManifest {
+                id: step.id,
+                slug: step.slug.unwrap_or_else(|| Slug::derive(&step.name)),
+                routine: step.routine.unwrap_or_else(|| routine_slug.clone()),
+                name: step.name,
+                step_type: step.step_type,
+                council: step.council.map(Slug::derive),
+                agent: step.agent.map(Slug::derive),
+                config: step.config,
+                order_index: step.order_index,
+            })
+            .collect(),
+        edges: routine
+            .edges
+            .into_iter()
+            .map(|edge| nenjo::manifest::RoutineEdgeManifest {
+                id: edge.id,
+                routine: edge.routine.unwrap_or_else(|| routine_slug.clone()),
+                source_step: Slug::derive(edge.source_step),
+                target_step: Slug::derive(edge.target_step),
+                condition: edge.condition,
+                metadata: edge.metadata,
+            })
+            .collect(),
+    }
 }
 
 pub struct WorkerManifestCache {

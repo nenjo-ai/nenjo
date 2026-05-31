@@ -11,9 +11,10 @@ use nenjo::manifest::{
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use nenjo_knowledge::tools::{
-    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackSummary, KnowledgeReadArgs,
-    KnowledgeRef, KnowledgeRegistry, KnowledgeSearchArgs, knowledge_document_metadata,
-    knowledge_filter, knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
+    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackEntry, KnowledgePackSummary,
+    KnowledgeReadArgs, KnowledgeRef, KnowledgeRegistry, KnowledgeSearchArgs,
+    StaticKnowledgeRegistry, knowledge_document_metadata, knowledge_filter,
+    knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
 };
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
@@ -100,6 +101,7 @@ pub struct PlatformManifestBackend<L, E> {
     workspace_dir: Option<PathBuf>,
     cached_org_id: Option<Uuid>,
     current_library_slug: Option<String>,
+    package_knowledge_registry: StaticKnowledgeRegistry,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -117,6 +119,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
             workspace_dir: None,
             cached_org_id: None,
             current_library_slug: None,
+            package_knowledge_registry: StaticKnowledgeRegistry::new(),
         }
     }
 
@@ -141,6 +144,15 @@ impl<L, E> PlatformManifestBackend<L, E> {
     /// Attach the default library slug used to resolve the `workspace` library pack alias.
     pub fn with_current_library_slug(mut self, pack_slug: Option<String>) -> Self {
         self.current_library_slug = pack_slug.filter(|slug| !slug.trim().is_empty());
+        self
+    }
+
+    /// Attach installed package knowledge packs available to platform workers.
+    pub fn with_package_knowledge_packs(
+        mut self,
+        packs: impl IntoIterator<Item = KnowledgePackEntry>,
+    ) -> Self {
+        self.package_knowledge_registry = StaticKnowledgeRegistry::new().with_entries(packs);
         self
     }
 
@@ -354,9 +366,11 @@ where
                 .map(ResolvedKnowledgePack::Library);
         }
         if let KnowledgeRef::Package { .. } = selector.parse::<KnowledgeRef>()? {
-            return Err(anyhow!(
-                "package knowledge pack '{selector}' must be loaded from installed packages"
-            ));
+            let pack = self
+                .package_knowledge_registry
+                .resolve_pack(selector)
+                .await?;
+            return Ok(ResolvedKnowledgePack::Package(pack));
         }
         Err(unknown_pack(selector))
     }
@@ -391,6 +405,7 @@ where
                 }
             }
         }
+        packs.extend(self.package_knowledge_registry.list_packs().await?);
         Ok(packs)
     }
 
@@ -424,7 +439,7 @@ where
             )
         })?;
         serde_json::to_value(KnowledgeDocReadResult {
-            document: knowledge_document_metadata(&doc.manifest),
+            document: knowledge_document_metadata(args.pack, &doc.manifest),
             content: doc.content,
         })
         .map_err(Into::into)
@@ -438,7 +453,7 @@ where
         serde_json::to_value(
             pack.search(&args.query, filter)
                 .into_iter()
-                .map(knowledge_search_result)
+                .map(|hit| knowledge_search_result(args.pack.clone(), hit))
                 .collect::<Vec<_>>(),
         )
         .map_err(Into::into)
@@ -459,7 +474,7 @@ where
                 args.pack
             )
         })?;
-        serde_json::to_value(knowledge_neighbors_result(neighbors)).map_err(Into::into)
+        serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors)).map_err(Into::into)
     }
 }
 

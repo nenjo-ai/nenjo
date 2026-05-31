@@ -17,4 +17,5 @@ async-trait = { workspace = true }
 nenjo-xml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 nenjo-tool-api = { workspace = true }

@@ -142,6 +142,23 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+/// Runtime ownership surface for a tool.
+///
+/// This is intentionally separate from read/write category. It describes who
+/// owns tool availability and scoping so runtimes can rebuild or inherit tools
+/// correctly across abilities, domains, and sub-agents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOrigin {
+    /// Host/runtime tools such as shell, files, git, web, memory, and MCP host tools.
+    #[default]
+    Host,
+    /// Platform resource tools whose availability is governed by platform scopes.
+    Platform,
+    /// Harness orchestration tools such as ability or sub-agent control.
+    Harness,
+}
+
 /// Core tool trait for agent capabilities.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -160,6 +177,11 @@ pub trait Tool: Send + Sync {
     /// Tool category for profile-based filtering.
     fn category(&self) -> ToolCategory {
         ToolCategory::Write
+    }
+
+    /// Runtime ownership surface for this tool.
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Host
     }
 
     /// Whether calling this tool should immediately end the turn loop.

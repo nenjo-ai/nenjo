@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use nenjo::manifest::store::ManifestReader;
-use nenjo::{Slug, Tool, ToolCategory, ToolResult};
+use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use uuid::Uuid;
@@ -658,6 +658,10 @@ where
     fn category(&self) -> ToolCategory {
         self.spec.category
     }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Platform
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -850,6 +854,10 @@ impl Tool for ManifestContractTool {
 
     fn category(&self) -> ToolCategory {
         self.spec.category
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Platform
     }
 }
 

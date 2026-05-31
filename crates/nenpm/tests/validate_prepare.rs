@@ -184,7 +184,7 @@ manifest:
   name: agent
   prompt_config:
     developer_prompt: |
-      {{ pkg.nenjo.context.knowledge.knowledge_routing }}
+      {{ pkg.nenjo_ai.packages.context.knowledge.knowledge_routing }}
 "#,
     );
 

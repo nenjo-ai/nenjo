@@ -93,7 +93,7 @@ pub use handle::{HarnessExecutionHandle, HarnessScheduleHandle};
 #[cfg(feature = "local-runtime")]
 pub use local_runtime::{
     FileCheckpointStore, FileSessionRuntime, FileSessionStore, FileSessionStores, FileTraceStore,
-    FileTranscriptStore, LocalSessionCoordinator, SessionRecoveryHandler,
+    FileTranscriptStore, SessionRecoveryHandler,
 };
 pub use request::{ChatDomainActivation, ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
 pub use session::HarnessSessions;

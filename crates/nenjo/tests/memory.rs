@@ -8,6 +8,7 @@ use uuid::Uuid;
 use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+    model_manifest_slug,
 };
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
@@ -81,6 +82,7 @@ fn test_manifest() -> Manifest {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "memory-agent".into(),
+        slug: None,
         description: Some("An agent with memory".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a helpful assistant.\n{{ memories }}".into(),
@@ -94,7 +96,7 @@ fn test_manifest() -> Manifest {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -634,6 +636,7 @@ async fn ability_inherits_memory_vars() {
     let agent = nenjo::manifest::AgentManifest {
         id: Uuid::new_v4(),
         name: "ability-agent".into(),
+        slug: None,
         description: Some("Agent with abilities".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are helpful.\n{{ memories }}".into(),
@@ -647,7 +650,7 @@ async fn ability_inherits_memory_vars() {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -757,6 +760,7 @@ async fn domain_expansion_preserves_memory() {
     let agent = nenjo::manifest::AgentManifest {
         id: Uuid::new_v4(),
         name: "domain-agent".into(),
+        slug: None,
         description: Some("Agent with domains".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are helpful.\n{{ memories }}".into(),
@@ -770,7 +774,7 @@ async fn domain_expansion_preserves_memory() {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![Slug::derive(&domain.name)],
         platform_scopes: vec![],
         mcp_servers: vec![],

@@ -11,6 +11,7 @@ use uuid::Uuid;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::{Slug, TaskInput};
@@ -60,6 +61,7 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
         name: "routine-agent".into(),
+        slug: None,
         description: Some("Executes routine steps".into()),
         prompt_config: PromptConfig {
             system_prompt:
@@ -75,7 +77,7 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],

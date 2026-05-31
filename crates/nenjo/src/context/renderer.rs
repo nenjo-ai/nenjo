@@ -40,7 +40,9 @@ impl ContextRenderer {
             let rendered = nenjo_xml::template::render_template(&block.template, vars);
             if !rendered.is_empty() {
                 let key = Self::dotted_key(&block.path, &block.name);
-                map.insert(key, rendered);
+                map.insert(key, rendered.clone());
+                map.entry(format!("context.{}", block.name))
+                    .or_insert(rendered);
             }
         }
         map
@@ -77,5 +79,24 @@ mod tests {
             nenjo_xml::template::render_template("{{ pkg.nenjo.core.methodology }}", &prompt_vars);
 
         assert_eq!(prompt, "<methodology>system</methodology>");
+    }
+
+    #[test]
+    fn renders_context_name_alias_for_imported_blocks() {
+        let renderer = ContextRenderer::from_blocks(&[RenderContextBlock {
+            name: "methodology".into(),
+            path: "shared/context".into(),
+            template: "<methodology>{{ self.role }}</methodology>".into(),
+        }]);
+        let vars = HashMap::from([("self.role".into(), "system".into())]);
+
+        let rendered_blocks = renderer.render_all(&vars);
+
+        assert_eq!(
+            rendered_blocks
+                .get("context.methodology")
+                .map(String::as_str),
+            Some("<methodology>system</methodology>")
+        );
     }
 }

@@ -2089,6 +2089,7 @@ dependencies = [
  "nenjo-xml",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -2132,6 +2133,7 @@ name = "nenjo-packages"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "reqwest",
  "serde",
  "serde_json",

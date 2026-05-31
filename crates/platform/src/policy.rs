@@ -110,6 +110,7 @@ mod tests {
         let agent = AgentManifest {
             id: Uuid::new_v4(),
             name: "agent".into(),
+            slug: None,
             description: None,
             prompt_config: PromptConfig::default(),
             color: None,
