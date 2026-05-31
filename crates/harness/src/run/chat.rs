@@ -159,17 +159,6 @@ where
                 return Err(crate::HarnessError::Other(error));
             }
         };
-        debug!(
-            agent = %agent,
-            session = %session_id,
-            domain_session = %activation.domain_session_id,
-            "Preparing chat: domain activated"
-        );
-        debug!(
-            agent = %agent,
-            session = %session_id,
-            "Preparing chat: appending domain activation transcript"
-        );
         sessions
             .record_events_and_wait(
                 lease.clone(),
@@ -193,6 +182,7 @@ where
         debug!(
             agent = %agent,
             session = %session_id,
+            domain_session = %activation.domain_session_id,
             "Preparing chat: appended domain activation transcript"
         );
         let _ = events_tx.send(HarnessEvent::DomainEntered {
@@ -201,53 +191,29 @@ where
         });
     }
 
-    debug!(
-        agent = %agent,
-        session = %session_id,
-        "Preparing chat: queueing chat session upsert"
-    );
-    upsert_chat_session_record(
-        harness,
-        &lease,
-        ChatSessionRecord {
-            session_id,
-            project: project.clone(),
-            agent: agent.clone(),
-            project_slug: slug.clone(),
-            agent_name: aname.clone(),
-            status: SessionStatus::Active,
-        },
-    )
-    .await;
-    debug!(
-        agent = %agent,
-        session = %session_id,
-        "Preparing chat: queued chat session upsert"
-    );
-    debug!(
-        agent = %agent,
-        session = %session_id,
-        "Preparing chat: queueing session transition to calling_model"
-    );
-    record_session_transition(
-        &sessions,
+    sessions.record_events(
         lease.clone(),
-        SessionTransition {
-            session_id,
-            worker_id: worker_id.clone(),
-            phase: Some(ExecutionPhase::CallingModel),
-            status: SessionStatus::Active,
-        },
+        vec![
+            chat_session_upsert_runtime_event(ChatSessionRecord {
+                session_id,
+                project: project.clone(),
+                agent: agent.clone(),
+                project_slug: slug.clone(),
+                agent_name: aname.clone(),
+                status: SessionStatus::Active,
+            }),
+            SessionRuntimeEvent::Transition(SessionTransition {
+                session_id,
+                worker_id: worker_id.clone(),
+                phase: Some(ExecutionPhase::CallingModel),
+                status: SessionStatus::Active,
+            }),
+        ],
     );
     debug!(
         agent = %agent,
         session = %session_id,
-        "Preparing chat: queued session transition to calling_model"
-    );
-    debug!(
-        agent = %agent,
-        session = %session_id,
-        "Preparing chat: reading transcript"
+        "Preparing chat: queued session upsert and calling_model transition"
     );
     let transcript_events = sessions
         .read_transcript(session_id, TranscriptQuery::default())
@@ -271,12 +237,6 @@ where
         && let Some(domain_command) = active_domain_command(harness, dsid).await
     {
         let domain_name = domain_name_for_command(&manifest, &domain_command);
-        debug!(
-            agent = %agent,
-            session = %session_id,
-            domain_session = %dsid,
-            "Preparing chat: appending restored domain activation transcript"
-        );
         sessions
             .record_events_and_wait(
                 lease.clone(),
@@ -384,12 +344,6 @@ where
         worker_id,
     } = input;
     let history: Vec<ChatMessage> = replay_transcript_history(&transcript_events);
-    debug!(
-        agent = %agent,
-        session = %session_id,
-        history_len = history.len(),
-        "Preparing chat: queueing user message transcript"
-    );
     sessions.record_events(
         lease.clone(),
         vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
@@ -403,6 +357,7 @@ where
     debug!(
         agent = %agent,
         session = %session_id,
+        history_len = history.len(),
         "Preparing chat: queued user message transcript"
     );
     info!(
@@ -626,29 +581,25 @@ where
                         .get(&session_id)
                         .is_some_and(|entry| entry.registry_token == registry_token);
                     if is_current_execution {
-                        record_session_transition(
-                            &harness.sessions(),
+                        harness.sessions().record_events(
                             lease.clone(),
-                            SessionTransition {
-                                session_id,
-                                worker_id: worker_id.clone(),
-                                phase: Some(ExecutionPhase::Finalizing),
-                                status: SessionStatus::Cancelled,
-                            },
+                            vec![
+                                SessionRuntimeEvent::Transition(SessionTransition {
+                                    session_id,
+                                    worker_id: worker_id.clone(),
+                                    phase: Some(ExecutionPhase::Finalizing),
+                                    status: SessionStatus::Cancelled,
+                                }),
+                                chat_session_upsert_runtime_event(ChatSessionRecord {
+                                    session_id,
+                                    project: project.clone(),
+                                    agent: prepared_agent_for_record.clone(),
+                                    project_slug: project_slug.clone(),
+                                    agent_name: agent_name.clone(),
+                                    status: SessionStatus::Cancelled,
+                                }),
+                            ],
                         );
-                        upsert_chat_session_record(
-                            &harness,
-                            &lease,
-                            ChatSessionRecord {
-                                session_id,
-                                project: project.clone(),
-                                agent: prepared_agent_for_record.clone(),
-                                project_slug: project_slug.clone(),
-                                agent_name: agent_name.clone(),
-                                status: SessionStatus::Cancelled,
-                            },
-                        )
-                        .await;
                     }
                     break;
                 }
@@ -696,29 +647,25 @@ where
                 return Err(error.into());
             }
         };
-        record_session_transition(
-            &harness.sessions(),
+        harness.sessions().record_events(
             lease.clone(),
-            SessionTransition {
-                session_id,
-                worker_id: worker_id.clone(),
-                phase: Some(ExecutionPhase::Finalizing),
-                status: SessionStatus::Completed,
-            },
+            vec![
+                SessionRuntimeEvent::Transition(SessionTransition {
+                    session_id,
+                    worker_id: worker_id.clone(),
+                    phase: Some(ExecutionPhase::Finalizing),
+                    status: SessionStatus::Completed,
+                }),
+                chat_session_upsert_runtime_event(ChatSessionRecord {
+                    session_id,
+                    project,
+                    agent: prepared_agent_for_record,
+                    project_slug,
+                    agent_name: agent_name.clone(),
+                    status: SessionStatus::Completed,
+                }),
+            ],
         );
-        upsert_chat_session_record(
-            &harness,
-            &lease,
-            ChatSessionRecord {
-                session_id,
-                project,
-                agent: prepared_agent_for_record,
-                project_slug,
-                agent_name: agent_name.clone(),
-                status: SessionStatus::Completed,
-            },
-        )
-        .await;
         if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
             warn!(error = %error, session = %session_id, "Failed to flush completed chat session events");
         }
@@ -768,6 +715,13 @@ async fn upsert_chat_session_record<P, SessionRt>(
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
+    harness.sessions().record_events(
+        lease.clone(),
+        vec![chat_session_upsert_runtime_event(params)],
+    );
+}
+
+fn chat_session_upsert_runtime_event(params: ChatSessionRecord) -> SessionRuntimeEvent {
     let ChatSessionRecord {
         session_id,
         project,
@@ -787,12 +741,7 @@ async fn upsert_chat_session_record<P, SessionRt>(
         project_slug,
     );
 
-    harness.sessions().record_events(
-        lease.clone(),
-        vec![SessionRuntimeEvent::SessionUpsert(
-            session_upsert_from_chat(upsert),
-        )],
-    );
+    SessionRuntimeEvent::SessionUpsert(session_upsert_from_chat(upsert))
 }
 
 fn chat_session_upsert(

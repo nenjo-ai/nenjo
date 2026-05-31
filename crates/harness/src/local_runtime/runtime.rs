@@ -674,61 +674,6 @@ impl FileSessionRuntime {
         }
     }
 
-    pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
-        let session_id = event.session_id();
-        let grant =
-            self.lease_store
-                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
-        let result = <Self as SessionRuntime>::record(self, &grant, event).await;
-        let release_result = self
-            .lease_store
-            .release(grant.session_id, grant.lease_token);
-        release_result?;
-        result
-    }
-
-    pub async fn append_transcript(
-        &self,
-        append: SessionTranscriptAppend,
-    ) -> Result<Option<SessionTranscriptEvent>> {
-        let session_id = append.session_id;
-        let grant =
-            self.lease_store
-                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
-        let result = self.append_transcript_record(append).await;
-        let release_result = self
-            .lease_store
-            .release(grant.session_id, grant.lease_token);
-        release_result?;
-        result
-    }
-
-    pub async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
-        let session_id = update.session_id;
-        let grant =
-            self.lease_store
-                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
-        let result = self.update_checkpoint_record(update).await;
-        let release_result = self
-            .lease_store
-            .release(grant.session_id, grant.lease_token);
-        release_result?;
-        result
-    }
-
-    pub async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
-        let session_id = transition.session_id;
-        let grant =
-            self.lease_store
-                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
-        let result = self.transition_session_record(&grant, transition).await;
-        let release_result = self
-            .lease_store
-            .release(grant.session_id, grant.lease_token);
-        release_result?;
-        result
-    }
-
     pub async fn recover_reconcilable_sessions(
         &self,
         handler: &(dyn SessionRecoveryHandler + Send + Sync),
@@ -1040,19 +985,26 @@ mod tests {
         records
             .put(&test_record(session_id, SessionStatus::Active))
             .unwrap();
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
 
-        assert!(
-            runtime
-                .update_checkpoint(SessionCheckpointUpdate {
-                    session_id,
-                    phase: ExecutionPhase::Preparing,
-                    active_tool_name: None,
-                    worktree: None,
-                    scheduler_runtime: None,
-                })
-                .await
-                .unwrap()
-        );
+        runtime
+            .record_batch(
+                &grant,
+                vec![SessionRuntimeEvent::CheckpointUpdate(
+                    SessionCheckpointUpdate {
+                        session_id,
+                        phase: ExecutionPhase::Preparing,
+                        active_tool_name: None,
+                        worktree: None,
+                        scheduler_runtime: None,
+                    },
+                )],
+            )
+            .await
+            .unwrap();
 
         let worktree = WorktreeSnapshot {
             repo_dir: "/repo".to_string(),
@@ -1060,18 +1012,21 @@ mod tests {
             branch: "feature/test".to_string(),
             target_branch: Some("main".to_string()),
         };
-        assert!(
-            runtime
-                .update_checkpoint(SessionCheckpointUpdate {
-                    session_id,
-                    phase: ExecutionPhase::Finalizing,
-                    active_tool_name: None,
-                    worktree: Some(worktree.clone()),
-                    scheduler_runtime: None,
-                })
-                .await
-                .unwrap()
-        );
+        runtime
+            .record_batch(
+                &grant,
+                vec![SessionRuntimeEvent::CheckpointUpdate(
+                    SessionCheckpointUpdate {
+                        session_id,
+                        phase: ExecutionPhase::Finalizing,
+                        active_tool_name: None,
+                        worktree: Some(worktree.clone()),
+                        scheduler_runtime: None,
+                    },
+                )],
+            )
+            .await
+            .unwrap();
 
         let checkpoint = checkpoints
             .load_latest(session_id, Default::default())
@@ -1098,18 +1053,23 @@ mod tests {
         records
             .put(&test_record(session_id, SessionStatus::Active))
             .unwrap();
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "test"))
+            .await
+            .unwrap();
 
-        assert!(
-            runtime
-                .transition_session(SessionTransition {
+        runtime
+            .record_batch(
+                &grant,
+                vec![SessionRuntimeEvent::Transition(SessionTransition {
                     session_id,
                     status: SessionStatus::Cancelled,
                     worker_id: "test".to_string(),
                     phase: Some(ExecutionPhase::Waiting),
-                })
-                .await
-                .unwrap()
-        );
+                })],
+            )
+            .await
+            .unwrap();
 
         let record = records.get(session_id).unwrap().unwrap();
         assert_eq!(record.status, SessionStatus::Cancelled);
@@ -1178,33 +1138,39 @@ mod tests {
         records
             .put(&test_record(session_id, SessionStatus::Active))
             .unwrap();
-
-        runtime
-            .append_transcript(SessionTranscriptAppend {
-                session_id,
-                turn_id: None,
-                payload: SessionTranscriptEventPayload::ChatMessage {
-                    message: SessionTranscriptChatMessage {
-                        role: "user".to_string(),
-                        content: "first".to_string(),
-                    },
-                },
-                transcript_state: TranscriptState::MidTurn,
-            })
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "test"))
             .await
             .unwrap();
+
         runtime
-            .append_transcript(SessionTranscriptAppend {
-                session_id,
-                turn_id: None,
-                payload: SessionTranscriptEventPayload::ChatMessage {
-                    message: SessionTranscriptChatMessage {
-                        role: "assistant".to_string(),
-                        content: "second".to_string(),
-                    },
-                },
-                transcript_state: TranscriptState::Clean,
-            })
+            .record_batch(
+                &grant,
+                vec![
+                    SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                        session_id,
+                        turn_id: None,
+                        payload: SessionTranscriptEventPayload::ChatMessage {
+                            message: SessionTranscriptChatMessage {
+                                role: "user".to_string(),
+                                content: "first".to_string(),
+                            },
+                        },
+                        transcript_state: TranscriptState::MidTurn,
+                    }),
+                    SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                        session_id,
+                        turn_id: None,
+                        payload: SessionTranscriptEventPayload::ChatMessage {
+                            message: SessionTranscriptChatMessage {
+                                role: "assistant".to_string(),
+                                content: "second".to_string(),
+                            },
+                        },
+                        transcript_state: TranscriptState::Clean,
+                    }),
+                ],
+            )
             .await
             .unwrap();
 
@@ -1234,29 +1200,36 @@ mod tests {
         records
             .put(&test_record(session_id, SessionStatus::Active))
             .unwrap();
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "test"))
+            .await
+            .unwrap();
 
         runtime
-            .record(SessionRuntimeEvent::Trace(TraceEvent {
-                session_id,
-                turn_id: None,
-                recorded_at: Utc::now(),
-                phase: TracePhase::Completed,
-                agent_id: None,
-                agent_name: None,
-                tool_name: None,
-                parent_tool_name: None,
-                ability_name: None,
-                target_agent_id: None,
-                target_agent_name: None,
-                success: Some(true),
-                usage: TokenUsage::default(),
-                preview: Some("done".to_string()),
-                task_input: None,
-                final_output: Some("done".to_string()),
-                tool_args: None,
-                error_preview: None,
-                metadata: serde_json::Value::Null,
-            }))
+            .record_batch(
+                &grant,
+                vec![SessionRuntimeEvent::Trace(TraceEvent {
+                    session_id,
+                    turn_id: None,
+                    recorded_at: Utc::now(),
+                    phase: TracePhase::Completed,
+                    agent_id: None,
+                    agent_name: None,
+                    tool_name: None,
+                    parent_tool_name: None,
+                    ability_name: None,
+                    target_agent_id: None,
+                    target_agent_name: None,
+                    success: Some(true),
+                    usage: TokenUsage::default(),
+                    preview: Some("done".to_string()),
+                    task_input: None,
+                    final_output: Some("done".to_string()),
+                    tool_args: None,
+                    error_preview: None,
+                    metadata: serde_json::Value::Null,
+                })],
+            )
             .await
             .unwrap();
 

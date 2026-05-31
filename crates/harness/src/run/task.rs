@@ -96,32 +96,28 @@ where
         .sessions()
         .record_batch(
             &lease,
-            vec![task_session_upsert_event(TaskSessionUpsert {
-                task_id: request.task_id,
-                status: SessionStatus::Active,
-                project: request.project.to_string(),
-                agent: None,
-                routine: Some(routine.to_string()),
-                execution_run_id,
-                memory_namespace: memory_namespace.clone(),
-                metadata: json!({
-                    "source": "harness_task",
-                    "project_slug": pslug,
-                    "routine_slug": routine.to_string(),
+            vec![
+                task_session_upsert_event(TaskSessionUpsert {
+                    task_id: request.task_id,
+                    status: SessionStatus::Active,
+                    project: request.project.to_string(),
+                    agent: None,
+                    routine: Some(routine.to_string()),
+                    execution_run_id,
+                    memory_namespace: memory_namespace.clone(),
+                    metadata: json!({
+                        "source": "harness_task",
+                        "project_slug": pslug,
+                        "routine_slug": routine.to_string(),
+                    }),
                 }),
-            })],
-        )
-        .await?;
-    harness
-        .sessions()
-        .record_batch(
-            &lease,
-            vec![SessionRuntimeEvent::Transition(SessionTransition {
-                session_id: request.task_id,
-                worker_id: "harness".to_string(),
-                phase: Some(ExecutionPhase::CallingModel),
-                status: SessionStatus::Active,
-            })],
+                SessionRuntimeEvent::Transition(SessionTransition {
+                    session_id: request.task_id,
+                    worker_id: "harness".to_string(),
+                    phase: Some(ExecutionPhase::CallingModel),
+                    status: SessionStatus::Active,
+                }),
+            ],
         )
         .await?;
     let mut handle = harness
@@ -310,33 +306,29 @@ where
         .sessions()
         .record_batch(
             &lease,
-            vec![task_session_upsert_event(TaskSessionUpsert {
-                task_id: request.task_id,
-                status: SessionStatus::Active,
-                project: request.project.to_string(),
-                agent: Some(agent.to_string()),
-                routine: None,
-                execution_run_id,
-                memory_namespace,
-                metadata: json!({
-                    "source": "harness_task",
-                    "project_slug": pslug,
-                    "agent_name": aname,
-                    "agent_slug": agent.to_string(),
+            vec![
+                task_session_upsert_event(TaskSessionUpsert {
+                    task_id: request.task_id,
+                    status: SessionStatus::Active,
+                    project: request.project.to_string(),
+                    agent: Some(agent.to_string()),
+                    routine: None,
+                    execution_run_id,
+                    memory_namespace,
+                    metadata: json!({
+                        "source": "harness_task",
+                        "project_slug": pslug,
+                        "agent_name": aname,
+                        "agent_slug": agent.to_string(),
+                    }),
                 }),
-            })],
-        )
-        .await?;
-    harness
-        .sessions()
-        .record_batch(
-            &lease,
-            vec![SessionRuntimeEvent::Transition(SessionTransition {
-                session_id: request.task_id,
-                worker_id: "harness".to_string(),
-                phase: Some(ExecutionPhase::CallingModel),
-                status: SessionStatus::Active,
-            })],
+                SessionRuntimeEvent::Transition(SessionTransition {
+                    session_id: request.task_id,
+                    worker_id: "harness".to_string(),
+                    phase: Some(ExecutionPhase::CallingModel),
+                    status: SessionStatus::Active,
+                }),
+            ],
         )
         .await?;
 
