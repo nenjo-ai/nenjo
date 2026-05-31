@@ -400,10 +400,14 @@ mod tests {
         let agent = AgentManifest {
             id: Uuid::new_v4(),
             name: "coder".into(),
+            slug: None,
             description: None,
             prompt_config: PromptConfig::default(),
             color: Some("blue".into()),
-            model: Some(crate::Slug::derive(&model.name)),
+            model: Some(crate::manifest::model_manifest_slug(
+                &model.model_provider,
+                &model.model,
+            )),
             domains: vec![],
             platform_scopes: vec![],
             mcp_servers: vec![],

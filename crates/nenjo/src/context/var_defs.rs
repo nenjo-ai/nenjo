@@ -37,11 +37,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Agent (self)",
                 },
                 TemplateVarDef {
-                    name: "agent.role",
-                    description: "Internal role name (e.g. coder, reviewer)",
-                    group: "Agent (self)",
-                },
-                TemplateVarDef {
                     name: "agent.name",
                     description: "Display name of the executing agent",
                     group: "Agent (self)",

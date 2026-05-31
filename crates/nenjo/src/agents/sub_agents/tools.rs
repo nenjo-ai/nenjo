@@ -5,10 +5,18 @@ use serde_json::json;
 
 use crate::Slug;
 use crate::provider::ProviderRuntime;
-use crate::tools::{Tool, ToolCategory, ToolResult};
+use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
 use super::format::ResultFormat;
 use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle, SubAgentTask};
+
+pub(crate) const PARENT_TOOL_NAMES: &[&str] = &[
+    "spawn_sub_agents",
+    "send_sub_agents",
+    "inspect_sub_agents",
+    "stop_sub_agents",
+    "wait",
+];
 
 pub(crate) fn parent_tools<P: ProviderRuntime>(
     handle: SubAgentHandle<P>,
@@ -100,11 +108,15 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
     }
 
     fn description(&self) -> &str {
-        "Start one or more child agent runs. Each child is addressed by a slug scoped to this parent run."
+        "Start one or more isolated child agent runs. The agent field is a child role/name, not an installed agent lookup; children inherit parent host tools but not sub-agent management tools."
     }
 
     fn category(&self) -> ToolCategory {
         ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -116,7 +128,10 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "agent": {"type": "string"},
+                            "agent": {
+                                "type": "string",
+                                "description": "Role/name for the ephemeral child worker. This does not load an installed agent manifest or grant that agent's abilities."
+                            },
                             "slug": {"type": "string"},
                             "prompt": {
                                 "type": "string",
@@ -229,6 +244,10 @@ impl<P: ProviderRuntime> Tool for SendSubAgentsTool<P> {
         ToolCategory::ReadWrite
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -280,11 +299,15 @@ impl<P: ProviderRuntime> Tool for InspectSubAgentsTool<P> {
     }
 
     fn description(&self) -> &str {
-        "Inspect bounded child state and optional transcript deltas for correction or debugging."
+        "Inspect bounded child state and optional transcript deltas for correction, evidence review, or debugging."
     }
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -330,6 +353,10 @@ impl<P: ProviderRuntime> Tool for StopSubAgentsTool<P> {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -381,6 +408,10 @@ impl<P: ProviderRuntime> Tool for WaitTool<P> {
         ToolCategory::Read
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -416,6 +447,10 @@ impl<P: ProviderRuntime> Tool for UpdateParentAgentTool<P> {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -454,6 +489,10 @@ impl<P: ProviderRuntime> Tool for AskParentAgentTool<P> {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

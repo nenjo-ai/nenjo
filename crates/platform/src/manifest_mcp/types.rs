@@ -11,13 +11,15 @@ use nenjo::manifest::{
     PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
     RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
-use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig, model_manifest_slug};
 
 /// Canonical prompt-free agent document used by manifest list/get/update/delete operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
     pub description: Option<String>,
     pub color: Option<String>,
     #[serde(default)]
@@ -67,6 +69,10 @@ pub struct AgentUpdateDocument {
         skip_serializing_if = "Option::is_none"
     )]
     pub model: Option<Option<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abilities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domains: Option<Vec<Slug>>,
 }
 
 fn deserialize_optional_slug_field<'de, D>(
@@ -84,6 +90,7 @@ impl From<AgentManifest> for AgentDocument {
             summary: AgentSummary {
                 id: agent.id,
                 name: agent.name,
+                slug: agent.slug,
                 description: agent.description,
                 color: agent.color,
                 model: agent.model,
@@ -113,6 +120,7 @@ impl From<AgentDocument> for AgentManifest {
         Self {
             id: agent.summary.id,
             name: agent.summary.name,
+            slug: agent.summary.slug,
             description: agent.summary.description,
             prompt_config: PromptConfig::default(),
             color: agent.summary.color,
@@ -134,6 +142,8 @@ impl From<AgentDocument> for AgentUpdateDocument {
             description: Some(agent.summary.description),
             color: Some(agent.summary.color),
             model: None,
+            abilities: None,
+            domains: None,
         }
     }
 }
@@ -648,7 +658,7 @@ pub struct RoutineDocument {
 /// Full graph payload used when creating or replacing a routine workflow.
 pub struct RoutineGraphInput {
     #[serde(default)]
-    pub entry_step_ids: Vec<String>,
+    pub entry_steps: Vec<Slug>,
     #[serde(default)]
     pub steps: Vec<RoutineStepInput>,
     #[serde(default)]
@@ -658,7 +668,7 @@ pub struct RoutineGraphInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One step in a routine graph write request.
 pub struct RoutineStepInput {
-    pub step_id: String,
+    pub slug: Slug,
     pub name: String,
     pub step_type: RoutineStepType,
     #[serde(default)]
@@ -673,8 +683,8 @@ pub struct RoutineStepInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One edge in a routine graph write request.
 pub struct RoutineEdgeInput {
-    pub source_step: String,
-    pub target_step: String,
+    pub source_step: Slug,
+    pub target_step: Slug,
     pub condition: RoutineEdgeCondition,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -723,17 +733,12 @@ impl RoutineDocument {
     /// Convert the stored routine document into a graph write payload.
     pub fn graph_input(&self) -> RoutineGraphInput {
         RoutineGraphInput {
-            entry_step_ids: self
-                .metadata
-                .entry_steps
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
+            entry_steps: self.metadata.entry_steps.clone(),
             steps: self
                 .steps
                 .iter()
                 .map(|step| RoutineStepInput {
-                    step_id: step.id.to_string(),
+                    slug: step.slug.clone(),
                     name: step.name.clone(),
                     step_type: step.step_type,
                     council: step.council.clone(),
@@ -746,8 +751,8 @@ impl RoutineDocument {
                 .edges
                 .iter()
                 .map(|edge| RoutineEdgeInput {
-                    source_step: edge.source_step.to_string(),
-                    target_step: edge.target_step.to_string(),
+                    source_step: edge.source_step.clone(),
+                    target_step: edge.target_step.clone(),
                     condition: edge.condition,
                     metadata: edge.metadata.clone(),
                 })
@@ -776,6 +781,7 @@ impl From<RoutineManifest> for RoutineDocument {
 /// Model metadata returned by list/get operations.
 pub struct ModelSummary {
     pub id: Uuid,
+    pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
     pub model: String,
@@ -824,9 +830,11 @@ pub struct ModelUpdateDocument {
 
 impl From<ModelManifest> for ModelDocument {
     fn from(model: ModelManifest) -> Self {
+        let slug = model_manifest_slug(&model.model_provider, &model.model);
         Self {
             summary: ModelSummary {
                 id: model.id,
+                slug,
                 name: model.name,
                 description: model.description,
                 model: model.model,
@@ -969,6 +977,8 @@ mod tests {
             description: None,
             color: None,
             model: None,
+            abilities: None,
+            domains: None,
         })
         .unwrap();
         assert!(agent.get("platform_scopes").is_none());

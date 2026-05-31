@@ -52,6 +52,7 @@ struct RoutineResponseDetail {
 #[derive(Debug, serde::Deserialize)]
 struct RoutineResponseStep {
     id: Uuid,
+    slug: Slug,
     name: String,
     step_type: String,
     #[serde(default)]
@@ -95,8 +96,7 @@ struct RoutineUpdateApiBody<'a> {
 
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphStepBody {
-    client_ref: String,
-    id: Option<Uuid>,
+    slug: Slug,
     name: String,
     step_type: String,
     council: Option<Slug>,
@@ -110,8 +110,8 @@ struct SaveRoutineGraphStepBody {
 
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphEdgeBody {
-    source_ref: String,
-    target_ref: String,
+    source_step: Slug,
+    target_step: Slug,
     condition: Option<String>,
     metadata: Option<serde_json::Value>,
 }
@@ -126,7 +126,7 @@ struct SaveRoutineGraphBody<'a> {
     trigger: Option<RoutineTrigger>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<&'a RoutineMetadata>,
-    entry_step_refs: Vec<String>,
+    entry_steps: Vec<Slug>,
     steps: Vec<SaveRoutineGraphStepBody>,
     edges: Vec<SaveRoutineGraphEdgeBody>,
 }
@@ -163,11 +163,6 @@ pub struct PlatformKnowledgePackMetadata {
 
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
     let routine = Slug::derive(&detail.routine.name);
-    let step_slugs = detail
-        .steps
-        .iter()
-        .map(|step| (step.id, Slug::derive(&step.name)))
-        .collect::<std::collections::HashMap<_, _>>();
     RoutineDocument {
         summary: crate::manifest_mcp::RoutineSummary {
             id: detail.routine.id,
@@ -181,10 +176,7 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
             .into_iter()
             .map(|step| RoutineStepManifest {
                 id: step.id,
-                slug: step_slugs
-                    .get(&step.id)
-                    .cloned()
-                    .unwrap_or_else(|| Slug::derive(&step.name)),
+                slug: step.slug,
                 routine: routine.clone(),
                 name: step.name,
                 step_type: match step.step_type.as_str() {
@@ -228,13 +220,12 @@ fn routine_graph_body<'a>(
         description,
         trigger,
         metadata,
-        entry_step_refs: graph.entry_step_ids.clone(),
+        entry_steps: graph.entry_steps.clone(),
         steps: graph
             .steps
             .iter()
             .map(|step| SaveRoutineGraphStepBody {
-                client_ref: step.step_id.clone(),
-                id: Uuid::parse_str(&step.step_id).ok(),
+                slug: step.slug.clone(),
                 name: step.name.clone(),
                 step_type: step.step_type.to_string(),
                 council: step.council.clone(),
@@ -261,8 +252,8 @@ fn routine_graph_body<'a>(
             .edges
             .iter()
             .map(|edge| SaveRoutineGraphEdgeBody {
-                source_ref: edge.source_step.clone(),
-                target_ref: edge.target_step.clone(),
+                source_step: edge.source_step.clone(),
+                target_step: edge.target_step.clone(),
                 condition: Some(
                     match edge.condition {
                         RoutineEdgeCondition::Always => "always",
@@ -271,10 +262,18 @@ fn routine_graph_body<'a>(
                     }
                     .to_string(),
                 ),
-                metadata: None,
+                metadata: Some(edge.metadata.clone()),
             })
             .collect(),
     }
+}
+
+fn response_error_preview(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "<empty response body>".to_string();
+    }
+    trimmed.chars().take(1000).collect()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1842,7 +1841,13 @@ impl PlatformManifestClient {
                     .context("failed to decode updated routine graph")?;
                 Ok(routine_document_from_detail(detail))
             }
-            status => bail!("routine graph save failed with status {status}"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "routine graph save failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
         }
     }
 
@@ -2360,5 +2365,53 @@ fn knowledge_doc_summary(
         tags: document.tags,
         content_type: document.content_type,
         updated_at: document.updated_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest_mcp::{RoutineEdgeInput, RoutineStepInput};
+
+    #[test]
+    fn routine_graph_body_uses_step_slugs_for_platform_refs() {
+        let graph = RoutineGraphInput {
+            entry_steps: vec![Slug::derive("implement_pr_changes")],
+            steps: vec![
+                RoutineStepInput {
+                    slug: Slug::derive("implement_pr_changes"),
+                    name: "Implement PR changes".to_string(),
+                    step_type: RoutineStepType::Agent,
+                    council: None,
+                    agent: Some(Slug::derive("coder")),
+                    config: serde_json::json!({}),
+                    order_index: 0,
+                },
+                RoutineStepInput {
+                    slug: Slug::derive("evaluate_result"),
+                    name: "Evaluate result".to_string(),
+                    step_type: RoutineStepType::Gate,
+                    council: None,
+                    agent: Some(Slug::derive("security")),
+                    config: serde_json::json!({}),
+                    order_index: 1,
+                },
+            ],
+            edges: vec![RoutineEdgeInput {
+                source_step: Slug::derive("implement_pr_changes"),
+                target_step: Slug::derive("evaluate_result"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        let body = routine_graph_body(None, None, None, None, &graph);
+
+        assert_eq!(body.entry_steps, vec![Slug::derive("implement_pr_changes")]);
+        assert_eq!(
+            body.edges[0].source_step,
+            Slug::derive("implement_pr_changes")
+        );
+        assert_eq!(body.edges[0].target_step, Slug::derive("evaluate_result"));
     }
 }

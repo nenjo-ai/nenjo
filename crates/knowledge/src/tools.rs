@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use nenjo_tool_api::{Tool, ToolCategory, ToolResult, ToolSpec};
+use nenjo_tool_api::{Tool, ToolCategory, ToolOrigin, ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -275,6 +275,9 @@ impl KnowledgeRegistry for StaticKnowledgeRegistry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgePackSummary {
+    /// Canonical pack selector to pass as the `pack` argument to knowledge tools.
+    pub selector: String,
+    /// Backwards-compatible alias for `selector`.
     pub pack: String,
     pub pack_id: String,
     pub version: String,
@@ -284,8 +287,10 @@ pub struct KnowledgePackSummary {
 
 impl KnowledgePackSummary {
     pub fn new(pack: impl Into<String>, manifest: &dyn KnowledgePackManifest) -> Self {
+        let selector = pack.into();
         Self {
-            pack: pack.into(),
+            pack: selector.clone(),
+            selector,
             pack_id: manifest.pack_id().to_string(),
             version: manifest.version().to_string(),
             root_uri: manifest.root_uri().to_string(),
@@ -327,6 +332,8 @@ pub struct KnowledgeFilterArgs {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeDocMetadataResult {
+    /// Canonical pack selector to pass as the `pack` argument to knowledge tools.
+    pub pack: String,
     /// Stable document identifier within the pack.
     pub id: String,
     /// Agent-visible selector used for lookup and traversal.
@@ -407,8 +414,12 @@ where
         .transpose()
 }
 
-pub fn knowledge_document_metadata(doc: &KnowledgeDocManifest) -> KnowledgeDocMetadataResult {
+pub fn knowledge_document_metadata(
+    pack: impl Into<String>,
+    doc: &KnowledgeDocManifest,
+) -> KnowledgeDocMetadataResult {
     KnowledgeDocMetadataResult {
+        pack: pack.into(),
         id: doc.id.clone(),
         selector: doc.selector.clone(),
         title: doc.title.clone(),
@@ -426,23 +437,29 @@ pub fn knowledge_document_metadata(doc: &KnowledgeDocManifest) -> KnowledgeDocMe
     }
 }
 
-pub fn knowledge_search_result(hit: KnowledgeDocSearchHit) -> KnowledgeDocSearchResult {
+pub fn knowledge_search_result(
+    pack: impl Into<String>,
+    hit: KnowledgeDocSearchHit,
+) -> KnowledgeDocSearchResult {
     KnowledgeDocSearchResult {
-        document: knowledge_document_metadata(&hit.document),
+        document: knowledge_document_metadata(pack, &hit.document),
         score: hit.score,
         matched: hit.matched,
     }
 }
 
-pub fn knowledge_neighbors_result(neighbors: KnowledgeDocNeighbor) -> KnowledgeDocNeighborsResult {
+pub fn knowledge_neighbors_result(
+    pack: impl Into<String> + Clone,
+    neighbors: KnowledgeDocNeighbor,
+) -> KnowledgeDocNeighborsResult {
     KnowledgeDocNeighborsResult {
-        document: knowledge_document_metadata(&neighbors.document),
+        document: knowledge_document_metadata(pack.clone(), &neighbors.document),
         edges: neighbors
             .edges
             .into_iter()
             .map(|edge| KnowledgeDocNeighborEdgeResult {
                 edge_type: edge.edge_type.as_str().to_string(),
-                target: knowledge_document_metadata(&edge.target),
+                target: knowledge_document_metadata(pack.clone(), &edge.target),
             })
             .collect(),
     }
@@ -454,7 +471,7 @@ pub fn knowledge_document_metadata_vars(
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
     for doc in pack.manifest().docs() {
-        let metadata = doc_metadata(doc);
+        let metadata = doc_metadata(knowledge_ref, doc);
         vars.insert(
             knowledge_document_var_key(knowledge_ref, doc),
             metadata.clone(),
@@ -637,6 +654,8 @@ fn normalize_var_segment(segment: &str) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename = "knowledge_doc")]
 struct KnowledgeDocMetadataContext<'a> {
+    #[serde(rename = "@pack")]
+    pack: &'a str,
     #[serde(rename = "@selector")]
     selector: &'a str,
     #[serde(rename = "@title")]
@@ -646,16 +665,28 @@ struct KnowledgeDocMetadataContext<'a> {
     summary: &'a str,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     tags: Vec<&'a str>,
+    #[serde(rename = "related", skip_serializing_if = "Vec::is_empty", default)]
+    related: Vec<KnowledgeDocumentRelatedSummaryContext<'a>>,
 }
 
-fn doc_metadata(doc: &KnowledgeDocManifest) -> String {
+fn doc_metadata(knowledge_ref: &KnowledgeRef, doc: &KnowledgeDocManifest) -> String {
     let selector = prompt_doc_selector(doc);
+    let pack = knowledge_ref.selector();
     let ctx = KnowledgeDocMetadataContext {
+        pack: &pack,
         selector: &selector,
         title: &doc.title,
         summary: &doc.summary,
         kind: doc.kind.as_str(),
         tags: doc.tags.iter().map(String::as_str).collect(),
+        related: doc
+            .related
+            .iter()
+            .map(|edge| KnowledgeDocumentRelatedSummaryContext {
+                edge_type: edge.edge_type.as_str(),
+                target: edge.target.as_str(),
+            })
+            .collect(),
     };
     nenjo_xml::to_xml_pretty(&ctx, 2)
 }
@@ -675,7 +706,7 @@ fn prompt_doc_selector(doc: &KnowledgeDocManifest) -> String {
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Knowledge pack selector: lib:<pack>, pkg:<package>, or local:<pack>."
+        "description": "Canonical knowledge pack selector. Use exactly the selector returned by list_knowledge_packs or the pack attribute in seeded knowledge metadata, such as pkg:<source>.<repo>.<package>.<pack>."
     })
 }
 
@@ -744,7 +775,7 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_knowledge_packs".into(),
-            description: "List locally available knowledge packs. Use this before reading or searching knowledge when you need to discover available sources.".into(),
+            description: "List locally available knowledge packs. Copy the returned selector value into the pack argument for read_knowledge_doc, search_knowledge, and list_knowledge_neighbors.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {},
@@ -832,6 +863,10 @@ impl Tool for KnowledgeTool {
         self.spec.category
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Platform
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let output = match self.name() {
             "list_knowledge_packs" => serde_json::to_value(self.registry.list_packs().await?)?,
@@ -846,7 +881,7 @@ impl Tool for KnowledgeTool {
                     )
                 })?;
                 serde_json::to_value(KnowledgeDocReadResult {
-                    document: knowledge_document_metadata(&doc.manifest),
+                    document: knowledge_document_metadata(args.pack, &doc.manifest),
                     content: doc.content,
                 })?
             }
@@ -857,7 +892,7 @@ impl Tool for KnowledgeTool {
                 let hits = pack
                     .search(&args.query, filter)
                     .into_iter()
-                    .map(knowledge_search_result)
+                    .map(|hit| knowledge_search_result(args.pack.clone(), hit))
                     .collect::<Vec<_>>();
                 serde_json::to_value(hits)?
             }
@@ -872,7 +907,7 @@ impl Tool for KnowledgeTool {
                         args.pack
                     )
                 })?;
-                serde_json::to_value(knowledge_neighbors_result(neighbors))?
+                serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors))?
             }
             name => return Err(anyhow!("unknown knowledge tool '{name}'")),
         };
@@ -985,6 +1020,18 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_pack_summary_returns_selector_for_tool_calls() {
+        let pack = test_pack();
+        let summary = super::KnowledgePackSummary::new(
+            "pkg:nenjo-ai.packages.knowledge.core",
+            pack.manifest(),
+        );
+
+        assert_eq!(summary.selector, "pkg:nenjo-ai.packages.knowledge.core");
+        assert_eq!(summary.pack, summary.selector);
+    }
+
+    #[test]
     fn pack_prompt_summary_includes_compact_related_edges() {
         let pack = TestPack {
             manifest: KnowledgePackManifestData {
@@ -1028,11 +1075,32 @@ mod tests {
     }
 
     #[test]
+    fn document_metadata_prompt_var_includes_related_edges() {
+        let doc = test_doc(
+            "root",
+            "docs/root.md",
+            "Root",
+            vec![KnowledgeDocEdge {
+                edge_type: KnowledgeDocEdgeType::DependsOn,
+                target: "docs/leaf.md".into(),
+                description: Some("root to leaf".into()),
+            }],
+        );
+        let knowledge_ref = KnowledgeRef::local("test").unwrap();
+        let metadata = super::doc_metadata(&knowledge_ref, &doc);
+
+        assert!(metadata.contains(r#"pack="local:test""#));
+        assert!(metadata.contains(r#"selector="docs/root.md""#));
+        assert!(metadata.contains(r#"<related type="depends_on" target="docs/leaf.md""#));
+        assert!(!metadata.contains("root to leaf"));
+    }
+
+    #[test]
     fn neighbor_traversal_returns_outbound_edges_with_slim_target_metadata() {
         let pack = test_pack();
         let result = pack
             .neighbors("root", None)
-            .map(knowledge_neighbors_result)
+            .map(|neighbors| knowledge_neighbors_result("lib:test", neighbors))
             .expect("root neighbors");
         let value = serde_json::to_value(result).unwrap();
 
@@ -1059,7 +1127,7 @@ mod tests {
         let value = serde_json::to_value(
             pack.search("Leaf", Default::default())
                 .into_iter()
-                .map(knowledge_search_result)
+                .map(|hit| knowledge_search_result("lib:test", hit))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -1091,11 +1159,12 @@ mod tests {
         let pack = test_pack();
         let doc = pack.read_doc("leaf").expect("leaf doc");
         let value = serde_json::to_value(KnowledgeDocReadResult {
-            document: super::knowledge_document_metadata(&doc.manifest),
+            document: super::knowledge_document_metadata("lib:test", &doc.manifest),
             content: doc.content,
         })
         .unwrap();
 
+        assert_eq!(value["document"]["pack"], "lib:test");
         assert_eq!(value["document"]["selector"], "library://test/leaf.md");
         assert_eq!(
             value["document"]["related"][0]["target"],

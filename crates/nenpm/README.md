@@ -208,9 +208,10 @@ manifest:
     {{ context.methodology }}
 ```
 
-Package dependencies are declared only in `nenjo.package.v1`. Prompt selectors
-such as `{{ pkg.nenjo.knowledge }}` are valid only when the
-referenced package is the current package or a declared package dependency.
+Package dependencies are declared only in `nenjo.package.v1`. Context prompt
+selectors are derived from package/module paths. Knowledge prompt selectors
+include source scope, source repo, package name, and knowledge pack name, such
+as `{{ pkg.nenjo_ai.packages.knowledge.core }}`.
 
 `prepare` runs the same validation and writes `.nenpm/registry-compiled.json`
 with package versions, modules, wrapper imports, context selectors, and

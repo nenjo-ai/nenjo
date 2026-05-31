@@ -69,27 +69,22 @@ fn graph_input_to_manifest_parts(
         return (Vec::new(), Vec::new(), metadata);
     };
 
-    let step_ids: std::collections::HashMap<String, uuid::Uuid> = graph
+    let step_ids: std::collections::HashMap<Slug, uuid::Uuid> = graph
         .steps
         .iter()
-        .map(|step| {
-            (
-                step.step_id.clone(),
-                uuid::Uuid::parse_str(&step.step_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
-            )
-        })
+        .map(|step| (step.slug.clone(), uuid::Uuid::new_v4()))
         .collect();
 
-    metadata.entry_steps = graph.entry_step_ids.iter().map(Slug::derive).collect();
+    metadata.entry_steps = graph.entry_steps.clone();
 
     let steps = graph
         .steps
         .into_iter()
         .map(|step| RoutineStepManifest {
             id: *step_ids
-                .get(&step.step_id)
+                .get(&step.slug)
                 .expect("step id mapping should exist"),
-            slug: Slug::derive(&step.step_id),
+            slug: step.slug,
             routine: routine.clone(),
             name: step.name,
             step_type: step.step_type,
@@ -106,8 +101,8 @@ fn graph_input_to_manifest_parts(
         .map(|edge| RoutineEdgeManifest {
             id: uuid::Uuid::new_v4(),
             routine: routine.clone(),
-            source_step: Slug::derive(&edge.source_step),
-            target_step: Slug::derive(&edge.target_step),
+            source_step: edge.source_step,
+            target_step: edge.target_step,
             condition: edge.condition,
             metadata: edge.metadata,
         })
@@ -276,7 +271,7 @@ where
             )
         })?;
         serde_json::to_value(KnowledgeDocReadResult {
-            document: knowledge_document_metadata(&doc.manifest),
+            document: knowledge_document_metadata(args.pack, &doc.manifest),
             content: doc.content,
         })
         .map_err(Into::into)
@@ -290,7 +285,7 @@ where
         serde_json::to_value(
             pack.search(&args.query, filter)
                 .into_iter()
-                .map(knowledge_search_result)
+                .map(|hit| knowledge_search_result(args.pack.clone(), hit))
                 .collect::<Vec<_>>(),
         )
         .map_err(Into::into)
@@ -311,7 +306,7 @@ where
                 args.pack
             )
         })?;
-        serde_json::to_value(knowledge_neighbors_result(neighbors)).map_err(Into::into)
+        serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors)).map_err(Into::into)
     }
 }
 
@@ -354,6 +349,7 @@ where
         let agent = AgentManifest {
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
+            slug: None,
             description: params.data.description,
             prompt_config: PromptConfig::default(),
             color: params.data.color,
@@ -387,6 +383,12 @@ where
         }
         if let Some(model) = params.data.model {
             agent.model = model;
+        }
+        if let Some(abilities) = params.data.abilities {
+            agent.abilities = abilities;
+        }
+        if let Some(domains) = params.data.domains {
+            agent.domains = domains;
         }
         let resource = ManifestResource::Agent(agent.clone());
         self.writer.upsert_resource(&resource).await?;
@@ -1284,6 +1286,7 @@ mod tests {
         let agent = AgentManifest {
             id: Uuid::new_v4(),
             name: "coder".into(),
+            slug: None,
             description: Some("writes code".into()),
             prompt_config: PromptConfig {
                 system_prompt: "You are a coding agent.".into(),
@@ -1548,6 +1551,8 @@ mod tests {
                     description: None,
                     color: None,
                     model: None,
+                    abilities: None,
+                    domains: None,
                 },
             })
             .await
@@ -1571,6 +1576,8 @@ mod tests {
                     description: Some(None),
                     color: Some(None),
                     model: Some(None),
+                    abilities: None,
+                    domains: None,
                 },
             })
             .await
@@ -2244,8 +2251,6 @@ mod tests {
     #[tokio::test]
     async fn create_routine_and_update_accept_graph_payloads() {
         let TestContext { backend, .. } = backend().await;
-        let step_id = Uuid::new_v4();
-        let terminal_id = Uuid::new_v4();
 
         let created = backend
             .create_routine(RoutineCreateParams {
@@ -2258,10 +2263,10 @@ mod tests {
                         entry_steps: vec![],
                     }),
                     graph: Some(RoutineGraphInput {
-                        entry_step_ids: vec![step_id.to_string()],
+                        entry_steps: vec![Slug::derive("build")],
                         steps: vec![
                             RoutineStepInput {
-                                step_id: step_id.to_string(),
+                                slug: Slug::derive("build"),
                                 name: "build".into(),
                                 step_type: RoutineStepType::Agent,
                                 council: None,
@@ -2270,7 +2275,7 @@ mod tests {
                                 order_index: 0,
                             },
                             RoutineStepInput {
-                                step_id: terminal_id.to_string(),
+                                slug: Slug::derive("done"),
                                 name: "done".into(),
                                 step_type: RoutineStepType::Terminal,
                                 council: None,
@@ -2280,8 +2285,8 @@ mod tests {
                             },
                         ],
                         edges: vec![RoutineEdgeInput {
-                            source_step: step_id.to_string(),
-                            target_step: terminal_id.to_string(),
+                            source_step: Slug::derive("build"),
+                            target_step: Slug::derive("done"),
                             condition: RoutineEdgeCondition::Always,
                             metadata: serde_json::json!({}),
                         }],
@@ -2303,9 +2308,9 @@ mod tests {
                     trigger: None,
                     metadata: None,
                     graph: Some(RoutineGraphInput {
-                        entry_step_ids: vec![step_id.to_string()],
+                        entry_steps: vec![Slug::derive("build")],
                         steps: vec![RoutineStepInput {
-                            step_id: step_id.to_string(),
+                            slug: Slug::derive("build"),
                             name: "build".into(),
                             step_type: RoutineStepType::Agent,
                             council: None,

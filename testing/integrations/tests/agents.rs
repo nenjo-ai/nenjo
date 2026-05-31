@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
-    PromptConfig, PromptTemplates,
+    PromptConfig, PromptTemplates, model_manifest_slug,
 };
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
@@ -133,6 +133,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
     AgentManifest {
         id: Uuid::new_v4(),
         name: name.into(),
+        slug: None,
         description: Some(format!("Test agent: {name}")),
         prompt_config: PromptConfig {
             system_prompt: system_prompt.into(),
@@ -146,7 +147,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive(&model.name)),
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -619,7 +620,7 @@ async fn domain_expansion_with_real_llm() {
 
     assert!(!output.text.is_empty(), "should have a response");
 
-    // The domain's system_addon instructs the agent to structure as a PRD
+    // The domain's developer_prompt_addon instructs the agent to structure as a PRD
     let text_lower = output.text.to_lowercase();
     assert!(
         text_lower.contains("problem")

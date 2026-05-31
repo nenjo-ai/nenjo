@@ -12,6 +12,7 @@ use nenjo::manifest::{
     AgentManifest, CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, Manifest,
     ModelManifest, ProjectManifest, PromptConfig, PromptTemplates, RoutineEdgeCondition,
     RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::routines::RoutineEvent;
@@ -296,6 +297,7 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
         id,
         name: name.into(),
+        slug: None,
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -311,7 +313,7 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive("test-model")),
+        model: Some(model_manifest_slug("mock", "mock-v1")),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],

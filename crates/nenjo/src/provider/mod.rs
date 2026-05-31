@@ -27,7 +27,7 @@ use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
-use crate::manifest::{AgentManifest, Manifest, ModelManifest, ProjectManifest};
+use crate::manifest::{AgentManifest, HasManifestSlug, Manifest, ModelManifest, ProjectManifest};
 use crate::memory::Memory;
 use crate::tools::Tool;
 use crate::types::RenderContextVars;
@@ -71,78 +71,60 @@ pub(crate) struct ProviderInner<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, M
 
 pub(crate) struct ManifestIndex {
     manifest: Arc<Manifest>,
-    agents: HashMap<Slug, usize>,
-    models: HashMap<Slug, usize>,
-    routines: HashMap<Slug, usize>,
-    projects: HashMap<Slug, usize>,
-    councils: HashMap<Slug, usize>,
+    agents_by_slug: HashMap<Slug, usize>,
+    models_by_slug: HashMap<Slug, usize>,
+    routines_by_slug: HashMap<Slug, usize>,
+    projects_by_slug: HashMap<Slug, usize>,
+    councils_by_slug: HashMap<Slug, usize>,
 }
 
 impl ManifestIndex {
     fn new(manifest: Arc<Manifest>) -> Self {
         Self {
-            agents: index_by_name(manifest.agents.iter().map(|agent| agent.name.as_str())),
-            models: index_by_name(manifest.models.iter().map(|model| model.name.as_str())),
-            routines: index_by_name(
-                manifest
-                    .routines
-                    .iter()
-                    .map(|routine| routine.name.as_str()),
-            ),
-            projects: index_by_slug(manifest.projects.iter().map(|project| &project.slug)),
-            councils: index_by_name(
-                manifest
-                    .councils
-                    .iter()
-                    .map(|council| council.name.as_str()),
-            ),
+            agents_by_slug: index_by_manifest_slug(&manifest.agents),
+            models_by_slug: index_by_manifest_slug(&manifest.models),
+            routines_by_slug: index_by_manifest_slug(&manifest.routines),
+            projects_by_slug: index_by_manifest_slug(&manifest.projects),
+            councils_by_slug: index_by_manifest_slug(&manifest.councils),
             manifest,
         }
     }
 
     fn agent(&self, slug: &Slug) -> Option<&AgentManifest> {
-        self.agents
+        self.agents_by_slug
             .get(slug)
             .map(|index| &self.manifest.agents[*index])
     }
 
     fn model(&self, slug: &Slug) -> Option<&ModelManifest> {
-        self.models
+        self.models_by_slug
             .get(slug)
             .map(|index| &self.manifest.models[*index])
     }
 
     fn routine(&self, slug: &Slug) -> Option<&crate::manifest::RoutineManifest> {
-        self.routines
+        self.routines_by_slug
             .get(slug)
             .map(|index| &self.manifest.routines[*index])
     }
 
     fn project(&self, slug: &Slug) -> Option<&ProjectManifest> {
-        self.projects
+        self.projects_by_slug
             .get(slug)
             .map(|index| &self.manifest.projects[*index])
     }
 
     fn council(&self, slug: &Slug) -> Option<&crate::manifest::CouncilManifest> {
-        self.councils
+        self.councils_by_slug
             .get(slug)
             .map(|index| &self.manifest.councils[*index])
     }
 }
 
-fn index_by_slug<'a>(slugs: impl Iterator<Item = &'a Slug>) -> HashMap<Slug, usize> {
+fn index_by_manifest_slug<T: HasManifestSlug>(items: &[T]) -> HashMap<Slug, usize> {
     let mut index = HashMap::new();
-    for (position, slug) in slugs.enumerate() {
-        index.entry(slug.clone()).or_insert(position);
-    }
-    index
-}
-
-fn index_by_name<'a>(names: impl Iterator<Item = &'a str>) -> HashMap<Slug, usize> {
-    let mut index = HashMap::new();
-    for (position, name) in names.enumerate() {
-        index.entry(Slug::derive(name)).or_insert(position);
+    for (position, item) in items.iter().enumerate() {
+        index.entry(item.manifest_slug()).or_insert(position);
     }
     index
 }

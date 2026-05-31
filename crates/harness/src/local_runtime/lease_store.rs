@@ -4,40 +4,50 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use nenjo_sessions::{SessionCoordinator, SessionLeaseGrant};
+use nenjo_sessions::SessionLeaseGrant;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
-pub struct LocalSessionCoordinator {
+pub(super) struct SessionLeaseStore {
     leases: Arc<Mutex<HashMap<Uuid, SessionLeaseGrant>>>,
 }
 
-impl LocalSessionCoordinator {
-    pub fn new() -> Self {
+impl SessionLeaseStore {
+    pub(super) fn new() -> Self {
         Self::default()
     }
-}
 
-impl SessionCoordinator for LocalSessionCoordinator {
-    fn acquire_lease(
+    pub(super) fn acquire(
         &self,
         session_id: Uuid,
         worker_id: &str,
         ttl: Duration,
     ) -> Result<SessionLeaseGrant> {
+        let now = Utc::now();
+        let mut leases = self.leases.lock();
+        if let Some(existing) = leases.get(&session_id)
+            && existing.lease_expires_at > now
+            && existing.worker_id != worker_id
+        {
+            anyhow::bail!(
+                "session {session_id} is already leased by worker {} until {}",
+                existing.worker_id,
+                existing.lease_expires_at
+            );
+        }
         let grant = SessionLeaseGrant {
             session_id,
             worker_id: worker_id.to_string(),
             lease_token: Uuid::new_v4(),
-            lease_expires_at: Utc::now()
+            lease_expires_at: now
                 + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(30)),
         };
-        self.leases.lock().insert(session_id, grant.clone());
+        leases.insert(session_id, grant.clone());
         Ok(grant)
     }
 
-    fn renew_lease(
+    pub(super) fn renew(
         &self,
         session_id: Uuid,
         lease_token: Uuid,
@@ -55,7 +65,7 @@ impl SessionCoordinator for LocalSessionCoordinator {
         Ok(Some(existing.clone()))
     }
 
-    fn release_lease(&self, session_id: Uuid, lease_token: Uuid) -> Result<()> {
+    pub(super) fn release(&self, session_id: Uuid, lease_token: Uuid) -> Result<()> {
         let mut leases = self.leases.lock();
         if leases
             .get(&session_id)

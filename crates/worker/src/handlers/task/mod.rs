@@ -7,8 +7,8 @@ use chrono::Utc;
 use dashmap::mapref::entry::Entry;
 use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
-    CheckpointQuery, ExecutionPhase, SessionCheckpointUpdate, SessionStatus, SessionTransition,
-    TaskSessionUpsert, WorktreeSnapshot,
+    CheckpointQuery, ExecutionPhase, SessionCheckpointUpdate, SessionOwnerKind, SessionStatus,
+    SessionTransition, TaskSessionUpsert, WorktreeSnapshot,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -164,9 +164,10 @@ fn record_task_turn_event<P, SessionRt>(
         agent_name: agent_name.map(ToOwned::to_owned),
         recorded_at: Utc::now(),
     };
-    harness.sessions().record_events(
-        session_runtime_events_from_turn_event(&context, event),
+    harness.sessions().record_events_best_effort(
         task_id,
+        SessionOwnerKind::Task,
+        session_runtime_events_from_turn_event(&context, event),
     );
 }
 

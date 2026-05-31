@@ -27,6 +27,16 @@ fn agent_update_data_schema() -> serde_json::Value {
             "model": {
                 "type": ["string", "null"],
                 "description": "Directly assigned model slug for this agent. Use null to clear the current model assignment, or omit to leave it unchanged."
+            },
+            "abilities": {
+                "type": "array",
+                "description": "Full replacement list of ability slugs assigned to this agent. Omit to leave assignments unchanged.",
+                "items": { "type": "string" }
+            },
+            "domains": {
+                "type": "array",
+                "description": "Full replacement list of domain slugs assigned to this agent. Omit to leave assignments unchanged.",
+                "items": { "type": "string" }
             }
         },
         "additionalProperties": false
@@ -186,7 +196,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_agent".to_string(),
-            description: "Update one agent's top-level fields by slug: name, description, color, or model; use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
+            description: "Update one agent by slug. Supports top-level name, description, color, model slug, and full replacement ability/domain assignments. Use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -196,7 +206,9 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                     "name": agent_update_data_schema()["properties"]["name"].clone(),
                     "description": agent_update_data_schema()["properties"]["description"].clone(),
                     "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model": agent_update_data_schema()["properties"]["model"].clone()
+                    "model": agent_update_data_schema()["properties"]["model"].clone(),
+                    "abilities": agent_update_data_schema()["properties"]["abilities"].clone(),
+                    "domains": agent_update_data_schema()["properties"]["domains"].clone()
                 },
                 "additionalProperties": false
             }),

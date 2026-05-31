@@ -4,12 +4,11 @@
 //! transcript, trace, checkpoint, and lease implementations without depending
 //! on `nenjo-worker`.
 
-mod coordinator;
 mod event_store;
+mod lease_store;
 mod record_store;
 mod runtime;
 
-pub use coordinator::LocalSessionCoordinator;
 pub use event_store::{
     FileCheckpointStore, FileSessionStores, FileTraceStore, FileTranscriptStore,
     SessionCleanupReport,

@@ -4,7 +4,10 @@ use anyhow::anyhow;
 use chrono::Utc;
 use nenjo::memory::MemoryScope;
 use nenjo::{AgentRun, RoutineRun, TaskInput};
-use nenjo_sessions::{ExecutionPhase, SessionStatus, SessionTransition, TaskSessionUpsert};
+use nenjo_sessions::{
+    ExecutionPhase, SessionLeaseGrant, SessionOwnerKind, SessionRuntimeEvent, SessionStatus,
+    SessionTransition, TaskSessionUpsert,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -15,7 +18,9 @@ use crate::execution_context::{project_slug, summarize_turn_event};
 use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::TaskRequest;
-use crate::session::{TurnEventContext, session_runtime_events_from_turn_event};
+use crate::session::{
+    TurnEventContext, session_runtime_events_from_turn_event, task_session_upsert_event,
+};
 use crate::{Harness, ProviderRuntime};
 
 pub(crate) async fn task_stream<P, SessionRt>(
@@ -83,32 +88,42 @@ where
         run = run.project_location(location);
     }
     let memory_namespace = harness.sessions().memory_namespace(request.task_id).await?;
+    let lease = harness
+        .sessions()
+        .acquire_lease(request.task_id, "harness", SessionOwnerKind::Task)
+        .await?;
     harness
         .sessions()
-        .upsert_task(TaskSessionUpsert {
-            task_id: request.task_id,
-            status: SessionStatus::Active,
-            project: request.project.to_string(),
-            agent: None,
-            routine: Some(routine.to_string()),
-            execution_run_id,
-            memory_namespace: memory_namespace.clone(),
-            metadata: json!({
-                "source": "harness_task",
-                "project_slug": pslug,
-                "routine_slug": routine.to_string(),
-            }),
-        })
+        .record_batch(
+            &lease,
+            vec![task_session_upsert_event(TaskSessionUpsert {
+                task_id: request.task_id,
+                status: SessionStatus::Active,
+                project: request.project.to_string(),
+                agent: None,
+                routine: Some(routine.to_string()),
+                execution_run_id,
+                memory_namespace: memory_namespace.clone(),
+                metadata: json!({
+                    "source": "harness_task",
+                    "project_slug": pslug,
+                    "routine_slug": routine.to_string(),
+                }),
+            })],
+        )
         .await?;
-    let _ = harness
+    harness
         .sessions()
-        .transition(SessionTransition {
-            session_id: request.task_id,
-            worker_id: "harness".to_string(),
-            phase: Some(ExecutionPhase::CallingModel),
-            status: SessionStatus::Active,
-        })
-        .await;
+        .record_batch(
+            &lease,
+            vec![SessionRuntimeEvent::Transition(SessionTransition {
+                session_id: request.task_id,
+                worker_id: "harness".to_string(),
+                phase: Some(ExecutionPhase::CallingModel),
+                status: SessionStatus::Active,
+            })],
+        )
+        .await?;
     let mut handle = harness
         .provider()
         .routine(&routine)
@@ -140,6 +155,7 @@ where
     let task_id = request.task_id;
     let join_cancel = cancel.clone();
     let join = tokio::spawn(async move {
+        let lease_renewal = harness.sessions().spawn_lease_renewer(lease.clone());
         loop {
             tokio::select! {
                 event = handle.recv() => {
@@ -156,12 +172,15 @@ where
                 }
                 _ = join_cancel.cancelled() => {
                     handle.cancel();
-                    let _ = harness.sessions().transition(SessionTransition {
-                        session_id: task_id,
-                        worker_id: "harness".to_string(),
-                        phase: Some(ExecutionPhase::Finalizing),
-                        status: SessionStatus::Cancelled,
-                    }).await;
+                    harness.sessions().record_events(
+                        lease.clone(),
+                        vec![SessionRuntimeEvent::Transition(SessionTransition {
+                            session_id: task_id,
+                            worker_id: "harness".to_string(),
+                            phase: Some(ExecutionPhase::Finalizing),
+                            status: SessionStatus::Cancelled,
+                        })],
+                    );
                     break;
                 }
             }
@@ -176,13 +195,41 @@ where
         }
 
         if join_cancel.is_cancelled() {
+            lease_renewal.cancel();
+            if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+                warn!(error = %error, task_id = %task_id, "Failed to flush cancelled routine task session events");
+            }
+            if let Err(error) = harness.sessions().release_lease(lease).await {
+                warn!(error = %error, task_id = %task_id, "Failed to release cancelled routine task session lease");
+            }
             return Err(crate::HarnessError::Other(anyhow!("Cancelled")));
         }
 
-        let result = handle.output().await?;
-        let _ = harness
-            .sessions()
-            .transition(SessionTransition {
+        lease_renewal.cancel();
+        let result = match handle.output().await {
+            Ok(result) => result,
+            Err(error) => {
+                harness.sessions().record_events(
+                    lease.clone(),
+                    vec![SessionRuntimeEvent::Transition(SessionTransition {
+                        session_id: task_id,
+                        worker_id: "harness".to_string(),
+                        phase: Some(ExecutionPhase::Finalizing),
+                        status: SessionStatus::Failed,
+                    })],
+                );
+                if let Err(flush_error) = harness.sessions().flush_events(lease.clone()).await {
+                    warn!(error = %flush_error, task_id = %task_id, "Failed to flush failed routine task session events");
+                }
+                if let Err(release_error) = harness.sessions().release_lease(lease).await {
+                    warn!(error = %release_error, task_id = %task_id, "Failed to release failed routine task session lease");
+                }
+                return Err(error.into());
+            }
+        };
+        harness.sessions().record_events(
+            lease.clone(),
+            vec![SessionRuntimeEvent::Transition(SessionTransition {
                 session_id: task_id,
                 worker_id: "harness".to_string(),
                 phase: Some(ExecutionPhase::Finalizing),
@@ -191,8 +238,14 @@ where
                 } else {
                     SessionStatus::Failed
                 },
-            })
-            .await;
+            })],
+        );
+        if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+            warn!(error = %error, task_id = %task_id, "Failed to flush completed routine task session events");
+        }
+        if let Err(error) = harness.sessions().release_lease(lease).await {
+            warn!(error = %error, task_id = %task_id, "Failed to release completed routine task session lease");
+        }
 
         Ok(nenjo::TurnOutput {
             task_id: result.task_id,
@@ -216,6 +269,7 @@ struct PreparedTaskExecution {
     agent_name: String,
     run: AgentRun,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
+    lease: SessionLeaseGrant,
 }
 
 async fn prepare_task_execution<P, SessionRt>(
@@ -248,33 +302,43 @@ where
         run = run.project_location(location);
     }
     let memory_namespace = task_memory_namespace(Some(&aname), &pslug);
+    let lease = harness
+        .sessions()
+        .acquire_lease(request.task_id, "harness", SessionOwnerKind::Task)
+        .await?;
     harness
         .sessions()
-        .upsert_task(TaskSessionUpsert {
-            task_id: request.task_id,
-            status: SessionStatus::Active,
-            project: request.project.to_string(),
-            agent: Some(agent.to_string()),
-            routine: None,
-            execution_run_id,
-            memory_namespace,
-            metadata: json!({
-                "source": "harness_task",
-                "project_slug": pslug,
-                "agent_name": aname,
-                "agent_slug": agent.to_string(),
-            }),
-        })
+        .record_batch(
+            &lease,
+            vec![task_session_upsert_event(TaskSessionUpsert {
+                task_id: request.task_id,
+                status: SessionStatus::Active,
+                project: request.project.to_string(),
+                agent: Some(agent.to_string()),
+                routine: None,
+                execution_run_id,
+                memory_namespace,
+                metadata: json!({
+                    "source": "harness_task",
+                    "project_slug": pslug,
+                    "agent_name": aname,
+                    "agent_slug": agent.to_string(),
+                }),
+            })],
+        )
         .await?;
-    let _ = harness
+    harness
         .sessions()
-        .transition(SessionTransition {
-            session_id: request.task_id,
-            worker_id: "harness".to_string(),
-            phase: Some(ExecutionPhase::CallingModel),
-            status: SessionStatus::Active,
-        })
-        .await;
+        .record_batch(
+            &lease,
+            vec![SessionRuntimeEvent::Transition(SessionTransition {
+                session_id: request.task_id,
+                worker_id: "harness".to_string(),
+                phase: Some(ExecutionPhase::CallingModel),
+                status: SessionStatus::Active,
+            })],
+        )
+        .await?;
 
     info!(
         task_id = %request.task_id,
@@ -293,6 +357,7 @@ where
         agent_name: aname,
         run,
         events_tx,
+        lease,
     })
 }
 
@@ -360,8 +425,10 @@ where
             agent_id,
             agent_name,
             events_tx,
+            lease,
             ..
         } = prepared;
+        let lease_renewal = harness.sessions().spawn_lease_renewer(lease.clone());
 
         loop {
             tokio::select! {
@@ -389,7 +456,7 @@ where
                             });
                             harness
                                 .sessions()
-                                .record_events(runtime_events, task_id);
+                                .record_events(lease.clone(), runtime_events);
                         }
                         None => break,
                     }
@@ -397,12 +464,15 @@ where
                 _ = join_cancel.cancelled() => {
                     warn!(agent = %agent_name, task_id = %task_id, "Harness task execution cancelled");
                     handle.abort();
-                    let _ = harness.sessions().transition(SessionTransition {
-                        session_id: task_id,
-                        worker_id: "harness".to_string(),
-                        phase: Some(ExecutionPhase::Finalizing),
-                        status: SessionStatus::Cancelled,
-                    }).await;
+                    harness.sessions().record_events(
+                        lease.clone(),
+                        vec![SessionRuntimeEvent::Transition(SessionTransition {
+                            session_id: task_id,
+                            worker_id: "harness".to_string(),
+                            phase: Some(ExecutionPhase::Finalizing),
+                            status: SessionStatus::Cancelled,
+                        })],
+                    );
                     break;
                 }
             }
@@ -416,19 +486,53 @@ where
         }
 
         if join_cancel.is_cancelled() {
+            lease_renewal.cancel();
+            if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+                warn!(error = %error, task_id = %task_id, "Failed to flush cancelled task session events");
+            }
+            if let Err(error) = harness.sessions().release_lease(lease).await {
+                warn!(error = %error, task_id = %task_id, "Failed to release cancelled task session lease");
+            }
             return Err(crate::HarnessError::Other(anyhow!("Cancelled")));
         }
 
-        let output = handle.output().await?;
-        let _ = harness
-            .sessions()
-            .transition(SessionTransition {
+        lease_renewal.cancel();
+        let output = match handle.output().await {
+            Ok(output) => output,
+            Err(error) => {
+                harness.sessions().record_events(
+                    lease.clone(),
+                    vec![SessionRuntimeEvent::Transition(SessionTransition {
+                        session_id: task_id,
+                        worker_id: "harness".to_string(),
+                        phase: Some(ExecutionPhase::Finalizing),
+                        status: SessionStatus::Failed,
+                    })],
+                );
+                if let Err(flush_error) = harness.sessions().flush_events(lease.clone()).await {
+                    warn!(error = %flush_error, task_id = %task_id, "Failed to flush failed task session events");
+                }
+                if let Err(release_error) = harness.sessions().release_lease(lease).await {
+                    warn!(error = %release_error, task_id = %task_id, "Failed to release failed task session lease");
+                }
+                return Err(error.into());
+            }
+        };
+        harness.sessions().record_events(
+            lease.clone(),
+            vec![SessionRuntimeEvent::Transition(SessionTransition {
                 session_id: task_id,
                 worker_id: "harness".to_string(),
                 phase: Some(ExecutionPhase::Finalizing),
                 status: SessionStatus::Completed,
-            })
-            .await;
+            })],
+        );
+        if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+            warn!(error = %error, task_id = %task_id, "Failed to flush completed task session events");
+        }
+        if let Err(error) = harness.sessions().release_lease(lease).await {
+            warn!(error = %error, task_id = %task_id, "Failed to release completed task session lease");
+        }
 
         Ok(output)
     })

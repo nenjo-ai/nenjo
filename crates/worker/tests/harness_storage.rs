@@ -16,7 +16,7 @@ use uuid::Uuid;
 use nenjo_worker::api_client::{ApiClient, DocumentSyncMeta};
 use nenjo_worker::bootstrap::WorkerManifestCache;
 use nenjo_worker::handlers::manifest::ManifestStore;
-use nenjo_worker::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
+use nenjo_worker::sessions::{WorkerSessionRuntime, WorkerSessionStores};
 
 struct TestModelProvider;
 
@@ -184,11 +184,7 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
 
     let session_stores = WorkerSessionStores::new(&state_dir);
     let records = session_stores.records.clone();
-    let runtime = WorkerSessionRuntime::with_coordinator(
-        session_stores,
-        LocalSessionCoordinator::new(),
-        "worker-test",
-    );
+    let runtime = WorkerSessionRuntime::with_host(session_stores, "worker-test");
     let provider = provider_with_manifest(Manifest::default()).await;
     let harness = nenjo_harness::Harness::builder(provider)
         .with_session_runtime(runtime)

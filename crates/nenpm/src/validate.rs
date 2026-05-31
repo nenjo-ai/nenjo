@@ -482,7 +482,21 @@ fn pkg_selector_is_allowed(
     dependency_selectors: &BTreeSet<String>,
 ) -> bool {
     selector == package_selector
+        || selector
+            .strip_prefix(package_selector)
+            .is_some_and(|suffix| suffix.starts_with('.'))
         || dependency_selectors.contains(selector)
+        || dependency_selectors.iter().any(|dependency| {
+            selector
+                .strip_prefix(dependency)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+        || selector_fully_qualified_package_leaf(selector).is_some_and(|leaf| {
+            selector_matches_unscoped_package(package_selector, leaf)
+                || dependency_selectors
+                    .iter()
+                    .any(|dependency| selector_matches_unscoped_package(dependency, leaf))
+        })
         || selector_package_slug(selector).is_some_and(|slug| {
             selector_matches_unscoped_package(package_selector, slug)
                 || dependency_selectors
@@ -507,8 +521,24 @@ fn selector_package_slug(selector: &str) -> Option<&str> {
     second.or(Some(first))
 }
 
+fn selector_fully_qualified_package_leaf(selector: &str) -> Option<&str> {
+    let mut parts = selector.split('.');
+    if parts.next()? != "pkg" {
+        return None;
+    }
+    let _scope = parts.next()?;
+    let repo = parts.next()?;
+    if repo != "packages" {
+        return None;
+    }
+    parts.next()
+}
+
 fn selector_to_package_name(selector: &str) -> String {
     let parts = selector.split('.').collect::<Vec<_>>();
+    if let Some(leaf) = selector_fully_qualified_package_leaf(selector) {
+        return leaf.to_string();
+    }
     if parts.len() >= 3 {
         format!("@{}/{}", parts[1], parts[2])
     } else {
@@ -543,9 +573,24 @@ fn unique_scans(values: &[&str], scanner: impl Fn(&str) -> Vec<String>) -> Vec<S
 }
 
 fn scan_pkg_selectors(value: &str) -> Vec<String> {
-    scan_selector(value, "pkg.", 2)
+    scan_selector_path(value, "pkg.")
         .into_iter()
-        .map(|segments| format!("pkg.{}.{}", segments[0], segments[1]))
+        .filter(|segments| !segments.is_empty())
+        .map(|segments| {
+            let package_segment_count = if segments.len() >= 3 && segments[1] == "packages" {
+                3
+            } else {
+                segments.len().min(2)
+            };
+            format!(
+                "pkg.{}",
+                segments
+                    .into_iter()
+                    .take(package_segment_count)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            )
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -558,6 +603,38 @@ fn scan_context_selectors(value: &str) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn scan_selector_path(value: &str, prefix: &str) -> Vec<Vec<String>> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while let Some(offset) = value[index..].find(prefix) {
+        let start = index + offset;
+        if start > 0 {
+            let previous = bytes[start - 1] as char;
+            if is_ident_continue(previous) || previous == '.' {
+                index = start + prefix.len();
+                continue;
+            }
+        }
+        let mut cursor = start + prefix.len();
+        let mut segments = Vec::new();
+        while let Some((segment, next_cursor)) = read_ident(value, cursor) {
+            segments.push(segment.to_string());
+            cursor = next_cursor;
+            if value[cursor..].starts_with('.') {
+                cursor += 1;
+            } else {
+                break;
+            }
+        }
+        if !segments.is_empty() {
+            out.push(segments);
+        }
+        index = (start + prefix.len()).min(value.len());
+    }
+    out
 }
 
 fn scan_selector(value: &str, prefix: &str, segment_count: usize) -> Vec<Vec<String>> {

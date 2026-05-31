@@ -5,7 +5,7 @@ use nenjo_sessions::{
     SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
     TranscriptState,
 };
-use tracing::{info, trace};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::Slug;
@@ -179,22 +179,37 @@ where
                 ..
             } => {
                 if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
-                    trace!(
+                    debug!(
                         stream_event = %summarize_stream_event(&se),
                         agent = %aname,
                         "Chat handler produced stream event"
                     );
-                    let _ = ctx.response_sink.send(Response::AgentResponse {
+                    if let Err(error) = ctx.response_sink.send(Response::AgentResponse {
                         session_id: Some(event_session_id),
                         payload: se,
-                    });
+                    }) {
+                        warn!(
+                            error = %error,
+                            session = %event_session_id,
+                            agent = %aname,
+                            "Failed to enqueue chat response"
+                        );
+                    }
                 }
             }
             HarnessEvent::Routine { .. } => {}
         }
     }
 
-    let _ = stream.output().await?;
+    debug!(session = %session_id, agent = %aname, "Chat harness event stream closed");
+    debug!(session = %session_id, agent = %aname, "Awaiting chat stream output");
+    let output = stream.output().await?;
+    debug!(
+        session = %session_id,
+        agent = %aname,
+        text_len = output.text.len(),
+        "Chat stream output completed"
+    );
     Ok(())
 }
 /// Cancel in-flight chat executions.

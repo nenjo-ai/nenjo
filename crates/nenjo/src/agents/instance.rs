@@ -247,8 +247,7 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         }
 
         // Agent (self)
-        ctx._self.slug = crate::Slug::derive(self.name()).to_string();
-        ctx._self.role = self.name().to_string();
+        ctx._self.slug = self.manifest.slug().to_string();
         ctx._self.display_name = self.name().to_string();
         ctx._self.model_name = self.model.model_name.clone();
         ctx._self.description = Some(self.description().to_string());

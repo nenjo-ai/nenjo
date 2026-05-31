@@ -4,7 +4,7 @@
 //! traits. Runtime-specific implementations live in the worker harness.
 
 pub mod checkpoint;
-pub mod coordinator;
+pub mod lease;
 pub mod runtime;
 pub mod store;
 pub mod trace;
@@ -13,11 +13,12 @@ pub mod types;
 pub mod updates;
 
 pub use checkpoint::{CheckpointQuery, CheckpointStore};
-pub use coordinator::{SessionCoordinator, SessionLeaseGrant};
+pub use lease::SessionLeaseGrant;
 pub use runtime::{
     ChatSessionUpsert, CheckpointRecord, DomainSessionUpsert, NoopSessionRuntime,
-    SchedulerSessionUpsert, SessionCheckpointUpdate, SessionRuntime, SessionRuntimeEvent,
-    SessionTranscriptAppend, SessionTranscriptRecord, SessionTransition, SessionUpsert,
+    SchedulerSessionUpsert, SessionCheckpointUpdate, SessionLeaseRequest, SessionOwnerKind,
+    SessionRuntime, SessionRuntimeEvent, SessionRuntimeEventType, SessionTranscriptAppend,
+    SessionTranscriptRecord, SessionTransition, SessionUpsert, SessionWriteOutcome,
     TaskSessionUpsert,
 };
 pub use store::SessionStore;

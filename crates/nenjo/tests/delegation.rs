@@ -8,6 +8,7 @@ use anyhow::Result;
 use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
@@ -31,6 +32,7 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
         id,
         name: name.into(),
+        slug: None,
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -44,7 +46,7 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model: Some(Slug::derive("test-model")),
+        model: Some(model_manifest_slug("mock", "mock-v1")),
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
@@ -609,7 +611,7 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
             "{names:?}"
         );
         assert!(
-            !names.iter().any(|name| name == "platform_echo"),
+            names.iter().any(|name| name == "platform_echo"),
             "{names:?}"
         );
         assert!(

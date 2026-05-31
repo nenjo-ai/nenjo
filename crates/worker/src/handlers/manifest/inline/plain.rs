@@ -365,6 +365,7 @@ mod tests {
         nenjo::manifest::AgentManifest {
             id,
             name: "agent".into(),
+            slug: None,
             description: None,
             prompt_config: PromptConfig {
                 developer_prompt: developer_prompt.into(),

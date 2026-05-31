@@ -10,9 +10,9 @@ use crate::module::index_child_module_path;
 use crate::{
     ModuleImport, ModuleIndexManifest, ModulePackageManifest, PackageModule,
     PackageRegistryManifest, ResolvedModule, ResolvedPackage, ResolvedPackageGraph,
-    module_file_schema, module_reference_is_directory, normalize_module_reference,
-    package_module_source_path, parse_json_or_yaml_as, parse_module_file, sha256_hex,
-    validate_package_name, validate_source_path,
+    complete_package_resource_manifest, module_file_schema, module_reference_is_directory,
+    normalize_module_reference, package_module_source_path, parse_json_or_yaml_as,
+    parse_module_file, sha256_hex, validate_package_name, validate_source_path,
 };
 
 #[derive(Debug, Clone)]
@@ -127,14 +127,16 @@ impl LocalPackageResolver {
         self.resolve_package_modules(&package_path, &manifest, &mut modules)
             .with_context(|| format!("failed to expand modules in {package_path}"))?;
 
-        Ok(ResolvedPackage {
+        let package = ResolvedPackage {
             name: manifest.name.clone(),
             path: package_path,
             version: manifest.version.clone(),
             hash: sha256_hex(package_content.as_bytes()),
             manifest,
             modules,
-        })
+        };
+        package.validate_knowledge_pack_names()?;
+        Ok(package)
     }
 
     fn resolve_package_modules(
@@ -188,6 +190,7 @@ impl LocalPackageResolver {
         let multiple_resources = resources.len() > 1;
         let mut all_imports = Vec::new();
         for resource_manifest in resources {
+            let resource_manifest = complete_package_resource_manifest(resource_manifest, package)?;
             let kind = resource_manifest.kind()?;
             resource_manifest.name().with_context(|| {
                 format!("failed to validate module manifest {}", module.source_path)

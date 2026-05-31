@@ -15,7 +15,8 @@ use uuid::Uuid;
 use super::abilities::{build_ability_tools, is_ability_tool};
 use super::instance::AgentExecutionMode;
 use super::sub_agents::{
-    ChildRuntimeHandle, SubAgentLimits, SubAgentRuntime, child_tools, parent_tools,
+    ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, child_tools,
+    parent_tools,
 };
 use anyhow::Context;
 use nenjo_models::ModelProvider;
@@ -405,10 +406,18 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             && let Some(provider) = inst.runtime.provider_runtime.clone()
             && inst.runtime.config.max_delegation_depth > 0
         {
+            let inherited_host_tools = inst
+                .runtime
+                .tools
+                .iter()
+                .filter(|tool| !PARENT_TOOL_NAMES.contains(&tool.name()))
+                .cloned()
+                .collect();
             let runtime = SubAgentRuntime::new(
                 provider,
                 inst.agent_id(),
                 inst.model_manifest.clone(),
+                inherited_host_tools,
                 SubAgentLimits {
                     max_depth: inst.runtime.config.max_delegation_depth,
                 },
@@ -450,13 +459,18 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         let system_prompt = prompts.system;
         let developer_prompt = prompts.developer;
         let templated_user_message = prompts.user_message;
+        let user_message = if !templated_user_message.is_empty() {
+            templated_user_message
+        } else {
+            raw_user_message(&run)
+        };
         trace!(
             agent = inst.name(),
             "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
             inst.name(),
             system_prompt,
             developer_prompt,
-            templated_user_message,
+            user_message,
         );
 
         // 4. Build initial messages.
@@ -473,11 +487,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             }
         }
 
-        let user_message = if !templated_user_message.is_empty() {
-            templated_user_message
-        } else {
-            raw_user_message(&run)
-        };
         messages.push(ChatMessage::user(&user_message));
 
         let task_id = match &run.kind {

@@ -334,7 +334,7 @@ mod tests {
     use crate::config::Config;
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
-    use crate::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
+    use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
     use nenjo::LocalManifestStore;
     use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
@@ -346,6 +346,7 @@ mod tests {
     async fn worker_runtime_constructs_from_assembly() {
         let temp = tempdir().unwrap();
         let config = Config {
+            config_dir: temp.path().join("config"),
             workspace_dir: temp.path().join("workspace"),
             state_dir: temp.path().join("state"),
             manifests_dir: temp.path().join("manifests"),
@@ -366,11 +367,8 @@ mod tests {
         .await
         .unwrap();
         let session_stores = WorkerSessionStores::new(&config.state_dir);
-        let session_runtime = WorkerSessionRuntime::with_coordinator(
-            session_stores.clone(),
-            LocalSessionCoordinator::new(),
-            "embedded-worker",
-        );
+        let session_runtime =
+            WorkerSessionRuntime::with_host(session_stores.clone(), "embedded-worker");
         let harness = nenjo_harness::Harness::builder(provider)
             .with_session_runtime(session_runtime.clone())
             .build();

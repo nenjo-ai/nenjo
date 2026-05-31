@@ -158,6 +158,11 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
+    pub(crate) fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.tools.extend(tools);
+        self
+    }
+
     /// Override the agent configuration.
     pub fn with_config(mut self, config: AgentConfig) -> Self {
         self.agent_config = config;

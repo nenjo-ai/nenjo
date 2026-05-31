@@ -7,16 +7,18 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nenjo_sessions::{
     CheckpointQuery, CheckpointStore, DomainSessionUpsert, SchedulerSessionUpsert,
-    SessionCheckpoint, SessionCheckpointUpdate, SessionCoordinator, SessionKind, SessionLease,
-    SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
-    SessionUpsert, TraceEvent, TraceStore, TranscriptQuery, TranscriptStore,
+    SessionCheckpoint, SessionCheckpointUpdate, SessionKind, SessionLease, SessionLeaseGrant,
+    SessionLeaseRequest, SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent,
+    SessionStatus, SessionStore, SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent,
+    SessionTransition, SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery,
+    TranscriptStore,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
 use uuid::Uuid;
 
 use super::event_store::FileSessionStores;
+use super::lease_store::SessionLeaseStore;
 
 #[async_trait]
 /// Restores durable local sessions that were active when a process stopped.
@@ -78,7 +80,7 @@ pub struct FileSessionRuntime {
     transcripts: Arc<dyn TranscriptStore>,
     traces: Arc<dyn TraceStore>,
     checkpoints: Arc<dyn CheckpointStore>,
-    coordinator: Arc<dyn SessionCoordinator>,
+    lease_store: SessionLeaseStore,
     record_locks: Arc<DashMap<Uuid, Arc<Mutex<()>>>>,
     worker_id: String,
 }
@@ -86,10 +88,9 @@ pub struct FileSessionRuntime {
 impl FileSessionRuntime {
     /// Create a local file-backed session runtime.
     ///
-    /// This uses [`LocalSessionCoordinator`](super::LocalSessionCoordinator)
-    /// and the default host id `"local"`. Use [`with_host`](Self::with_host)
-    /// or [`with_coordinator`](Self::with_coordinator) when persisted leases
-    /// should identify a specific host or process.
+    /// This uses the default host id `"local"`. Use
+    /// [`with_host`](Self::with_host) when persisted leases should identify a
+    /// specific host or process.
     pub fn new(stores: FileSessionStores) -> Self {
         Self::with_host(stores, "local")
     }
@@ -98,33 +99,14 @@ impl FileSessionRuntime {
     ///
     /// The host id is written into active session leases. A single-process app
     /// can usually use [`new`](Self::new); named services and workers should
-    /// use this constructor or [`with_coordinator`](Self::with_coordinator).
+    /// use this constructor.
     pub fn with_host(stores: FileSessionStores, host_id: impl Into<String>) -> Self {
-        Self::with_coordinator(
-            stores,
-            super::coordinator::LocalSessionCoordinator::new(),
-            host_id,
-        )
-    }
-
-    /// Create a file-backed session runtime with an explicit coordinator.
-    ///
-    /// Worker processes use this to share the same lease identity and recovery
-    /// semantics as the rest of the runtime.
-    pub fn with_coordinator<Coordinator>(
-        stores: FileSessionStores,
-        coordinator: Coordinator,
-        host_id: impl Into<String>,
-    ) -> Self
-    where
-        Coordinator: SessionCoordinator + 'static,
-    {
         Self {
             records: Arc::new(stores.records),
             transcripts: Arc::new(stores.transcripts),
             traces: Arc::new(stores.traces),
             checkpoints: Arc::new(stores.checkpoints),
-            coordinator: Arc::new(coordinator),
+            lease_store: SessionLeaseStore::new(),
             record_locks: Arc::new(DashMap::new()),
             worker_id: host_id.into(),
         }
@@ -135,6 +117,7 @@ impl FileSessionRuntime {
         &self.worker_id
     }
 
+    #[cfg(test)]
     async fn record_guard(&self, session_id: Uuid) -> OwnedMutexGuard<()> {
         self.record_locks
             .entry(session_id)
@@ -144,7 +127,20 @@ impl FileSessionRuntime {
             .await
     }
 
-    fn handle_session_upsert(&self, upsert: SessionUpsert) -> Result<()> {
+    fn try_record_guard(&self, session_id: Uuid) -> Option<OwnedMutexGuard<()>> {
+        self.record_locks
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+            .try_lock_owned()
+            .ok()
+    }
+
+    fn handle_session_upsert(
+        &self,
+        grant: &SessionLeaseGrant,
+        upsert: SessionUpsert,
+    ) -> Result<()> {
         let now = Utc::now();
         let mut record = self
             .records
@@ -182,13 +178,8 @@ impl FileSessionRuntime {
         record.metadata = upsert.metadata.clone();
         if let Some(lease) = upsert.lease {
             record.lease = lease;
-        } else if upsert.kind == SessionKind::Task {
-            record.lease = self.lease_for_status(
-                upsert.session_id,
-                &self.worker_id,
-                upsert.status,
-                &record.lease,
-            );
+        } else {
+            record.lease = self.lease_from_grant_for_status(grant, upsert.status, &record.lease);
         }
         record.version += 1;
         record.updated_at = now;
@@ -227,41 +218,40 @@ impl FileSessionRuntime {
         )
     }
 
-    fn lease_for_status(
+    fn lease_from_grant_for_status(
         &self,
-        session_id: Uuid,
-        worker_id: &str,
+        grant: &SessionLeaseGrant,
         status: SessionStatus,
         existing: &SessionLease,
     ) -> SessionLease {
         if Self::is_terminal_status(status) {
             if let Some(lease_token) = existing.lease_token {
-                let _ = self.coordinator.release_lease(session_id, lease_token);
+                let _ = self.lease_store.release(grant.session_id, lease_token);
             }
+            let _ = self
+                .lease_store
+                .release(grant.session_id, grant.lease_token);
             SessionLease::default()
         } else {
-            self.coordinator
-                .acquire_lease(session_id, worker_id, std::time::Duration::from_secs(30))
-                .map(|grant| SessionLease {
-                    worker_id: Some(grant.worker_id),
-                    lease_token: Some(grant.lease_token),
-                    lease_expires_at: Some(grant.lease_expires_at),
-                })
-                .unwrap_or_else(|_| existing.clone())
+            SessionLease {
+                worker_id: Some(grant.worker_id.clone()),
+                lease_token: Some(grant.lease_token),
+                lease_expires_at: Some(grant.lease_expires_at),
+            }
         }
     }
 
     fn update_session_status(
         &self,
         session_id: Uuid,
-        worker_id: &str,
+        grant: &SessionLeaseGrant,
         status: SessionStatus,
     ) -> Result<bool> {
         let Some(mut record) = self.records.get(session_id)? else {
             return Ok(false);
         };
         let now = Utc::now();
-        record.lease = self.lease_for_status(session_id, worker_id, status, &record.lease);
+        record.lease = self.lease_from_grant_for_status(grant, status, &record.lease);
         record.status = status;
         record.version += 1;
         record.updated_at = now;
@@ -411,7 +401,11 @@ impl FileSessionRuntime {
         Ok(())
     }
 
-    async fn transition_session_record(&self, transition: SessionTransition) -> Result<bool> {
+    async fn transition_session_record(
+        &self,
+        grant: &SessionLeaseGrant,
+        transition: SessionTransition,
+    ) -> Result<bool> {
         if let Some(phase) = transition.phase {
             let _ = self
                 .update_checkpoint_record(SessionCheckpointUpdate {
@@ -423,12 +417,7 @@ impl FileSessionRuntime {
                 })
                 .await?;
         }
-        let worker_id = if transition.worker_id.is_empty() {
-            &self.worker_id
-        } else {
-            &transition.worker_id
-        };
-        self.update_session_status(transition.session_id, worker_id, transition.status)
+        self.update_session_status(transition.session_id, grant, transition.status)
     }
 
     async fn handle_checkpoint(&self, record: nenjo_sessions::CheckpointRecord) -> Result<()> {
@@ -437,6 +426,7 @@ impl FileSessionRuntime {
 
     async fn upsert_scheduler_session_record(
         &self,
+        grant: &SessionLeaseGrant,
         upsert: SchedulerSessionUpsert,
     ) -> Result<bool> {
         let now = Utc::now();
@@ -482,13 +472,7 @@ impl FileSessionRuntime {
         if let Some(progress_message) = upsert.progress_message {
             record.summary.last_progress_message = Some(progress_message);
         }
-        let worker_id = if upsert.worker_id.is_empty() {
-            &self.worker_id
-        } else {
-            &upsert.worker_id
-        };
-        record.lease =
-            self.lease_for_status(upsert.session_id, worker_id, upsert.status, &record.lease);
+        record.lease = self.lease_from_grant_for_status(grant, upsert.status, &record.lease);
         self.records.put(&record)?;
         Ok(true)
     }
@@ -501,9 +485,7 @@ impl FileSessionRuntime {
             .and_then(|checkpoint| checkpoint.current_phase);
 
         if let Some(lease_token) = record.lease.lease_token {
-            let _ = self
-                .coordinator
-                .release_lease(record.session_id, lease_token);
+            let _ = self.lease_store.release(record.session_id, lease_token);
         }
 
         record.status = SessionStatus::Waiting;
@@ -609,93 +591,11 @@ impl FileSessionRuntime {
         Ok(())
     }
 
-    pub async fn recover_reconcilable_sessions(
+    async fn upsert_domain_session_record(
         &self,
-        handler: &(dyn SessionRecoveryHandler + Send + Sync),
-    ) -> Result<()> {
-        for record in self.records.list()? {
-            if let Err(error) = self.recover_record(record.clone(), handler).await {
-                warn!(session_id = %record.session_id, error = %error, "Failed to recover persisted session");
-            }
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SessionRuntime for FileSessionRuntime {
-    async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
-        match event {
-            SessionRuntimeEvent::SessionUpsert(upsert) => {
-                let _guard = self.record_guard(upsert.session_id).await;
-                self.handle_session_upsert(upsert)
-            }
-            SessionRuntimeEvent::Transcript(record) => {
-                let _guard = self.record_guard(record.session_id).await;
-                self.handle_transcript(record).await
-            }
-            SessionRuntimeEvent::Trace(event) => {
-                let _guard = self.record_guard(event.session_id).await;
-                self.handle_trace(event).await
-            }
-            SessionRuntimeEvent::Checkpoint(record) => {
-                let _guard = self.record_guard(record.session_id).await;
-                self.handle_checkpoint(record).await
-            }
-        }
-    }
-
-    async fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
-        self.records.get(session_id)
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
-        self.records.list()
-    }
-
-    async fn delete_session(&self, session_id: Uuid) -> Result<()> {
-        self.records.delete(session_id)
-    }
-
-    async fn read_transcript(
-        &self,
-        session_id: Uuid,
-        query: TranscriptQuery,
-    ) -> Result<Vec<SessionTranscriptEvent>> {
-        if self.records.get(session_id)?.is_none() {
-            return Ok(Vec::new());
-        }
-        self.transcripts.read(session_id, query).await
-    }
-
-    async fn append_transcript(
-        &self,
-        append: SessionTranscriptAppend,
-    ) -> Result<Option<SessionTranscriptEvent>> {
-        let _guard = self.record_guard(append.session_id).await;
-        self.append_transcript_record(append).await
-    }
-
-    async fn load_latest_checkpoint(
-        &self,
-        session_id: Uuid,
-        query: CheckpointQuery,
-    ) -> Result<Option<SessionCheckpoint>> {
-        self.checkpoints.load_latest(session_id, query).await
-    }
-
-    async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
-        let _guard = self.record_guard(update.session_id).await;
-        self.update_checkpoint_record(update).await
-    }
-
-    async fn upsert_scheduler_session(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
-        let _guard = self.record_guard(upsert.session_id).await;
-        self.upsert_scheduler_session_record(upsert).await
-    }
-
-    async fn upsert_domain_session(&self, upsert: DomainSessionUpsert) -> Result<bool> {
-        let _guard = self.record_guard(upsert.session_id).await;
+        grant: &SessionLeaseGrant,
+        upsert: DomainSessionUpsert,
+    ) -> Result<bool> {
         let now = Utc::now();
         let mut record = self
             .records
@@ -736,38 +636,218 @@ impl SessionRuntime for FileSessionRuntime {
         } else {
             None
         };
-        let worker_id = if upsert.worker_id.is_empty() {
-            &self.worker_id
-        } else {
-            &upsert.worker_id
-        };
-        record.lease =
-            self.lease_for_status(upsert.session_id, worker_id, upsert.status, &record.lease);
+        record.lease = self.lease_from_grant_for_status(grant, upsert.status, &record.lease);
         self.records.put(&record)?;
         Ok(true)
     }
 
-    async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
-        let _guard = self.record_guard(transition.session_id).await;
-        self.transition_session_record(transition).await
+    async fn apply_session_event(
+        &self,
+        grant: &SessionLeaseGrant,
+        event: SessionRuntimeEvent,
+    ) -> Result<()> {
+        match event {
+            SessionRuntimeEvent::SessionUpsert(upsert) => self.handle_session_upsert(grant, upsert),
+            SessionRuntimeEvent::SchedulerUpsert(upsert) => {
+                self.upsert_scheduler_session_record(grant, upsert).await?;
+                Ok(())
+            }
+            SessionRuntimeEvent::DomainUpsert(upsert) => {
+                self.upsert_domain_session_record(grant, upsert).await?;
+                Ok(())
+            }
+            SessionRuntimeEvent::Transcript(record) => self.handle_transcript(record).await,
+            SessionRuntimeEvent::TranscriptAppend(append) => {
+                let _ = self.append_transcript_record(append).await?;
+                Ok(())
+            }
+            SessionRuntimeEvent::Trace(event) => self.handle_trace(event).await,
+            SessionRuntimeEvent::Checkpoint(record) => self.handle_checkpoint(record).await,
+            SessionRuntimeEvent::CheckpointUpdate(update) => {
+                self.update_checkpoint_record(update).await?;
+                Ok(())
+            }
+            SessionRuntimeEvent::Transition(transition) => {
+                self.transition_session_record(grant, transition).await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
+        let session_id = event.session_id();
+        let grant =
+            self.lease_store
+                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
+        let result = <Self as SessionRuntime>::record(self, &grant, event).await;
+        let release_result = self
+            .lease_store
+            .release(grant.session_id, grant.lease_token);
+        release_result?;
+        result
+    }
+
+    pub async fn append_transcript(
+        &self,
+        append: SessionTranscriptAppend,
+    ) -> Result<Option<SessionTranscriptEvent>> {
+        let session_id = append.session_id;
+        let grant =
+            self.lease_store
+                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
+        let result = self.append_transcript_record(append).await;
+        let release_result = self
+            .lease_store
+            .release(grant.session_id, grant.lease_token);
+        release_result?;
+        result
+    }
+
+    pub async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
+        let session_id = update.session_id;
+        let grant =
+            self.lease_store
+                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
+        let result = self.update_checkpoint_record(update).await;
+        let release_result = self
+            .lease_store
+            .release(grant.session_id, grant.lease_token);
+        release_result?;
+        result
+    }
+
+    pub async fn transition_session(&self, transition: SessionTransition) -> Result<bool> {
+        let session_id = transition.session_id;
+        let grant =
+            self.lease_store
+                .acquire(session_id, &self.worker_id, Duration::from_secs(120))?;
+        let result = self.transition_session_record(&grant, transition).await;
+        let release_result = self
+            .lease_store
+            .release(grant.session_id, grant.lease_token);
+        release_result?;
+        result
+    }
+
+    pub async fn recover_reconcilable_sessions(
+        &self,
+        handler: &(dyn SessionRecoveryHandler + Send + Sync),
+    ) -> Result<()> {
+        for record in self.records.list()? {
+            if let Err(error) = self.recover_record(record.clone(), handler).await {
+                warn!(session_id = %record.session_id, error = %error, "Failed to recover persisted session");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SessionRuntime for FileSessionRuntime {
+    async fn acquire_session_lease(
+        &self,
+        request: SessionLeaseRequest,
+    ) -> Result<SessionLeaseGrant> {
+        self.lease_store
+            .acquire(request.session_id, &request.worker_id, request.ttl)
+    }
+
+    async fn renew_session_lease(&self, grant: &SessionLeaseGrant, ttl: Duration) -> Result<bool> {
+        Ok(self
+            .lease_store
+            .renew(grant.session_id, grant.lease_token, ttl)?
+            .is_some())
+    }
+
+    async fn release_session_lease(&self, grant: SessionLeaseGrant) -> Result<()> {
+        self.lease_store
+            .release(grant.session_id, grant.lease_token)
+    }
+
+    async fn record_batch(
+        &self,
+        grant: &SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        if events.is_empty() {
+            return Ok(SessionWriteOutcome { applied: 0 });
+        }
+        if events
+            .iter()
+            .any(|event| event.session_id() != grant.session_id)
+        {
+            anyhow::bail!(
+                "session write batch contains event for a different session than lease {}",
+                grant.session_id
+            );
+        }
+
+        let Some(_guard) = self.try_record_guard(grant.session_id) else {
+            warn!(
+                session_id = %grant.session_id,
+                worker_id = %grant.worker_id,
+                lease_token = %grant.lease_token,
+                "Skipping session write batch because session lock is busy"
+            );
+            anyhow::bail!("session {} lock is busy", grant.session_id);
+        };
+        let applied = events.len();
+        for event in events {
+            self.apply_session_event(grant, event).await?;
+        }
+        Ok(SessionWriteOutcome { applied })
+    }
+
+    async fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
+        self.records.get(session_id)
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
+        self.records.list()
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        self.records.delete(session_id)
+    }
+
+    async fn read_transcript(
+        &self,
+        session_id: Uuid,
+        query: TranscriptQuery,
+    ) -> Result<Vec<SessionTranscriptEvent>> {
+        if self.records.get(session_id)?.is_none() {
+            return Ok(Vec::new());
+        }
+        self.transcripts.read(session_id, query).await
+    }
+
+    async fn load_latest_checkpoint(
+        &self,
+        session_id: Uuid,
+        query: CheckpointQuery,
+    ) -> Result<Option<SessionCheckpoint>> {
+        self.checkpoints.load_latest(session_id, query).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use chrono::Utc;
     use nenjo_sessions::{
-        CheckpointStore, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionRecord,
-        SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
-        SessionSummary, SessionTranscriptAppend, SessionTranscriptChatMessage,
-        SessionTranscriptEventPayload, SessionTransition, TokenUsage, TraceEvent, TracePhase,
-        TranscriptQuery, TranscriptState, WorktreeSnapshot,
+        CheckpointStore, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionLeaseRequest,
+        SessionOwnerKind, SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent,
+        SessionStatus, SessionStore, SessionSummary, SessionTranscriptAppend,
+        SessionTranscriptChatMessage, SessionTranscriptEventPayload, SessionTransition,
+        SessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery, TranscriptState,
+        WorktreeSnapshot,
     };
     use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::{FileSessionRuntime, SessionRecoveryHandler};
-    use crate::local_runtime::{FileSessionStores, LocalSessionCoordinator};
+    use crate::local_runtime::FileSessionStores;
 
     fn test_record(session_id: Uuid, status: SessionStatus) -> SessionRecord {
         let now = Utc::now();
@@ -799,14 +879,162 @@ mod tests {
         }
     }
 
+    fn lease_request(session_id: Uuid, worker_id: &str) -> SessionLeaseRequest {
+        SessionLeaseRequest {
+            session_id,
+            worker_id: worker_id.to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: Duration::from_secs(30),
+        }
+    }
+
+    fn trace_event(session_id: Uuid) -> SessionRuntimeEvent {
+        SessionRuntimeEvent::Trace(TraceEvent {
+            session_id,
+            turn_id: None,
+            recorded_at: Utc::now(),
+            phase: TracePhase::Completed,
+            agent_id: None,
+            agent_name: None,
+            tool_name: None,
+            parent_tool_name: None,
+            ability_name: None,
+            target_agent_id: None,
+            target_agent_name: None,
+            success: Some(true),
+            usage: TokenUsage::default(),
+            preview: Some("done".to_string()),
+            task_input: None,
+            final_output: Some("done".to_string()),
+            tool_args: None,
+            error_preview: None,
+            metadata: serde_json::Value::Null,
+        })
+    }
+
+    #[tokio::test]
+    async fn acquire_session_lease_rejects_different_active_worker() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let runtime = FileSessionRuntime::with_host(stores, "test");
+        let session_id = Uuid::new_v4();
+
+        runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
+
+        let error = runtime
+            .acquire_session_lease(lease_request(session_id, "worker-b"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already leased by worker"));
+
+        runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_batch_rejects_events_outside_lease_session() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let runtime = FileSessionRuntime::with_host(stores, "test");
+        let session_id = Uuid::new_v4();
+        let other_session_id = Uuid::new_v4();
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
+
+        let error = runtime
+            .record_batch(&grant, vec![trace_event(other_session_id)])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("different session"));
+    }
+
+    #[tokio::test]
+    async fn record_batch_fails_fast_when_session_write_lock_is_busy() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let runtime = FileSessionRuntime::with_host(stores, "test");
+        let session_id = Uuid::new_v4();
+        let _guard = runtime.record_guard(session_id).await;
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
+
+        let error = runtime
+            .record_batch(&grant, vec![trace_event(session_id)])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("lock is busy"));
+    }
+
+    #[tokio::test]
+    async fn session_writes_preserve_existing_lease_grant() {
+        let dir = tempdir().unwrap();
+        let stores = FileSessionStores::new(dir.path());
+        let records = stores.records.clone();
+        let runtime = FileSessionRuntime::with_host(stores, "test");
+        let session_id = Uuid::new_v4();
+        let grant = runtime
+            .acquire_session_lease(lease_request(session_id, "worker-a"))
+            .await
+            .unwrap();
+
+        runtime
+            .record_batch(
+                &grant,
+                vec![
+                    SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                        session_id,
+                        kind: SessionKind::Task,
+                        status: SessionStatus::Active,
+                        agent: Some("tester".to_string()),
+                        project: Some("core".to_string()),
+                        task_id: Some(session_id),
+                        routine: None,
+                        execution_run_id: Some(Uuid::new_v4()),
+                        parent_session_id: None,
+                        lease: None,
+                        memory_namespace: None,
+                        refs: SessionRefs::default(),
+                        metadata: serde_json::Value::Null,
+                    }),
+                    SessionRuntimeEvent::Transition(SessionTransition {
+                        session_id,
+                        worker_id: "worker-a".to_string(),
+                        phase: Some(ExecutionPhase::CallingModel),
+                        status: SessionStatus::Active,
+                    }),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            runtime
+                .renew_session_lease(&grant, Duration::from_secs(30))
+                .await
+                .unwrap()
+        );
+        let record = records.get(session_id).unwrap().unwrap();
+        assert_eq!(record.lease.lease_token, Some(grant.lease_token));
+    }
+
     #[tokio::test]
     async fn checkpoint_updates_advance_sequence_and_preserve_worktree() {
         let dir = tempdir().unwrap();
         let stores = FileSessionStores::new(dir.path());
         let records = stores.records.clone();
         let checkpoints = stores.checkpoints.clone();
-        let runtime =
-            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let runtime = FileSessionRuntime::with_host(stores, "test");
         let session_id = Uuid::new_v4();
 
         records
@@ -864,8 +1092,7 @@ mod tests {
         let stores = FileSessionStores::new(dir.path());
         let records = stores.records.clone();
         let checkpoints = stores.checkpoints.clone();
-        let runtime =
-            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let runtime = FileSessionRuntime::with_host(stores, "test");
         let session_id = Uuid::new_v4();
 
         records
@@ -903,8 +1130,7 @@ mod tests {
         let stores = FileSessionStores::new(dir.path());
         let records = stores.records.clone();
         let checkpoints = stores.checkpoints.clone();
-        let runtime =
-            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let runtime = FileSessionRuntime::with_host(stores, "test");
         let session_id = Uuid::new_v4();
 
         records
@@ -946,8 +1172,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let stores = FileSessionStores::new(dir.path());
         let records = stores.records.clone();
-        let runtime =
-            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let runtime = FileSessionRuntime::with_host(stores, "test");
         let session_id = Uuid::new_v4();
 
         records
@@ -1003,8 +1228,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let stores = FileSessionStores::new(dir.path());
         let records = stores.records.clone();
-        let runtime =
-            FileSessionRuntime::with_coordinator(stores, LocalSessionCoordinator::new(), "test");
+        let runtime = FileSessionRuntime::with_host(stores, "test");
         let session_id = Uuid::new_v4();
 
         records
