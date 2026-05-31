@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use nenjo::manifest::local::LocalManifestStore;
-use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_platform::{
     PlatformManifestBackend, PlatformManifestClient, tools::PlatformProjectToolsBackend,
 };
@@ -24,7 +23,6 @@ impl PlatformToolServices {
         payload_encoder: PlatformPayloadEncoder,
         cached_org_id: Option<Uuid>,
         workspace_dir: std::path::PathBuf,
-        package_knowledge_packs: Vec<KnowledgePackEntry>,
     ) -> Self {
         let manifest_backend = platform_client.as_ref().map(|client| {
             Arc::new(
@@ -34,8 +32,7 @@ impl PlatformToolServices {
                     payload_encoder.clone(),
                 )
                 .with_workspace_dir(workspace_dir)
-                .with_cached_org_id(cached_org_id)
-                .with_package_knowledge_packs(package_knowledge_packs),
+                .with_cached_org_id(cached_org_id),
             )
         });
 

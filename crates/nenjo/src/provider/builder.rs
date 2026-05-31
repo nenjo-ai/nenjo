@@ -12,7 +12,7 @@ use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use nenjo_knowledge::tools::KnowledgePackEntry;
+use nenjo_knowledge::tools::{CompositeKnowledgeRegistry, KnowledgePackEntry};
 
 /// Builder for creating a [`Provider`].
 ///
@@ -49,7 +49,7 @@ pub struct ProviderBuilder<
     memory: Option<Mem>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
-    knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry,
+    knowledge_registry: CompositeKnowledgeRegistry,
 }
 
 /// Marker used until `.with_model_factory(...)` is called.
@@ -104,7 +104,7 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             memory: None,
             agent_config: AgentConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
-            knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry::new(),
+            knowledge_registry: CompositeKnowledgeRegistry::new(),
         }
     }
 }
@@ -252,13 +252,17 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     }
 
     fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
+        self.add_knowledge_prompt_vars(entry.clone());
+        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
+    }
+
+    fn add_knowledge_prompt_vars(&mut self, entry: KnowledgePackEntry) {
         self.render_ctx_extra.knowledge_vars.extend(
             nenjo_knowledge::tools::knowledge_pack_prompt_vars(
                 entry.knowledge_ref(),
                 entry.pack().as_ref(),
             ),
         );
-        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
     }
 }
 

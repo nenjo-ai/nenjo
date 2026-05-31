@@ -39,12 +39,6 @@ const DOMAIN_WRITE_TOOLS: &[&str] = &[
     "update_domain_prompt",
     "delete_domain",
 ];
-const KNOWLEDGE_READ_TOOLS: &[&str] = &[
-    "list_knowledge_packs",
-    "read_knowledge_doc",
-    "search_knowledge",
-    "list_knowledge_neighbors",
-];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
 const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_tasks",
@@ -128,7 +122,6 @@ pub fn add_manifest_tools(
     policy: &ManifestAccessPolicy,
 ) {
     let specs = manifest_tool_specs();
-    add_named_manifest_tools(tools, backend.clone(), &specs, KNOWLEDGE_READ_TOOLS);
     for (resource, read_tools, write_tools) in MANIFEST_TOOL_GROUPS {
         if policy.can_read_resource(*resource) {
             add_named_manifest_tools(tools, backend.clone(), &specs, read_tools);

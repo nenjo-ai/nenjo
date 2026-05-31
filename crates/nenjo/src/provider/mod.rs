@@ -182,7 +182,7 @@ pub(crate) struct ProviderServices<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized
     memory: Option<Arc<Mem>>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
-    knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry,
+    knowledge_registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
 }
 
 impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
@@ -220,7 +220,7 @@ where
         memory: Option<Arc<Mem>>,
         agent_config: AgentConfig,
         render_ctx_extra: RenderContextVars,
-        knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry,
+        knowledge_registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
     ) -> Self {
         let services = ProviderServices {
             model_factory,

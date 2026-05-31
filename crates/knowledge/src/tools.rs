@@ -253,6 +253,71 @@ impl StaticKnowledgeRegistry {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct CompositeKnowledgeRegistry {
+    library: StaticKnowledgeRegistry,
+    package: StaticKnowledgeRegistry,
+    local: StaticKnowledgeRegistry,
+}
+
+impl CompositeKnowledgeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_entry(mut self, entry: KnowledgePackEntry) -> Self {
+        match entry.knowledge_ref() {
+            KnowledgeRef::Library { .. } => {
+                self.library = self.library.with_entry(entry);
+            }
+            KnowledgeRef::Package { .. } => {
+                self.package = self.package.with_entry(entry);
+            }
+            KnowledgeRef::Local { .. } => {
+                self.local = self.local.with_entry(entry);
+            }
+        }
+        self
+    }
+
+    pub fn with_entries(mut self, entries: impl IntoIterator<Item = KnowledgePackEntry>) -> Self {
+        for entry in entries {
+            self = self.with_entry(entry);
+        }
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.library.is_empty() && self.package.is_empty() && self.local.is_empty()
+    }
+
+    fn static_registry_for_selector(&self, selector: &str) -> Result<&StaticKnowledgeRegistry> {
+        match KnowledgeRef::from_str(selector)? {
+            KnowledgeRef::Library { .. } => Ok(&self.library),
+            KnowledgeRef::Package { .. } => Ok(&self.package),
+            KnowledgeRef::Local { .. } => Ok(&self.local),
+        }
+    }
+}
+
+#[async_trait]
+impl KnowledgeRegistry for CompositeKnowledgeRegistry {
+    async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
+        let mut packs = Vec::new();
+        packs.extend(self.library.list_packs().await?);
+        packs.extend(self.package.list_packs().await?);
+        packs.extend(self.local.list_packs().await?);
+        packs.sort_by(|a, b| a.pack.cmp(&b.pack));
+        Ok(packs)
+    }
+
+    async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
+        self.static_registry_for_selector(selector)?
+            .resolve_pack(selector)
+            .await
+    }
+}
+
 #[async_trait]
 impl KnowledgeRegistry for StaticKnowledgeRegistry {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
@@ -923,10 +988,13 @@ impl Tool for KnowledgeTool {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
 
     use super::{
-        KnowledgeDocReadResult, KnowledgeRef, knowledge_document_var_key,
-        knowledge_neighbors_result, knowledge_search_result, knowledge_tools,
+        CompositeKnowledgeRegistry, KnowledgeDocReadResult, KnowledgePackEntry, KnowledgeRef,
+        KnowledgeRegistry, knowledge_document_var_key, knowledge_neighbors_result,
+        knowledge_search_result, knowledge_tools,
     };
     use crate::{
         KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest,
@@ -945,6 +1013,16 @@ mod tests {
 
         fn doc_content(&self, manifest: &KnowledgeDocManifest) -> Option<Cow<'_, str>> {
             Some(Cow::Owned(format!("body for {}", manifest.title)))
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly yielded"),
         }
     }
 
@@ -999,6 +1077,38 @@ mod tests {
                 ],
             },
         }
+    }
+
+    #[test]
+    fn composite_registry_routes_builtin_knowledge_namespaces() {
+        block_on(async {
+            let registry = CompositeKnowledgeRegistry::new()
+                .with_entry(KnowledgePackEntry::library("docs", test_pack()).unwrap())
+                .with_entry(KnowledgePackEntry::package("nenjo/core", test_pack()).unwrap())
+                .with_entry(KnowledgePackEntry::local("scratch", test_pack()).unwrap());
+
+            let packs = registry.list_packs().await.unwrap();
+            let selectors = packs
+                .iter()
+                .map(|pack| pack.selector.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                selectors,
+                vec!["lib:docs", "local:scratch", "pkg:nenjo.core"]
+            );
+
+            assert_eq!(
+                registry
+                    .resolve_pack("lib:docs")
+                    .await
+                    .unwrap()
+                    .manifest()
+                    .pack_id(),
+                "test"
+            );
+            assert!(registry.resolve_pack("pkg:nenjo.core").await.is_ok());
+            assert!(registry.resolve_pack("local:scratch").await.is_ok());
+        });
     }
 
     #[test]

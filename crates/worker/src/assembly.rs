@@ -8,7 +8,7 @@ use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
-use nenjo_knowledge::tools::{KnowledgePackEntry, knowledge_pack_prompt_vars};
+use nenjo_knowledge::tools::KnowledgePackEntry;
 use nenjo_knowledge::{KnowledgePack, PackageKnowledgePack};
 use nenjo_nenpm::{
     NenpmLock, PackageInstallIndex, PackageSource, package_install_path_in_packages_dir,
@@ -137,20 +137,8 @@ pub(crate) async fn build_provider(
     let provider_registry =
         ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
     let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
-    let package_knowledge_packs = load_package_knowledge_packs(&config.config_dir);
-    let platform_tools =
-        build_platform_tool_services(config, auth_provider, package_knowledge_packs.clone());
-    let registered_knowledge_packs =
-        provider_knowledge_packs(&config.config_dir, &platform_tools, package_knowledge_packs);
-    let mut render_ctx_extra = nenjo::types::RenderContextVars::default();
-    for entry in &registered_knowledge_packs.prompt_only {
-        render_ctx_extra
-            .knowledge_vars
-            .extend(knowledge_pack_prompt_vars(
-                entry.knowledge_ref(),
-                entry.pack().as_ref(),
-            ));
-    }
+    let platform_tools = build_platform_tool_services(config, auth_provider);
+    let knowledge_packs = load_provider_knowledge_packs(&config.config_dir);
     let tool_factory = WorkerToolFactory::new(
         security,
         NativeRuntime,
@@ -171,8 +159,7 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
-        .with_render_context_vars(render_ctx_extra)
-        .with_knowledge_packs(registered_knowledge_packs.tool_enabled)
+        .with_knowledge_packs(knowledge_packs)
         .build()
         .await
         .context("Failed to build Provider")
@@ -361,35 +348,15 @@ fn package_root_from_platform_index(
     }
 }
 
-struct ProviderKnowledgePacks {
-    tool_enabled: Vec<KnowledgePackEntry>,
-    prompt_only: Vec<KnowledgePackEntry>,
-}
-
-fn provider_knowledge_packs(
-    nenjo_home: &Path,
-    platform_tools: &PlatformToolServices,
-    package_packs: Vec<KnowledgePackEntry>,
-) -> ProviderKnowledgePacks {
-    if platform_tools.manifest_backend.is_some() {
-        ProviderKnowledgePacks {
-            tool_enabled: Vec::new(),
-            prompt_only: package_packs,
-        }
-    } else {
-        let mut packs = load_library_knowledge_packs(nenjo_home);
-        packs.extend(package_packs);
-        ProviderKnowledgePacks {
-            tool_enabled: packs,
-            prompt_only: Vec::new(),
-        }
-    }
+fn load_provider_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
+    let mut packs = load_library_knowledge_packs(nenjo_home);
+    packs.extend(load_package_knowledge_packs(nenjo_home));
+    packs
 }
 
 fn build_platform_tool_services(
     config: &Config,
     auth_provider: Arc<WorkerAuthProvider>,
-    package_knowledge_packs: Vec<KnowledgePackEntry>,
 ) -> PlatformToolServices {
     let manifest_store = Arc::new(LocalManifestStore::new(config.manifests_dir.clone()));
     let platform_client = PlatformManifestClient::new(config.backend_api_url(), &config.api_key)
@@ -410,7 +377,6 @@ fn build_platform_tool_services(
         payload_encoder,
         cached_org_id,
         config.config_dir.clone(),
-        package_knowledge_packs,
     )
 }
 
@@ -450,44 +416,12 @@ mod tests {
         .unwrap();
     }
 
-    fn platform_tools(root: &Path, with_manifest_backend: bool) -> PlatformToolServices {
-        let auth_provider =
-            Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
-        let manifest_store = Arc::new(LocalManifestStore::new(root.join("manifests")));
-        let platform_client = with_manifest_backend
-            .then(|| PlatformManifestClient::new("http://localhost:1", "test-api-key").unwrap())
-            .map(Arc::new);
-
-        PlatformToolServices::new(
-            manifest_store,
-            platform_client,
-            PlatformPayloadEncoder::new(auth_provider),
-            None,
-            root.to_path_buf(),
-            Vec::new(),
-        )
-    }
-
     #[test]
-    fn provider_knowledge_packs_are_skipped_when_platform_manifest_backend_is_present() {
+    fn provider_knowledge_packs_include_local_cached_library_and_package_packs() {
         let temp = tempfile::tempdir().unwrap();
         write_library_pack(temp.path());
 
-        let without_platform = platform_tools(temp.path(), false);
-        assert_eq!(
-            provider_knowledge_packs(temp.path(), &without_platform, Vec::new())
-                .tool_enabled
-                .len(),
-            1
-        );
-
-        let with_platform = platform_tools(temp.path(), true);
-        assert!(
-            provider_knowledge_packs(temp.path(), &with_platform, Vec::new())
-                .tool_enabled
-                .is_empty(),
-            "platform manifest backend owns knowledge tools for platform workers"
-        );
+        assert_eq!(load_provider_knowledge_packs(temp.path()).len(), 1);
     }
 
     #[test]
@@ -576,7 +510,10 @@ manifest:
                 .content
                 .contains("Knowledge content")
         );
-        let vars = knowledge_pack_prompt_vars(packs[0].knowledge_ref(), packs[0].pack().as_ref());
+        let vars = nenjo_knowledge::tools::knowledge_pack_prompt_vars(
+            packs[0].knowledge_ref(),
+            packs[0].pack().as_ref(),
+        );
         assert!(vars.contains_key("pkg.nenjo_ai.packages.knowledge.core.domain.nenjo"));
     }
 

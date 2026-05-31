@@ -33,7 +33,6 @@ fn test_platform_services(
         PlatformPayloadEncoder::new(auth_provider),
         None,
         config.workspace_dir.clone(),
-        Vec::new(),
     )
 }
 
@@ -221,10 +220,6 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     assert!(names.iter().any(|name| name == "update_agent"));
     assert!(names.iter().any(|name| name == "list_projects"));
     assert!(names.iter().any(|name| name == "get_project"));
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(names.iter().any(|name| name == "list_project_tasks"));
     assert!(names.iter().any(|name| name == "get_project_task"));
     assert!(
@@ -234,6 +229,10 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     );
     assert!(names.iter().any(|name| name == "get_project_execution_run"));
     assert!(!names.iter().any(|name| name == "list_builtin_docs"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
+    assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "search_knowledge"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "read_builtin_doc"));
     assert!(!names.iter().any(|name| name == "search_builtin_docs"));
     assert!(!names.iter().any(|name| name == "search_builtin_doc_paths"));
@@ -258,10 +257,10 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let tools = factory.create_tools(&agent_without_project_scope).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "list_knowledge_neighbors"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
+    assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "search_knowledge"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "list_projects"));
 }
 

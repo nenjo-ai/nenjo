@@ -183,11 +183,6 @@ where
                     match msg {
                         Some(routed) => {
                             let response_label = routed.response.to_string();
-                            debug!(
-                                target = ?routed.target,
-                                response = %response_label,
-                                "Publishing worker response"
-                            );
                             let result = match routed.target {
                                 ResponseTarget::Actor(actor_user_id) => {
                                     response_bus.send_response_for(org_id, actor_user_id, routed.response)
