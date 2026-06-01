@@ -43,15 +43,11 @@ impl LocalManifestStore {
         }
     }
 
-    fn load_tree<T: serde::de::DeserializeOwned>(&self, subdir: &str, legacy_file: &str) -> Vec<T> {
+    fn load_tree<T: serde::de::DeserializeOwned>(&self, subdir: &str) -> Vec<T> {
         let dir = self.root.join(subdir);
-        if dir.is_dir() {
-            let mut items = Vec::new();
-            walk_json_files(&dir, &mut items);
-            items
-        } else {
-            self.load_json(legacy_file)
-        }
+        let mut items = Vec::new();
+        walk_json_files(&dir, &mut items);
+        items
     }
 }
 
@@ -64,10 +60,10 @@ impl ManifestReader for LocalManifestStore {
             models: self.load_json("models.json"),
             agents: self.load_json("agents.json"),
             councils: self.load_json("councils.json"),
-            domains: self.load_tree("domains", "domains.json"),
+            domains: self.load_tree("domains"),
             mcp_servers: self.load_json("mcp_servers.json"),
-            abilities: self.load_tree("abilities", "abilities.json"),
-            context_blocks: self.load_tree("context_blocks", "context_blocks.json"),
+            abilities: self.load_tree("abilities"),
+            context_blocks: self.load_tree("context_blocks"),
         })
     }
 
@@ -238,7 +234,7 @@ trait TreeItem: serde::Serialize {
 
 impl TreeItem for AbilityManifest {
     fn path(&self) -> &str {
-        &self.path
+        self.path.as_deref().unwrap_or("")
     }
 
     fn name(&self) -> &str {
@@ -404,14 +400,18 @@ mod tests {
         let agent = AgentManifest {
             id: Uuid::new_v4(),
             name: "coder".into(),
+            slug: None,
             description: None,
             prompt_config: PromptConfig::default(),
             color: Some("blue".into()),
-            model_id: Some(model.id),
-            domain_ids: vec![],
+            model: Some(crate::manifest::model_manifest_slug(
+                &model.model_provider,
+                &model.model,
+            )),
+            domains: vec![],
             platform_scopes: vec![],
-            mcp_server_ids: vec![],
-            ability_ids: vec![],
+            mcp_servers: vec![],
+            abilities: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -419,16 +419,14 @@ mod tests {
         let ability = AbilityManifest {
             id: Uuid::new_v4(),
             name: "research".into(),
-            tool_name: "research".into(),
-            path: "team/core".into(),
-            display_name: None,
+            path: Some("team/core".into()),
             description: None,
             activation_condition: "always".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "Use research".into(),
             },
             platform_scopes: vec![],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -464,22 +462,39 @@ mod tests {
         store.replace_manifest(&manifest).await.unwrap();
 
         let mut agent = manifest.agents[0].clone();
+        agent.id = Uuid::new_v4();
         agent.name = "reviewer".into();
         store
             .upsert_resource(&ManifestResource::Agent(agent.clone()))
             .await
             .unwrap();
 
-        assert_eq!(
-            store.get_agent(agent.id).await.unwrap().unwrap().name,
-            "reviewer"
-        );
+        let loaded = store.load_manifest().await.unwrap();
+        assert_eq!(loaded.agents.len(), 2);
+        assert!(loaded.agents.iter().any(|item| item.name == "reviewer"));
 
+        let mut replacement = agent.clone();
+        replacement.id = Uuid::new_v4();
+        replacement.description = Some("Updated reviewer".into());
         store
-            .delete_resource(ManifestResourceKind::Agent, agent.id)
+            .upsert_resource(&ManifestResource::Agent(replacement.clone()))
             .await
             .unwrap();
 
-        assert!(store.get_agent(agent.id).await.unwrap().is_none());
+        let loaded = store.load_manifest().await.unwrap();
+        assert_eq!(loaded.agents.len(), 2);
+        assert!(
+            loaded
+                .agents
+                .iter()
+                .any(|item| item.id == replacement.id && item.name == "reviewer")
+        );
+
+        store
+            .delete_resource(ManifestResourceKind::Agent, replacement.id)
+            .await
+            .unwrap();
+
+        assert!(store.get_agent(replacement.id).await.unwrap().is_none());
     }
 }

@@ -5,6 +5,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use dashmap::DashMap;
+use nenjo_platform::api_client::{
+    WorkerEnrollmentRequest as ApiWorkerEnrollmentRequest, WorkerEnrollmentState,
+    WorkerEnrollmentStatusResponse,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use x25519_dalek::StaticSecret;
@@ -79,9 +83,9 @@ impl WorkerAuthProvider {
         &self,
         api_key_id: Uuid,
         metadata: Option<serde_json::Value>,
-    ) -> nenjo::client::WorkerEnrollmentRequest {
+    ) -> ApiWorkerEnrollmentRequest {
         let worker = self.identity();
-        nenjo::client::WorkerEnrollmentRequest {
+        ApiWorkerEnrollmentRequest {
             api_key_id,
             requested_at: chrono::Utc::now(),
             crypto_version: worker.crypto_version,
@@ -98,9 +102,9 @@ impl WorkerAuthProvider {
         &self,
         api_key_id: Uuid,
         metadata: Option<serde_json::Value>,
-    ) -> Result<nenjo::client::WorkerEnrollmentRequest> {
+    ) -> Result<ApiWorkerEnrollmentRequest> {
         let worker = self.identity();
-        Ok(nenjo::client::WorkerEnrollmentRequest {
+        Ok(ApiWorkerEnrollmentRequest {
             api_key_id,
             requested_at: chrono::Utc::now(),
             crypto_version: worker.crypto_version,
@@ -193,12 +197,11 @@ impl WorkerAuthProvider {
     /// Apply a backend enrollment status response to local persisted state.
     pub async fn apply_backend_enrollment(
         &self,
-        status: &nenjo::client::WorkerEnrollmentStatusResponse,
+        status: &WorkerEnrollmentStatusResponse,
     ) -> Result<()> {
         if matches!(
             status.state,
-            nenjo::client::WorkerEnrollmentState::Pending
-                | nenjo::client::WorkerEnrollmentState::Revoked
+            WorkerEnrollmentState::Pending | WorkerEnrollmentState::Revoked
         ) {
             let mut enrollment = self.enrollment.write().await;
             enrollment.certificate = None;
@@ -274,7 +277,7 @@ impl WorkerAuthProvider {
     /// the resulting status to local state.
     pub async fn sync_worker_enrollment(
         &self,
-        api: &nenjo::client::NenjoClient,
+        api: &nenjo_platform::api_client::ApiClient,
         api_key_id: Uuid,
         _bootstrap_user_id: Uuid,
         metadata: Option<serde_json::Value>,
@@ -419,7 +422,7 @@ mod tests {
         WrappedOrgContentKey, wrap_ack_for_recipient,
     };
     use chrono::Utc;
-    use nenjo::client::{
+    use nenjo_platform::api_client::{
         WorkerCertificate as ApiWorkerCertificate, WorkerEnrollmentState,
         WorkerEnrollmentStatusResponse,
     };

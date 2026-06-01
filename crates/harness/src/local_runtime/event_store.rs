@@ -114,11 +114,13 @@ impl FileTranscriptStore {
 #[async_trait]
 impl TranscriptStore for FileTranscriptStore {
     async fn append(&self, mut event: SessionTranscriptEvent) -> Result<u64> {
-        let mut events = read_jsonl::<SessionTranscriptEvent>(&self.path(event.session_id))?;
-        let seq = events.last().map(|event| event.seq + 1).unwrap_or(1);
-        event.seq = seq;
-        events.push(event);
-        write_jsonl(&self.path(events[0].session_id), &events)?;
+        let path = self.path(event.session_id);
+        if event.seq == 0 {
+            let events = read_jsonl::<SessionTranscriptEvent>(&path)?;
+            event.seq = events.last().map(|event| event.seq + 1).unwrap_or(1);
+        }
+        let seq = event.seq;
+        append_jsonl(&path, &event)?;
         Ok(seq)
     }
 
@@ -290,29 +292,6 @@ where
     Ok(())
 }
 
-fn write_jsonl<T>(path: &Path, values: &[T]) -> Result<()>
-where
-    T: serde::Serialize,
-{
-    safe_existing_path(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("jsonl.tmp");
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        for value in values {
-            serde_json::to_writer(&mut file, value)?;
-            use std::io::Write;
-            file.write_all(b"\n")?;
-        }
-        use std::io::Write;
-        file.flush()?;
-    }
-    std::fs::rename(tmp, path)?;
-    Ok(())
-}
-
 fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
 where
     T: serde::de::DeserializeOwned,
@@ -366,10 +345,10 @@ mod tests {
             session_id,
             kind: SessionKind::Chat,
             status,
-            project_id: None,
-            agent_id: None,
+            project: None,
+            agent: None,
             task_id: None,
-            routine_id: None,
+            routine: None,
             execution_run_id: None,
             parent_session_id: None,
             version: 1,
@@ -383,6 +362,7 @@ mod tests {
             scheduler: None,
             domain: None,
             summary: SessionSummary::default(),
+            metadata: serde_json::Value::Null,
             created_at: timestamp,
             updated_at: timestamp,
             completed_at: matches!(

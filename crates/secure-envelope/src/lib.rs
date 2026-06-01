@@ -47,10 +47,10 @@ pub struct DecodingError {
     pub message: String,
     /// Session associated with the failed command when available.
     pub session_id: Option<Uuid>,
-    /// Project associated with the failed command when available.
-    pub project_id: Option<Uuid>,
-    /// Agent associated with the failed command when available.
-    pub agent_id: Option<Uuid>,
+    /// Project slug associated with the failed command when available.
+    pub project: Option<String>,
+    /// Agent slug associated with the failed command when available.
+    pub agent: Option<String>,
 }
 
 /// Result of decoding an inbound command envelope.
@@ -366,6 +366,11 @@ impl ReceivedCommand {
         self.received.msg.source.as_ref()
     }
 
+    /// Split the decoded command from its transport envelope and ack handle.
+    pub fn into_parts(self) -> (Command, Envelope, ReceivedEnvelope) {
+        (self.command, self.envelope, self.received)
+    }
+
     /// Acknowledge the underlying transport envelope.
     pub async fn ack(self) -> Result<(), EventBusError> {
         self.received.ack().await
@@ -390,6 +395,11 @@ pub struct ReceivedDecodeFailure {
 impl ReceivedDecodeFailure {
     pub fn source(&self) -> Option<&nenjo_eventbus::MessageSource> {
         self.received.msg.source.as_ref()
+    }
+
+    /// Split the decode failure from its transport envelope and ack handle.
+    pub fn into_parts(self) -> (DecodingError, Envelope, ReceivedEnvelope) {
+        (self.failure, self.envelope, self.received)
     }
 
     /// Acknowledge the underlying transport envelope.

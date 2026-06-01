@@ -5,8 +5,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
+use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
@@ -26,10 +28,11 @@ fn model(id: Uuid) -> ModelManifest {
     }
 }
 
-fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
+fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
         id,
         name: name.into(),
+        slug: None,
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -43,11 +46,11 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(model_manifest_slug("mock", "mock-v1")),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -57,7 +60,7 @@ fn project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     }
@@ -466,7 +469,7 @@ async fn parent_tools_are_available_during_execution() {
         .await
         .unwrap();
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .build()
@@ -516,13 +519,7 @@ async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
         .build()
         .await
         .unwrap();
-    let runner = provider
-        .agent_by_name("solo")
-        .await
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
+    let runner = provider.agent("solo").await.unwrap().build().await.unwrap();
 
     runner.chat("work").await.unwrap();
     let first_tools = captured.tool_names().remove(0);
@@ -560,7 +557,7 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
         .await
         .unwrap();
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .build()
@@ -614,7 +611,7 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
             "{names:?}"
         );
         assert!(
-            !names.iter().any(|name| name == "platform_echo"),
+            names.iter().any(|name| name == "platform_echo"),
             "{names:?}"
         );
         assert!(
@@ -677,7 +674,7 @@ async fn sub_agent_events_stream_to_parent_observers() {
         .await
         .unwrap();
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .build()
@@ -747,7 +744,7 @@ async fn parent_abort_cancels_live_child_execution() {
         .await
         .unwrap();
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .build()
@@ -796,7 +793,7 @@ async fn max_depth_zero_disables_parent_tools() {
         .await
         .unwrap();
     let runner = provider
-        .agent_by_name("alpha")
+        .agent("alpha")
         .await
         .unwrap()
         .with_config(config)

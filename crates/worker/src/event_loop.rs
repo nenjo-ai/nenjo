@@ -3,11 +3,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
+use nenjo_eventbus::ReceivedEnvelope;
 use nenjo_events::{Response, StreamEvent};
 use nenjo_secure_envelope::{DecodingError, ReceivedInput, SecureEnvelopeBus};
 use serde_json::json;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::runtime::WorkerRuntime;
@@ -98,6 +99,14 @@ fn response_for_decode_failure(failure: &DecodingError) -> Option<Response> {
     })
 }
 
+fn ack_received_envelope(received: ReceivedEnvelope, message_id: Uuid, context: &'static str) {
+    tokio::spawn(async move {
+        if let Err(error) = received.ack().await {
+            warn!(%message_id, %context, %error, "Failed to ack worker command");
+        }
+    });
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerEventLoopContext {
     pub org_id: Uuid,
@@ -173,6 +182,7 @@ where
                 msg = response_rx.recv() => {
                     match msg {
                         Some(routed) => {
+                            let response_label = routed.response.to_string();
                             let result = match routed.target {
                                 ResponseTarget::Actor(actor_user_id) => {
                                     response_bus.send_response_for(org_id, actor_user_id, routed.response)
@@ -184,6 +194,12 @@ where
                             };
                             if let Err(e) = result {
                                 warn!(error = %e, "Failed to send response");
+                            } else {
+                                debug!(
+                                    target = ?routed.target,
+                                    response = %response_label,
+                                    "Published worker response"
+                                );
                             }
                         }
                         None => break,
@@ -224,14 +240,12 @@ where
     while let Some(received) = command_rx.recv().await {
         match received {
             ReceivedInput::Command(received) => {
-                let command = received.command.clone();
-                let actor_user_id = received.envelope.user_id;
-                let message_id = received.envelope.message_id;
                 let source = received.source().cloned();
+                let (command, envelope, ack) = received.into_parts();
+                let actor_user_id = envelope.user_id;
+                let message_id = envelope.message_id;
                 if !mark_message_seen(&seen_message_ids, message_id) {
-                    if let Err(e) = received.ack().await {
-                        warn!(error = %e, %message_id, "Failed to ack duplicate command");
-                    }
+                    ack_received_envelope(ack, message_id, "duplicate_command");
                     warn!(
                         actor_user_id = %actor_user_id,
                         %message_id,
@@ -241,16 +255,15 @@ where
                     );
                     continue;
                 }
+                let command_label = command.to_string();
                 info!(
                     actor_user_id = %actor_user_id,
                     %message_id,
-                    command = %command,
+                    command = %command_label,
                     source = ?source,
                     "Received worker command"
                 );
-                if let Err(e) = received.ack().await {
-                    warn!(error = %e, "Failed to ack command");
-                }
+                ack_received_envelope(ack, message_id, "command");
 
                 let ctx = runtime.command_context(
                     actor_user_id,
@@ -264,14 +277,12 @@ where
                 });
             }
             ReceivedInput::DecodeFailure(received) => {
-                let actor_user_id = received.envelope.user_id;
-                let message_id = received.envelope.message_id;
                 let source = received.source().cloned();
-                let failure = received.failure.clone();
+                let (failure, envelope, ack) = received.into_parts();
+                let actor_user_id = envelope.user_id;
+                let message_id = envelope.message_id;
                 if !mark_message_seen(&seen_message_ids, message_id) {
-                    if let Err(e) = received.ack().await {
-                        warn!(error = %e, %message_id, "Failed to ack duplicate decode failure");
-                    }
+                    ack_received_envelope(ack, message_id, "duplicate_decode_failure");
                     warn!(
                         actor_user_id = %actor_user_id,
                         %message_id,
@@ -281,9 +292,7 @@ where
                     );
                     continue;
                 }
-                if let Err(e) = received.ack().await {
-                    warn!(error = %e, "Failed to ack decode failure");
-                }
+                ack_received_envelope(ack, message_id, "decode_failure");
                 if let Some(response) = response_for_decode_failure(&failure) {
                     let _ = response_tx.send(RoutedResponse {
                         target: ResponseTarget::Actor(actor_user_id),

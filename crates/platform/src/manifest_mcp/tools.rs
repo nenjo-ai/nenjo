@@ -25,9 +25,9 @@ pub fn all_tools() -> Vec<ToolSpec> {
                 | "create_project"
                 | "update_project"
                 | "delete_project"
-                | "create_knowledge_item"
-                | "update_knowledge_item_content"
-                | "delete_knowledge_item"
+                | "create_knowledge_doc"
+                | "update_knowledge_doc"
+                | "delete_knowledge_doc"
         )
     }));
     tools.extend(routine_tools());
@@ -81,6 +81,29 @@ mod tests {
             "update_context_block_content",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
+        }
+    }
+
+    #[test]
+    fn manifest_tool_registry_exposes_only_default_knowledge_tools() {
+        let names: HashSet<_> = all_tools().into_iter().map(|tool| tool.name).collect();
+
+        for expected in [
+            "list_knowledge_packs",
+            "read_knowledge_doc",
+            "search_knowledge",
+            "list_knowledge_neighbors",
+        ] {
+            assert!(names.contains(expected), "missing tool: {expected}");
+        }
+
+        for removed in [
+            "list_knowledge_docs",
+            "read_knowledge_doc_manifest",
+            "search_knowledge_paths",
+            "list_knowledge_tree",
+        ] {
+            assert!(!names.contains(removed), "removed tool exposed: {removed}");
         }
     }
 
@@ -161,21 +184,17 @@ mod tests {
                 ("update_domain_prompt".into(), ToolCategory::Write),
                 ("delete_domain".into(), ToolCategory::Write),
                 ("list_knowledge_packs".into(), ToolCategory::Read),
-                ("list_knowledge_docs".into(), ToolCategory::Read),
                 ("read_knowledge_doc".into(), ToolCategory::Read),
-                ("read_knowledge_doc_manifest".into(), ToolCategory::Read),
                 ("search_knowledge".into(), ToolCategory::Read),
-                ("search_knowledge_paths".into(), ToolCategory::Read),
-                ("list_knowledge_tree".into(), ToolCategory::Read),
                 ("list_knowledge_neighbors".into(), ToolCategory::Read),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),
-                ("create_knowledge_item".into(), ToolCategory::Write),
-                ("delete_knowledge_item".into(), ToolCategory::Write),
-                ("update_knowledge_item_content".into(), ToolCategory::Write),
+                ("create_knowledge_doc".into(), ToolCategory::Write),
+                ("delete_knowledge_doc".into(), ToolCategory::Write),
+                ("update_knowledge_doc".into(), ToolCategory::Write),
                 ("list_routines".into(), ToolCategory::Read),
                 ("get_routine".into(), ToolCategory::Read),
                 ("create_routine".into(), ToolCategory::Write),

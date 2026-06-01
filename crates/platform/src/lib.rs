@@ -4,10 +4,13 @@
 //! manifest operations over HTTP or MCP. Most consumers will use:
 //!
 //! - [`PlatformManifestClient`] to talk to platform HTTP endpoints.
+//! - [`ApiClient`] to talk to worker-facing platform HTTP endpoints.
 //! - [`PlatformManifestBackend`] to bridge a local manifest store with the platform API.
 //! - [`ManifestMcpContract`] to expose the manifest tool contract to an MCP server or test
 //!   harness.
 
+/// Typed HTTP client for worker-facing platform API endpoints.
+pub mod api_client;
 /// Platform-backed manifest backend implementations and payload encoding hooks.
 pub mod backend;
 /// Thin HTTP client for the platform manifest API.
@@ -32,6 +35,7 @@ pub mod tools;
 /// Shared transport types used by the platform bootstrap and write APIs.
 pub mod types;
 
+pub use api_client::{ApiClient, ApiClientError, NoopPayloadCodec, PayloadCodec};
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
 pub use local::LocalManifestMcpBackend;
@@ -60,16 +64,16 @@ pub use manifest_mcp::{
     DomainManifestGetResult, DomainManifestMutationResult, DomainManifestUpdateParams,
     DomainMutationResult, DomainPromptDocument, DomainPromptGetParams, DomainPromptGetResult,
     DomainPromptMutationResult, DomainPromptUpdateParams, DomainSummary, DomainUpdateDocument,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeItemContentDocument,
-    KnowledgeItemContentMutationResult, KnowledgeItemContentUpdateParams,
-    KnowledgeItemCreateDocument, KnowledgeItemCreateParams, KnowledgeItemDeleteParams,
-    KnowledgeItemMutationResult, KnowledgeItemSummary, KnowledgeManifestBackend,
+    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocContentDocument,
+    KnowledgeDocCreateDocument, KnowledgeDocCreateParams, KnowledgeDocDeleteParams,
+    KnowledgeDocMutationResult, KnowledgeDocRelatedDocument, KnowledgeDocSummary,
+    KnowledgeDocUpdateDocument, KnowledgeDocUpdateParams, KnowledgeManifestBackend,
     ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument, ModelCreateParams,
     ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
     ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams, ModelsListResult,
     ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams, ProjectDocument,
     ProjectGetResult, ProjectManifestBackend, ProjectMutationResult, ProjectSummary,
-    ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult, ResourceRef,
     RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams, RoutineDocument,
     RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
     RoutineMutationResult, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,

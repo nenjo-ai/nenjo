@@ -4,11 +4,11 @@ use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{AbilityManifest, DomainManifest, Manifest};
-use nenjo::{ManifestWriter, ToolFactory};
+use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
     DomainManifestBackend, DomainsGetParams, ManifestAccessPolicy, PlatformManifestBackend,
-    PlatformManifestClient,
+    PlatformManifestClient, ResourceRef,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -55,28 +55,30 @@ async fn scoped_backend(
     let visible_agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "visible-agent".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: None,
-        domain_ids: vec![],
+        model: None,
+        domains: vec![],
         platform_scopes: vec!["projects:read".into()],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
     let hidden_agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "hidden-agent".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: None,
-        domain_ids: vec![],
+        model: None,
+        domains: vec![],
         platform_scopes: vec!["projects:write".into()],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -84,16 +86,14 @@ async fn scoped_backend(
     let visible_ability = AbilityManifest {
         id: Uuid::new_v4(),
         name: "visible-ability".into(),
-        path: String::new(),
-        display_name: None,
+        path: None,
         description: None,
         activation_condition: "visible".into(),
         prompt_config: nenjo::types::AbilityPromptConfig {
             developer_prompt: "visible prompt".into(),
         },
         platform_scopes: vec!["projects:read".into()],
-        mcp_server_ids: vec![],
-        tool_name: "visible_ability".into(),
+        mcp_servers: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -101,16 +101,14 @@ async fn scoped_backend(
     let hidden_ability = AbilityManifest {
         id: Uuid::new_v4(),
         name: "hidden-ability".into(),
-        path: String::new(),
-        display_name: None,
+        path: None,
         description: None,
         activation_condition: "hidden".into(),
         prompt_config: nenjo::types::AbilityPromptConfig {
             developer_prompt: "hidden prompt".into(),
         },
         platform_scopes: vec!["projects:write".into()],
-        mcp_server_ids: vec![],
-        tool_name: "hidden_ability".into(),
+        mcp_servers: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -124,8 +122,8 @@ async fn scoped_backend(
         description: None,
         command: "#visible".into(),
         platform_scopes: vec!["projects:read".into()],
-        ability_ids: vec![],
-        mcp_server_ids: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
     let hidden_domain = DomainManifest {
@@ -136,8 +134,8 @@ async fn scoped_backend(
         description: None,
         command: "#hidden".into(),
         platform_scopes: vec!["projects:write".into()],
-        ability_ids: vec![],
-        mcp_server_ids: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
 
@@ -195,18 +193,19 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "tester".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: None,
-        domain_ids: vec![],
+        model: None,
+        domains: vec![],
         platform_scopes: vec![
             "agents:read".into(),
             "agents:write".into(),
             "projects:read".into(),
         ],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -221,10 +220,6 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     assert!(names.iter().any(|name| name == "update_agent"));
     assert!(names.iter().any(|name| name == "list_projects"));
     assert!(names.iter().any(|name| name == "get_project"));
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "search_knowledge_paths"));
     assert!(names.iter().any(|name| name == "list_project_tasks"));
     assert!(names.iter().any(|name| name == "get_project_task"));
     assert!(
@@ -234,6 +229,10 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     );
     assert!(names.iter().any(|name| name == "get_project_execution_run"));
     assert!(!names.iter().any(|name| name == "list_builtin_docs"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
+    assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "search_knowledge"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "read_builtin_doc"));
     assert!(!names.iter().any(|name| name == "search_builtin_docs"));
     assert!(!names.iter().any(|name| name == "search_builtin_doc_paths"));
@@ -258,10 +257,10 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let tools = factory.create_tools(&agent_without_project_scope).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "search_knowledge_paths"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
+    assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "search_knowledge"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "list_projects"));
 }
 
@@ -288,14 +287,15 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
     let agent = AgentManifest {
         id: Uuid::new_v4(),
         name: "tester".into(),
+        slug: None,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
-        model_id: None,
-        domain_ids: vec![],
+        model: None,
+        domains: vec![],
         platform_scopes: vec!["projects:write".into()],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     };
@@ -329,7 +329,7 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
     assert!(
         backend
             .get_agent(AgentsGetParams {
-                id: hidden_agent.id
+                agent: Slug::derive(&hidden_agent.name)
             })
             .await
             .is_err()
@@ -341,7 +341,7 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
     assert!(
         backend
             .get_ability(AbilitiesGetParams {
-                id: hidden_ability.id
+                ability: ResourceRef::Id(hidden_ability.id)
             })
             .await
             .is_err()
@@ -358,7 +358,7 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
     assert!(
         backend
             .get_domain(DomainsGetParams {
-                id: hidden_domain.id
+                domain: hidden_domain.slug()
             })
             .await
             .is_err()

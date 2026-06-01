@@ -15,7 +15,10 @@ build-release:
 
 # Run all tests
 test:
-    cargo test --workspace
+    cargo test --workspace --exclude nenjo-integration-tests
+
+test-e2e:
+    just test-crate nenjo-integration-tests
 
 # Run tests for a specific crate
 test-crate crate:

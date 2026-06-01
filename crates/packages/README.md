@@ -79,8 +79,8 @@ modules:
 
 ```yaml
 schema: nenjo.agent.v1
-selector: git://nenjo-ai/packages/packages/reviewer
-root_uri: git://nenjo-ai/packages/packages/reviewer/
+selector: pkg:packages.reviewer
+root_uri: pkg://packages.reviewer/
 manifest:
   name: reviewer
   display_name: Reviewer

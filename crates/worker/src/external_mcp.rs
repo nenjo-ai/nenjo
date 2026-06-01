@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use nenjo::manifest::McpServerManifest;
-use nenjo::{Tool, ToolCategory, ToolResult};
+use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +19,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // MCP credential resolution
@@ -517,7 +516,7 @@ pub struct ExternalMcpTool {
     tool_name: String,
     tool_description: String,
     input_schema: serde_json::Value,
-    server_id: Uuid,
+    server: Slug,
     pool: Arc<ExternalMcpPool>,
 }
 
@@ -540,10 +539,14 @@ impl Tool for ExternalMcpTool {
         ToolCategory::Write
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Mcp
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         match self
             .pool
-            .call_tool(self.server_id, &self.tool_name, args)
+            .call_tool(&self.server, &self.tool_name, args)
             .await
         {
             Ok(output) => Ok(ToolResult {
@@ -569,10 +572,10 @@ impl Tool for ExternalMcpTool {
 
 /// Manages a pool of connected external MCP servers.
 ///
-/// Servers are keyed by their UUID. The pool is reconciled when bootstrap data
+/// Servers are keyed by their slug. The pool is reconciled when bootstrap data
 /// changes: servers no longer assigned are shut down, new ones are spawned.
 pub struct ExternalMcpPool {
-    servers: RwLock<HashMap<Uuid, tokio::sync::Mutex<ConnectedServer>>>,
+    servers: RwLock<HashMap<Slug, tokio::sync::Mutex<ConnectedServer>>>,
 }
 
 impl Default for ExternalMcpPool {
@@ -594,27 +597,31 @@ impl ExternalMcpPool {
     /// - Servers already connected are kept.
     /// - New servers are connected.
     pub async fn reconcile(&self, desired: &[McpServerManifest]) {
-        let desired_ids: std::collections::HashSet<Uuid> = desired.iter().map(|s| s.id).collect();
+        let desired_slugs: std::collections::HashSet<Slug> = desired
+            .iter()
+            .map(|server| Slug::derive(&server.name))
+            .collect();
 
         // Remove servers no longer desired
         {
             let mut servers = self.servers.write().await;
-            let to_remove: Vec<Uuid> = servers
+            let to_remove: Vec<Slug> = servers
                 .keys()
-                .filter(|id| !desired_ids.contains(id))
+                .filter(|slug| !desired_slugs.contains(slug))
                 .cloned()
                 .collect();
-            for id in to_remove {
-                info!(server_id = %id, "Shutting down removed external MCP server");
-                servers.remove(&id);
+            for slug in to_remove {
+                info!(server = %slug, "Shutting down removed external MCP server");
+                servers.remove(&slug);
             }
         }
 
         // Connect new servers
         for def in desired {
+            let server_slug = Slug::derive(&def.name);
             let already_connected = {
                 let servers = self.servers.read().await;
-                servers.contains_key(&def.id)
+                servers.contains_key(&server_slug)
             };
 
             if already_connected {
@@ -624,12 +631,12 @@ impl ExternalMcpPool {
             match ConnectedServer::connect(def.clone()).await {
                 Ok(server) => {
                     let mut servers = self.servers.write().await;
-                    servers.insert(def.id, tokio::sync::Mutex::new(server));
+                    servers.insert(server_slug, tokio::sync::Mutex::new(server));
                 }
                 Err(e) => {
                     warn!(
                         server = %def.display_name,
-                        server_id = %def.id,
+                        server_slug = %Slug::derive(&def.name),
                         error = %e,
                         "Failed to connect external MCP server — skipping"
                     );
@@ -641,19 +648,19 @@ impl ExternalMcpPool {
     /// Call a tool on a specific server.
     async fn call_tool(
         &self,
-        server_id: Uuid,
+        server_slug: &Slug,
         tool_name: &str,
         args: serde_json::Value,
     ) -> anyhow::Result<String> {
         let servers = self.servers.read().await;
         let server_mutex = servers
-            .get(&server_id)
-            .ok_or_else(|| anyhow::anyhow!("Server {server_id} not connected"))?;
+            .get(server_slug)
+            .ok_or_else(|| anyhow::anyhow!("Server {server_slug} not connected"))?;
         let mut server = server_mutex.lock().await;
         server.call_tool(tool_name, args).await
     }
 
-    /// Get tools for an agent, given the agent's assigned MCP server IDs.
+    /// Get tools for an agent, given the agent's assigned MCP server slugs.
     ///
     /// When `scopes` is provided, only tools whose `scope` field matches the
     /// given scopes are included. This is used for the internal Nenjo platform
@@ -661,17 +668,17 @@ impl ExternalMcpPool {
     /// have no per-tool scopes — pass `None` for those.
     pub async fn tools_for_agent(
         self: &Arc<Self>,
-        mcp_server_ids: &[Uuid],
+        mcp_servers: &[Slug],
         scopes: Option<&[String]>,
     ) -> Vec<Box<dyn Tool>> {
         let servers = self.servers.read().await;
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
-        for server_id in mcp_server_ids {
-            let server_mutex = match servers.get(server_id) {
+        for server_slug in mcp_servers {
+            let server_mutex = match servers.get(server_slug) {
                 Some(s) => s,
                 None => {
-                    debug!(server_id = %server_id, "MCP server not connected, skipping tools");
+                    debug!(server = %server_slug, "MCP server not connected, skipping tools");
                     continue;
                 }
             };
@@ -693,7 +700,7 @@ impl ExternalMcpPool {
                     tool_name: tool_def.name.clone(),
                     tool_description: tool_def.description.clone().unwrap_or_default(),
                     input_schema: tool_def.input_schema.clone(),
-                    server_id: *server_id,
+                    server: server_slug.clone(),
                     pool: Arc::clone(self),
                 }));
             }
@@ -703,11 +710,11 @@ impl ExternalMcpPool {
     }
 
     /// Get metadata about connected external servers (for McpIntegrationContext).
-    pub async fn server_info(&self, server_ids: &[Uuid]) -> Vec<(String, String)> {
+    pub async fn server_info(&self, server_slugs: &[Slug]) -> Vec<(String, String)> {
         let servers = self.servers.read().await;
         let mut info = Vec::new();
-        for id in server_ids {
-            if let Some(server_mutex) = servers.get(id) {
+        for slug in server_slugs {
+            if let Some(server_mutex) = servers.get(slug) {
                 let server = server_mutex.lock().await;
                 info.push((
                     server.server_def.display_name.clone(),

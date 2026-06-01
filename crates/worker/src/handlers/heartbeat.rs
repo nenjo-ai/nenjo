@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nenjo::memory::MemoryScope;
-use nenjo::{AgentRun, AgentRunKind, HeartbeatInput};
+use nenjo::{AgentRun, AgentRunKind, HeartbeatInput, Slug};
 use nenjo_events::{ExecutionType, Response};
 use nenjo_sessions::{
     ExecutionPhase, HeartbeatScheduleState, RunCompletion, ScheduleState, SchedulerRuntimeSnapshot,
@@ -18,6 +18,7 @@ use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
 use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::handlers::ResponseSender;
+use crate::resource_resolver::PlatformResourceResolver;
 
 #[derive(Clone)]
 pub struct HeartbeatCommandContext<S> {
@@ -163,15 +164,22 @@ async fn upsert_heartbeat_session<P, SessionRt>(
         run_in_progress,
         last_completion,
     } = params;
+    let agent = harness
+        .provider()
+        .manifest_snapshot()
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| nenjo::Slug::derive(&agent.name).to_string());
     if let Err(error) = harness
         .sessions()
         .upsert_scheduler(SchedulerSessionUpsert {
             session_id: agent_id,
             kind: SessionKind::HeartbeatSchedule,
             status,
-            project_id: None,
-            agent_id: Some(agent_id),
-            routine_id: None,
+            project: None,
+            agent,
+            routine: None,
             worker_id: worker_id.to_string(),
             memory_namespace: memory_namespace.map(ToString::to_string),
             scheduler: ScheduleState::Heartbeat(HeartbeatScheduleState {
@@ -194,14 +202,14 @@ async fn upsert_heartbeat_session<P, SessionRt>(
 
 fn emit_heartbeat_state<S>(
     response_sink: &S,
-    agent_id: Uuid,
+    agent: &str,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_run_at: chrono::DateTime<chrono::Utc>,
 ) where
     S: ResponseSender,
 {
     let _ = response_sink.send(Response::AgentHeartbeatHeartbeat {
-        agent_id,
+        agent: agent.to_string(),
         last_run_at: last_run_at.map(|ts| ts.to_rfc3339()),
         next_run_at: Some(next_run_at.to_rfc3339()),
     });
@@ -259,8 +267,9 @@ where
     let run_state = Arc::new(Mutex::new(restored_state));
     let provider_cell = harness.provider_handle();
     let provider = harness.provider();
-    let heartbeat_agent_name = provider
-        .manifest_snapshot()
+    let manifest = provider.manifest_snapshot();
+    let heartbeat_agent_slug = PlatformResourceResolver::new(&manifest).agent(agent_id)?;
+    let heartbeat_agent_name = manifest
         .agents
         .iter()
         .find(|agent| agent.id == agent_id)
@@ -301,10 +310,15 @@ where
     tokio::spawn(async move {
         let mut next_run_at = initial_next_run_at;
         let _ = response_tx.send(Response::AgentHeartbeatScheduled {
-            agent_id,
+            agent: heartbeat_agent_slug.to_string(),
             next_run_at: Some(next_run_at.to_rfc3339()),
         });
-        emit_heartbeat_state(&response_tx, agent_id, None, next_run_at);
+        emit_heartbeat_state(
+            &response_tx,
+            heartbeat_agent_slug.as_str(),
+            None,
+            next_run_at,
+        );
 
         loop {
             pause_token.wait_if_paused().await;
@@ -324,7 +338,12 @@ where
             let finished_handle = match active_run_guard.as_ref() {
                 Some(handle) if handle.is_finished() => active_run_guard.take(),
                 Some(_) => {
-                    emit_heartbeat_state(&response_tx, agent_id, None, scheduled_next_run_at);
+                    emit_heartbeat_state(
+                        &response_tx,
+                        heartbeat_agent_slug.as_str(),
+                        None,
+                        scheduled_next_run_at,
+                    );
                     upsert_heartbeat_session(
                         &harness_for_schedule,
                         &worker_id,
@@ -386,18 +405,19 @@ where
             )
             .await;
             let mut active_run_guard = active_run_for_schedule.lock().await;
+            let heartbeat_agent_slug_for_run = heartbeat_agent_slug.clone();
             *active_run_guard = Some(tokio::spawn(async move {
                 let execution_id = Uuid::new_v4();
                 let _ = response_tx.send(Response::ExecutionStarted {
                     id: execution_id,
-                    project_id: None,
-                    routine_id: None,
+                    project: None,
+                    routine: None,
                     routine_name: None,
-                    agent_id: Some(agent_id),
+                    agent: Some(heartbeat_agent_slug_for_run.to_string()),
                     config: serde_json::json!({
                         "trigger": "agent_heartbeat",
                         "interval_secs": interval.as_secs(),
-                        "agent_id": agent_id.to_string(),
+                        "agent": heartbeat_agent_slug_for_run.clone(),
                         "timezone": timezone_for_run.as_deref(),
                     }),
                 });
@@ -427,14 +447,17 @@ where
                     )
                     .await;
                     let provider = provider_cell.load_full();
-                    let builder = provider.build_agent_by_id(agent_id).await?;
+                    let manifest = provider.manifest_snapshot();
+                    let resolver = PlatformResourceResolver::new(&manifest);
+                    let agent = resolver.agent(agent_id)?;
+                    let builder = provider.agent(&agent).await?;
                     let builder =
                         apply_session_memory_scope(&harness_for_run, builder, agent_id).await;
                     let runner = builder.build().await?;
                     runner
                         .run(AgentRun {
                             kind: AgentRunKind::Heartbeat(HeartbeatInput {
-                                agent_id,
+                                agent: agent.clone(),
                                 interval,
                                 start_at: None,
                                 previous_output: task_state.previous_output,
@@ -464,9 +487,9 @@ where
                             total_input_tokens: output.input_tokens,
                             total_output_tokens: output.output_tokens,
                             execution_type: Some(ExecutionType::Heartbeat),
-                            routine_id: None,
+                            routine: None,
                             routine_name: None,
-                            agent_id: Some(agent_id),
+                            agent: Some(heartbeat_agent_slug_for_run.to_string()),
                         });
                         upsert_heartbeat_session(
                             &harness_for_run,
@@ -508,9 +531,9 @@ where
                             total_input_tokens: 0,
                             total_output_tokens: 0,
                             execution_type: Some(ExecutionType::Heartbeat),
-                            routine_id: None,
+                            routine: None,
                             routine_name: None,
-                            agent_id: Some(agent_id),
+                            agent: Some(heartbeat_agent_slug_for_run.to_string()),
                         });
                         upsert_heartbeat_session(
                             &harness_for_run,
@@ -537,7 +560,12 @@ where
                     }
                 }
 
-                emit_heartbeat_state(&response_tx, agent_id, Some(completed_at), run_next_run_at);
+                emit_heartbeat_state(
+                    &response_tx,
+                    heartbeat_agent_slug_for_run.as_str(),
+                    Some(completed_at),
+                    run_next_run_at,
+                );
                 let _ = harness_for_run
                     .sessions()
                     .update_checkpoint(SessionCheckpointUpdate {
@@ -591,7 +619,7 @@ where
     async fn handle_agent_heartbeat_enable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
         interval_str: &str,
         timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -612,14 +640,14 @@ where
     async fn handle_agent_heartbeat_disable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
     ) -> Result<()>;
 
     /// Trigger an agent heartbeat immediately outside its regular interval.
     async fn handle_agent_heartbeat_trigger(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
     ) -> Result<()>;
 }
 
@@ -633,7 +661,7 @@ where
     async fn handle_agent_heartbeat_enable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
         interval_str: &str,
         timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -641,6 +669,9 @@ where
     where
         S: Clone + 'static,
     {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let agent_id = resolver.agent_id(&Slug::parse(agent)?)?;
         let interval = nenjo::routines::types::parse_duration(interval_str)?;
         spawn_agent_heartbeat(
             self,
@@ -704,13 +735,16 @@ where
     async fn handle_agent_heartbeat_disable(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
     ) -> Result<()> {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let agent_id = resolver.agent_id(&Slug::parse(agent)?)?;
         if let Some((_, exec)) = self.executions().remove(&agent_id) {
             exec.cancel.cancel();
-            let _ = ctx
-                .response_sink
-                .send(Response::AgentHeartbeatStopped { agent_id });
+            let _ = ctx.response_sink.send(Response::AgentHeartbeatStopped {
+                agent: agent.to_string(),
+            });
             upsert_heartbeat_session(
                 self,
                 &ctx.worker_id,
@@ -736,32 +770,38 @@ where
     async fn handle_agent_heartbeat_trigger(
         &self,
         ctx: &HeartbeatCommandContext<S>,
-        agent_id: Uuid,
+        agent: &str,
     ) -> Result<()> {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let agent_id = resolver.agent_id(&Slug::parse(agent)?)?;
         let execution_id = Uuid::new_v4();
         let _ = ctx.response_sink.send(Response::ExecutionStarted {
             id: execution_id,
-            project_id: None,
-            routine_id: None,
+            project: None,
+            routine: None,
             routine_name: None,
-            agent_id: Some(agent_id),
+            agent: Some(agent.to_string()),
             config: serde_json::json!({
                 "trigger": "agent_heartbeat",
                 "manual": true,
-                "agent_id": agent_id.to_string(),
+                "agent": agent,
             }),
         });
 
         let result = async {
             let task_state =
                 load_heartbeat_task_state(self, agent_id, HeartbeatTaskState::default()).await;
-            let builder = self.provider().build_agent_by_id(agent_id).await?;
+            let manifest = self.provider().manifest_snapshot();
+            let resolver = PlatformResourceResolver::new(&manifest);
+            let agent = resolver.agent(agent_id)?;
+            let builder = self.provider().agent(&agent).await?;
             let builder = apply_session_memory_scope(self, builder, agent_id).await;
             let runner = builder.build().await?;
             runner
                 .run(AgentRun {
                     kind: AgentRunKind::Heartbeat(HeartbeatInput {
-                        agent_id,
+                        agent,
                         interval: Duration::from_secs(1),
                         start_at: None,
                         previous_output: task_state.previous_output,
@@ -786,9 +826,9 @@ where
             total_input_tokens,
             total_output_tokens,
             execution_type: Some(ExecutionType::Heartbeat),
-            routine_id: None,
+            routine: None,
             routine_name: None,
-            agent_id: Some(agent_id),
+            agent: Some(agent.to_string()),
         });
 
         Ok(())

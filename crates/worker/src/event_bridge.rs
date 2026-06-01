@@ -126,8 +126,8 @@ pub fn turn_event_to_stream_event(
             encrypted_payload: None,
             total_input_tokens: output.input_tokens,
             total_output_tokens: output.output_tokens,
-            project_id: None,
-            agent_id: None,
+            project: None,
+            agent: None,
             session_id: None,
         }),
     };
@@ -319,21 +319,17 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             encrypted_payload,
             total_input_tokens,
             total_output_tokens,
-            project_id,
-            agent_id,
+            project,
+            agent,
             session_id,
         } => format!(
-            "done(payload={}, encrypted={}, input_tokens={}, output_tokens={}, project_id={}, agent_id={}, session_id={})",
+            "done(payload={}, encrypted={}, input_tokens={}, output_tokens={}, project={}, agent={}, session_id={})",
             if payload.is_some() { "yes" } else { "no" },
             encrypted_payload.is_some(),
             total_input_tokens,
             total_output_tokens,
-            project_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            agent_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "-".to_string()),
+            project.as_deref().unwrap_or("-"),
+            agent.as_deref().unwrap_or("-"),
             session_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_string())
@@ -370,7 +366,9 @@ fn resolve_agent(manifest: &Manifest, agent_id: Option<Uuid>) -> Option<StepAgen
     agent_id.map(|aid| {
         let a = manifest.agents.iter().find(|a| a.id == aid);
         StepAgent {
-            agent_id: aid,
+            agent: a
+                .map(|a| nenjo::Slug::derive(&a.name).to_string())
+                .unwrap_or_else(|| aid.to_string()),
             agent_name: a.map(|a| a.name.clone()),
             agent_color: a.and_then(|a| a.color.clone()),
         }
@@ -794,7 +792,7 @@ pub fn project_slug(manifest: &Manifest, project_id: Uuid) -> String {
         return String::new();
     }
     match manifest.projects.iter().find(|p| p.id == project_id) {
-        Some(p) => p.slug.clone(),
+        Some(p) => p.slug.to_string(),
         None => project_id.to_string(),
     }
 }
@@ -856,10 +854,10 @@ mod tests {
     fn direct_task_turn_done_emits_agent_response_step() {
         let execution_run_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
-        let agent_id = Uuid::new_v4();
         let response = turn_event_to_task_step_response(
             &nenjo::TurnEvent::Done {
                 output: nenjo::TurnOutput {
+                    task_id: Some(task_id),
                     text: "final answer".to_string(),
                     input_tokens: 10,
                     output_tokens: 20,
@@ -871,7 +869,7 @@ mod tests {
                 execution_run_id,
                 task_id: Some(task_id),
                 agent: Some(StepAgent {
-                    agent_id,
+                    agent: "agent".to_string(),
                     agent_name: Some("agent".to_string()),
                     agent_color: None,
                 }),
@@ -905,7 +903,7 @@ mod tests {
                 assert_eq!(data["input_tokens"], 10);
                 assert_eq!(data["output_tokens"], 20);
                 assert_eq!(payload.unwrap()["output_preview"], "final answer");
-                assert_eq!(agent.unwrap().agent_id, agent_id);
+                assert_eq!(agent.unwrap().agent, "agent");
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -916,6 +914,7 @@ mod tests {
         let response = turn_event_to_task_step_response(
             &nenjo::TurnEvent::Done {
                 output: nenjo::TurnOutput {
+                    task_id: None,
                     text: "done".to_string(),
                     input_tokens: 1,
                     output_tokens: 2,

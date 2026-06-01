@@ -111,7 +111,7 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                         } else {
                             manifest.projects.push(item);
                         }
-                        debug!(%rt, %id, "Applied inline project document payload");
+                        debug!(%rt, %id, "Applied inline project resource payload");
                         true
                     }
                     Err(e) => {
@@ -285,14 +285,14 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 .as_ref()
                                 .map(|domain| domain.platform_scopes.clone())
                                 .unwrap_or_else(|| domain.domain.platform_scopes.clone()),
-                            ability_ids: existing_manifest
+                            abilities: existing_manifest
                                 .as_ref()
-                                .map(|domain| domain.ability_ids.clone())
-                                .unwrap_or_else(|| domain.domain.ability_ids.clone()),
-                            mcp_server_ids: existing_manifest
+                                .map(|domain| domain.abilities.clone())
+                                .unwrap_or_else(|| domain.domain.abilities.clone()),
+                            mcp_servers: existing_manifest
                                 .as_ref()
-                                .map(|domain| domain.mcp_server_ids.clone())
-                                .unwrap_or_else(|| domain.domain.mcp_server_ids.clone()),
+                                .map(|domain| domain.mcp_servers.clone())
+                                .unwrap_or(domain.domain.mcp_servers),
                             prompt_config: domain.prompt_config,
                         };
                         if let Some(pos) = manifest.domains.iter().position(|r| r.id == id) {
@@ -314,8 +314,8 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 description: domain.summary.description,
                                 command: domain.command,
                                 platform_scopes: domain.platform_scopes,
-                                ability_ids: domain.ability_ids,
-                                mcp_server_ids: domain.mcp_server_ids,
+                                abilities: domain.abilities,
+                                mcp_servers: domain.mcp_servers,
                                 prompt_config: existing_manifest
                                     .as_ref()
                                     .map(|domain| domain.prompt_config.clone())
@@ -365,17 +365,18 @@ mod tests {
         nenjo::manifest::AgentManifest {
             id,
             name: "agent".into(),
+            slug: None,
             description: None,
             prompt_config: PromptConfig {
                 developer_prompt: developer_prompt.into(),
                 ..Default::default()
             },
             color: None,
-            model_id: None,
-            domain_ids: Vec::new(),
+            model: None,
+            domains: Vec::new(),
             platform_scopes: Vec::new(),
-            mcp_server_ids: Vec::new(),
-            ability_ids: Vec::new(),
+            mcp_servers: Vec::new(),
+            abilities: Vec::new(),
             prompt_locked: false,
             heartbeat: None,
         }
@@ -409,10 +410,10 @@ mod tests {
             "name": "agent",
             "description": null,
             "color": null,
-            "model_id": null,
+            "model": null,
             "domains": [],
             "platform_scopes": [],
-            "mcp_server_ids": [],
+            "mcp_servers": [],
             "abilities": [],
             "prompt_locked": false,
             "heartbeat": null
@@ -442,10 +443,10 @@ mod tests {
             "name": "renamed",
             "description": null,
             "color": null,
-            "model_id": null,
+            "model": null,
             "domains": [],
             "platform_scopes": [],
-            "mcp_server_ids": [],
+            "mcp_servers": [],
             "abilities": [],
             "prompt_locked": false,
             "heartbeat": null

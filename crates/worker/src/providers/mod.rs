@@ -23,9 +23,6 @@ pub use nenjo_models::{
 
 pub use nenjo_models::{sanitize_api_error, scrub_secret_patterns};
 
-/// Backward-compatible alias: old code used `Provider`, new code uses `ModelProvider`.
-pub use nenjo_models::ModelProvider as Provider;
-
 // Re-export registry.
 pub use registry::ModelProviderRegistry;
 

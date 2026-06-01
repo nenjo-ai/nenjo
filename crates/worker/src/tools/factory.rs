@@ -85,11 +85,11 @@ where
         let mut tools = self.base_tools_with(security);
 
         // Add MCP tools scoped to this agent's server assignments and platform scopes.
-        if !agent.mcp_server_ids.is_empty() {
+        if !agent.mcp_servers.is_empty() {
             let mcp_tools = self
                 .external_mcp
                 .tools_for_agent(
-                    &agent.mcp_server_ids,
+                    &agent.mcp_servers,
                     if agent.platform_scopes.is_empty() {
                         None
                     } else {

@@ -248,14 +248,12 @@ impl SecureEnvelopeCodec {
             StreamEvent::DelegationStarted {
                 agent,
                 target_agent,
-                target_agent_id,
                 delegate_tool_name,
                 payload,
                 ..
             } => Ok(Some(StreamEvent::DelegationStarted {
                 agent,
                 target_agent,
-                target_agent_id,
                 delegate_tool_name,
                 payload: None,
                 encrypted_payload: self
@@ -265,7 +263,6 @@ impl SecureEnvelopeCodec {
             StreamEvent::DelegationCompleted {
                 agent,
                 target_agent,
-                target_agent_id,
                 delegate_tool_name,
                 success,
                 payload,
@@ -273,7 +270,6 @@ impl SecureEnvelopeCodec {
             } => Ok(Some(StreamEvent::DelegationCompleted {
                 agent,
                 target_agent,
-                target_agent_id,
                 delegate_tool_name,
                 success,
                 payload: None,
@@ -300,8 +296,8 @@ impl SecureEnvelopeCodec {
                 encrypted_payload: _,
                 total_input_tokens,
                 total_output_tokens,
-                project_id,
-                agent_id,
+                project,
+                agent,
                 session_id,
             } => Ok(Some(StreamEvent::Done {
                 payload: None,
@@ -310,8 +306,8 @@ impl SecureEnvelopeCodec {
                     .await?,
                 total_input_tokens,
                 total_output_tokens,
-                project_id,
-                agent_id,
+                project,
+                agent,
                 session_id,
             })),
             other => Ok(Some(other)),
@@ -330,7 +326,7 @@ impl SecureEnvelopeCodec {
 }
 
 #[async_trait]
-impl nenjo::client::PayloadCodec for SecureEnvelopeCodec {
+impl nenjo_platform::api_client::PayloadCodec for SecureEnvelopeCodec {
     async fn decode_text(&self, payload: &EncryptedPayload) -> Result<Option<String>> {
         Ok(Some(
             SecureEnvelopeCodec::decode_payload_text(self, payload).await?,
@@ -356,9 +352,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 content: _,
                 encrypted_content: Some(payload),
                 hidden,
-                project_id,
-                routine_id,
-                agent_id,
+                project,
+                routine,
+                agent,
                 session_id,
                 domain_session_id,
                 domain_activation,
@@ -369,9 +365,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         content,
                         encrypted_content: None,
                         hidden,
-                        project_id,
-                        routine_id,
-                        agent_id,
+                        project,
+                        routine,
+                        agent,
                         session_id,
                         domain_session_id,
                         domain_activation,
@@ -381,25 +377,25 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     code: "encrypted_chat_decode_failed",
                     message: error.to_string(),
                     session_id: Some(session_id),
-                    project_id,
-                    agent_id,
+                    project: project.clone(),
+                    agent: agent.clone(),
                 })),
             },
             Command::TaskExecute {
                 task_id,
-                project_id,
+                project,
                 execution_run_id,
-                routine_id,
-                assigned_agent_id,
+                routine,
+                agent,
                 payload,
                 encrypted_payload: Some(encrypted_payload),
             } => Ok(DecodeCommandResult::Command(Box::new(
                 Command::TaskExecute {
                     task_id,
-                    project_id,
+                    project,
                     execution_run_id,
-                    routine_id,
-                    assigned_agent_id,
+                    routine,
+                    agent,
                     payload: match payload {
                         Some(mut payload) => {
                             let encrypted = self
@@ -425,9 +421,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
             ))),
             Command::ManifestChanged {
                 resource_type,
-                resource_id,
+                resource,
                 action,
-                project_id,
+                project,
                 payload,
                 encrypted_payload,
             } => {
@@ -435,9 +431,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     return Ok(DecodeCommandResult::Command(Box::new(
                         Command::ManifestChanged {
                             resource_type,
-                            resource_id,
+                            resource,
                             action,
-                            project_id,
+                            project,
                             payload,
                             encrypted_payload: None,
                         },
@@ -457,8 +453,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                             code: "encrypted_manifest_decode_failed",
                             message: error.to_string(),
                             session_id: None,
-                            project_id,
-                            agent_id: None,
+                            project: project.clone(),
+                            agent: None,
                         }));
                     }
                 };
@@ -474,9 +470,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::ManifestChanged {
                         resource_type,
-                        resource_id,
+                        resource,
                         action,
-                        project_id,
+                        project,
                         payload: Some(payload),
                         encrypted_payload: None,
                     },
@@ -583,9 +579,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 total_input_tokens,
                 total_output_tokens,
                 execution_type,
-                routine_id,
+                routine,
                 routine_name,
-                agent_id,
+                agent,
             } => Ok(Some(Response::ExecutionCompleted {
                 id,
                 success,
@@ -593,9 +589,9 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 total_input_tokens,
                 total_output_tokens,
                 execution_type,
-                routine_id,
+                routine,
                 routine_name,
-                agent_id,
+                agent,
             })),
             other => Ok(Some(other)),
         }
@@ -703,9 +699,9 @@ mod tests {
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload.clone()),
                     hidden: false,
-                    project_id: None,
-                    routine_id: None,
-                    agent_id: None,
+                    project: None,
+                    routine: None,
+                    agent: None,
                     domain_session_id: None,
                     domain_activation: None,
                     session_id: Uuid::new_v4(),
@@ -736,9 +732,9 @@ mod tests {
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload),
                     hidden: false,
-                    project_id: None,
-                    routine_id: None,
-                    agent_id: None,
+                    project: None,
+                    routine: None,
+                    agent: None,
                     domain_session_id: None,
                     domain_activation: None,
                     session_id: Uuid::new_v4(),

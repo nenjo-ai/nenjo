@@ -1,10 +1,9 @@
 use nenjo::{ToolCategory, ToolSpec};
 
-fn agent_id_schema() -> serde_json::Value {
+fn agent_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target agent."
+        "description": "The slug of the target agent."
     })
 }
 
@@ -25,10 +24,19 @@ fn agent_update_data_schema() -> serde_json::Value {
                 "type": ["string", "null"],
                 "description": "Hex color used to render the agent in the dashboard. Set to null to clear it, or omit to leave it unchanged."
             },
-            "model_id": {
+            "model": {
                 "type": ["string", "null"],
-                "format": "uuid",
-                "description": "Directly assigned model id for this agent. Use null to clear the current model assignment, or omit to leave it unchanged."
+                "description": "Directly assigned model slug for this agent. Use null to clear the current model assignment, or omit to leave it unchanged."
+            },
+            "abilities": {
+                "type": "array",
+                "description": "Full replacement list of ability slugs assigned to this agent. Omit to leave assignments unchanged.",
+                "items": { "type": "string" }
+            },
+            "domains": {
+                "type": "array",
+                "description": "Full replacement list of domain slugs assigned to this agent. Omit to leave assignments unchanged.",
+                "items": { "type": "string" }
             }
         },
         "additionalProperties": false
@@ -48,10 +56,9 @@ fn agent_create_data_schema() -> serde_json::Value {
                 "type": "string",
                 "description": "Optional hex color used to render the agent in the dashboard. Omit if unknown."
             },
-            "model_id": {
+            "model": {
                 "type": "string",
-                "format": "uuid",
-                "description": "Optional directly assigned model id for this agent. Omit if the model should be selected later."
+                "description": "Optional directly assigned model slug for this agent. Omit if the model should be selected later."
             }
         },
         "additionalProperties": false
@@ -130,7 +137,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_agents".to_string(),
-            description: "List agents so you can find an agent id before reading, updating, or deleting one."
+            description: "List agents so you can find an agent slug before reading, updating, or deleting one."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -141,13 +148,13 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_agent".to_string(),
-            description: "Get one agent's name, description, color, model_id, domains, abilities, scopes, MCP assignments, flags, and heartbeat by id."
+            description: "Get one agent's name, description, color, model, domains, abilities, scopes, MCP assignments, flags, and heartbeat by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["agent"],
                 "properties": {
-                    "id": agent_id_schema()
+                    "agent": agent_ref_schema()
                 },
                 "additionalProperties": false
             }),
@@ -155,13 +162,13 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_agent_prompt".to_string(),
-            description: "Get one agent's prompt_config, including system_prompt, developer_prompt, templates, and memory_profile, by id."
+            description: "Get one agent's prompt_config, including system_prompt, developer_prompt, templates, and memory_profile, by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["agent"],
                 "properties": {
-                    "id": agent_id_schema()
+                    "agent": agent_ref_schema()
                 },
                 "additionalProperties": false
             }),
@@ -169,7 +176,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_agent".to_string(),
-            description: "Create one agent with top-level name, description, color, and model_id. Agent platform scopes are managed outside this MCP tool."
+            description: "Create one agent with top-level name, description, color, and model slug. Agent platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -181,7 +188,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                     },
                     "description": agent_create_data_schema()["properties"]["description"].clone(),
                     "color": agent_create_data_schema()["properties"]["color"].clone(),
-                    "model_id": agent_create_data_schema()["properties"]["model_id"].clone()
+                    "model": agent_create_data_schema()["properties"]["model"].clone()
                 },
                 "additionalProperties": false
             }),
@@ -189,17 +196,19 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_agent".to_string(),
-            description: "Update one agent's top-level fields by id: name, description, color, or model_id; use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
+            description: "Update one agent by slug. Supports top-level name, description, color, model slug, and full replacement ability/domain assignments. Use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["agent"],
                 "properties": {
-                    "id": agent_id_schema(),
+                    "agent": agent_ref_schema(),
                     "name": agent_update_data_schema()["properties"]["name"].clone(),
                     "description": agent_update_data_schema()["properties"]["description"].clone(),
                     "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model_id": agent_update_data_schema()["properties"]["model_id"].clone()
+                    "model": agent_update_data_schema()["properties"]["model"].clone(),
+                    "abilities": agent_update_data_schema()["properties"]["abilities"].clone(),
+                    "domains": agent_update_data_schema()["properties"]["domains"].clone()
                 },
                 "additionalProperties": false
             }),
@@ -207,13 +216,13 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_agent_prompt".to_string(),
-            description: "Update one agent's prompt_config by id using prompt_config.system_prompt, prompt_config.developer_prompt, prompt_config.templates, or prompt_config.memory_profile."
+            description: "Update one agent's prompt_config by slug using prompt_config.system_prompt, prompt_config.developer_prompt, prompt_config.templates, or prompt_config.memory_profile."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["agent"],
                 "properties": {
-                    "id": agent_id_schema(),
+                    "agent": agent_ref_schema(),
                     "prompt_config": prompt_config_schema()
                 },
                 "additionalProperties": false
@@ -222,13 +231,13 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_agent".to_string(),
-            description: "Delete one agent by id when you want it removed from the manifest."
+            description: "Delete one agent by slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["id"],
+                "required": ["agent"],
                 "properties": {
-                    "id": agent_id_schema()
+                    "agent": agent_ref_schema()
                 },
                 "additionalProperties": false
             }),
@@ -254,7 +263,7 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("create_agent should define properties");
 
-        for field in ["description", "color", "model_id"] {
+        for field in ["description", "color", "model"] {
             assert_eq!(properties[field]["type"], "string");
             assert!(
                 !properties[field]["description"]

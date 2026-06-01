@@ -18,6 +18,7 @@ use super::{
     apply_session_binding_memory_scope, gate, with_agent_step_tools, with_routine_step_max_turns,
 };
 use crate::AgentBuilder;
+use crate::Slug;
 use crate::agents::runner::types::TurnOutput;
 use crate::input::{AgentRun, ChatInput, CouncilSubtaskInput, ProjectLocation};
 use crate::manifest::{CouncilDelegationStrategy, CouncilManifest, RoutineStepManifest};
@@ -54,14 +55,17 @@ pub(crate) async fn execute_council<P>(
 where
     P: ProviderRuntime,
 {
-    let council_id = step.council_id.context("Council step missing council_id")?;
+    let council_slug = step
+        .council
+        .as_ref()
+        .context("Council step missing council")?;
     let manifest = provider.manifest_snapshot();
 
     let council = manifest
         .councils
         .iter()
-        .find(|c| c.id == council_id)
-        .with_context(|| format!("Council {council_id} not found in manifest"))?
+        .find(|c| Slug::derive(&c.name) == *council_slug)
+        .with_context(|| format!("Council {council_slug} not found in manifest"))?
         .clone();
 
     match council.delegation_strategy {
@@ -85,7 +89,7 @@ where
 
 struct StreamedTaskParams<'a, P> {
     provider: &'a P,
-    agent_id: Uuid,
+    agent: Slug,
     state: &'a RoutineState,
     step: &'a RoutineStepManifest,
     task: AgentRun,
@@ -99,7 +103,7 @@ where
 {
     let StreamedTaskParams {
         provider,
-        agent_id,
+        agent,
         state,
         step,
         task,
@@ -108,7 +112,7 @@ where
     } = params;
 
     let builder = apply_session_binding_memory_scope(
-        provider.build_agent_by_id(agent_id).await?,
+        provider.agent(&agent).await?,
         state.input.session_binding.as_ref(),
     );
     let builder = scope_tools_to_work_dir(builder, state);
@@ -119,7 +123,7 @@ where
     gate::execute_with_pass_verdict(
         &runner,
         task,
-        state.input.project_id,
+        state.input.project.clone(),
         step.id,
         step_run_id,
         events_tx,
@@ -127,12 +131,12 @@ where
     .await
 }
 
-fn member_agent_ids(council: &CouncilManifest) -> Result<Vec<Uuid>> {
-    let ids: Vec<Uuid> = council.members.iter().map(|m| m.agent_id).collect();
-    if ids.is_empty() {
+fn member_agents(council: &CouncilManifest) -> Result<Vec<Slug>> {
+    let agents: Vec<Slug> = council.members.iter().map(|m| m.agent.clone()).collect();
+    if agents.is_empty() {
         bail!("Council '{}' has no members configured", council.name);
     }
-    Ok(ids)
+    Ok(agents)
 }
 
 async fn run_member_tasks<P>(
@@ -140,7 +144,7 @@ async fn run_member_tasks<P>(
     step: &RoutineStepManifest,
     step_run_id: Uuid,
     state: &RoutineState,
-    members: &[(Uuid, String)],
+    members: &[(Slug, String)],
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<Vec<StepResult>>
 where
@@ -148,10 +152,10 @@ where
 {
     let mut member_results = Vec::new();
 
-    for (i, (agent_id, task_text)) in members.iter().enumerate() {
+    for (i, (agent, task_text)) in members.iter().enumerate() {
         debug!(
             member_index = i,
-            agent_id = %agent_id,
+            agent = %agent,
             task = %task_text,
             "Executing council member task"
         );
@@ -162,7 +166,7 @@ where
                     parent_task: state.initial_input.clone(),
                     subtask_description: task_text.clone(),
                     subtask_index: i,
-                    project_id: state.input.project_id,
+                    project: state.input.project.clone(),
                 }),
                 execution: Default::default(),
             },
@@ -171,7 +175,7 @@ where
 
         match run_streamed_task(StreamedTaskParams {
             provider,
-            agent_id: *agent_id,
+            agent: agent.clone(),
             state,
             step,
             task,
@@ -181,6 +185,7 @@ where
         .await
         {
             Ok(output) => member_results.push(StepResult {
+                task_id: output.task_id.or(state.input.task_id),
                 passed: gate::resolve_pass_verdict(&output.messages)?.passed,
                 output: output.text,
                 step_name: format!("member-{}", i + 1),
@@ -254,14 +259,14 @@ where
 
     let aggregate_result = run_streamed_task(StreamedTaskParams {
         provider,
-        agent_id: council.leader_agent_id,
+        agent: council.leader_agent.clone(),
         state,
         step,
         task: attach_location(
             AgentRun::chat(ChatInput {
                 message: prompt,
                 history: Vec::new(),
-                project_id: Some(state.input.project_id),
+                project: state.input.project.clone(),
             }),
             state,
         ),
@@ -281,6 +286,7 @@ where
     let output = gate::pass_verdict_display_output(&verdict, &aggregate_result.text);
 
     Ok(StepResult {
+        task_id: aggregate_result.task_id.or(state.input.task_id),
         passed: verdict.passed,
         output,
         data: serde_json::json!({
@@ -319,25 +325,25 @@ async fn execute_dynamic<P>(
 where
     P: ProviderRuntime,
 {
-    let leader_agent_id = council.leader_agent_id;
+    let leader_agent = council.leader_agent.clone();
 
     info!(
         step_name = %step.name,
-        leader = %leader_agent_id,
+        leader = %leader_agent,
         strategy = "dynamic",
         "Starting dynamic council execution"
     );
 
     let output = run_streamed_task(StreamedTaskParams {
         provider,
-        agent_id: leader_agent_id,
+        agent: leader_agent,
         state,
         step,
         task: attach_location(
             AgentRun::chat(ChatInput {
                 message: state.initial_input.clone(),
                 history: Vec::new(),
-                project_id: Some(state.input.project_id),
+                project: state.input.project.clone(),
             }),
             state,
         ),
@@ -360,6 +366,7 @@ where
     });
 
     Ok(StepResult {
+        task_id: output.task_id.or(state.input.task_id),
         passed: verdict.passed,
         output: step_output,
         data,
@@ -384,13 +391,13 @@ async fn execute_decompose<P>(
 where
     P: ProviderRuntime,
 {
-    let leader_agent_id = council.leader_agent_id;
-    let member_agent_ids = member_agent_ids(council)?;
+    let leader_agent = council.leader_agent.clone();
+    let member_agents = member_agents(council)?;
 
     debug!(
         step_name = %step.name,
-        leader = %leader_agent_id,
-        members = member_agent_ids.len(),
+        leader = %leader_agent,
+        members = member_agents.len(),
         strategy = "decompose",
         "Starting decompose council execution"
     );
@@ -403,21 +410,21 @@ where
          1. [subtask description]\n\
          2. [subtask description]\n\
          ...",
-        member_agent_ids.len(),
-        member_agent_ids.len(),
+        member_agents.len(),
+        member_agents.len(),
         state.initial_input
     );
 
     let decompose_result = run_streamed_task(StreamedTaskParams {
         provider,
-        agent_id: leader_agent_id,
+        agent: leader_agent,
         state,
         step,
         task: attach_location(
             AgentRun::chat(ChatInput {
                 message: decompose_message,
                 history: Vec::new(),
-                project_id: Some(state.input.project_id),
+                project: state.input.project.clone(),
             }),
             state,
         ),
@@ -425,14 +432,14 @@ where
         events_tx,
     })
     .await?;
-    let subtasks = parse_subtasks(&decompose_result.text, member_agent_ids.len());
+    let subtasks = parse_subtasks(&decompose_result.text, member_agents.len());
 
     debug!(parsed_subtasks = subtasks.len(), "Leader decomposed task");
 
-    let members: Vec<(Uuid, String)> = member_agent_ids
+    let members: Vec<(Slug, String)> = member_agents
         .iter()
         .zip(subtasks.iter())
-        .map(|(agent_id, subtask)| (*agent_id, subtask.clone()))
+        .map(|(agent, subtask)| (agent.clone(), subtask.clone()))
         .collect();
     let member_results =
         run_member_tasks(provider, step, step_run_id, state, &members, events_tx).await?;
@@ -471,12 +478,12 @@ async fn execute_broadcast<P>(
 where
     P: ProviderRuntime,
 {
-    let member_agent_ids = member_agent_ids(council)?;
-    let members: Vec<(Uuid, String)> = member_agent_ids
+    let member_agents = member_agents(council)?;
+    let members: Vec<(Slug, String)> = member_agents
         .iter()
-        .map(|agent_id| {
+        .map(|agent| {
             (
-                *agent_id,
+                agent.clone(),
                 format!(
                     "Provide your independent assessment of the full task.\n\nTask: {}",
                     state.initial_input
@@ -512,10 +519,10 @@ async fn execute_round_robin<P>(
 where
     P: ProviderRuntime,
 {
-    let member_agent_ids = member_agent_ids(council)?;
+    let member_agents = member_agents(council)?;
     let mut running_context = String::new();
     let mut members = Vec::new();
-    for (index, agent_id) in member_agent_ids.iter().enumerate() {
+    for (index, agent) in member_agents.iter().enumerate() {
         let task = if running_context.is_empty() {
             format!(
                 "You are contributor {} in a round-robin council. Provide the first contribution toward this task.\n\nTask: {}",
@@ -530,7 +537,7 @@ where
                 running_context
             )
         };
-        let single_member = vec![(*agent_id, task)];
+        let single_member = vec![(agent.clone(), task)];
         let result = run_member_tasks(
             provider,
             step,
@@ -580,12 +587,12 @@ async fn execute_vote<P>(
 where
     P: ProviderRuntime,
 {
-    let member_agent_ids = member_agent_ids(council)?;
-    let members: Vec<(Uuid, String)> = member_agent_ids
+    let member_agents = member_agents(council)?;
+    let members: Vec<(Slug, String)> = member_agents
         .iter()
-        .map(|agent_id| {
+        .map(|agent| {
             (
-                *agent_id,
+                agent.clone(),
                 format!(
                     "Review the task and cast your vote with a recommendation. State your preferred outcome, whether you believe the task should pass or fail, and your reasoning.\n\nTask: {}",
                     state.initial_input

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::error::ApiClientError;
 use super::types::*;
-use crate::manifest::*;
+use nenjo::manifest::*;
 
 /// Result alias for client operations.
 pub type Result<T> = std::result::Result<T, ApiClientError>;
@@ -60,23 +60,23 @@ fn merge_json_object(
 ///
 /// Every request automatically includes the `X-API-Key` header.
 #[derive(Clone)]
-pub struct NenjoClient {
+pub struct ApiClient {
     http: Client,
     base_url: String,
     api_key: String,
     payload_codec: Arc<dyn PayloadCodec>,
 }
 
-impl std::fmt::Debug for NenjoClient {
+impl std::fmt::Debug for ApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NenjoClient")
+        f.debug_struct("ApiClient")
             .field("base_url", &self.base_url)
             .field("payload_codec", &"<configured>")
             .finish_non_exhaustive()
     }
 }
 
-impl NenjoClient {
+impl ApiClient {
     /// Create a new client pointing at the given backend URL.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         let http = Client::builder()
@@ -336,28 +336,28 @@ impl NenjoClient {
         }
     }
 
-    pub async fn list_knowledge_items(&self, pack_id: Uuid) -> Result<Vec<KnowledgeItemSyncMeta>> {
-        let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack_id);
+    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocSyncMeta>> {
+        let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let items: Vec<KnowledgeItemSyncMeta> = resp.json().await?;
-                debug!(pack_id = %pack_id, count = items.len(), "Listed knowledge items");
-                Ok(items)
+                let docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                debug!(pack = %pack, count = docs.len(), "Listed knowledge documents");
+                Ok(docs)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    pub async fn get_knowledge_item_content(
+    pub async fn get_knowledge_doc_content(
         &self,
-        pack_id: Uuid,
-        item_id: Uuid,
-    ) -> Result<KnowledgeItemSyncContent> {
+        pack: &str,
+        doc: &str,
+    ) -> Result<KnowledgeDocSyncContent> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/content",
-            self.base_url, pack_id, item_id
+            self.base_url, pack, doc
         );
         let resp = self.get(&url).await?;
 
@@ -365,56 +365,32 @@ impl NenjoClient {
             StatusCode::OK => {
                 let content = resp.json().await.map_err(ApiClientError::Http)?;
                 let content = self.decode_document_content(content).await?;
-                debug!(pack_id = %pack_id, item_id = %item_id, "Fetched knowledge item content");
+                debug!(pack = %pack, doc = %doc, "Fetched knowledge document content");
                 Ok(content)
             }
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    pub async fn list_knowledge_item_edges(
+    pub async fn list_knowledge_doc_edges(
         &self,
-        pack_id: Uuid,
-        item_id: Uuid,
-    ) -> Result<Vec<KnowledgeItemSyncEdge>> {
+        pack: &str,
+        doc: &str,
+    ) -> Result<Vec<KnowledgeDocSyncEdge>> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/edges",
-            self.base_url, pack_id, item_id
+            self.base_url, pack, doc
         );
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let edges: Vec<KnowledgeItemSyncEdge> = resp.json().await?;
-                debug!(pack_id = %pack_id, item_id = %item_id, count = edges.len(), "Listed knowledge item edges");
+                let edges: Vec<KnowledgeDocSyncEdge> = resp.json().await?;
+                debug!(pack = %pack, doc = %doc, count = edges.len(), "Listed knowledge document edges");
                 Ok(edges)
             }
             status => Err(self.api_error(status, resp).await),
         }
-    }
-
-    #[deprecated(note = "Use workspace knowledge APIs")]
-    pub async fn list_project_documents(&self, project_id: Uuid) -> Result<Vec<DocumentSyncMeta>> {
-        let _ = project_id;
-        self.list_knowledge_packs().await.map(|_| Vec::new())
-    }
-
-    #[deprecated(note = "Use get_knowledge_item_content")]
-    pub async fn get_document_content(
-        &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<DocumentSyncContent> {
-        self.get_knowledge_item_content(project_id, doc_id).await
-    }
-
-    #[deprecated(note = "Use list_knowledge_item_edges")]
-    pub async fn list_project_document_edges(
-        &self,
-        project_id: Uuid,
-        doc_id: Uuid,
-    ) -> Result<Vec<DocumentSyncEdge>> {
-        self.list_knowledge_item_edges(project_id, doc_id).await
     }
 
     // -----------------------------------------------------------------------
@@ -645,19 +621,19 @@ mod tests {
 
     #[test]
     fn test_client_creation() {
-        let client = NenjoClient::new("http://localhost:8080", "test-key");
+        let client = ApiClient::new("http://localhost:8080", "test-key");
         assert_eq!(client.base_url(), "http://localhost:8080");
     }
 
     #[test]
     fn test_trailing_slash_stripped() {
-        let client = NenjoClient::new("http://localhost:8080/", "key");
+        let client = ApiClient::new("http://localhost:8080/", "key");
         assert_eq!(client.base_url(), "http://localhost:8080");
     }
 
     #[test]
     fn test_auth_headers() {
-        let client = NenjoClient::new("http://localhost", "my-secret");
+        let client = ApiClient::new("http://localhost", "my-secret");
         let headers = client.auth_headers();
         assert_eq!(
             headers.get("X-API-Key").unwrap().to_str().unwrap(),
@@ -669,7 +645,7 @@ mod tests {
     async fn decode_project_settings_merges_decrypted_payload() {
         let id = Uuid::new_v4();
         let client =
-            NenjoClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
+            ApiClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
                 plaintext: Some(
                     serde_json::json!({
                         "context": "Use this private context.",

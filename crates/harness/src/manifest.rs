@@ -42,27 +42,27 @@ where
             .map(|entry| {
                 (
                     *entry.key(),
-                    entry.agent_id,
-                    entry.project_id,
+                    entry.agent.clone(),
+                    entry.project.clone(),
                     entry.domain_command.clone(),
                 )
             })
             .collect();
 
-        for (session_id, agent_id, project_id, domain_command) in active_sessions {
+        for (session_id, agent, project, domain_command) in active_sessions {
             match self
                 .harness
-                .rebuild_domain_session(session_id, agent_id, project_id, &domain_command)
+                .rebuild_domain_session(session_id, agent.clone(), project, &domain_command)
                 .await
             {
                 Ok(session) => {
                     domains.insert(session_id, session);
-                    info!(%session_id, %agent_id, domain = %domain_command, "Refreshed active domain session after manifest update");
+                    info!(%session_id, %agent, domain = %domain_command, "Refreshed active domain session after manifest update");
                 }
                 Err(error) => {
                     warn!(
                         %session_id,
-                        %agent_id,
+                        %agent,
                         domain = %domain_command,
                         error = %error,
                         "Failed to refresh active domain session after manifest update"

@@ -53,9 +53,6 @@ pub use shell::ShellTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
-// Re-export per-ability tool type from nenjo SDK.
-pub use nenjo::agents::abilities::AssignedAbilityTool;
-
 mod factory;
 #[cfg(test)]
 mod factory_tests;

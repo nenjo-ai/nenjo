@@ -1962,7 +1962,6 @@ dependencies = [
  "nenjo-tool-api",
  "nenjo-xml",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -2090,6 +2089,7 @@ dependencies = [
  "nenjo-xml",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -2133,6 +2133,7 @@ name = "nenjo-packages"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "reqwest",
  "serde",
  "serde_json",
@@ -2149,6 +2150,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "derive_builder",
  "nenjo",
  "nenjo-events",
  "nenjo-knowledge",
@@ -2156,7 +2158,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2173,6 +2177,7 @@ dependencies = [
  "nenjo-crypto-auth",
  "nenjo-eventbus",
  "nenjo-events",
+ "nenjo-platform",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -2223,7 +2228,6 @@ dependencies = [
  "directories",
  "dotenvy",
  "ed25519-dalek",
- "flate2",
  "futures-util",
  "glob",
  "hkdf",
@@ -2251,7 +2255,6 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "shellexpand",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

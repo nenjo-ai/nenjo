@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nenjo::memory::MemoryScope;
-use nenjo::{CronInput, RoutineRun};
+use nenjo::{CronInput, RoutineRun, Slug};
 use nenjo_events::{CronScheduleStatus, Response};
 use nenjo_sessions::{
     CronScheduleState, ExecutionPhase, RunCompletion, ScheduleState, SchedulerRuntimeSnapshot,
@@ -20,6 +20,7 @@ use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::{project_slug, routine_event_to_response};
 use crate::handlers::ResponseSender;
+use crate::resource_resolver::PlatformResourceResolver;
 
 #[derive(Clone)]
 pub struct CronCommandContext<S> {
@@ -58,15 +59,24 @@ async fn upsert_cron_session<P, SessionRt>(
         next_run_at,
         last_completion,
     } = params;
+    let manifest = harness.provider().manifest_snapshot();
+    let resolver = PlatformResourceResolver::new(&manifest);
+    let project = project_id
+        .and_then(|project_id| resolver.project(project_id).ok().flatten())
+        .map(|slug| slug.to_string());
+    let routine = resolver
+        .routine(routine_id)
+        .ok()
+        .map(|slug| slug.to_string());
     if let Err(error) = harness
         .sessions()
         .upsert_scheduler(SchedulerSessionUpsert {
             session_id: routine_id,
             kind: SessionKind::CronSchedule,
             status,
-            project_id,
-            agent_id: None,
-            routine_id: Some(routine_id),
+            project,
+            agent: None,
+            routine,
             worker_id: worker_id.to_string(),
             memory_namespace: memory_namespace.map(ToString::to_string),
             scheduler: ScheduleState::Cron(CronScheduleState {
@@ -102,8 +112,11 @@ where
     let mut agent_names: BTreeSet<String> = BTreeSet::new();
 
     for step in &routine.steps {
-        if let Some(agent_id) = step.agent_id
-            && let Some(agent) = manifest.agents.iter().find(|agent| agent.id == agent_id)
+        if let Some(agent_slug) = &step.agent
+            && let Some(agent) = manifest
+                .agents
+                .iter()
+                .find(|agent| nenjo::Slug::derive(&agent.name) == *agent_slug)
         {
             agent_names.insert(agent.name.clone());
         }
@@ -123,7 +136,7 @@ where
 
 fn emit_cron_heartbeat<S>(
     response_sink: &S,
-    routine_id: Uuid,
+    routine: &str,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_fire_at: chrono::DateTime<chrono::Utc>,
 ) where
@@ -131,7 +144,7 @@ fn emit_cron_heartbeat<S>(
 {
     let _ = response_sink.send(Response::CronHeartbeat {
         active_schedules: vec![CronScheduleStatus {
-            routine_id: routine_id.to_string(),
+            routine: routine.to_string(),
             last_run_at: last_run_at.map(|ts| ts.to_rfc3339()),
             next_fire_at: Some(next_fire_at.to_rfc3339()),
         }],
@@ -152,8 +165,8 @@ where
     async fn handle_cron_enable(
         &self,
         ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-        project_id: Option<Uuid>,
+        routine: &str,
+        project: Option<&str>,
         schedule: &str,
         timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -162,18 +175,14 @@ where
         S: Clone + 'static;
 
     /// Disable an active cron schedule.
-    async fn handle_cron_disable(
-        &self,
-        ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-    ) -> Result<()>;
+    async fn handle_cron_disable(&self, ctx: &CronCommandContext<S>, routine: &str) -> Result<()>;
 
     /// Trigger a cron routine immediately outside its regular schedule.
     async fn handle_cron_trigger(
         &self,
         ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-        project_id: Option<Uuid>,
+        routine: &str,
+        project: Option<&str>,
     ) -> Result<()>;
 }
 
@@ -188,8 +197,8 @@ where
     async fn handle_cron_enable(
         &self,
         ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-        project_id: Option<Uuid>,
+        routine: &str,
+        project: Option<&str>,
         schedule: &str,
         timezone: Option<&str>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -197,6 +206,16 @@ where
     where
         S: Clone + 'static,
     {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let routine_slug = Slug::parse(routine)?;
+        let routine_id = resolver.routine_id(&routine_slug)?;
+        let project_id = project
+            .map(Slug::parse)
+            .transpose()?
+            .as_ref()
+            .map(|slug| resolver.project_id(slug))
+            .transpose()?;
         info!(%routine_id, %schedule, timezone, "Enabling cron schedule");
 
         let cron_schedule = nenjo::routines::types::parse_schedule_in_timezone(schedule, timezone)
@@ -222,9 +241,15 @@ where
             },
         );
 
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let project = project_id.and_then(|project_id| resolver.project(project_id).ok().flatten());
+        let project_slug_for_response = project.as_ref().map(ToString::to_string);
+        let routine_slug_for_response = routine_slug.to_string();
+
         let task = RoutineRun::cron(CronInput {
             task: None,
-            project_id,
+            project,
             schedule: cron_schedule.clone(),
             start_at: None,
             timeout: Duration::from_secs(24 * 3600),
@@ -270,9 +295,14 @@ where
             let mut last_run_at: Option<chrono::DateTime<chrono::Utc>> = None;
             let mut next_run_at = initial_next_run_at;
 
-            emit_cron_heartbeat(&response_sink, routine_id, None, next_run_at);
+            emit_cron_heartbeat(
+                &response_sink,
+                &routine_slug_for_response,
+                None,
+                next_run_at,
+            );
             let _ = response_sink.send(Response::CronScheduled {
-                routine_id,
+                routine: routine_slug_for_response.clone(),
                 next_run_at: Some(next_run_at.to_rfc3339()),
             });
 
@@ -287,7 +317,16 @@ where
                 }
 
                 let provider = provider_cell.load_full();
-                match provider.routine_by_id(routine_id) {
+                let manifest = provider.manifest_snapshot();
+                let resolver = PlatformResourceResolver::new(&manifest);
+                let routine_slug = match resolver.routine(routine_id) {
+                    Ok(slug) => slug,
+                    Err(error) => {
+                        error!(%routine_id, %error, "Routine manifest not found for cron schedule");
+                        break;
+                    }
+                };
+                match provider.routine(&routine_slug) {
                     Ok(runner) => match runner.run_stream(task.clone()).await {
                         Ok(mut handle) => {
                             let mut current_cycle_id: Option<Uuid> = None;
@@ -323,15 +362,15 @@ where
 
                                                         let _ = response_sink.send(Response::ExecutionStarted {
                                                             id: cycle_id,
-                                                            project_id: opt_project_id,
-                                                            routine_id: Some(routine_id),
+                                                            project: project_slug_for_response.clone(),
+                                                            routine: Some(routine_slug_for_response.clone()),
                                                             routine_name: Some(routine_name.clone()),
-                                                            agent_id: None,
+                                                            agent: None,
                                                             config: serde_json::json!({
                                                                 "trigger": "cron",
                                                                 "cycle": cycle,
                                                                 "schedule": schedule_owned,
-                                                                "routine_id": routine_id.to_string(),
+                                                                "routine": routine_slug_for_response.clone(),
                                                             }),
                                                         });
                                                     }
@@ -357,9 +396,9 @@ where
                                                                 total_input_tokens: *total_input_tokens,
                                                                 total_output_tokens: *total_output_tokens,
                                                                 execution_type: Some(nenjo_events::ExecutionType::Cron),
-                                                                routine_id: Some(routine_id),
+                                                                routine: Some(routine_slug_for_response.clone()),
                                                                 routine_name: Some(routine_name.clone()),
-                                                                agent_id: None,
+                                                                agent: None,
                                                             });
                                                             upsert_cron_session(
                                                                 &harness,
@@ -425,9 +464,9 @@ where
                                                 total_input_tokens: 0,
                                                 total_output_tokens: 0,
                                                 execution_type: Some(nenjo_events::ExecutionType::Cron),
-                                                routine_id: Some(routine_id),
+                                                routine: Some(routine_slug_for_response.clone()),
                                                 routine_name: Some(routine_name.clone()),
-                                                agent_id: None,
+                                                agent: None,
                                             });
                                         }
                                         break;
@@ -453,7 +492,12 @@ where
                 }
 
                 next_run_at = cron_schedule.next_fire_at();
-                emit_cron_heartbeat(&response_sink, routine_id, last_run_at, next_run_at);
+                emit_cron_heartbeat(
+                    &response_sink,
+                    &routine_slug_for_response,
+                    last_run_at,
+                    next_run_at,
+                );
                 upsert_cron_session(
                     &harness,
                     &worker_id,
@@ -484,14 +528,15 @@ where
     }
 
     /// Disable a cron schedule by routine id.
-    async fn handle_cron_disable(
-        &self,
-        ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-    ) -> Result<()> {
+    async fn handle_cron_disable(&self, ctx: &CronCommandContext<S>, routine: &str) -> Result<()> {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let routine_id = resolver.routine_id(&Slug::parse(routine)?)?;
         if let Some((_, exec)) = self.executions().remove(&routine_id) {
             exec.cancel.cancel();
-            let _ = ctx.response_sink.send(Response::CronStopped { routine_id });
+            let _ = ctx.response_sink.send(Response::CronStopped {
+                routine: routine.to_string(),
+            });
             upsert_cron_session(
                 self,
                 &ctx.worker_id,
@@ -517,9 +562,18 @@ where
     async fn handle_cron_trigger(
         &self,
         ctx: &CronCommandContext<S>,
-        routine_id: Uuid,
-        project_id: Option<Uuid>,
+        routine: &str,
+        project: Option<&str>,
     ) -> Result<()> {
+        let manifest = self.provider().manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let routine_id = resolver.routine_id(&Slug::parse(routine)?)?;
+        let project_id = project
+            .map(Slug::parse)
+            .transpose()?
+            .as_ref()
+            .map(|slug| resolver.project_id(slug))
+            .transpose()?;
         info!(%routine_id, "Manual cron trigger");
 
         let project_id = project_id.unwrap_or(Uuid::nil());
@@ -530,6 +584,9 @@ where
         };
 
         let provider = self.provider();
+        let routine_slug = Slug::parse(routine)?;
+        let routine_slug_for_response = routine_slug.to_string();
+        let project_slug_for_response = project.map(ToOwned::to_owned);
         let routine_name = provider
             .manifest_snapshot()
             .routines
@@ -541,25 +598,35 @@ where
         let execution_id = Uuid::new_v4();
         let _ = ctx.response_sink.send(Response::ExecutionStarted {
             id: execution_id,
-            project_id: opt_project_id,
-            routine_id: Some(routine_id),
+            project: project_slug_for_response.clone(),
+            routine: Some(routine_slug_for_response.clone()),
             routine_name: Some(routine_name.clone()),
-            agent_id: None,
+            agent: None,
             config: serde_json::json!({
                 "trigger": "cron",
                 "manual": true,
+                "routine": routine_slug_for_response,
             }),
         });
 
+        let manifest = provider.manifest_snapshot();
+        let resolver = PlatformResourceResolver::new(&manifest);
+        let project =
+            opt_project_id.and_then(|project_id| resolver.project(project_id).ok().flatten());
+
         let task = RoutineRun::cron(CronInput {
             task: None,
-            project_id: opt_project_id,
+            project,
             schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_secs(0)),
             start_at: None,
             timeout: Duration::from_secs(0),
         });
 
-        let result = async { provider.routine_by_id(routine_id)?.run(task).await }.await;
+        let result = async {
+            let routine = resolver.routine(routine_id)?;
+            provider.routine(&routine)?.run(task).await
+        }
+        .await;
 
         let (success, error, total_input_tokens, total_output_tokens) = match &result {
             Ok(result) => (
@@ -582,9 +649,9 @@ where
             total_input_tokens,
             total_output_tokens,
             execution_type: Some(nenjo_events::ExecutionType::Cron),
-            routine_id: Some(routine_id),
+            routine: Some(routine_slug.to_string()),
             routine_name: Some(routine_name),
-            agent_id: None,
+            agent: None,
         });
 
         info!(%routine_id, %execution_id, success, "Manual trigger complete");

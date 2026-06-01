@@ -8,9 +8,11 @@ use nenjo_sessions::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use nenjo::Slug;
 use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::agent_name;
+use crate::resource_resolver::PlatformResourceResolver;
 
 #[derive(Clone)]
 pub struct DomainCommandContext {
@@ -29,7 +31,7 @@ pub(crate) trait WorkerDomainHarnessExt {
     async fn handle_domain_exit(
         &self,
         ctx: &DomainCommandContext,
-        agent_id: Uuid,
+        agent: &str,
         domain_session_id: Uuid,
         chat_session_id: Option<Uuid>,
     ) -> Result<()>;
@@ -45,12 +47,14 @@ where
     async fn handle_domain_exit(
         &self,
         ctx: &DomainCommandContext,
-        agent_id: Uuid,
+        agent: &str,
         domain_session_id: Uuid,
         chat_session_id: Option<Uuid>,
     ) -> Result<()> {
         let provider = self.provider();
         let manifest = provider.manifest_snapshot();
+        let agent_slug = Slug::parse(agent)?;
+        let agent_id = PlatformResourceResolver::new(&manifest).agent_id(&agent_slug)?;
         let aname = agent_name(&manifest, agent_id);
 
         let session = self.domains().remove(&domain_session_id).map(|(_, v)| v);

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::api_client::NenjoClient;
+use crate::api_client::ApiClient;
 use crate::assembly::{WorkerAssembly, WorkerHarness, WorkerProvider};
 use crate::config::{Config, SessionConfig};
 use crate::crypto::WorkerAuthProvider;
@@ -74,7 +74,7 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 /// Responses are sent via `response_tx` (never touch the bus directly).
 pub struct CommandContext {
     pub harness: WorkerHarness,
-    pub api: Arc<NenjoClient>,
+    pub api: Arc<ApiClient>,
     pub actor_user_id: Uuid,
     pub response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
@@ -93,7 +93,7 @@ pub struct CommandContext {
 pub struct WorkerRuntime {
     harness: WorkerHarness,
     config: Config,
-    api: Arc<NenjoClient>,
+    api: Arc<ApiClient>,
     auth_provider: Arc<WorkerAuthProvider>,
     external_mcp: Arc<ExternalMcpPool>,
     worker_name: String,
@@ -110,27 +110,38 @@ struct RuntimeSessionRecoveryHandler {
 #[async_trait::async_trait]
 impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
     async fn restore_domain_session(&self, request: DomainSessionRecovery) -> Result<()> {
+        let agent = nenjo::Slug::parse(&request.agent)?;
+        let project = request
+            .project
+            .as_deref()
+            .map(nenjo::Slug::parse)
+            .transpose()?;
         let session = self
             .ctx
             .harness
-            .rebuild_domain_session(
-                request.session_id,
-                request.agent_id,
-                request.project_id,
-                &request.domain_command,
-            )
+            .rebuild_domain_session(request.session_id, agent, project, &request.domain_command)
             .await?;
         self.ctx.domains.insert(request.session_id, session);
         Ok(())
     }
 
     async fn restore_cron_session(&self, request: CronSessionRecovery) -> Result<()> {
+        let Some(routine) = request.routine.as_deref() else {
+            return Ok(());
+        };
+        let routine = nenjo::Slug::parse(routine)?;
+        let project = request
+            .project
+            .as_deref()
+            .map(nenjo::Slug::parse)
+            .transpose()?;
+        let project = project.as_ref().map(|slug| slug.as_str());
         self.ctx
             .harness
             .handle_cron_enable(
                 &self.ctx.cron_context(),
-                request.session_id,
-                request.project_id,
+                routine.as_str(),
+                project,
                 &request.schedule_expr,
                 request.timezone.as_deref(),
                 request.next_run_at,
@@ -140,12 +151,20 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
     }
 
     async fn restore_heartbeat_session(&self, request: HeartbeatSessionRecovery) -> Result<()> {
+        let agent = nenjo::Slug::parse(&request.agent)?;
+        let manifest = self.ctx.harness.provider().manifest_snapshot();
+        let agent_id = manifest
+            .agents
+            .iter()
+            .find(|item| nenjo::Slug::derive(&item.name) == agent)
+            .map(|item| item.id)
+            .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
         self.ctx
             .harness
             .restore_agent_heartbeat(
                 &self.ctx.heartbeat_context(),
                 HeartbeatRestoreRequest {
-                    agent_id: request.session_id,
+                    agent_id,
                     interval: request.interval,
                     timezone: request.timezone,
                     start_at: request.next_run_at,
@@ -220,7 +239,7 @@ impl WorkerRuntime {
         self.harness.provider()
     }
 
-    pub fn api(&self) -> Arc<NenjoClient> {
+    pub fn api(&self) -> Arc<ApiClient> {
         self.api.clone()
     }
 
@@ -315,9 +334,9 @@ mod tests {
     use crate::config::Config;
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
-    use crate::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
+    use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
     use nenjo::LocalManifestStore;
-    use nenjo::client::NenjoClient;
+    use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -327,6 +346,7 @@ mod tests {
     async fn worker_runtime_constructs_from_assembly() {
         let temp = tempdir().unwrap();
         let config = Config {
+            config_dir: temp.path().join("config"),
             workspace_dir: temp.path().join("workspace"),
             state_dir: temp.path().join("state"),
             manifests_dir: temp.path().join("manifests"),
@@ -336,7 +356,7 @@ mod tests {
         };
         let auth_provider =
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
-        let api = NenjoClient::new(config.backend_api_url(), &config.api_key);
+        let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let provider = build_provider(
             &config,
@@ -347,11 +367,8 @@ mod tests {
         .await
         .unwrap();
         let session_stores = WorkerSessionStores::new(&config.state_dir);
-        let session_runtime = WorkerSessionRuntime::with_coordinator(
-            session_stores.clone(),
-            LocalSessionCoordinator::new(),
-            "embedded-worker",
-        );
+        let session_runtime =
+            WorkerSessionRuntime::with_host(session_stores.clone(), "embedded-worker");
         let harness = nenjo_harness::Harness::builder(provider)
             .with_session_runtime(session_runtime.clone())
             .build();

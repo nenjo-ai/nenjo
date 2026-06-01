@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use nenjo::Slug;
 use nenjo::manifest::{Manifest, ProjectManifest};
 use nenjo_models::{ChatRequest, ChatResponse, TokenUsage};
 use nenjo_sessions::{
@@ -12,10 +13,10 @@ use serde_json::json;
 use tempfile::tempdir;
 use uuid::Uuid;
 
-use nenjo_worker::api_client::{DocumentSyncMeta, NenjoClient};
+use nenjo_worker::api_client::{ApiClient, DocumentSyncMeta};
 use nenjo_worker::bootstrap::WorkerManifestCache;
 use nenjo_worker::handlers::manifest::ManifestStore;
-use nenjo_worker::sessions::{LocalSessionCoordinator, WorkerSessionRuntime, WorkerSessionStores};
+use nenjo_worker::sessions::{WorkerSessionRuntime, WorkerSessionStores};
 
 struct TestModelProvider;
 
@@ -64,7 +65,7 @@ fn manifest_with_project(project_id: Uuid, slug: &str) -> Manifest {
         projects: vec![ProjectManifest {
             id: project_id,
             name: "Alpha Project".to_string(),
-            slug: slug.to_string(),
+            slug: Slug::derive(slug),
             description: None,
             settings: json!({}),
         }],
@@ -74,22 +75,17 @@ fn manifest_with_project(project_id: Uuid, slug: &str) -> Manifest {
 
 fn document_meta(document_id: Uuid) -> DocumentSyncMeta {
     DocumentSyncMeta {
-        id: document_id,
-        pack_id: Uuid::from_u128(7),
-        pack_slug: Some("alpha".to_string()),
+        id: Some(document_id),
+        pack_id: Some(Uuid::from_u128(7)),
+        pack_slug: "alpha".to_string(),
         slug: "alpha".to_string(),
         filename: "spec.md".to_string(),
         path: Some("domain".to_string()),
         title: Some("Spec".to_string()),
         kind: Some("note".to_string()),
-        authority: Some("project".to_string()),
         summary: Some("Project spec".to_string()),
-        status: Some("active".to_string()),
         tags: vec!["planning".to_string()],
-        aliases: vec![],
-        keywords: vec![],
         content_type: "text/markdown".to_string(),
-        size_bytes: 11,
         updated_at: Utc::now().to_rfc3339(),
     }
 }
@@ -106,7 +102,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     let provider = provider_with_manifest(manifest.clone()).await;
     let harness = nenjo_harness::Harness::builder(provider).build();
 
-    let api = NenjoClient::new("http://127.0.0.1:9", "test-api-key");
+    let api = ApiClient::new("http://127.0.0.1:9", "test-api-key");
     let cache = WorkerManifestCache {
         manifests_dir: manifests_dir.clone(),
         workspace_dir: workspace_dir.clone(),
@@ -126,10 +122,14 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     assert!(!state_dir.join("projects.json").exists());
 
     cache
-        .sync_document_metadata(&api, document_id, Some(&document_meta(document_id)))
+        .sync_document_metadata(
+            &api,
+            &Slug::derive("alpha"),
+            Some(&document_meta(document_id)),
+        )
         .await
         .expect("sync document metadata");
-    let pack_dir = config_dir.join("library").join("platform").join("alpha");
+    let pack_dir = config_dir.join("library").join("alpha");
     assert!(pack_dir.join("manifest.json").exists());
     assert!(
         !workspace_dir
@@ -154,12 +154,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     );
 
     cache
-        .write_document_content(
-            Uuid::from_u128(7),
-            Some("alpha"),
-            "domain/spec.md",
-            "hello world",
-        )
+        .write_document_content(&Slug::derive("alpha"), "domain/spec.md", "hello world")
         .expect("write document content");
     assert_eq!(
         std::fs::read_to_string(pack_dir.join("docs").join("domain").join("spec.md")).unwrap(),
@@ -167,7 +162,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     );
 
     cache
-        .remove_document(document_id, Some(&document_meta(document_id)))
+        .remove_document(&Slug::derive("alpha"), Some(&document_meta(document_id)))
         .await
         .expect("remove document");
     assert!(
@@ -186,15 +181,10 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
     let session_id = Uuid::new_v4();
     let turn_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
 
     let session_stores = WorkerSessionStores::new(&state_dir);
     let records = session_stores.records.clone();
-    let runtime = WorkerSessionRuntime::with_coordinator(
-        session_stores,
-        LocalSessionCoordinator::new(),
-        "worker-test",
-    );
+    let runtime = WorkerSessionRuntime::with_host(session_stores, "worker-test");
     let provider = provider_with_manifest(Manifest::default()).await;
     let harness = nenjo_harness::Harness::builder(provider)
         .with_session_runtime(runtime)
@@ -205,8 +195,8 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
         .upsert_chat(nenjo_sessions::ChatSessionUpsert {
             session_id,
             status: SessionStatus::Active,
-            project_id: Some(project_id),
-            agent_id,
+            project: Some("alpha".to_string()),
+            agent: "test_agent".to_string(),
             memory_namespace: Some("project_alpha_agent_test".to_string()),
             metadata: json!({"progress": "started"}),
         })

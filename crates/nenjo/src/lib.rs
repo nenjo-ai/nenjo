@@ -8,16 +8,15 @@
 //! ```ignore
 //! use nenjo::{AgentRun, ChatInput};
 //!
-//! let agent = provider.agent_by_name("my-coder").await?.build().await?;
+//! let agent = provider.agent("my-coder").await?.build().await?;
 //! let handle = agent
-//!     .run_stream(AgentRun::chat(ChatInput::new("Hello!").project_id(project_id)))
+//!     .run_stream(AgentRun::chat(ChatInput::new("Hello!").project("demo_project")))
 //!     .await?;
 //! let output = handle.output().await?;
 //! println!("{}", output.text);
 //! ```
 
 pub mod agents;
-pub mod client;
 pub mod config;
 pub mod context;
 pub mod input;
@@ -26,6 +25,7 @@ pub mod memory;
 pub mod provider;
 pub mod repo_manifest;
 pub mod routines;
+pub mod slug;
 pub mod tools;
 pub mod types;
 
@@ -46,9 +46,14 @@ pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,
     ProviderRuntime, RoutineRunner, ToolContext, ToolFactory, TypedModelProviderFactory,
 };
+pub use slug::{IntoSlug, Slug, SlugError};
+
+pub mod knowledge {
+    pub use nenjo_knowledge::*;
+}
 
 // Re-export the Tool API for custom tool implementations.
-pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolResult, ToolSecurity, ToolSpec};
+pub use tools::{Tool, ToolAutonomy, ToolCategory, ToolOrigin, ToolResult, ToolSecurity, ToolSpec};
 
 // Re-export the model provider trait for custom model implementations.
 pub use nenjo_models::ModelProvider;
@@ -58,9 +63,6 @@ pub use nenjo_events::StreamEvent;
 
 // Re-export the XML/template crate for downstream consumers.
 pub use nenjo_xml as xml;
-
-// Re-export the API client.
-pub use client::{ApiClientError, NenjoClient};
 
 // Re-export routine types.
 pub use routines::{RoutineEvent, RoutineExecutionHandle, RoutineInput, StepResult};

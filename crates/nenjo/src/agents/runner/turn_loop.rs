@@ -566,6 +566,7 @@ where
             }
 
             let output = TurnOutput {
+                task_id: None,
                 text: final_text,
                 input_tokens: total_input_tokens,
                 output_tokens: total_output_tokens,

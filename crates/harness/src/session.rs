@@ -1,16 +1,21 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nenjo_models::ChatMessage;
 use nenjo_sessions::{
     ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SchedulerSessionUpsert,
-    SessionCheckpoint, SessionCheckpointUpdate, SessionRecord, SessionRuntime, SessionRuntimeEvent,
-    SessionTranscriptAppend, SessionTranscriptChatMessage, SessionTranscriptEvent,
-    SessionTranscriptEventPayload, SessionTranscriptRecord, SessionTransition, TaskSessionUpsert,
-    TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
+    SessionCheckpoint, SessionCheckpointUpdate, SessionKind, SessionLeaseGrant,
+    SessionLeaseRequest, SessionOwnerKind, SessionRecord, SessionRefs, SessionRuntime,
+    SessionRuntimeEvent, SessionTranscriptAppend, SessionTranscriptChatMessage,
+    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord,
+    SessionTransition, SessionUpsert, SessionWriteOutcome, TaskSessionUpsert, TokenUsage,
+    TraceEvent, TracePhase, TranscriptQuery,
 };
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -22,8 +27,9 @@ const PREVIEW_CHAR_LIMIT: usize = 2_000;
 pub type SessionEventLocks = Arc<DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>;
 
 struct SessionEventBatch {
-    session_id: Uuid,
+    grant: SessionLeaseGrant,
     events: Vec<SessionRuntimeEvent>,
+    ack: Option<oneshot::Sender<std::result::Result<SessionWriteOutcome, String>>>,
 }
 
 /// Handle for the harness-owned session event writer task.
@@ -41,14 +47,25 @@ impl SessionEventWriter {
 
         tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
-                for event in batch.events {
-                    if let Err(error) = runtime.record(event).await {
-                        warn!(
-                            error = %error,
-                            session_id = %batch.session_id,
-                            "Failed to record session event"
-                        );
-                    }
+                let outcome = if batch.events.is_empty() {
+                    Ok(SessionWriteOutcome { applied: 0 })
+                } else {
+                    runtime
+                        .record_batch(&batch.grant, batch.events)
+                        .await
+                        .map_err(|error| error.to_string())
+                };
+
+                if let Err(error) = &outcome {
+                    warn!(
+                        error,
+                        session_id = %batch.grant.session_id,
+                        lease_token = %batch.grant.lease_token,
+                        "Failed to record session event batch"
+                    );
+                }
+                if let Some(ack) = batch.ack {
+                    let _ = ack.send(outcome);
                 }
             }
         });
@@ -56,14 +73,19 @@ impl SessionEventWriter {
         Self { tx }
     }
 
-    pub(crate) fn record_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
+    pub(crate) fn record_events(&self, grant: SessionLeaseGrant, events: Vec<SessionRuntimeEvent>) {
         if events.is_empty() {
             return;
         }
 
+        let session_id = grant.session_id;
         if self
             .tx
-            .send(SessionEventBatch { session_id, events })
+            .send(SessionEventBatch {
+                grant,
+                events,
+                ack: None,
+            })
             .is_err()
         {
             warn!(
@@ -71,6 +93,39 @@ impl SessionEventWriter {
                 "Failed to enqueue session events because the writer task stopped"
             );
         }
+    }
+
+    pub(crate) async fn record_events_and_wait(
+        &self,
+        grant: SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        let session_id = grant.session_id;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SessionEventBatch {
+                grant,
+                events,
+                ack: Some(ack_tx),
+            })
+            .is_err()
+        {
+            warn!(
+                session_id = %session_id,
+                "Failed to enqueue session events because the writer task stopped"
+            );
+            return Err(HarnessError::session_runtime(anyhow::anyhow!(
+                "session event writer stopped"
+            )));
+        }
+
+        ack_rx
+            .await
+            .map_err(|_| {
+                HarnessError::session_runtime(anyhow::anyhow!("session event writer stopped"))
+            })?
+            .map_err(|error| HarnessError::session_runtime(anyhow::anyhow!(error)))
     }
 }
 
@@ -106,11 +161,99 @@ where
         }
     }
 
-    pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
+    pub async fn acquire_lease(
+        &self,
+        session_id: Uuid,
+        worker_id: impl Into<String>,
+        owner_kind: SessionOwnerKind,
+    ) -> Result<SessionLeaseGrant> {
         self.runtime
-            .record(event)
+            .acquire_session_lease(SessionLeaseRequest {
+                session_id,
+                worker_id: worker_id.into(),
+                owner_kind,
+                ttl: Duration::from_secs(120),
+            })
             .await
             .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn release_lease(&self, grant: SessionLeaseGrant) -> Result<()> {
+        self.runtime
+            .release_session_lease(grant)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn renew_lease(&self, grant: &SessionLeaseGrant) -> Result<bool> {
+        self.runtime
+            .renew_session_lease(grant, Duration::from_secs(120))
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub fn spawn_lease_renewer(&self, grant: SessionLeaseGrant) -> CancellationToken
+    where
+        Runtime: 'static,
+    {
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let sessions = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                        match sessions.renew_lease(&grant).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                warn!(
+                                    session_id = %grant.session_id,
+                                    worker_id = %grant.worker_id,
+                                    lease_token = %grant.lease_token,
+                                    "Session lease renewal lost ownership"
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    session_id = %grant.session_id,
+                                    worker_id = %grant.worker_id,
+                                    lease_token = %grant.lease_token,
+                                    "Failed to renew session lease"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        cancel
+    }
+
+    pub async fn record_batch(
+        &self,
+        grant: &SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        self.runtime
+            .record_batch(grant, events)
+            .await
+            .map_err(HarnessError::session_runtime)
+    }
+
+    pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
+        let session_id = event.session_id();
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Chat)
+            .await?;
+        let result = self.record_batch(&grant, vec![event]).await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(())
     }
 
     pub async fn get(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
@@ -149,10 +292,17 @@ where
         &self,
         append: SessionTranscriptAppend,
     ) -> Result<Option<SessionTranscriptEvent>> {
-        self.runtime
-            .append_transcript(append)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = append.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Chat)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![SessionRuntimeEvent::TranscriptAppend(append)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(None)
     }
 
     pub async fn latest_checkpoint(
@@ -167,45 +317,87 @@ where
     }
 
     pub async fn update_checkpoint(&self, update: SessionCheckpointUpdate) -> Result<bool> {
-        self.runtime
-            .update_checkpoint(update)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = update.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Task)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![SessionRuntimeEvent::CheckpointUpdate(update)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn transition(&self, transition: SessionTransition) -> Result<bool> {
-        self.runtime
-            .transition_session(transition)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = transition.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Task)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![SessionRuntimeEvent::Transition(transition)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn upsert_scheduler(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
-        self.runtime
-            .upsert_scheduler_session(upsert)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = upsert.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Cron)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![SessionRuntimeEvent::SchedulerUpsert(upsert)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn upsert_chat(&self, upsert: ChatSessionUpsert) -> Result<bool> {
-        self.runtime
-            .upsert_chat_session(upsert)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = upsert.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Chat)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![chat_session_upsert_event(upsert)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn upsert_task(&self, upsert: TaskSessionUpsert) -> Result<bool> {
-        self.runtime
-            .upsert_task_session(upsert)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = upsert.task_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Task)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![task_session_upsert_event(upsert)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn upsert_domain(&self, upsert: DomainSessionUpsert) -> Result<bool> {
-        self.runtime
-            .upsert_domain_session(upsert)
-            .await
-            .map_err(HarnessError::session_runtime)
+        let session_id = upsert.session_id;
+        let grant = self
+            .acquire_lease(session_id, "harness", SessionOwnerKind::Domain)
+            .await?;
+        let result = self
+            .record_batch(&grant, vec![SessionRuntimeEvent::DomainUpsert(upsert)])
+            .await;
+        let release_result = self.release_lease(grant).await;
+        result?;
+        release_result?;
+        Ok(true)
     }
 
     pub async fn memory_namespace(&self, session_id: Uuid) -> Result<Option<String>> {
@@ -215,9 +407,96 @@ where
             .map_err(HarnessError::session_runtime)
     }
 
-    pub fn record_events(&self, events: Vec<SessionRuntimeEvent>, session_id: Uuid) {
-        self.event_writer.record_events(events, session_id);
+    pub fn record_events(&self, grant: SessionLeaseGrant, events: Vec<SessionRuntimeEvent>) {
+        self.event_writer.record_events(grant, events);
     }
+
+    pub async fn record_events_and_wait(
+        &self,
+        grant: SessionLeaseGrant,
+        events: Vec<SessionRuntimeEvent>,
+    ) -> Result<SessionWriteOutcome> {
+        self.event_writer
+            .record_events_and_wait(grant, events)
+            .await
+    }
+
+    pub async fn flush_events(&self, grant: SessionLeaseGrant) -> Result<()> {
+        self.record_events_and_wait(grant, Vec::new()).await?;
+        Ok(())
+    }
+
+    pub fn record_events_best_effort(
+        &self,
+        session_id: Uuid,
+        owner_kind: SessionOwnerKind,
+        events: Vec<SessionRuntimeEvent>,
+    ) where
+        Runtime: 'static,
+    {
+        if events.is_empty() {
+            return;
+        }
+        let sessions = self.clone();
+        tokio::spawn(async move {
+            let Ok(grant) = sessions
+                .acquire_lease(session_id, "harness", owner_kind)
+                .await
+            else {
+                warn!(session_id = %session_id, "Skipping session events because lease could not be acquired");
+                return;
+            };
+            let result = sessions.record_events_and_wait(grant.clone(), events).await;
+            if let Err(error) = result {
+                warn!(error = %error, session_id = %session_id, "Failed to record best-effort session events");
+            }
+            if let Err(error) = sessions.release_lease(grant).await {
+                warn!(error = %error, session_id = %session_id, "Failed to release best-effort session lease");
+            }
+        });
+    }
+}
+
+pub fn chat_session_upsert_event(upsert: ChatSessionUpsert) -> SessionRuntimeEvent {
+    SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+        session_id: upsert.session_id,
+        kind: SessionKind::Chat,
+        status: upsert.status,
+        agent: Some(upsert.agent),
+        project: upsert.project,
+        task_id: None,
+        routine: None,
+        execution_run_id: None,
+        parent_session_id: None,
+        lease: None,
+        memory_namespace: upsert.memory_namespace.clone(),
+        refs: SessionRefs {
+            memory_namespace: upsert.memory_namespace,
+            ..Default::default()
+        },
+        metadata: upsert.metadata,
+    })
+}
+
+pub fn task_session_upsert_event(upsert: TaskSessionUpsert) -> SessionRuntimeEvent {
+    SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+        session_id: upsert.task_id,
+        kind: SessionKind::Task,
+        status: upsert.status,
+        agent: upsert.agent,
+        project: Some(upsert.project),
+        task_id: Some(upsert.task_id),
+        routine: upsert.routine,
+        execution_run_id: Some(upsert.execution_run_id),
+        parent_session_id: None,
+        lease: None,
+        memory_namespace: upsert.memory_namespace.clone(),
+        refs: SessionRefs {
+            memory_namespace: upsert.memory_namespace,
+            ..Default::default()
+        },
+        metadata: upsert.metadata,
+    })
 }
 
 pub fn chat_message_to_transcript(message: &ChatMessage) -> SessionTranscriptChatMessage {
@@ -732,6 +1011,7 @@ mod tests {
             &context,
             &nenjo::TurnEvent::Done {
                 output: nenjo::TurnOutput {
+                    task_id: None,
                     text: "finished".to_string(),
                     input_tokens: 3,
                     output_tokens: 4,

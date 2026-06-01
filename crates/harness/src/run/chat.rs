@@ -6,8 +6,9 @@ use nenjo::memory::MemoryScope;
 use nenjo_models::ChatMessage;
 use nenjo_sessions::{
     ChatSessionUpsert, DomainSessionUpsert, DomainState, ExecutionPhase, SessionKind,
-    SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
-    TranscriptQuery, TranscriptState,
+    SessionLeaseGrant, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus,
+    SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTranscriptRecord,
+    SessionTransition, SessionUpsert, TranscriptQuery, TranscriptState,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -15,10 +16,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::events::HarnessEvent;
-use crate::execution_context::{agent_name, project_slug, summarize_turn_event};
+use crate::execution_context::{project_slug, summarize_turn_event};
 use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
-use crate::request::{AgentRef, ChatRequest};
+use crate::request::ChatRequest;
 use crate::session::{
     TurnEventContext, chat_message_to_transcript, replay_transcript_history,
     session_runtime_events_from_turn_event,
@@ -33,6 +34,10 @@ where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
+    if let Some((_, previous)) = harness.executions().remove(&request.session_id) {
+        previous.cancel.cancel();
+    }
+
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let mut prepared = prepare_chat_execution(harness, request, events_tx).await?;
     let runner = build_chat_runner(harness, &prepared).await?;
@@ -43,9 +48,6 @@ where
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
-    if let Some((_, previous)) = harness.executions().remove(&prepared.session_id) {
-        previous.cancel.cancel();
-    }
     harness.executions().insert(
         prepared.session_id,
         ActiveExecution {
@@ -56,6 +58,8 @@ where
             pause: None,
         },
     );
+
+    debug!("spawning chat execution task");
 
     let join = spawn_chat_execution(
         harness.clone(),
@@ -71,16 +75,17 @@ where
 struct PreparedChatExecution {
     session_id: Uuid,
     turn_id: Uuid,
-    agent: AgentRef,
+    agent: nenjo::Slug,
     agent_id: Uuid,
     agent_name: String,
-    project_id: Option<Uuid>,
+    project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
     effective_domain_session_id: Option<Uuid>,
     history: Vec<ChatMessage>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
+    lease: SessionLeaseGrant,
 }
 
 async fn prepare_chat_execution<P, SessionRt>(
@@ -96,7 +101,7 @@ where
         session_id,
         agent,
         message,
-        project_id,
+        project,
         domain_session_id,
         domain_activation,
     } = request;
@@ -104,7 +109,6 @@ where
     let sessions = harness.sessions();
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
-    let effective_project_id = project_id.unwrap_or(Uuid::nil());
     let effective_content = if message.trim().is_empty() {
         match &domain_activation {
             Some(activation) => activation.domain_command.clone(),
@@ -118,70 +122,108 @@ where
         .map(|activation| activation.domain_session_id)
         .or(domain_session_id);
     let turn_id = Uuid::new_v4();
-    let agent_id = resolve_agent_id(provider.as_ref(), &agent)?;
-    let slug = project_slug(&manifest, effective_project_id);
-    let aname = agent_name(&manifest, agent_id);
+    let agent_manifest = provider
+        .find_agent_manifest(&agent)
+        .ok_or_else(|| anyhow!("agent not found: {}", agent))?;
+    let agent_id = agent_manifest.id;
+    let aname = agent_manifest.name.clone();
+    let slug = project_slug(project.as_ref());
     let worker_id = "harness".to_string();
+    let lease = sessions
+        .acquire_lease(session_id, worker_id.clone(), SessionOwnerKind::Chat)
+        .await?;
 
     if let Some(activation) = &domain_activation {
-        let domain_name = activate_domain_for_chat(
+        debug!(
+            agent = %agent,
+            session = %session_id,
+            domain_session = %activation.domain_session_id,
+            "Preparing chat: activating domain"
+        );
+        let domain_name = match activate_domain_for_chat(
             harness,
             ActivateDomainForChat {
                 worker_id: &worker_id,
-                project_id: effective_project_id,
-                agent_id,
+                agent_slug: &agent,
                 domain_command: &activation.domain_command,
                 domain_session_id: activation.domain_session_id,
                 agent_name: &aname,
                 project_slug: &slug,
             },
         )
-        .await?;
-        let _ = sessions
-            .append_transcript(SessionTranscriptAppend {
-                session_id,
-                turn_id: Some(turn_id),
-                payload: SessionTranscriptEventPayload::DomainActivated {
-                    domain_session_id: activation.domain_session_id,
-                    domain_command: activation.domain_command.clone(),
-                    domain_name: domain_name.clone(),
-                    agent_id,
-                    user_message_preview: (!effective_content.trim().is_empty())
-                        .then(|| effective_content.clone()),
-                },
-                transcript_state: TranscriptState::MidTurn,
-            })
+        .await
+        {
+            Ok(domain_name) => domain_name,
+            Err(error) => {
+                let _ = sessions.release_lease(lease).await;
+                return Err(crate::HarnessError::Other(error));
+            }
+        };
+        sessions
+            .record_events_and_wait(
+                lease.clone(),
+                vec![SessionRuntimeEvent::TranscriptAppend(
+                    SessionTranscriptAppend {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        payload: SessionTranscriptEventPayload::DomainActivated {
+                            domain_session_id: activation.domain_session_id,
+                            domain_command: activation.domain_command.clone(),
+                            domain_name: domain_name.clone(),
+                            agent_id,
+                            user_message_preview: (!effective_content.trim().is_empty())
+                                .then(|| effective_content.clone()),
+                        },
+                        transcript_state: TranscriptState::MidTurn,
+                    },
+                )],
+            )
             .await?;
+        debug!(
+            agent = %agent,
+            session = %session_id,
+            domain_session = %activation.domain_session_id,
+            "Preparing chat: appended domain activation transcript"
+        );
         let _ = events_tx.send(HarnessEvent::DomainEntered {
             session_id: activation.domain_session_id,
             domain_name,
         });
     }
 
-    upsert_chat_session_record(
-        harness,
-        ChatSessionRecord {
-            session_id,
-            project_id,
-            agent_id,
-            project_slug: slug.clone(),
-            agent_name: aname.clone(),
-            status: SessionStatus::Active,
-        },
-        SessionUpsertMode::Await,
-    )
-    .await;
-    let _ = sessions
-        .transition(SessionTransition {
-            session_id,
-            worker_id: worker_id.clone(),
-            phase: Some(ExecutionPhase::CallingModel),
-            status: SessionStatus::Active,
-        })
-        .await;
-    let mut transcript_events = sessions
+    sessions.record_events(
+        lease.clone(),
+        vec![
+            chat_session_upsert_runtime_event(ChatSessionRecord {
+                session_id,
+                project: project.clone(),
+                agent: agent.clone(),
+                project_slug: slug.clone(),
+                agent_name: aname.clone(),
+                status: SessionStatus::Active,
+            }),
+            SessionRuntimeEvent::Transition(SessionTransition {
+                session_id,
+                worker_id: worker_id.clone(),
+                phase: Some(ExecutionPhase::CallingModel),
+                status: SessionStatus::Active,
+            }),
+        ],
+    );
+    debug!(
+        agent = %agent,
+        session = %session_id,
+        "Preparing chat: queued session upsert and calling_model transition"
+    );
+    let transcript_events = sessions
         .read_transcript(session_id, TranscriptQuery::default())
         .await?;
+    debug!(
+        agent = %agent,
+        session = %session_id,
+        transcript_events = transcript_events.len(),
+        "Preparing chat: read transcript"
+    );
     if let Some(dsid) = effective_domain_session_id
         && !transcript_events.iter().any(|event| {
             matches!(
@@ -195,38 +237,132 @@ where
         && let Some(domain_command) = active_domain_command(harness, dsid).await
     {
         let domain_name = domain_name_for_command(&manifest, &domain_command);
-        if let Some(event) = sessions
-            .append_transcript(SessionTranscriptAppend {
+        sessions
+            .record_events_and_wait(
+                lease.clone(),
+                vec![SessionRuntimeEvent::TranscriptAppend(
+                    SessionTranscriptAppend {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        payload: SessionTranscriptEventPayload::DomainActivated {
+                            domain_session_id: dsid,
+                            domain_command,
+                            domain_name,
+                            agent_id,
+                            user_message_preview: None,
+                        },
+                        transcript_state: TranscriptState::MidTurn,
+                    },
+                )],
+            )
+            .await?;
+        debug!(
+            agent = %agent,
+            session = %session_id,
+            domain_session = %dsid,
+            "Preparing chat: appended restored domain activation transcript"
+        );
+        let transcript_events = sessions
+            .read_transcript(session_id, TranscriptQuery::default())
+            .await?;
+        return finish_prepare_chat_execution(
+            &sessions,
+            lease,
+            PreparedChatInput {
                 session_id,
-                turn_id: Some(turn_id),
-                payload: SessionTranscriptEventPayload::DomainActivated {
-                    domain_session_id: dsid,
-                    domain_command,
-                    domain_name,
-                    agent_id,
-                    user_message_preview: None,
-                },
-                transcript_state: TranscriptState::MidTurn,
-            })
-            .await?
-        {
-            transcript_events.push(event);
-        }
+                turn_id,
+                agent,
+                agent_id,
+                agent_name: aname,
+                project,
+                project_slug: slug,
+                effective_content,
+                effective_domain_session_id,
+                transcript_events,
+                events_tx,
+                worker_id,
+            },
+        )
+        .await;
     }
+    finish_prepare_chat_execution(
+        &sessions,
+        lease,
+        PreparedChatInput {
+            session_id,
+            turn_id,
+            agent,
+            agent_id,
+            agent_name: aname,
+            project,
+            project_slug: slug,
+            effective_content,
+            effective_domain_session_id,
+            transcript_events,
+            events_tx,
+            worker_id,
+        },
+    )
+    .await
+}
+
+struct PreparedChatInput {
+    session_id: Uuid,
+    turn_id: Uuid,
+    agent: nenjo::Slug,
+    agent_id: Uuid,
+    agent_name: String,
+    project: Option<nenjo::Slug>,
+    project_slug: String,
+    effective_content: String,
+    effective_domain_session_id: Option<Uuid>,
+    transcript_events: Vec<nenjo_sessions::SessionTranscriptEvent>,
+    events_tx: mpsc::UnboundedSender<HarnessEvent>,
+    worker_id: String,
+}
+
+async fn finish_prepare_chat_execution<SessionRt>(
+    sessions: &crate::HarnessSessions<SessionRt>,
+    lease: SessionLeaseGrant,
+    input: PreparedChatInput,
+) -> crate::Result<PreparedChatExecution>
+where
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    let PreparedChatInput {
+        session_id,
+        turn_id,
+        agent,
+        agent_id,
+        agent_name,
+        project,
+        project_slug,
+        effective_content,
+        effective_domain_session_id,
+        transcript_events,
+        events_tx,
+        worker_id,
+    } = input;
     let history: Vec<ChatMessage> = replay_transcript_history(&transcript_events);
-    let _ = sessions
-        .append_transcript(SessionTranscriptAppend {
+    sessions.record_events(
+        lease.clone(),
+        vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
             session_id,
             turn_id: Some(turn_id),
             payload: SessionTranscriptEventPayload::ChatMessage {
                 message: chat_message_to_transcript(&ChatMessage::user(effective_content.clone())),
             },
-            transcript_state: TranscriptState::MidTurn,
-        })
-        .await?;
+        })],
+    );
+    debug!(
+        agent = %agent,
+        session = %session_id,
+        history_len = history.len(),
+        "Preparing chat: queued user message transcript"
+    );
     info!(
-        agent = %aname,
-        agent_id = %agent_id,
+        agent = %agent_name,
+        agent_slug = %agent,
         session = %session_id,
         domain_session = ?effective_domain_session_id,
         history_len = history.len(),
@@ -238,14 +374,15 @@ where
         turn_id,
         agent,
         agent_id,
-        agent_name: aname,
-        project_id,
-        project_slug: slug,
+        agent_name,
+        project,
+        project_slug,
         effective_content,
         effective_domain_session_id,
         history,
         events_tx,
         worker_id,
+        lease,
     })
 }
 
@@ -258,7 +395,6 @@ where
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
     let provider = harness.provider();
-    let manifest = provider.manifest_snapshot();
 
     let runner = if let Some(dsid) = prepared.effective_domain_session_id {
         if !harness.domains().contains_key(&dsid) {
@@ -275,19 +411,34 @@ where
 
         match harness.domains().get_mut(&dsid) {
             Some(session) => {
-                let agent_id = session.agent_id;
-                let project_id = session.project_id;
+                let agent = session.agent.clone();
+                let project = session.project.clone();
                 let domain_command = session.domain_command.clone();
                 drop(session);
                 let rebuilt = harness
-                    .rebuild_domain_session(dsid, agent_id, project_id, &domain_command)
+                    .rebuild_domain_session(dsid, agent, project, &domain_command)
                     .await?;
                 let mut instance = rebuilt.runner.instance().clone();
-                instance.set_active_domain_session_id(prepared.session_id);
+                instance.set_active_domain_session_id(dsid);
                 let runner = nenjo::AgentRunner::from_instance(
                     instance,
                     rebuilt.runner.memory().cloned(),
                     rebuilt.runner.memory_scope().cloned(),
+                );
+                debug!(
+                    agent = %prepared.agent,
+                    session = %prepared.session_id,
+                    domain_session = %dsid,
+                    domain = %domain_command,
+                    addon_len = runner
+                        .instance()
+                        .prompt_context()
+                        .active_domain
+                        .as_ref()
+                        .and_then(|domain| domain.manifest.prompt_config.developer_prompt_addon.as_ref())
+                        .map(|addon| addon.len())
+                        .unwrap_or_default(),
+                    "Prepared domain-expanded chat runner"
                 );
                 harness.domains().insert(dsid, rebuilt);
                 runner
@@ -304,15 +455,15 @@ where
                     .await;
                 upsert_chat_session_record(
                     harness,
+                    &prepared.lease,
                     ChatSessionRecord {
                         session_id: prepared.session_id,
-                        project_id: prepared.project_id,
-                        agent_id: prepared.agent_id,
+                        project: prepared.project.clone(),
+                        agent: prepared.agent.clone(),
                         project_slug: prepared.project_slug.clone(),
                         agent_name: prepared.agent_name.clone(),
                         status: SessionStatus::Failed,
                     },
-                    SessionUpsertMode::Spawn,
                 )
                 .await;
                 return Err(crate::HarnessError::InvalidCommand(
@@ -321,25 +472,15 @@ where
             }
         }
     } else {
-        let mut builder = match &prepared.agent {
-            AgentRef::Id(agent_id) => provider
-                .build_agent_by_id(*agent_id)
-                .await
-                .map_err(anyhow::Error::from)?,
-            AgentRef::Name(agent_name) => provider
-                .build_agent_by_name(agent_name)
-                .await
-                .map_err(anyhow::Error::from)?,
-        };
-        if let Some(project_id) = prepared.project_id {
-            if let Some(project) = manifest
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-            {
+        let mut builder = provider
+            .agent(&prepared.agent)
+            .await
+            .map_err(anyhow::Error::from)?;
+        if let Some(project_slug) = &prepared.project {
+            if let Some(project) = provider.find_project(project_slug) {
                 builder = builder.with_project_context(project);
             } else {
-                warn!(%project_id, agent_id = %prepared.agent_id, "Project not found in manifest for chat session");
+                warn!(project = %project_slug, agent = %prepared.agent, "Project not found in manifest for chat session");
             }
         }
         match harness
@@ -375,14 +516,18 @@ where
         let PreparedChatExecution {
             session_id,
             turn_id,
+            agent,
             agent_id,
             agent_name,
-            project_id,
+            project,
             project_slug,
             events_tx,
             worker_id,
+            lease,
             ..
         } = prepared;
+        let prepared_agent_for_record = agent;
+        let lease_renewal = harness.sessions().spawn_lease_renewer(lease.clone());
 
         loop {
             tokio::select! {
@@ -401,12 +546,29 @@ where
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };
+                            let forwarded = events_tx.send(HarnessEvent::Turn {
+                                session_id,
+                                turn_id: Some(turn_id),
+                                event: ev.clone(),
+                            });
+                            if forwarded.is_err() {
+                                warn!(
+                                    agent = %agent_name,
+                                    session = %session_id,
+                                    "Failed to forward chat turn event because receiver was dropped"
+                                );
+                            } else {
+                                debug!(
+                                    agent = %agent_name,
+                                    session = %session_id,
+                                    "Forwarded chat turn event to harness stream"
+                                );
+                            }
                             let runtime_events =
                                 session_runtime_events_from_turn_event(&session_event_context, &ev);
-                            let _ = events_tx.send(HarnessEvent::Turn(ev));
                             harness
                                 .sessions()
-                                .record_events(runtime_events, session_id);
+                                .record_events(lease.clone(), runtime_events);
                         }
                         None => break,
                     }
@@ -419,25 +581,25 @@ where
                         .get(&session_id)
                         .is_some_and(|entry| entry.registry_token == registry_token);
                     if is_current_execution {
-                        let _ = harness.sessions().transition(SessionTransition {
-                            session_id,
-                            worker_id: worker_id.clone(),
-                            phase: Some(ExecutionPhase::Finalizing),
-                            status: SessionStatus::Cancelled,
-                        }).await;
-                        upsert_chat_session_record(
-                            &harness,
-                            ChatSessionRecord {
-                                session_id,
-                                project_id,
-                                agent_id,
-                                project_slug: project_slug.clone(),
-                                agent_name: agent_name.clone(),
-                                status: SessionStatus::Cancelled,
-                            },
-                            SessionUpsertMode::Spawn,
-                        )
-                        .await;
+                        harness.sessions().record_events(
+                            lease.clone(),
+                            vec![
+                                SessionRuntimeEvent::Transition(SessionTransition {
+                                    session_id,
+                                    worker_id: worker_id.clone(),
+                                    phase: Some(ExecutionPhase::Finalizing),
+                                    status: SessionStatus::Cancelled,
+                                }),
+                                chat_session_upsert_runtime_event(ChatSessionRecord {
+                                    session_id,
+                                    project: project.clone(),
+                                    agent: prepared_agent_for_record.clone(),
+                                    project_slug: project_slug.clone(),
+                                    agent_name: agent_name.clone(),
+                                    status: SessionStatus::Cancelled,
+                                }),
+                            ],
+                        );
                     }
                     break;
                 }
@@ -452,48 +614,67 @@ where
         }
 
         if join_cancel.is_cancelled() {
+            lease_renewal.cancel();
+            if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+                warn!(error = %error, session = %session_id, "Failed to flush cancelled chat session events");
+            }
+            if let Err(error) = harness.sessions().release_lease(lease).await {
+                warn!(error = %error, session = %session_id, "Failed to release cancelled chat session lease");
+            }
             return Err(crate::HarnessError::Other(anyhow!("Cancelled")));
         }
 
-        let output = handle.output().await?;
-        let _ = harness
-            .sessions()
-            .transition(SessionTransition {
-                session_id,
-                worker_id: worker_id.clone(),
-                phase: Some(ExecutionPhase::Finalizing),
-                status: SessionStatus::Completed,
-            })
-            .await;
-        upsert_chat_session_record(
-            &harness,
-            ChatSessionRecord {
-                session_id,
-                project_id,
-                agent_id,
-                project_slug,
-                agent_name: agent_name.clone(),
-                status: SessionStatus::Completed,
-            },
-            SessionUpsertMode::Spawn,
-        )
-        .await;
+        lease_renewal.cancel();
+        let output = match handle.output().await {
+            Ok(output) => output,
+            Err(error) => {
+                record_session_transition(
+                    &harness.sessions(),
+                    lease.clone(),
+                    SessionTransition {
+                        session_id,
+                        worker_id: worker_id.clone(),
+                        phase: Some(ExecutionPhase::Finalizing),
+                        status: SessionStatus::Failed,
+                    },
+                );
+                if let Err(flush_error) = harness.sessions().flush_events(lease.clone()).await {
+                    warn!(error = %flush_error, session = %session_id, "Failed to flush failed chat session events");
+                }
+                if let Err(release_error) = harness.sessions().release_lease(lease).await {
+                    warn!(error = %release_error, session = %session_id, "Failed to release failed chat session lease");
+                }
+                return Err(error.into());
+            }
+        };
+        harness.sessions().record_events(
+            lease.clone(),
+            vec![
+                SessionRuntimeEvent::Transition(SessionTransition {
+                    session_id,
+                    worker_id: worker_id.clone(),
+                    phase: Some(ExecutionPhase::Finalizing),
+                    status: SessionStatus::Completed,
+                }),
+                chat_session_upsert_runtime_event(ChatSessionRecord {
+                    session_id,
+                    project,
+                    agent: prepared_agent_for_record,
+                    project_slug,
+                    agent_name: agent_name.clone(),
+                    status: SessionStatus::Completed,
+                }),
+            ],
+        );
+        if let Err(error) = harness.sessions().flush_events(lease.clone()).await {
+            warn!(error = %error, session = %session_id, "Failed to flush completed chat session events");
+        }
+        if let Err(error) = harness.sessions().release_lease(lease).await {
+            warn!(error = %error, session = %session_id, "Failed to release chat session lease");
+        }
 
         Ok(output)
     })
-}
-
-fn resolve_agent_id<P>(provider: &P, agent: &AgentRef) -> Result<Uuid>
-where
-    P: ProviderRuntime,
-{
-    match agent {
-        AgentRef::Id(agent_id) => Ok(*agent_id),
-        AgentRef::Name(agent_name) => provider
-            .find_agent_manifest(agent_name)
-            .map(|agent| agent.id)
-            .ok_or_else(|| anyhow!("agent not found: {agent_name}")),
-    }
 }
 
 fn chat_memory_namespace(agent_name: &str, project_slug: &str) -> String {
@@ -519,72 +700,103 @@ fn domain_name_for_command(manifest: &nenjo::manifest::Manifest, domain_command:
 
 struct ChatSessionRecord {
     session_id: Uuid,
-    project_id: Option<Uuid>,
-    agent_id: Uuid,
+    project: Option<nenjo::Slug>,
+    agent: nenjo::Slug,
     project_slug: String,
     agent_name: String,
     status: SessionStatus,
 }
 
-#[derive(Clone, Copy)]
-enum SessionUpsertMode {
-    Await,
-    Spawn,
-}
-
 async fn upsert_chat_session_record<P, SessionRt>(
     harness: &Harness<P, SessionRt>,
+    lease: &SessionLeaseGrant,
     params: ChatSessionRecord,
-    mode: SessionUpsertMode,
 ) where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
+    harness.sessions().record_events(
+        lease.clone(),
+        vec![chat_session_upsert_runtime_event(params)],
+    );
+}
+
+fn chat_session_upsert_runtime_event(params: ChatSessionRecord) -> SessionRuntimeEvent {
     let ChatSessionRecord {
         session_id,
-        project_id,
-        agent_id,
+        project,
+        agent,
         project_slug,
         agent_name,
         status,
     } = params;
     let memory_namespace = chat_memory_namespace(&agent_name, &project_slug);
-    let upsert = ChatSessionUpsert {
+    let upsert = chat_session_upsert(
         session_id,
         status,
-        project_id,
-        agent_id,
-        memory_namespace: Some(memory_namespace.clone()),
+        project.as_ref().map(ToString::to_string),
+        agent.to_string(),
+        memory_namespace,
+        agent_name,
+        project_slug,
+    );
+
+    SessionRuntimeEvent::SessionUpsert(session_upsert_from_chat(upsert))
+}
+
+fn chat_session_upsert(
+    session_id: Uuid,
+    status: SessionStatus,
+    project: Option<String>,
+    agent: String,
+    memory_namespace: String,
+    agent_name: String,
+    project_slug: String,
+) -> ChatSessionUpsert {
+    ChatSessionUpsert {
+        session_id,
+        status,
+        project,
+        agent: agent.clone(),
+        memory_namespace: Some(memory_namespace),
         metadata: json!({
             "source": "harness_chat",
             "agent_name": agent_name,
+            "agent_slug": agent,
             "project_slug": project_slug,
         }),
-    };
-
-    match mode {
-        SessionUpsertMode::Await => {
-            if let Err(error) = harness.sessions().upsert_chat(upsert).await {
-                warn!(
-                    error = %error,
-                    session_id = %session_id,
-                    "Failed to upsert chat session"
-                );
-            }
-        }
-        SessionUpsertMode::Spawn => {
-            let sessions = harness.sessions();
-            tokio::spawn(async move {
-                if let Err(error) = sessions.upsert_chat(upsert).await {
-                    warn!(
-                        error = %error,
-                        session_id = %session_id,
-                        "Failed to upsert chat session"
-                    );
-                }
-            });
-        }
     }
+}
+
+fn session_upsert_from_chat(upsert: ChatSessionUpsert) -> SessionUpsert {
+    SessionUpsert {
+        session_id: upsert.session_id,
+        kind: SessionKind::Chat,
+        status: upsert.status,
+        agent: Some(upsert.agent),
+        project: upsert.project,
+        task_id: None,
+        routine: None,
+        execution_run_id: None,
+        parent_session_id: None,
+        lease: None,
+        memory_namespace: upsert.memory_namespace.clone(),
+        refs: SessionRefs {
+            memory_namespace: upsert.memory_namespace,
+            ..Default::default()
+        },
+        metadata: upsert.metadata,
+    }
+}
+
+fn record_session_transition<SessionRt>(
+    sessions: &crate::HarnessSessions<SessionRt>,
+    lease: SessionLeaseGrant,
+    transition: SessionTransition,
+) where
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    sessions.record_events(lease, vec![SessionRuntimeEvent::Transition(transition)]);
 }
 
 async fn restore_domain_session<P, SessionRt>(
@@ -604,16 +816,28 @@ where
     let Some(domain) = persisted.domain else {
         return Ok(false);
     };
-    let Some(agent_id) = persisted.agent_id else {
-        return Err(anyhow!("domain session missing agent_id"));
+    let Some(agent_slug) = persisted
+        .metadata
+        .get("agent_slug")
+        .and_then(|value| value.as_str())
+        .map(nenjo::Slug::parse)
+        .transpose()?
+    else {
+        return Err(anyhow!("domain session missing agent_slug"));
     };
-    let project_id = persisted.project_id.unwrap_or_else(Uuid::nil);
+    let project_slug = persisted
+        .metadata
+        .get("project_slug")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(nenjo::Slug::parse)
+        .transpose()?;
 
     let session = harness
         .rebuild_domain_session(
             persisted.session_id,
-            agent_id,
-            project_id,
+            agent_slug,
+            project_slug,
             &domain.domain_command,
         )
         .await?;
@@ -625,8 +849,7 @@ where
 
 struct ActivateDomainForChat<'a> {
     worker_id: &'a str,
-    project_id: Uuid,
-    agent_id: Uuid,
+    agent_slug: &'a nenjo::Slug,
     domain_command: &'a str,
     domain_session_id: Uuid,
     agent_name: &'a str,
@@ -643,8 +866,7 @@ where
 {
     let ActivateDomainForChat {
         worker_id,
-        project_id,
-        agent_id,
+        agent_slug,
         domain_command,
         domain_session_id,
         agent_name,
@@ -653,20 +875,44 @@ where
 
     let manifest = harness.provider().manifest_snapshot();
     let domain_name = domain_name_for_command(&manifest, domain_command);
+    let project_slug = if project_slug.is_empty() {
+        None
+    } else {
+        Some(nenjo::Slug::parse(project_slug)?)
+    };
+
+    let session = harness
+        .rebuild_domain_session(
+            domain_session_id,
+            agent_slug.clone(),
+            project_slug.clone(),
+            domain_command,
+        )
+        .await?;
+    harness.domains().insert(domain_session_id, session);
 
     let _ = harness
         .sessions()
         .upsert_domain(DomainSessionUpsert {
             session_id: domain_session_id,
             status: SessionStatus::Active,
-            project_id: if project_id.is_nil() {
-                None
-            } else {
-                Some(project_id)
-            },
-            agent_id,
+            project: project_slug.as_ref().map(ToString::to_string),
+            agent: agent_slug.to_string(),
             worker_id: worker_id.to_string(),
-            memory_namespace: Some(chat_memory_namespace(agent_name, project_slug)),
+            memory_namespace: Some(chat_memory_namespace(
+                agent_name,
+                project_slug
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    .unwrap_or_default(),
+            )),
+            metadata: json!({
+                "source": "harness_domain",
+                "agent_name": agent_name,
+                "agent_slug": agent_slug.to_string(),
+                "project_slug": project_slug.as_ref().map(ToString::to_string).unwrap_or_default(),
+            }),
             domain: Some(DomainState {
                 domain_command: domain_command.to_string(),
             }),

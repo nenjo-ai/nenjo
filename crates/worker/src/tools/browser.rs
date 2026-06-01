@@ -236,11 +236,6 @@ impl BrowserTool {
             .unwrap_or(false)
     }
 
-    /// Backward-compatible alias.
-    pub async fn is_available() -> bool {
-        Self::is_agent_browser_available().await
-    }
-
     fn configured_backend(&self) -> anyhow::Result<BrowserBackendKind> {
         BrowserBackendKind::parse(&self.backend)
     }

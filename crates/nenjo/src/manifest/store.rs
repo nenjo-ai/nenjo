@@ -39,7 +39,7 @@ pub trait ManifestReader: Send + Sync {
             .list_projects()
             .await?
             .into_iter()
-            .find(|item| item.slug == slug))
+            .find(|item| item.slug.as_str() == slug))
     }
 
     /// List all cached councils.

@@ -7,6 +7,7 @@ use crate::tools::ToolResult;
 use nenjo_models::ChatMessage;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 /// A single tool call with its name and arguments.
 #[derive(Debug, Clone)]
@@ -190,6 +191,8 @@ impl PauseToken {
 /// Final output of a turn loop execution.
 #[derive(Debug, Clone)]
 pub struct TurnOutput {
+    /// Task ID for task-triggered agent runs.
+    pub task_id: Option<Uuid>,
     /// The agent's final text response.
     pub text: String,
     /// Total input tokens consumed across all LLM calls.

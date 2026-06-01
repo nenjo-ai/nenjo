@@ -86,6 +86,55 @@ impl ResolvedPackage {
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
         &self.manifest.dependencies
     }
+
+    /// Validate package-local knowledge pack names derived from `pack_id`.
+    pub fn validate_knowledge_pack_names(&self) -> Result<()> {
+        let mut seen_resources = BTreeSet::new();
+        let mut names = BTreeMap::new();
+        for module in self
+            .modules
+            .values()
+            .filter(|module| module.kind == PackageKind::Knowledge)
+        {
+            if !seen_resources.insert(module.key()) {
+                continue;
+            }
+            let pack_name = knowledge_pack_name(&module.manifest).unwrap_or_else(|| {
+                module
+                    .name()
+                    .trim()
+                    .rsplit(['.', '/'])
+                    .next()
+                    .unwrap_or(module.name())
+                    .to_string()
+            });
+            if let Some(existing) = names.insert(pack_name.clone(), module.source_path.clone()) {
+                bail!(
+                    "{} declares duplicate knowledge pack name '{}' in {} and {}",
+                    self.name,
+                    pack_name,
+                    existing,
+                    module.source_path
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn knowledge_pack_name(manifest: &ResourceManifest) -> Option<String> {
+    manifest
+        .manifest
+        .get("pack_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|pack_id| {
+            pack_id
+                .trim()
+                .rsplit(['.', '/'])
+                .next()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +192,7 @@ impl ResolvedPackageGraph {
     /// Validate package dependency version requirements against resolved versions.
     pub fn validate_versions(&self) -> Result<()> {
         for (name, package) in &self.packages {
+            package.validate_knowledge_pack_names()?;
             for (dependency, required) in package.dependencies() {
                 let resolved = self
                     .packages

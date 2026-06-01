@@ -12,11 +12,12 @@ use nenjo::manifest::{
     AgentManifest, CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, Manifest,
     ModelManifest, ProjectManifest, PromptConfig, PromptTemplates, RoutineEdgeCondition,
     RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::routines::RoutineEvent;
 use nenjo::routines::gate::PassVerdictTool;
-use nenjo::{CronInput, ProjectLocation, RoutineRun, TaskInput};
+use nenjo::{CronInput, ProjectLocation, RoutineRun, Slug, TaskInput};
 use nenjo_models::traits::{
     ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
 };
@@ -274,8 +275,10 @@ fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn test_task(project_id: Uuid, title: &str, desc: &str) -> TaskInput {
-    TaskInput::new(project_id, Uuid::nil(), title, desc).source("test")
+fn test_task(_project_id: Uuid, title: &str, desc: &str) -> TaskInput {
+    TaskInput::new("project", title, desc)
+        .with_task_id(Uuid::nil())
+        .source("test")
 }
 
 fn model(id: Uuid) -> ModelManifest {
@@ -290,10 +293,11 @@ fn model(id: Uuid) -> ModelManifest {
     }
 }
 
-fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
+fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
         id,
         name: name.into(),
+        slug: None,
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -309,11 +313,11 @@ fn agent(id: Uuid, name: &str, model_id: Uuid) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(model_manifest_slug("mock", "mock-v1")),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -330,7 +334,7 @@ fn project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: Some("A test project".into()),
         settings: serde_json::Value::Null,
     }
@@ -371,11 +375,12 @@ async fn single_agent_step() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("simple-routine"),
             name: "implement".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("coder")),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -404,7 +409,7 @@ async fn single_agent_step() {
 
     let task = test_task(Uuid::new_v4(), "Add auth", "Implement JWT authentication");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("simple-routine")
         .unwrap()
         .run(task)
         .await
@@ -432,11 +437,12 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("tool-check-routine"),
             name: "implement".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("coder")),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -482,7 +488,7 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
     }));
 
     provider
-        .routine_by_id(routine_id)
+        .routine("tool-check-routine")
         .unwrap()
         .run(task)
         .await
@@ -519,11 +525,12 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("agent-instructions"),
             name: "implement".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("coder")),
             config: serde_json::json!({
                 "instructions": instructions,
             }),
@@ -555,7 +562,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         .unwrap();
 
     provider
-        .routine_by_id(routine_id)
+        .routine("agent-instructions")
         .unwrap()
         .run(test_task(
             Uuid::new_v4(),
@@ -593,11 +600,12 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("gate-instructions"),
             name: "review".into(),
             step_type: RoutineStepType::Gate,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("reviewer")),
             config: serde_json::json!({
                 "criteria": "Output satisfies the task.",
                 "instructions": instructions,
@@ -630,7 +638,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         .unwrap();
 
     provider
-        .routine_by_id(routine_id)
+        .routine("gate-instructions")
         .unwrap()
         .run(test_task(
             Uuid::new_v4(),
@@ -664,11 +672,12 @@ async fn single_agent_step_retries_until_pass_verdict() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("retry-for-pass-verdict"),
             name: "implement".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("coder")),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -707,7 +716,7 @@ async fn single_agent_step_retries_until_pass_verdict() {
 
     let task = test_task(Uuid::new_v4(), "Add auth", "Implement JWT authentication");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("retry-for-pass-verdict")
         .unwrap()
         .run(task)
         .await
@@ -735,11 +744,12 @@ async fn stream_events_single_step() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("stream-test"),
             name: "work".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("worker")),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -768,7 +778,7 @@ async fn stream_events_single_step() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Do work");
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("stream-test")
         .unwrap()
         .run_stream(task)
         .await
@@ -826,30 +836,32 @@ async fn two_step_chain() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("code-review"),
                 name: "implement".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(coder_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: step2_id,
-                routine_id,
+                slug: Slug::derive(step2_id.to_string()),
+                routine: Slug::derive("code-review"),
                 name: "review".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(reviewer_id),
+                council: None,
+                agent: Some(Slug::derive("reviewer")),
                 config: serde_json::json!({}),
                 order_index: 1,
             },
         ],
         edges: vec![RoutineEdgeManifest {
             id: Uuid::new_v4(),
-            routine_id,
-            source_step_id: step1_id,
-            target_step_id: step2_id,
+            routine: Slug::derive("code-review"),
+            source_step: Slug::derive(step1_id.to_string()),
+            target_step: Slug::derive(step2_id.to_string()),
             condition: RoutineEdgeCondition::Always,
             metadata: serde_json::json!({}),
         }],
@@ -880,7 +892,7 @@ async fn two_step_chain() {
     let task = test_task(Uuid::new_v4(), "Feature", "Add login");
 
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("code-review")
         .unwrap()
         .run_stream(task)
         .await
@@ -919,30 +931,32 @@ async fn agent_step_fail_verdict_terminates_routine() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("agent-fail-stops-routine"),
                 name: "first-agent".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(first_agent_id),
+                council: None,
+                agent: Some(Slug::derive("first")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: step2_id,
-                routine_id,
+                slug: Slug::derive(step2_id.to_string()),
+                routine: Slug::derive("agent-fail-stops-routine"),
                 name: "second-agent".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(second_agent_id),
+                council: None,
+                agent: Some(Slug::derive("second")),
                 config: serde_json::json!({}),
                 order_index: 1,
             },
         ],
         edges: vec![RoutineEdgeManifest {
             id: Uuid::new_v4(),
-            routine_id,
-            source_step_id: step1_id,
-            target_step_id: step2_id,
+            routine: Slug::derive("agent-fail-stops-routine"),
+            source_step: Slug::derive(step1_id.to_string()),
+            target_step: Slug::derive(step2_id.to_string()),
             condition: RoutineEdgeCondition::Always,
             metadata: serde_json::json!({}),
         }],
@@ -994,7 +1008,7 @@ async fn agent_step_fail_verdict_terminates_routine() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Do work");
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("agent-fail-stops-routine")
         .unwrap()
         .run_stream(task)
         .await
@@ -1041,31 +1055,34 @@ async fn gate_step_pass() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("gated-routine"),
                 name: "implement".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: gate_id,
-                routine_id,
+                slug: Slug::derive(gate_id.to_string()),
+                routine: Slug::derive("gated-routine"),
                 name: "quality-check".into(),
                 step_type: RoutineStepType::Gate,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({ "criteria": "Code must compile and have tests." }),
                 order_index: 1,
             },
             RoutineStepManifest {
                 id: terminal_id,
-                routine_id,
+                slug: Slug::derive(terminal_id.to_string()),
+                routine: Slug::derive("gated-routine"),
                 name: "done".into(),
                 step_type: RoutineStepType::Terminal,
-                council_id: None,
-                agent_id: None,
+                council: None,
+                agent: None,
                 config: serde_json::json!({}),
                 order_index: 2,
             },
@@ -1073,17 +1090,17 @@ async fn gate_step_pass() {
         edges: vec![
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: step1_id,
-                target_step_id: gate_id,
+                routine: Slug::derive("gated-routine"),
+                source_step: Slug::derive(step1_id.to_string()),
+                target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::Always,
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: gate_id,
-                target_step_id: terminal_id,
+                routine: Slug::derive("gated-routine"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
                 metadata: serde_json::json!({}),
             },
@@ -1115,7 +1132,7 @@ async fn gate_step_pass() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Build feature");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("gated-routine")
         .unwrap()
         .run(task)
         .await
@@ -1143,31 +1160,34 @@ async fn gate_always_edge_is_invalid() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("invalid-gate-routing"),
                 name: "analyze_and_develop".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: gate_id,
-                routine_id,
+                slug: Slug::derive(gate_id.to_string()),
+                routine: Slug::derive("invalid-gate-routing"),
                 name: "verify".into(),
                 step_type: RoutineStepType::Gate,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
                 id: terminal_id,
-                routine_id,
+                slug: Slug::derive(terminal_id.to_string()),
+                routine: Slug::derive("invalid-gate-routing"),
                 name: "complete".into(),
                 step_type: RoutineStepType::Terminal,
-                council_id: None,
-                agent_id: None,
+                council: None,
+                agent: None,
                 config: serde_json::json!({}),
                 order_index: 2,
             },
@@ -1175,17 +1195,17 @@ async fn gate_always_edge_is_invalid() {
         edges: vec![
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: step1_id,
-                target_step_id: gate_id,
+                routine: Slug::derive("invalid-gate-routing"),
+                source_step: Slug::derive(step1_id.to_string()),
+                target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: gate_id,
-                target_step_id: terminal_id,
+                routine: Slug::derive("invalid-gate-routing"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::Always,
                 metadata: serde_json::json!({}),
             },
@@ -1217,7 +1237,7 @@ async fn gate_always_edge_is_invalid() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Build feature");
     let err = provider
-        .routine_by_id(routine_id)
+        .routine("invalid-gate-routing")
         .unwrap()
         .run(task)
         .await
@@ -1244,31 +1264,34 @@ async fn gate_on_fail_routes_back_before_completion() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("retry-gated-routine"),
                 name: "analyze_and_develop".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: gate_id,
-                routine_id,
+                slug: Slug::derive(gate_id.to_string()),
+                routine: Slug::derive("retry-gated-routine"),
                 name: "verify".into(),
                 step_type: RoutineStepType::Gate,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
                 id: terminal_id,
-                routine_id,
+                slug: Slug::derive(terminal_id.to_string()),
+                routine: Slug::derive("retry-gated-routine"),
                 name: "complete".into(),
                 step_type: RoutineStepType::Terminal,
-                council_id: None,
-                agent_id: None,
+                council: None,
+                agent: None,
                 config: serde_json::json!({}),
                 order_index: 2,
             },
@@ -1276,25 +1299,25 @@ async fn gate_on_fail_routes_back_before_completion() {
         edges: vec![
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: step1_id,
-                target_step_id: gate_id,
+                routine: Slug::derive("retry-gated-routine"),
+                source_step: Slug::derive(step1_id.to_string()),
+                target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: gate_id,
-                target_step_id: step1_id,
+                routine: Slug::derive("retry-gated-routine"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(step1_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: gate_id,
-                target_step_id: terminal_id,
+                routine: Slug::derive("retry-gated-routine"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
                 metadata: serde_json::json!({}),
             },
@@ -1332,7 +1355,7 @@ async fn gate_on_fail_routes_back_before_completion() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Build feature");
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("retry-gated-routine")
         .unwrap()
         .run_stream(task)
         .await
@@ -1376,31 +1399,34 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         steps: vec![
             RoutineStepManifest {
                 id: step1_id,
-                routine_id,
+                slug: Slug::derive(step1_id.to_string()),
+                routine: Slug::derive("retry-exhaustion-routine"),
                 name: "analyze_and_develop".into(),
                 step_type: RoutineStepType::Agent,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({}),
                 order_index: 0,
             },
             RoutineStepManifest {
                 id: gate_id,
-                routine_id,
+                slug: Slug::derive(gate_id.to_string()),
+                routine: Slug::derive("retry-exhaustion-routine"),
                 name: "verify".into(),
                 step_type: RoutineStepType::Gate,
-                council_id: None,
-                agent_id: Some(agent_id),
+                council: None,
+                agent: Some(Slug::derive("coder")),
                 config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
                 id: failed_id,
-                routine_id,
+                slug: Slug::derive(failed_id.to_string()),
+                routine: Slug::derive("retry-exhaustion-routine"),
                 name: "failed".into(),
                 step_type: RoutineStepType::TerminalFail,
-                council_id: None,
-                agent_id: None,
+                council: None,
+                agent: None,
                 config: serde_json::json!({ "reason": "Retry limit exhausted." }),
                 order_index: 2,
             },
@@ -1408,17 +1434,17 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         edges: vec![
             RoutineEdgeManifest {
                 id: Uuid::new_v4(),
-                routine_id,
-                source_step_id: step1_id,
-                target_step_id: gate_id,
+                routine: Slug::derive("retry-exhaustion-routine"),
+                source_step: Slug::derive(step1_id.to_string()),
+                target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
                 id: retry_edge_id,
-                routine_id,
-                source_step_id: gate_id,
-                target_step_id: step1_id,
+                routine: Slug::derive("retry-exhaustion-routine"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(step1_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
                 metadata: serde_json::json!({
                     "max_attempts": 1,
@@ -1462,7 +1488,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         .unwrap();
 
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("retry-exhaustion-routine")
         .unwrap()
         .run(test_task(Uuid::new_v4(), "Task", "Build feature"))
         .await
@@ -1484,7 +1510,7 @@ async fn routine_not_found() {
         .await
         .unwrap();
 
-    let err = provider.routine_by_id(Uuid::new_v4());
+    let err = provider.routine(Uuid::new_v4().to_string());
 
     assert!(err.is_err());
     assert!(err.unwrap_err().to_string().contains("not found"));
@@ -1504,11 +1530,12 @@ async fn terminal_fail_step() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("fail-routine"),
             name: "abort".into(),
             step_type: RoutineStepType::TerminalFail,
-            council_id: None,
-            agent_id: None,
+            council: None,
+            agent: None,
             config: serde_json::json!({ "reason": "Blocked by policy." }),
             order_index: 0,
         }],
@@ -1530,7 +1557,7 @@ async fn terminal_fail_step() {
 
     let task = test_task(Uuid::new_v4(), "Task", "Desc");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("fail-routine")
         .unwrap()
         .run(task)
         .await
@@ -1558,11 +1585,12 @@ async fn council_decompose() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("council-routine"),
             name: "council-step".into(),
             step_type: RoutineStepType::Council,
-            council_id: Some(council_id),
-            agent_id: None,
+            council: Some(Slug::derive("test-council")),
+            agent: None,
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -1581,10 +1609,9 @@ async fn council_decompose() {
             id: council_id,
             name: "test-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
-            leader_agent_id: leader_id,
+            leader_agent: Slug::derive("leader"),
             members: vec![CouncilMemberManifest {
-                agent_id: member_id,
-                agent_name: "member".into(),
+                agent: Slug::derive("member"),
                 priority: 1,
             }],
         }],
@@ -1605,7 +1632,7 @@ async fn council_decompose() {
 
     let task = test_task(Uuid::new_v4(), "Council task", "Build the feature");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("council-routine")
         .unwrap()
         .run(task)
         .await
@@ -1633,11 +1660,12 @@ async fn council_broadcast() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("broadcast-council-routine"),
             name: "broadcast-council-step".into(),
             step_type: RoutineStepType::Council,
-            council_id: Some(council_id),
-            agent_id: None,
+            council: Some(Slug::derive("broadcast-council")),
+            agent: None,
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -1657,16 +1685,14 @@ async fn council_broadcast() {
             id: council_id,
             name: "broadcast-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Broadcast,
-            leader_agent_id: leader_id,
+            leader_agent: Slug::derive("leader"),
             members: vec![
                 CouncilMemberManifest {
-                    agent_id: member_a_id,
-                    agent_name: "member-a".into(),
+                    agent: Slug::derive("member-a"),
                     priority: 1,
                 },
                 CouncilMemberManifest {
-                    agent_id: member_b_id,
-                    agent_name: "member-b".into(),
+                    agent: Slug::derive("member-b"),
                     priority: 2,
                 },
             ],
@@ -1709,7 +1735,7 @@ async fn council_broadcast() {
 
     let task = test_task(Uuid::new_v4(), "Council task", "Build the feature");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("broadcast-council-routine")
         .unwrap()
         .run(task)
         .await
@@ -1737,11 +1763,12 @@ async fn council_round_robin() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("round-robin-council-routine"),
             name: "round-robin-council-step".into(),
             step_type: RoutineStepType::Council,
-            council_id: Some(council_id),
-            agent_id: None,
+            council: Some(Slug::derive("round-robin-council")),
+            agent: None,
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -1761,16 +1788,14 @@ async fn council_round_robin() {
             id: council_id,
             name: "round-robin-council".into(),
             delegation_strategy: CouncilDelegationStrategy::RoundRobin,
-            leader_agent_id: leader_id,
+            leader_agent: Slug::derive("leader"),
             members: vec![
                 CouncilMemberManifest {
-                    agent_id: member_a_id,
-                    agent_name: "member-a".into(),
+                    agent: Slug::derive("member-a"),
                     priority: 1,
                 },
                 CouncilMemberManifest {
-                    agent_id: member_b_id,
-                    agent_name: "member-b".into(),
+                    agent: Slug::derive("member-b"),
                     priority: 2,
                 },
             ],
@@ -1809,7 +1834,7 @@ async fn council_round_robin() {
 
     let task = test_task(Uuid::new_v4(), "Council task", "Build the feature");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("round-robin-council-routine")
         .unwrap()
         .run(task)
         .await
@@ -1837,11 +1862,12 @@ async fn council_vote() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("vote-council-routine"),
             name: "vote-council-step".into(),
             step_type: RoutineStepType::Council,
-            council_id: Some(council_id),
-            agent_id: None,
+            council: Some(Slug::derive("vote-council")),
+            agent: None,
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -1861,16 +1887,14 @@ async fn council_vote() {
             id: council_id,
             name: "vote-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Vote,
-            leader_agent_id: leader_id,
+            leader_agent: Slug::derive("leader"),
             members: vec![
                 CouncilMemberManifest {
-                    agent_id: member_a_id,
-                    agent_name: "member-a".into(),
+                    agent: Slug::derive("member-a"),
                     priority: 1,
                 },
                 CouncilMemberManifest {
-                    agent_id: member_b_id,
-                    agent_name: "member-b".into(),
+                    agent: Slug::derive("member-b"),
                     priority: 2,
                 },
             ],
@@ -1913,7 +1937,7 @@ async fn council_vote() {
 
     let task = test_task(Uuid::new_v4(), "Council task", "Build the feature");
     let result = provider
-        .routine_by_id(routine_id)
+        .routine("vote-council-routine")
         .unwrap()
         .run(task)
         .await
@@ -1930,7 +1954,6 @@ async fn cron_execution() {
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
     let routine_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
         id: routine_id,
@@ -1940,11 +1963,12 @@ async fn cron_execution() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("cron-routine"),
             name: "check".into(),
             step_type: RoutineStepType::Gate,
-            council_id: None,
-            agent_id: Some(agent_id),
+            council: None,
+            agent: Some(Slug::derive("monitor")),
             config: serde_json::json!({ "criteria": "Check system health" }),
             order_index: 0,
         }],
@@ -1983,14 +2007,14 @@ async fn cron_execution() {
 
     let task = RoutineRun::cron(CronInput {
         task: None,
-        project_id: Some(project_id),
+        project: Some(nenjo::Slug::derive("project")),
         schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
         start_at: None,
         timeout: Duration::from_secs(5),
     });
 
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("cron-routine")
         .unwrap()
         .run_stream(task)
         .await
@@ -2026,8 +2050,6 @@ async fn cron_cancellation() {
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
     let routine_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
-
     let routine = RoutineManifest {
         id: routine_id,
         name: "cancel-cron".into(),
@@ -2036,11 +2058,12 @@ async fn cron_cancellation() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("cancel-cron"),
             name: "poll".into(),
             step_type: RoutineStepType::Terminal,
-            council_id: None,
-            agent_id: None,
+            council: None,
+            agent: None,
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -2065,14 +2088,14 @@ async fn cron_cancellation() {
 
     let task = RoutineRun::cron(CronInput {
         task: None,
-        project_id: Some(project_id),
+        project: Some(nenjo::Slug::derive("project")),
         schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
         start_at: None,
         timeout: Duration::from_secs(30),
     });
 
     let mut handle = provider
-        .routine_by_id(routine_id)
+        .routine("cancel-cron")
         .unwrap()
         .run_stream(task)
         .await
@@ -2133,7 +2156,7 @@ async fn delegation_basic() {
     // Parent sub-agent tools are injected into the per-run clone, not the
     // stored runner instance. The legacy delegate_to tool should never appear.
     let runner = provider
-        .agent_by_name("coder")
+        .agent("coder")
         .await
         .unwrap()
         .build()
@@ -2171,13 +2194,7 @@ async fn delegation_not_injected_for_single_agent() {
         .await
         .unwrap();
 
-    let runner = provider
-        .agent_by_name("solo")
-        .await
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
+    let runner = provider.agent("solo").await.unwrap().build().await.unwrap();
 
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -2210,7 +2227,7 @@ async fn worktree_scoped_agent_keeps_extra_runtime_tools() {
 
     let work_dir = tempfile::tempdir().unwrap();
     let runner = provider
-        .agent_by_name("worker")
+        .agent("worker")
         .await
         .unwrap()
         .with_tool(PassVerdictTool::new())

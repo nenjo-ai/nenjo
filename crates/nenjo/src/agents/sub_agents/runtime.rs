@@ -10,11 +10,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::Slug;
 use crate::agents::AgentExecutionMode;
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
 use crate::input::TaskInput;
-use crate::manifest::{AgentManifest, ModelManifest};
+use crate::manifest::{AgentManifest, ModelManifest, model_manifest_slug};
 use crate::provider::ProviderRuntime;
+use crate::tools::Tool;
 use crate::types::DelegationContext;
 
 use super::error::SubAgentError;
@@ -22,7 +24,6 @@ use super::events::{
     SignalDigest, SubAgentSignal, SubAgentStatus, SubAgentTranscriptEvent, push_bounded,
 };
 use super::format::ResultFormat;
-use super::slug::SubAgentSlug;
 
 const SIGNAL_QUEUE_CAP: usize = 128;
 const TRANSCRIPT_CAP: usize = 256;
@@ -47,7 +48,7 @@ pub(crate) struct SubAgentLimits {
 #[derive(Debug, Clone)]
 pub(crate) struct SpawnRequest {
     pub(crate) agent_name: String,
-    pub(crate) slug: Option<SubAgentSlug>,
+    pub(crate) slug: Option<Slug>,
     pub(crate) prompt: Option<String>,
     pub(crate) task: SubAgentTask,
     pub(crate) context: Option<Value>,
@@ -66,6 +67,15 @@ pub(crate) struct SpawnedSubAgent {
     pub(crate) slug: String,
     pub(crate) agent: String,
     pub(crate) status: &'static str,
+    pub(crate) capabilities: SubAgentCapabilities,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SubAgentCapabilities {
+    pub(crate) mode: &'static str,
+    pub(crate) inherited_host_tools: Vec<String>,
+    pub(crate) child_tools: &'static [&'static str],
+    pub(crate) note: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,14 +118,15 @@ struct RuntimeInner<P: ProviderRuntime> {
     provider: P,
     parent_agent_id: Uuid,
     parent_model_manifest: ModelManifest,
+    inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
-    runs: Mutex<HashMap<SubAgentSlug, Arc<SubAgentRun>>>,
+    runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
     notify: Notify,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
 struct SubAgentRun {
-    slug: SubAgentSlug,
+    slug: Slug,
     agent_name: String,
     status: Mutex<SubAgentStatus>,
     signals: Mutex<VecDeque<SubAgentSignal>>,
@@ -158,6 +169,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
         provider: P,
         parent_agent_id: Uuid,
         parent_model_manifest: ModelManifest,
+        inherited_host_tools: Vec<Arc<dyn Tool>>,
         limits: SubAgentLimits,
         delegation_ctx: Option<DelegationContext>,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -169,6 +181,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
                 provider,
                 parent_agent_id,
                 parent_model_manifest,
+                inherited_host_tools,
                 delegation_ctx,
                 runs: Mutex::new(HashMap::new()),
                 notify: Notify::new(),
@@ -199,6 +212,15 @@ impl<P: ProviderRuntime> Drop for RuntimeInner<P> {
     }
 }
 
+impl<P: ProviderRuntime> RuntimeInner<P> {
+    fn inherited_tool_names(&self) -> Vec<String> {
+        self.inherited_host_tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
+}
+
 impl<P: ProviderRuntime> SubAgentHandle<P> {
     pub(crate) async fn spawn_many(
         &self,
@@ -212,7 +234,13 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
     }
 
     async fn spawn_one(&self, request: SpawnRequest) -> Result<SpawnedSubAgent, SubAgentError> {
-        let child_agent = ephemeral_agent_manifest(&request, self.inner.parent_model_manifest.id)?;
+        let child_agent = ephemeral_agent_manifest(
+            &request,
+            model_manifest_slug(
+                &self.inner.parent_model_manifest.model_provider,
+                &self.inner.parent_model_manifest.model,
+            ),
+        )?;
         let child_ctx = self
             .inner
             .delegation_ctx
@@ -254,21 +282,23 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         };
         let provider = inner.provider.clone();
         let child_model_manifest = inner.parent_model_manifest.clone();
+        let inherited_host_tools = inner.inherited_host_tools.clone();
         let task = build_child_task_input(&request);
         let result_format = request.result_format.clone();
         let completion_format = result_format.clone();
         let cancel = run.cancel.clone();
 
         let join = tokio::spawn(async move {
-            let result = run_child_agent(
+            let result = run_child_agent(ChildAgentRun {
                 provider,
-                child_agent,
-                child_model_manifest,
+                agent: child_agent,
+                model_manifest: child_model_manifest,
+                inherited_host_tools,
                 task,
                 child_ctx,
-                child_handle.clone(),
+                child_handle: child_handle.clone(),
                 cancel,
-            )
+            })
             .await;
             match result {
                 Ok(output) => {
@@ -305,14 +335,20 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             slug: slug.to_string(),
             agent: request.agent_name,
             status: SubAgentStatus::Running.as_str(),
+            capabilities: SubAgentCapabilities {
+                mode: "isolated_ephemeral_child",
+                inherited_host_tools: self.inner.inherited_tool_names(),
+                child_tools: &["update_parent_agent", "ask_parent_agent"],
+                note: "Child agents inherit parent host tools and scoped workspace access, but not sub-agent management tools or installed-agent abilities.",
+            },
         })
     }
 
-    async fn reserve_slug(&self, request: &SpawnRequest) -> Result<SubAgentSlug, SubAgentError> {
+    async fn reserve_slug(&self, request: &SpawnRequest) -> Result<Slug, SubAgentError> {
         let base = request
             .slug
             .clone()
-            .unwrap_or_else(|| SubAgentSlug::derive(&request.agent_name));
+            .unwrap_or_else(|| Slug::derive_with_fallback(&request.agent_name, "sub_agent"));
         let runs = self.inner.runs.lock().await;
         if !runs.contains_key(&base) {
             return Ok(base);
@@ -330,7 +366,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         }
     }
 
-    pub(crate) async fn send(&self, messages: Vec<(SubAgentSlug, String)>) -> Vec<DeliveryResult> {
+    pub(crate) async fn send(&self, messages: Vec<(Slug, String)>) -> Vec<DeliveryResult> {
         let mut results = Vec::with_capacity(messages.len());
         for (slug, message) in messages {
             let Some(run) = self.find(&slug).await else {
@@ -372,7 +408,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
 
     pub(crate) async fn stop(
         &self,
-        slugs: Vec<SubAgentSlug>,
+        slugs: Vec<Slug>,
         reason: Option<String>,
     ) -> Vec<StoppedSubAgent> {
         let mut stopped = Vec::with_capacity(slugs.len());
@@ -403,7 +439,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
 
     pub(crate) async fn inspect(
         &self,
-        slugs: Vec<SubAgentSlug>,
+        slugs: Vec<Slug>,
         include_transcript: bool,
         limit: usize,
     ) -> Vec<InspectedSubAgent> {
@@ -510,7 +546,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         updates
     }
 
-    async fn find(&self, slug: &SubAgentSlug) -> Option<Arc<SubAgentRun>> {
+    async fn find(&self, slug: &Slug) -> Option<Arc<SubAgentRun>> {
         self.inner.runs.lock().await.get(slug).cloned()
     }
 
@@ -617,29 +653,34 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
     }
 }
 
-async fn run_child_agent<P: ProviderRuntime>(
+struct ChildAgentRun<P: ProviderRuntime> {
     provider: P,
     agent: AgentManifest,
     model_manifest: ModelManifest,
+    inherited_host_tools: Vec<Arc<dyn Tool>>,
     task: TaskInput,
     child_ctx: DelegationContext,
     child_handle: ChildRuntimeHandle<P>,
     cancel: CancellationToken,
-) -> Result<TurnOutput> {
-    let builder = provider
+}
+
+async fn run_child_agent<P: ProviderRuntime>(run: ChildAgentRun<P>) -> Result<TurnOutput> {
+    let builder = run
+        .provider
         .new_agent()
-        .with_agent_manifest(agent)
-        .with_model_manifest(model_manifest)
-        .with_child_delegation_ctx(child_ctx)
+        .with_agent_manifest(run.agent)
+        .with_model_manifest(run.model_manifest)
+        .with_tools(run.inherited_host_tools)
+        .with_child_delegation_ctx(run.child_ctx)
         .with_execution_mode(AgentExecutionMode::Child);
     let runner = builder.build().await?;
     let mut handle = runner
-        .task_stream_as_sub_agent(task, child_handle.clone())
+        .task_stream_as_sub_agent(run.task, run.child_handle.clone())
         .await?;
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
+            _ = run.cancel.cancelled() => {
                 handle.abort();
                 return Err(anyhow::anyhow!("sub-agent stopped"));
             }
@@ -647,7 +688,7 @@ async fn run_child_agent<P: ProviderRuntime>(
                 let Some(event) = event else {
                     break;
                 };
-                bridge_transcript(&child_handle, event).await;
+                bridge_transcript(&run.child_handle, event).await;
             }
         }
     }
@@ -656,7 +697,7 @@ async fn run_child_agent<P: ProviderRuntime>(
 
 fn ephemeral_agent_manifest(
     request: &SpawnRequest,
-    model_id: Uuid,
+    model: crate::Slug,
 ) -> Result<AgentManifest, SubAgentError> {
     let prompt = request
         .prompt
@@ -667,10 +708,10 @@ fn ephemeral_agent_manifest(
 
     AgentManifest::builder()
         .with_name(request.agent_name.clone())
-        .with_model_id(model_id)
+        .with_model(model)
         .with_system_prompt(prompt)
         .with_developer_prompt(
-            "You are an isolated sub-agent worker. Work only on the assigned task, report progress to the parent when useful, and return a focused final result.",
+            "You are an isolated sub-agent worker. Work only on the assigned task, report progress to the parent when useful, and return a focused final result. You inherit the parent agent's host tools and scoped workspace access for this run. You also have update_parent_agent and ask_parent_agent. You do not inherit sub-agent management tools, installed-agent abilities, or unrelated domains. Use inherited tools only within the assigned task and report any mutations or evidence clearly to the parent.",
         )
         .with_task_template(SUB_AGENT_TASK_TEMPLATE)
         .build()
@@ -754,13 +795,8 @@ fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
         acceptance_criteria.push_str(&format.instructions());
     }
 
-    let task = TaskInput::new(
-        Uuid::nil(),
-        Uuid::new_v4(),
-        request.task.goal.trim(),
-        description,
-    )
-    .source("sub_agent");
+    let task =
+        TaskInput::new("sub_agent", request.task.goal.trim(), description).source("sub_agent");
 
     if acceptance_criteria.trim().is_empty() {
         task

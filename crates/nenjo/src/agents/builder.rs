@@ -158,6 +158,11 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
+    pub(crate) fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.tools.extend(tools);
+        self
+    }
+
     /// Override the agent configuration.
     pub fn with_config(mut self, config: AgentConfig) -> Self {
         self.agent_config = config;
@@ -181,7 +186,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     }
 
     /// Inject routine context so the agent's prompts can reference
-    /// `{{ routine.name }}`, `{{ routine.id }}`, `{{ routine.execution_id }}`.
+    /// `{{ routine.name }}`, `{{ routine.slug }}`, `{{ routine.execution_id }}`.
     pub fn with_routine_context(mut self, ctx: RoutineContext) -> Self {
         self.pending_routine_context = Some(ctx);
         self
@@ -367,25 +372,15 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
 fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
     let slug = if prompt_context.render_ctx_extra.project.slug.is_empty() {
-        &prompt_context.current_project.slug
+        prompt_context.current_project.slug.as_str()
     } else {
-        &prompt_context.render_ctx_extra.project.slug
+        prompt_context.render_ctx_extra.project.slug.as_str()
     };
 
-    if slug.is_empty() {
-        None
-    } else {
-        Some(slug.as_str())
-    }
+    if slug.is_empty() { None } else { Some(slug) }
 }
 
 fn strip_child_prompt_capabilities(prompt_context: &mut PromptContext) {
-    prompt_context.available_agents.clear();
-    prompt_context.available_routines.clear();
-    prompt_context.available_abilities.clear();
-    prompt_context.available_domains.clear();
-    prompt_context.mcp_server_info.clear();
-    prompt_context.platform_scopes.clear();
     prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
 }

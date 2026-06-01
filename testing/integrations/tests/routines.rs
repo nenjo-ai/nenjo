@@ -8,12 +8,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 
-use nenjo::TaskInput;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
+use nenjo::{Slug, TaskInput};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -50,16 +51,17 @@ fn make_project() -> ProjectManifest {
     ProjectManifest {
         id: Uuid::new_v4(),
         name: "test-project".into(),
-        slug: "test-project".into(),
+        slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
     }
 }
 
-fn make_agent(model_id: Uuid) -> AgentManifest {
+fn make_agent(model: &ModelManifest) -> AgentManifest {
     AgentManifest {
         id: Uuid::new_v4(),
         name: "routine-agent".into(),
+        slug: None,
         description: Some("Executes routine steps".into()),
         prompt_config: PromptConfig {
             system_prompt:
@@ -75,23 +77,23 @@ fn make_agent(model_id: Uuid) -> AgentManifest {
             ..Default::default()
         },
         color: None,
-        model_id: Some(model_id),
-        domain_ids: vec![],
+        model: Some(model_manifest_slug(&model.model_provider, &model.model)),
+        domains: vec![],
         platform_scopes: vec![],
-        mcp_server_ids: vec![],
-        ability_ids: vec![],
+        mcp_servers: vec![],
+        abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
 }
 
-fn make_task(project_id: Uuid) -> TaskInput {
+fn make_task(project: &ProjectManifest) -> TaskInput {
     TaskInput::new(
-        project_id,
-        Uuid::new_v4(),
+        &project.slug,
         "Routine integration smoke test",
         "Reply with a short sentence that includes the marker ROUTINE_OK.",
     )
+    .with_task_id(Uuid::new_v4())
     .source("integration-test")
 }
 
@@ -107,9 +109,10 @@ async fn single_step_routine_with_real_llm() {
 
     let model = make_model();
     let project = make_project();
-    let agent = make_agent(model.id);
+    let agent = make_agent(&model);
     let step_id = Uuid::new_v4();
     let routine_id = Uuid::new_v4();
+    let routine_slug = Slug::derive("smoke-routine");
 
     let routine = RoutineManifest {
         id: routine_id,
@@ -119,11 +122,12 @@ async fn single_step_routine_with_real_llm() {
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             id: step_id,
-            routine_id,
+            slug: Slug::derive("respond"),
+            routine: routine_slug.clone(),
             name: "respond".into(),
             step_type: RoutineStepType::Agent,
-            council_id: None,
-            agent_id: Some(agent.id),
+            council: None,
+            agent: Some(Slug::derive(&agent.name)),
             config: serde_json::json!({}),
             order_index: 0,
         }],
@@ -147,9 +151,9 @@ async fn single_step_routine_with_real_llm() {
         .unwrap();
 
     let result = provider
-        .routine_by_id(routine_id)
+        .routine(routine_slug)
         .unwrap()
-        .run(make_task(project.id))
+        .run(make_task(&project))
         .await
         .expect("routine should succeed");
 

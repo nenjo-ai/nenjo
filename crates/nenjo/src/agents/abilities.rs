@@ -1,95 +1,181 @@
 //! Ability invocation tools.
 //!
-//! Each assigned ability is exposed as its own tool using the configured
-//! `tool_name`. The caller delegates work through a single `task` argument.
+//! Assigned abilities are exposed through a stable broker pair:
+//! `list_assigned_abilities` discovers available abilities and `use_ability` invokes
+//! one by its model-facing ability id.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use nenjo_models::ModelProvider;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::tools::{Tool, ToolCategory, ToolResult};
+use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
 use super::runner::types::TurnEvent;
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
-use crate::manifest::{AbilityManifest, Manifest, PromptConfig, PromptTemplates};
+use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
 
-/// A single assigned ability exposed as a first-class tool.
-pub struct AssignedAbilityTool<P: ProviderRuntime = ErasedProvider> {
-    tool_name: String,
+pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
+pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
+
+#[derive(Debug, Clone)]
+struct AbilityEntry {
+    ability_id: String,
     ability: AbilityManifest,
-    instance: Arc<AgentInstance<P>>,
-    manifest: Arc<Manifest>,
-    description: String,
 }
 
-impl<P: ProviderRuntime> AssignedAbilityTool<P> {
-    /// Create a tool that invokes the assigned ability through a sub-agent run.
-    pub fn new(
-        ability: AbilityManifest,
-        instance: Arc<AgentInstance<P>>,
-        manifest: Arc<Manifest>,
-    ) -> Self {
-        let mut description_parts = Vec::new();
-        if let Some(summary) = ability
-            .description
-            .as_ref()
-            .filter(|text| !text.trim().is_empty())
-        {
-            description_parts.push(summary.trim().to_string());
-        } else {
-            description_parts.push(format!("Execute the '{}' ability.", ability.name));
+#[derive(Debug, Clone)]
+struct AbilityRegistry {
+    entries: Vec<AbilityEntry>,
+    by_id: BTreeMap<String, usize>,
+}
+
+impl AbilityRegistry {
+    fn new(abilities: &[AbilityManifest]) -> Result<Self> {
+        let mut entries: Vec<AbilityEntry> = Vec::with_capacity(abilities.len());
+        let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+        for ability in abilities {
+            let ability_id = ability_id(ability);
+            if let Some(existing) = by_id.get(&ability_id) {
+                let existing = &entries[*existing].ability;
+                bail!(
+                    "duplicate ability_id '{ability_id}' for abilities '{}' and '{}'",
+                    existing.name,
+                    ability.name
+                );
+            }
+            by_id.insert(ability_id.clone(), entries.len());
+            entries.push(AbilityEntry {
+                ability_id,
+                ability: ability.clone(),
+            });
         }
-        if !ability.activation_condition.trim().is_empty() {
-            description_parts.push(format!("Use when: {}", ability.activation_condition.trim()));
-        }
-        description_parts.push(
-            "Provide a self-contained task: include all relevant code, artifacts, constraints, and context the ability needs. After the ability returns, base your response on its result."
-                .to_string(),
-        );
-        let description = description_parts.join(" ");
-        Self {
-            tool_name: ability.tool_name.clone(),
-            ability,
-            instance,
-            manifest,
-            description,
-        }
+        Ok(Self { entries, by_id })
+    }
+
+    fn get(&self, ability_id: &str) -> Option<&AbilityManifest> {
+        self.by_id
+            .get(ability_id)
+            .and_then(|index| self.entries.get(*index))
+            .map(|entry| &entry.ability)
     }
 }
 
-pub(crate) fn ability_tool_name(ability: &AbilityManifest) -> String {
-    ability.tool_name.clone()
+#[derive(Debug, Serialize)]
+struct AbilityListItem<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    activation_condition: &'a str,
+}
+
+/// Discover abilities assigned to the current agent.
+pub struct ListAssignedAbilitiesTool {
+    registry: Arc<AbilityRegistry>,
+}
+
+impl ListAssignedAbilitiesTool {
+    fn new(registry: Arc<AbilityRegistry>) -> Self {
+        Self { registry }
+    }
 }
 
 #[async_trait::async_trait]
-impl<P> Tool for AssignedAbilityTool<P>
+impl Tool for ListAssignedAbilitiesTool {
+    fn name(&self) -> &str {
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "List abilities assigned to this agent. Use this before invoking an ability when the task may require a specialized capability beyond the base tools."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
+        let abilities: Vec<_> = self
+            .registry
+            .entries
+            .iter()
+            .map(|entry| AbilityListItem {
+                name: &entry.ability_id,
+                description: entry.ability.description.as_deref(),
+                activation_condition: &entry.ability.activation_condition,
+            })
+            .collect();
+        let output = serde_json::to_string(&serde_json::json!({ "abilities": abilities }))
+            .context("failed to serialize ability list")?;
+        Ok(ToolResult {
+            success: true,
+            output,
+            error: None,
+        })
+    }
+}
+
+/// Invoke one assigned ability by slug name.
+pub struct UseAbilityTool<P: ProviderRuntime = ErasedProvider> {
+    registry: Arc<AbilityRegistry>,
+    instance: Arc<AgentInstance<P>>,
+}
+
+impl<P: ProviderRuntime> UseAbilityTool<P> {
+    fn new(registry: Arc<AbilityRegistry>, instance: Arc<AgentInstance<P>>) -> Self {
+        Self { registry, instance }
+    }
+}
+
+#[async_trait::async_trait]
+impl<P> Tool for UseAbilityTool<P>
 where
     P: ProviderRuntime,
 {
     fn name(&self) -> &str {
-        &self.tool_name
+        USE_ABILITY_TOOL_NAME
     }
 
     fn description(&self) -> &str {
-        &self.description
+        "Invoke one ability assigned to this agent by name. Use list_assigned_abilities to discover available ability names before calling this tool."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "task": {
+                "name": {
+                    "type": "string",
+                    "description": "The stable ability name returned by list_assigned_abilities."
+                },
+                "input": {
                     "type": "string",
                     "description": "A self-contained delegated task. Include all relevant user-provided context, code snippets, files, constraints, and expected output so the ability can complete the task without access to the caller conversation."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this ability is appropriate for the task."
                 }
             },
-            "required": ["task"],
+            "required": ["name", "input"],
             "additionalProperties": false
         })
     }
@@ -98,192 +184,220 @@ where
         ToolCategory::ReadWrite
     }
 
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let task_description = match args["task"].as_str() {
+        let ability_name = match args["name"]
+            .as_str()
+            .or_else(|| args["ability_id"].as_str())
+        {
+            Some(id) if !id.trim().is_empty() => id.trim(),
+            _ => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("ability name is required".into()),
+                });
+            }
+        };
+        let task_description = match args["input"].as_str() {
             Some(t) if !t.is_empty() => t,
             _ => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some("task is required".into()),
+                    error: Some("input is required".into()),
                 });
             }
         };
-        let ability = &self.ability;
-
-        debug!(
-            ability = ability.name,
-            agent = self.instance.name(),
-            "Activating ability"
-        );
-
-        // Build the sub-execution instance.
-        let sub_instance = build_ability_instance(&self.instance, ability, &self.manifest).await;
-
-        let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
-        let task = AgentRun::chat(ChatInput {
-            message: task_description.to_string(),
-            history: vec![],
-            project_id: None,
-        });
-        if let Some(parent_tx) = turn_loop::current_events_tx() {
-            debug!(
-                ability = ability.name,
-                ability_tool_name = ability.tool_name,
-                "Emitting AbilityStarted"
-            );
-            let _ = parent_tx.send(TurnEvent::AbilityStarted {
-                ability_tool_name: ability.tool_name.clone(),
-                ability_name: ability.name.clone(),
-                task_input: task_description.to_string(),
-                caller_history: caller_history_snapshot,
+        let Some(ability) = self.registry.get(ability_name) else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("unknown ability '{ability_name}'")),
             });
-        }
-
-        let prompts = sub_instance.build_prompts(&task);
-
-        let tool_names: Vec<&str> = sub_instance
-            .runtime
-            .tools
-            .iter()
-            .map(|t| t.name())
-            .collect();
-        debug!(
-            ability = ability.name,
-            agent = self.instance.name(),
-            tool_count = sub_instance.runtime.tools.len(),
-            tools = ?tool_names,
-            "Ability sub-agent prompt"
-        );
-        debug!("{prompts}");
-
-        // Build messages for the sub-execution.
-        let supports_developer_role = sub_instance
-            .model
-            .model_provider
-            .supports_developer_role(&sub_instance.model.model_name);
-        let mut messages = build_instruction_messages(
-            &prompts.system,
-            &prompts.developer,
-            supports_developer_role,
-        );
-
-        if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
-            messages.extend(chat.history.iter().cloned());
-        }
-
-        let user_message = if prompts.user_message.is_empty() {
-            task_description.to_string()
-        } else {
-            prompts.user_message
         };
+        execute_ability(&self.instance, ability, task_description).await
+    }
+}
+
+async fn execute_ability<P>(
+    instance: &Arc<AgentInstance<P>>,
+    ability: &AbilityManifest,
+    task_description: &str,
+) -> Result<ToolResult>
+where
+    P: ProviderRuntime,
+{
+    debug!(
+        ability = ability.name,
+        agent = instance.name(),
+        "Activating ability"
+    );
+
+    // Build the sub-execution instance.
+    let sub_instance = build_ability_instance(instance, ability).await;
+
+    let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
+    let task = AgentRun::chat(ChatInput {
+        message: task_description.to_string(),
+        history: vec![],
+        project: None,
+    });
+    if let Some(parent_tx) = turn_loop::current_events_tx() {
         debug!(
             ability = ability.name,
-            user_message = %user_message,
-            "Ability sub-agent user message"
+            ability_tool_name = USE_ABILITY_TOOL_NAME,
+            "Emitting AbilityStarted"
         );
-        messages.push(nenjo_models::ChatMessage::user(&user_message));
+        let _ = parent_tx.send(TurnEvent::AbilityStarted {
+            ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+            ability_name: ability.name.clone(),
+            task_input: task_description.to_string(),
+            caller_history: caller_history_snapshot,
+        });
+    }
 
-        let parent_events_tx = turn_loop::current_events_tx();
-        let (nested_tx, mut nested_rx) = mpsc::unbounded_channel::<TurnEvent>();
-        let ability_tool_name = ability.tool_name.clone();
-        let bridge = parent_events_tx.map(|parent_tx| {
-            let ability_tool_name = ability_tool_name.clone();
-            tokio::spawn(async move {
-                while let Some(event) = nested_rx.recv().await {
-                    match event {
-                        TurnEvent::AbilityStarted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
-                        TurnEvent::ToolCallStart {
-                            parent_tool_name,
+    let prompts = sub_instance.build_prompts(&task);
+
+    let tool_names: Vec<&str> = sub_instance
+        .runtime
+        .tools
+        .iter()
+        .map(|t| t.name())
+        .collect();
+    debug!(
+        ability = ability.name,
+        agent = instance.name(),
+        tool_count = sub_instance.runtime.tools.len(),
+        tools = ?tool_names,
+        "Ability sub-agent prompt"
+    );
+    debug!("{prompts}");
+
+    // Build messages for the sub-execution.
+    let supports_developer_role = sub_instance
+        .model
+        .model_provider
+        .supports_developer_role(&sub_instance.model.model_name);
+    let mut messages =
+        build_instruction_messages(&prompts.system, &prompts.developer, supports_developer_role);
+
+    if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
+        messages.extend(chat.history.iter().cloned());
+    }
+
+    let user_message = if prompts.user_message.is_empty() {
+        task_description.to_string()
+    } else {
+        prompts.user_message
+    };
+    debug!(
+        ability = ability.name,
+        user_message = %user_message,
+        "Ability sub-agent user message"
+    );
+    messages.push(nenjo_models::ChatMessage::user(&user_message));
+
+    let parent_events_tx = turn_loop::current_events_tx();
+    let (nested_tx, mut nested_rx) = mpsc::unbounded_channel::<TurnEvent>();
+    let bridge = parent_events_tx.map(|parent_tx| {
+        tokio::spawn(async move {
+            while let Some(event) = nested_rx.recv().await {
+                match event {
+                    TurnEvent::AbilityStarted { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
+                    TurnEvent::ToolCallStart {
+                        parent_tool_name,
+                        calls,
+                    } => {
+                        let _ = parent_tx.send(TurnEvent::ToolCallStart {
+                            parent_tool_name: parent_tool_name
+                                .or_else(|| Some(USE_ABILITY_TOOL_NAME.to_string())),
                             calls,
-                        } => {
-                            let _ = parent_tx.send(TurnEvent::ToolCallStart {
-                                parent_tool_name: parent_tool_name
-                                    .or_else(|| Some(ability_tool_name.clone())),
-                                calls,
-                            });
-                        }
-                        TurnEvent::ToolCallEnd {
-                            parent_tool_name,
+                        });
+                    }
+                    TurnEvent::ToolCallEnd {
+                        parent_tool_name,
+                        tool_call_id,
+                        tool_name,
+                        tool_args,
+                        result,
+                    } => {
+                        let _ = parent_tx.send(TurnEvent::ToolCallEnd {
+                            parent_tool_name: parent_tool_name
+                                .or_else(|| Some(USE_ABILITY_TOOL_NAME.to_string())),
                             tool_call_id,
                             tool_name,
                             tool_args,
                             result,
-                        } => {
-                            let _ = parent_tx.send(TurnEvent::ToolCallEnd {
-                                parent_tool_name: parent_tool_name
-                                    .or_else(|| Some(ability_tool_name.clone())),
-                                tool_call_id,
-                                tool_name,
-                                tool_args,
-                                result,
-                            });
-                        }
-                        TurnEvent::AbilityCompleted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
-                        TurnEvent::MessageCompacted { .. } => {
-                            let _ = parent_tx.send(event);
-                        }
-                        TurnEvent::TranscriptMessage { .. } => {}
-                        _ => {}
+                        });
                     }
+                    TurnEvent::AbilityCompleted { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
+                    TurnEvent::MessageCompacted { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
+                    TurnEvent::TranscriptMessage { .. } => {}
+                    _ => {}
                 }
-            })
-        });
+            }
+        })
+    });
 
-        // Run the sub turn loop with nested events enabled.
-        let result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None).await;
+    // Run the sub turn loop with nested events enabled.
+    let result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None).await;
 
-        if let Some(bridge) = bridge {
-            let _ = bridge.await;
-        }
+    if let Some(bridge) = bridge {
+        let _ = bridge.await;
+    }
 
-        match result {
-            Ok(output) => {
-                turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
-                if let Some(parent_tx) = turn_loop::current_events_tx() {
-                    debug!(
-                        ability = ability.name,
-                        ability_tool_name = ability.tool_name,
-                        "Emitting AbilityCompleted success=true"
-                    );
-                    let _ = parent_tx.send(TurnEvent::AbilityCompleted {
-                        ability_tool_name: ability.tool_name.clone(),
-                        ability_name: ability.name.clone(),
-                        success: true,
-                        final_output: output.text.clone(),
-                    });
-                }
-                Ok(ToolResult {
+    match result {
+        Ok(output) => {
+            turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
+            if let Some(parent_tx) = turn_loop::current_events_tx() {
+                debug!(
+                    ability = ability.name,
+                    ability_tool_name = USE_ABILITY_TOOL_NAME,
+                    "Emitting AbilityCompleted success=true"
+                );
+                let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                    ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+                    ability_name: ability.name.clone(),
                     success: true,
-                    output: output.text,
-                    error: None,
-                })
+                    final_output: output.text.clone(),
+                });
             }
-            Err(e) => {
-                let error = format!("ability execution failed: {e}");
-                if let Some(parent_tx) = turn_loop::current_events_tx() {
-                    debug!(
-                        ability = ability.name,
-                        ability_tool_name = ability.tool_name,
-                        "Emitting AbilityCompleted success=false"
-                    );
-                    let _ = parent_tx.send(TurnEvent::AbilityCompleted {
-                        ability_tool_name: ability.tool_name.clone(),
-                        ability_name: ability.name.clone(),
-                        success: false,
-                        final_output: error.clone(),
-                    });
-                }
-                Ok(ToolResult {
+            Ok(ToolResult {
+                success: true,
+                output: output.text,
+                error: None,
+            })
+        }
+        Err(e) => {
+            let error = format!("ability execution failed: {e}");
+            if let Some(parent_tx) = turn_loop::current_events_tx() {
+                debug!(
+                    ability = ability.name,
+                    ability_tool_name = USE_ABILITY_TOOL_NAME,
+                    "Emitting AbilityCompleted success=false"
+                );
+                let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                    ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+                    ability_name: ability.name.clone(),
                     success: false,
-                    output: String::new(),
-                    error: Some(error),
-                })
+                    final_output: error.clone(),
+                });
             }
+            Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(error),
+            })
         }
     }
 }
@@ -291,36 +405,33 @@ where
 pub(crate) fn build_ability_tools<P>(
     abilities: &[AbilityManifest],
     instance: Arc<AgentInstance<P>>,
-    manifest: Arc<Manifest>,
-) -> Vec<Arc<dyn Tool>>
+) -> Result<Vec<Arc<dyn Tool>>>
 where
     P: ProviderRuntime,
 {
-    abilities
-        .iter()
-        .cloned()
-        .map(|ability| {
-            Arc::new(AssignedAbilityTool::new(
-                ability,
-                instance.clone(),
-                manifest.clone(),
-            )) as Arc<dyn Tool>
-        })
-        .collect()
+    let registry = Arc::new(AbilityRegistry::new(abilities)?);
+    Ok(vec![
+        Arc::new(ListAssignedAbilitiesTool::new(registry.clone())) as Arc<dyn Tool>,
+        Arc::new(UseAbilityTool::new(registry, instance)) as Arc<dyn Tool>,
+    ])
 }
 
-pub(crate) fn is_ability_tool(name: &str, abilities: &[AbilityManifest]) -> bool {
-    abilities.iter().any(|ability| ability.tool_name == name)
+pub(crate) fn is_ability_tool(name: &str) -> bool {
+    matches!(
+        name,
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME | USE_ABILITY_TOOL_NAME
+    )
+}
+
+fn ability_id(ability: &AbilityManifest) -> String {
+    ability.name.clone()
 }
 
 /// Build a temporary AgentInstance for the ability sub-execution.
 ///
-/// Resolves the ability's `mcp_server_ids` from the manifest and merges them
-/// into the sub-instance's prompt context.
 async fn build_ability_instance<P>(
     caller: &AgentInstance<P>,
     ability: &AbilityManifest,
-    manifest: &Manifest,
 ) -> AgentInstance<P>
 where
     P: ProviderRuntime,
@@ -340,28 +451,21 @@ where
         .runtime
         .tools
         .iter()
-        .filter(|tool| {
-            !caller
-                .prompt
-                .context
-                .available_abilities
-                .iter()
-                .any(|ability| ability.tool_name == tool.name())
-        })
+        .filter(|tool| tool.origin() == ToolOrigin::Host)
         .cloned()
         .collect();
 
-    let mut merged_scopes = caller.manifest.platform_scopes.clone();
+    let mut ability_scopes = Vec::new();
     for scope in &ability.platform_scopes {
-        if !merged_scopes.contains(scope) {
-            merged_scopes.push(scope.clone());
+        if !ability_scopes.contains(scope) {
+            ability_scopes.push(scope.clone());
         }
     }
 
-    let mut merged_mcp_server_ids = caller.manifest.mcp_server_ids.clone();
-    for server_id in &ability.mcp_server_ids {
-        if !merged_mcp_server_ids.contains(server_id) {
-            merged_mcp_server_ids.push(*server_id);
+    let mut merged_mcp_servers = Vec::new();
+    for server_id in &ability.mcp_servers {
+        if !merged_mcp_servers.contains(server_id) {
+            merged_mcp_servers.push(server_id.clone());
         }
     }
 
@@ -379,8 +483,10 @@ where
 
     let mut tools = if let Some(provider) = caller.runtime.provider_runtime.as_ref() {
         let mut scoped_agent = caller.manifest.clone();
-        scoped_agent.platform_scopes = merged_scopes.clone();
-        scoped_agent.mcp_server_ids = merged_mcp_server_ids.clone();
+        scoped_agent.platform_scopes = ability_scopes.clone();
+        scoped_agent.mcp_servers = merged_mcp_servers.clone();
+        scoped_agent.abilities.clear();
+        scoped_agent.domains.clear();
         provider
             .tool_factory()
             .create_tools_with_security(&scoped_agent, scoped_security.clone())
@@ -397,31 +503,11 @@ where
         }
     }
 
-    // Build a prompt context without abilities (no recursion).
+    // Build a prompt context without ability recursion.
     let mut prompt_context = caller.prompt.context.clone();
-    prompt_context.available_abilities = vec![];
     prompt_context.agent_name = format!("{}:{}", caller.name(), ability.name);
+    prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
-    prompt_context.platform_scopes = merged_scopes.clone();
-
-    // Resolve and merge the ability's MCP server info from the manifest.
-    for server in manifest
-        .mcp_servers
-        .iter()
-        .filter(|s| ability.mcp_server_ids.contains(&s.id))
-    {
-        let entry = (
-            server.display_name.clone(),
-            server.description.clone().unwrap_or_default(),
-        );
-        if !prompt_context
-            .mcp_server_info
-            .iter()
-            .any(|e| e.0 == entry.0)
-        {
-            prompt_context.mcp_server_info.push(entry);
-        }
-    }
 
     let mut scoped_manifest = caller.manifest.clone();
     scoped_manifest.name = format!("{}:{}", caller.name(), ability.name);
@@ -432,8 +518,10 @@ where
             .unwrap_or_else(|| caller.description().to_string()),
     );
     scoped_manifest.prompt_config = prompt_config;
-    scoped_manifest.platform_scopes = merged_scopes;
-    scoped_manifest.mcp_server_ids = merged_mcp_server_ids;
+    scoped_manifest.platform_scopes = ability_scopes;
+    scoped_manifest.mcp_servers = merged_mcp_servers;
+    scoped_manifest.abilities.clear();
+    scoped_manifest.domains.clear();
 
     AgentInstance {
         manifest: scoped_manifest,
@@ -531,6 +619,7 @@ mod tests {
 
     struct TestTool {
         name: &'static str,
+        origin: ToolOrigin,
     }
 
     #[async_trait::async_trait]
@@ -553,6 +642,10 @@ mod tests {
 
         fn category(&self) -> ToolCategory {
             ToolCategory::ReadWrite
+        }
+
+        fn origin(&self) -> ToolOrigin {
+            self.origin
         }
 
         async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
@@ -578,14 +671,18 @@ mod tests {
             agent: &AgentManifest,
             _security: Arc<ToolSecurity>,
         ) -> Vec<Arc<dyn Tool>> {
-            let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestTool { name: "shell" })];
+            let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            })];
             if agent
                 .platform_scopes
                 .iter()
-                .any(|scope| scope == "agents:read")
+                .any(|scope| scope == "agents:read" || scope == "agents:write")
             {
                 tools.push(Arc::new(TestTool {
                     name: "list_agents",
+                    origin: ToolOrigin::Platform,
                 }));
             }
             if agent
@@ -595,6 +692,7 @@ mod tests {
             {
                 tools.push(Arc::new(TestTool {
                     name: "create_agent",
+                    origin: ToolOrigin::Platform,
                 }));
             }
             tools
@@ -618,6 +716,7 @@ mod tests {
             manifest: AgentManifest {
                 id: uuid::Uuid::new_v4(),
                 name: "nenji".into(),
+                slug: Some(crate::Slug::derive("nenji")),
                 description: Some("system agent".into()),
                 prompt_config: PromptConfig {
                     system_prompt: "caller system".into(),
@@ -626,11 +725,11 @@ mod tests {
                     memory_profile: Default::default(),
                 },
                 color: None,
-                model_id: Some(uuid::Uuid::new_v4()),
-                domain_ids: vec![],
+                model: Some(crate::Slug::derive("mock")),
+                domains: vec![],
                 platform_scopes: vec!["agents:read".into()],
-                mcp_server_ids: vec![],
-                ability_ids: vec![],
+                mcp_servers: vec![],
+                abilities: vec![],
                 prompt_locked: false,
                 heartbeat: None,
             },
@@ -653,19 +752,13 @@ mod tests {
                 context: PromptContext {
                     agent_name: "nenji".into(),
                     agent_description: "system agent".into(),
-                    available_agents: vec![],
-                    available_routines: vec![],
                     current_project: crate::manifest::ProjectManifest {
                         id: uuid::Uuid::nil(),
                         name: String::new(),
-                        slug: String::new(),
+                        slug: crate::Slug::derive("project"),
                         description: None,
                         settings: serde_json::Value::Null,
                     },
-                    available_abilities: vec![],
-                    available_domains: vec![],
-                    mcp_server_info: vec![],
-                    platform_scopes: vec!["agents:read".into()],
                     active_domain: Some(ActiveDomain {
                         session_id: uuid::Uuid::new_v4(),
                         domain_id: uuid::Uuid::new_v4(),
@@ -678,15 +771,14 @@ mod tests {
                             description: None,
                             command: "#creator".into(),
                             platform_scopes: vec![],
-                            ability_ids: vec![],
-                            mcp_server_ids: vec![],
+                            abilities: vec![],
+                            mcp_servers: vec![],
                             prompt_config: DomainPromptConfig {
                                 developer_prompt_addon: Some("domain addon".into()),
                             },
                         },
                     }),
                     append_active_domain_addon: true,
-                    docs_base_dir: None,
                     render_ctx_extra: Default::default(),
                 },
                 renderer: ContextRenderer::from_blocks(&[]),
@@ -706,36 +798,40 @@ mod tests {
 
     #[tokio::test]
     async fn ability_sub_instance_uses_ability_prompt_without_domain_addon() {
-        let caller = test_instance_with_active_domain();
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
-            tool_name: "design_agent".into(),
-            path: "nenjo/platform".into(),
-            display_name: Some("Agent Builder".into()),
+            path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
             activation_condition: "When building agents".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "ability developer".into(),
             },
             platform_scopes: vec!["agents:write".into()],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
         };
 
-        let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
+        let sub_instance = build_ability_instance(&caller, &ability).await;
         let prompts = sub_instance.build_prompts(&AgentRun::chat(ChatInput {
             message: "build an agent".into(),
             history: vec![],
-            project_id: None,
+            project: None,
         }));
 
         assert_eq!(prompts.system, "caller system");
         assert_eq!(prompts.developer, "ability developer");
         assert!(!prompts.developer.contains("domain addon"));
         assert!(!sub_instance.prompt.context.append_active_domain_addon);
+        assert!(sub_instance.prompt.context.active_domain.is_none());
+        assert_eq!(sub_instance.manifest.platform_scopes, vec!["agents:write"]);
+        assert!(sub_instance.manifest.abilities.is_empty());
+        assert!(sub_instance.manifest.domains.is_empty());
         let tool_names: Vec<_> = sub_instance
             .runtime
             .tools
@@ -747,6 +843,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ability_sub_instance_does_not_inherit_caller_scopes_or_assignments() {
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.platform_scopes = vec!["agents:read".into()];
+        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.domains = vec![crate::Slug::derive("creator")];
+        let ability = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "isolated".into(),
+            path: Some("nenjo/platform".into()),
+            description: Some("Runs isolated".into()),
+            activation_condition: "When isolation is needed".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "ability developer".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        let sub_instance = build_ability_instance(&caller, &ability).await;
+        let tool_names: Vec<_> = sub_instance
+            .runtime
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+
+        assert!(!tool_names.contains(&"list_agents"));
+        assert!(!tool_names.contains(&"create_agent"));
+        assert!(sub_instance.manifest.platform_scopes.is_empty());
+        assert!(sub_instance.manifest.abilities.is_empty());
+        assert!(sub_instance.manifest.domains.is_empty());
+        assert!(sub_instance.prompt.context.active_domain.is_none());
+    }
+
+    #[tokio::test]
     async fn ability_sub_instance_renders_context_blocks_and_user_message() {
         let mut caller = test_instance_with_active_domain();
         caller.manifest.prompt_config.system_prompt = "{{ pkg.nenjo.core.methodology }}".into();
@@ -754,37 +888,35 @@ mod tests {
             RenderContextBlock {
                 name: "methodology".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<methodology>{{ agent.role }}</methodology>".into(),
+                template: "<methodology>{{ agent.name }}</methodology>".into(),
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<tool_usage>{{ agent.role }}</tool_usage>".into(),
+                template: "<tool_usage>{{ agent.name }}</tool_usage>".into(),
             },
         ]);
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
-            tool_name: "design_agent".into(),
-            path: "nenjo/platform".into(),
-            display_name: Some("Agent Builder".into()),
+            path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
             activation_condition: "When building agents".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "{{ pkg.nenjo.core.tool_usage }}".into(),
             },
             platform_scopes: vec!["agents:write".into()],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
         };
 
-        let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
+        let sub_instance = build_ability_instance(&caller, &ability).await;
         let prompts = sub_instance.build_prompts(&AgentRun::chat(ChatInput {
             message: "build an agent".into(),
             history: vec![],
-            project_id: None,
+            project: None,
         }));
 
         assert_eq!(
@@ -802,30 +934,32 @@ mod tests {
     async fn ability_sub_instance_preserves_non_factory_tools_without_duplicates() {
         let mut caller = test_instance_with_active_domain();
         caller.runtime.tools = vec![
-            Arc::new(TestTool { name: "shell" }),
+            Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            }),
             Arc::new(TestTool {
                 name: "remember_fact",
+                origin: ToolOrigin::Host,
             }),
         ];
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
-            tool_name: "design_agent".into(),
-            path: "nenjo/platform".into(),
-            display_name: Some("Agent Builder".into()),
+            path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
             activation_condition: "When building agents".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "ability developer".into(),
             },
             platform_scopes: vec!["agents:write".into()],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
         };
 
-        let sub_instance = build_ability_instance(&caller, &ability, &Manifest::default()).await;
+        let sub_instance = build_ability_instance(&caller, &ability).await;
         let tool_names: Vec<_> = sub_instance
             .runtime
             .tools
@@ -840,40 +974,176 @@ mod tests {
         assert!(tool_names.contains(&"remember_fact"));
     }
 
+    #[tokio::test]
+    async fn ability_sub_instance_does_not_inherit_caller_mcp_tools() {
+        let mut caller = test_instance_with_active_domain();
+        caller.manifest.mcp_servers = vec![crate::Slug::derive("caller-mcp")];
+        caller.runtime.tools = vec![
+            Arc::new(TestTool {
+                name: "shell",
+                origin: ToolOrigin::Host,
+            }),
+            Arc::new(TestTool {
+                name: "caller_mcp_tool",
+                origin: ToolOrigin::Mcp,
+            }),
+        ];
+        let ability = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "agent_builder".into(),
+            path: Some("nenjo/platform".into()),
+            description: Some("Builds agents".into()),
+            activation_condition: "When building agents".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "ability developer".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        let sub_instance = build_ability_instance(&caller, &ability).await;
+        let tool_names: Vec<_> = sub_instance
+            .runtime
+            .tools
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+
+        assert!(tool_names.contains(&"shell"));
+        assert!(!tool_names.contains(&"caller_mcp_tool"));
+        assert!(sub_instance.manifest.mcp_servers.is_empty());
+    }
+
     #[test]
-    fn ability_tool_schema_requires_self_contained_task_input() {
+    fn use_ability_schema_requires_self_contained_input() {
         let ability = AbilityManifest {
             id: uuid::Uuid::new_v4(),
             name: "review".into(),
-            tool_name: "code_review".into(),
-            path: "review".into(),
-            display_name: Some("Code Review".into()),
+            path: Some("review".into()),
             description: Some("Reviews code".into()),
             activation_condition: "When code review is needed".into(),
             prompt_config: AbilityPromptConfig {
                 developer_prompt: "review code".into(),
             },
             platform_scopes: vec![],
-            mcp_server_ids: vec![],
+            mcp_servers: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
         };
-        let tool = AssignedAbilityTool::new(
-            ability,
-            Arc::new(test_instance_with_active_domain()),
-            Arc::new(Manifest::default()),
-        );
+        let registry = Arc::new(AbilityRegistry::new(&[ability]).unwrap());
+        let tool = UseAbilityTool::new(registry, Arc::new(test_instance_with_active_domain()));
 
         let description = tool.description();
         let schema = tool.parameters_schema();
-        let task_description = schema["properties"]["task"]["description"]
+        let task_description = schema["properties"]["input"]["description"]
             .as_str()
             .unwrap_or_default();
 
-        assert!(description.contains("self-contained task"));
+        assert!(description.contains("Invoke one ability"));
         assert!(task_description.contains("self-contained delegated task"));
         assert!(task_description.contains("code snippets"));
         assert!(task_description.contains("without access to the caller conversation"));
+    }
+
+    #[tokio::test]
+    async fn list_assigned_abilities_returns_all_assigned_ability_metadata() {
+        let review = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "Code Review".into(),
+            path: Some("review".into()),
+            description: Some("Reviews code".into()),
+            activation_condition: "When code review is needed".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "review code".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+        let docs = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "Search Docs!".into(),
+            path: Some("docs".into()),
+            description: None,
+            activation_condition: "When documentation lookup is needed".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "search docs".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+        let registry = Arc::new(AbilityRegistry::new(&[review, docs]).unwrap());
+        let tool = ListAssignedAbilitiesTool::new(registry);
+
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+        assert!(result.success);
+        assert_eq!(output["abilities"][0]["name"], "Code Review");
+        assert!(output["abilities"][0].get("ability_id").is_none());
+        assert!(output["abilities"][0].get("display_name").is_none());
+        assert_eq!(
+            output["abilities"][0]["activation_condition"],
+            "When code review is needed"
+        );
+        assert_eq!(output["abilities"][1]["name"], "Search Docs!");
+    }
+
+    #[test]
+    fn ability_tool_filter_does_not_match_manifest_resource_list_tool() {
+        assert!(is_ability_tool("list_assigned_abilities"));
+        assert!(is_ability_tool("use_ability"));
+        assert!(!is_ability_tool("list_abilities"));
+    }
+
+    #[test]
+    fn duplicate_ability_ids_are_rejected() {
+        let first = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "code_review".into(),
+            path: Some("frontend".into()),
+            description: None,
+            activation_condition: "frontend".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "frontend".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+        let second = AbilityManifest {
+            id: uuid::Uuid::new_v4(),
+            name: "code_review".into(),
+            path: Some("backend".into()),
+            description: None,
+            activation_condition: "backend".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "backend".into(),
+            },
+            platform_scopes: vec![],
+            mcp_servers: vec![],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        let error = AbilityRegistry::new(&[first, second]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate ability_id 'code_review'")
+        );
     }
 }

@@ -12,18 +12,15 @@ use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use nenjo_knowledge::tools::KnowledgePackEntry;
+use nenjo_knowledge::tools::{CompositeKnowledgeRegistry, KnowledgePackEntry};
 
 /// Builder for creating a [`Provider`].
 ///
-/// # Quick start (with NenjoClient)
+/// # Quick start
 ///
 /// ```ignore
-/// use nenjo_api_client::NenjoClient;
-///
-/// let client = NenjoClient::new("https://api.nenjo.dev", "nj_sk_...");
 /// let provider = Provider::builder()
-///     .with_loader(client)
+///     .with_loader(loader)
 ///     .with_model_factory(my_factory)
 ///     .build()
 ///     .await?;
@@ -52,7 +49,7 @@ pub struct ProviderBuilder<
     memory: Option<Mem>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
-    knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry,
+    knowledge_registry: CompositeKnowledgeRegistry,
 }
 
 /// Marker used until `.with_model_factory(...)` is called.
@@ -107,7 +104,7 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             memory: None,
             agent_config: AgentConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
-            knowledge_registry: nenjo_knowledge::tools::StaticKnowledgeRegistry::new(),
+            knowledge_registry: CompositeKnowledgeRegistry::new(),
         }
     }
 }
@@ -130,11 +127,10 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     /// returns a partial manifest that is merged into the result. Later
     /// loaders override earlier ones on name collision (for context blocks).
     ///
-    /// `NenjoClient` from `nenjo-api-client` implements `ManifestLoader`,
-    /// so you can pass it directly:
+    /// Any type implementing `ManifestLoader` can be passed directly:
     ///
     /// ```ignore
-    /// builder.with_loader(NenjoClient::new(url, api_key))
+    /// builder.with_loader(loader)
     /// ```
     pub fn with_loader<Loader>(
         self,
@@ -256,13 +252,17 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     }
 
     fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
+        self.add_knowledge_prompt_vars(entry.clone());
+        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
+    }
+
+    fn add_knowledge_prompt_vars(&mut self, entry: KnowledgePackEntry) {
         self.render_ctx_extra.knowledge_vars.extend(
             nenjo_knowledge::tools::knowledge_pack_prompt_vars(
-                entry.selector(),
+                entry.knowledge_ref(),
                 entry.pack().as_ref(),
             ),
         );
-        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
     }
 }
 

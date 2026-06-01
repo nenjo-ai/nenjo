@@ -7,7 +7,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::manifest::{
+use nenjo::Slug;
+use nenjo::manifest::{
     AgentHeartbeatManifest, AgentManifest, CouncilDelegationStrategy, CouncilManifest,
     CouncilMemberManifest, DomainManifest, DomainPromptConfig, PromptConfig, RoutineEdgeCondition,
     RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
@@ -39,13 +40,14 @@ fn default_knowledge_pack_source_type() -> String {
     "uploaded".to_string()
 }
 
-/// Metadata for a workspace knowledge item, used during knowledge sync.
+/// Metadata for a workspace knowledge document, used during knowledge sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeItemSyncMeta {
-    pub id: Uuid,
-    pub pack_id: Uuid,
+pub struct KnowledgeDocSyncMeta {
     #[serde(default)]
-    pub pack_slug: Option<String>,
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub pack_id: Option<Uuid>,
+    pub pack_slug: String,
     pub slug: String,
     pub filename: String,
     #[serde(default)]
@@ -55,24 +57,15 @@ pub struct KnowledgeItemSyncMeta {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
-    pub authority: Option<String>,
-    #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub keywords: Vec<String>,
     pub content_type: String,
-    pub size_bytes: i64,
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeItemSyncContent {
+pub struct KnowledgeDocSyncContent {
     #[serde(default)]
     pub content: Option<String>,
     pub filename: String,
@@ -83,11 +76,16 @@ pub struct KnowledgeItemSyncContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeItemSyncEdge {
+pub struct KnowledgeDocSyncEdge {
     pub id: Uuid,
-    pub pack_id: Uuid,
-    pub source_item_id: Uuid,
-    pub target_item_id: Uuid,
+    #[serde(default)]
+    pub pack_id: Option<Uuid>,
+    pub source_doc: Slug,
+    #[serde(default)]
+    pub source_item_id: Option<Uuid>,
+    pub target_doc: Slug,
+    #[serde(default)]
+    pub target_item_id: Option<Uuid>,
     pub edge_type: String,
     #[serde(default)]
     pub note: Option<String>,
@@ -95,9 +93,9 @@ pub struct KnowledgeItemSyncEdge {
     pub updated_at: DateTime<Utc>,
 }
 
-pub type DocumentSyncMeta = KnowledgeItemSyncMeta;
-pub type DocumentSyncContent = KnowledgeItemSyncContent;
-pub type DocumentSyncEdge = KnowledgeItemSyncEdge;
+pub type DocumentSyncMeta = KnowledgeDocSyncMeta;
+pub type DocumentSyncContent = KnowledgeDocSyncContent;
+pub type DocumentSyncEdge = KnowledgeDocSyncEdge;
 
 // ---------------------------------------------------------------------------
 // Project detail response (from GET /projects/{id}) -> conversion to Manifest
@@ -115,12 +113,12 @@ pub struct ProjectDetailResponse {
     pub encrypted_payload: Option<EncryptedPayload>,
 }
 
-impl From<ProjectDetailResponse> for crate::manifest::ProjectManifest {
+impl From<ProjectDetailResponse> for nenjo::manifest::ProjectManifest {
     fn from(project: ProjectDetailResponse) -> Self {
         Self {
             id: project.id,
             name: project.name,
-            slug: project.slug,
+            slug: Slug::derive(project.slug),
             description: project.description,
             settings: project.settings,
         }
@@ -135,19 +133,22 @@ impl From<ProjectDetailResponse> for crate::manifest::ProjectManifest {
 pub struct AgentDetailResponse {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub color: String,
-    pub model_id: Option<Uuid>,
+    #[serde(default)]
+    pub model: Option<Slug>,
     #[serde(default)]
     pub prompt_locked: bool,
     #[serde(default)]
-    pub domain_ids: Vec<Uuid>,
+    pub domains: Vec<Slug>,
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub mcp_server_ids: Vec<Uuid>,
+    pub mcp_servers: Vec<Slug>,
     #[serde(default)]
-    pub ability_ids: Vec<Uuid>,
+    pub abilities: Vec<String>,
     #[serde(default)]
     pub heartbeat: Option<AgentHeartbeatManifest>,
 }
@@ -157,14 +158,15 @@ impl From<AgentDetailResponse> for AgentManifest {
         Self {
             id: d.id,
             name: d.name,
+            slug: d.slug.map(Slug::derive),
             description: d.description,
             prompt_config: PromptConfig::default(),
             color: Some(d.color),
-            model_id: d.model_id,
-            domain_ids: d.domain_ids,
+            model: d.model,
+            domains: d.domains,
             platform_scopes: d.platform_scopes,
-            mcp_server_ids: d.mcp_server_ids,
-            ability_ids: d.ability_ids,
+            mcp_servers: d.mcp_servers,
+            abilities: d.abilities,
             prompt_locked: d.prompt_locked,
             heartbeat: d.heartbeat,
         }
@@ -187,21 +189,26 @@ pub struct AgentPromptConfigResponse {
 pub struct CouncilDetailResponse {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
     pub delegation_strategy: CouncilDelegationStrategy,
-    pub leader_agent_id: Uuid,
+    pub leader_agent: Slug,
     pub members: Vec<CouncilMemberDetailResponse>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CouncilMemberDetailResponse {
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub priority: i32,
-    pub agent: CouncilAgentSummary,
+    #[serde(default)]
+    pub agent_detail: Option<CouncilAgentSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CouncilAgentSummary {
     pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
 }
 
 impl From<CouncilDetailResponse> for CouncilManifest {
@@ -210,13 +217,12 @@ impl From<CouncilDetailResponse> for CouncilManifest {
             id: d.id,
             name: d.name,
             delegation_strategy: d.delegation_strategy,
-            leader_agent_id: d.leader_agent_id,
+            leader_agent: d.leader_agent,
             members: d
                 .members
                 .into_iter()
                 .map(|m| CouncilMemberManifest {
-                    agent_id: m.agent_id,
-                    agent_name: m.agent.name,
+                    agent: m.agent,
                     priority: m.priority,
                 })
                 .collect(),
@@ -240,9 +246,9 @@ pub struct DomainManifestResponse {
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub ability_ids: Vec<Uuid>,
+    pub abilities: Vec<String>,
     #[serde(default)]
-    pub mcp_server_ids: Vec<Uuid>,
+    pub mcp_servers: Vec<Slug>,
     #[serde(default)]
     pub prompt_config: DomainPromptConfig,
 }
@@ -257,8 +263,8 @@ impl From<DomainManifestResponse> for DomainManifest {
             description: d.description,
             command: d.command,
             platform_scopes: d.platform_scopes,
-            ability_ids: d.ability_ids,
-            mcp_server_ids: d.mcp_server_ids,
+            abilities: d.abilities,
+            mcp_servers: d.mcp_servers,
             prompt_config: d.prompt_config,
         }
     }
@@ -294,6 +300,8 @@ pub struct ContextBlockContentResponse {
 pub struct RoutineDetailResponse {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
     pub description: Option<String>,
     pub trigger: RoutineTrigger,
     #[serde(default)]
@@ -309,11 +317,14 @@ pub struct RoutineDetailResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoutineStepDetailResponse {
     pub id: Uuid,
-    pub routine_id: Uuid,
+    #[serde(default)]
+    pub slug: Option<String>,
     pub name: String,
     pub step_type: RoutineStepType,
-    pub council_id: Option<Uuid>,
-    pub agent_id: Option<Uuid>,
+    #[serde(default)]
+    pub council: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub config: serde_json::Value,
     #[serde(default)]
@@ -324,9 +335,8 @@ pub struct RoutineStepDetailResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoutineEdgeDetailResponse {
     pub id: Uuid,
-    pub routine_id: Uuid,
-    pub source_step_id: Uuid,
-    pub target_step_id: Uuid,
+    pub source_step: String,
+    pub target_step: String,
     pub condition: RoutineEdgeCondition,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -334,6 +344,10 @@ pub struct RoutineEdgeDetailResponse {
 
 impl From<RoutineDetailResponse> for RoutineManifest {
     fn from(d: RoutineDetailResponse) -> Self {
+        let routine_slug = d
+            .slug
+            .map(Slug::derive)
+            .unwrap_or_else(|| Slug::derive(&d.name));
         Self {
             id: d.id,
             name: d.name,
@@ -345,11 +359,15 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                 .into_iter()
                 .map(|step| RoutineStepManifest {
                     id: step.id,
-                    routine_id: step.routine_id,
+                    slug: step
+                        .slug
+                        .map(Slug::derive)
+                        .unwrap_or_else(|| Slug::derive(&step.name)),
+                    routine: routine_slug.clone(),
                     name: step.name,
                     step_type: step.step_type,
-                    council_id: step.council_id,
-                    agent_id: step.agent_id,
+                    council: step.council.map(Slug::derive),
+                    agent: step.agent.map(Slug::derive),
                     config: step.config,
                     order_index: step.order_index,
                 })
@@ -359,9 +377,9 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                 .into_iter()
                 .map(|edge| RoutineEdgeManifest {
                     id: edge.id,
-                    routine_id: edge.routine_id,
-                    source_step_id: edge.source_step_id,
-                    target_step_id: edge.target_step_id,
+                    routine: routine_slug.clone(),
+                    source_step: Slug::derive(edge.source_step),
+                    target_step: Slug::derive(edge.target_step),
                     condition: edge.condition,
                     metadata: edge.metadata,
                 })
@@ -386,8 +404,8 @@ pub struct ApiErrorDetail {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActiveCronRoutineState {
-    pub id: Uuid,
-    pub project_id: Option<Uuid>,
+    pub routine: Slug,
+    pub project: Option<Slug>,
     pub schedule: String,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
@@ -395,8 +413,7 @@ pub struct ActiveCronRoutineState {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActiveAgentHeartbeatState {
-    pub id: Uuid,
-    pub agent_id: Uuid,
+    pub agent: Slug,
     pub interval: String,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,

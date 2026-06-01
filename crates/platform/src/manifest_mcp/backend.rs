@@ -11,11 +11,10 @@ use super::params::{
     CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainUpdateParams,
-    DomainsGetParams, KnowledgeItemContentUpdateParams, KnowledgeItemCreateParams,
-    KnowledgeItemDeleteParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
-    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
-    ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
-    RoutinesGetParams,
+    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
+    ProjectDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
+    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
 };
 use super::results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -24,10 +23,9 @@ use super::results::{
     ContextBlockContentMutationResult, ContextBlockGetResult, ContextBlockMutationResult,
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
-    DomainMutationResult, DomainsListResult, KnowledgeItemContentMutationResult,
-    KnowledgeItemMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
-    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
-    RoutineMutationResult, RoutinesListResult,
+    DomainMutationResult, DomainsListResult, KnowledgeDocMutationResult, ModelGetResult,
+    ModelMutationResult, ModelsListResult, ProjectGetResult, ProjectMutationResult,
+    ProjectsListResult, RoutineGetResult, RoutineMutationResult, RoutinesListResult,
 };
 
 #[async_trait]
@@ -35,19 +33,11 @@ use super::results::{
 pub trait KnowledgeManifestBackend: Send + Sync {
     /// List locally available knowledge packs.
     async fn list_knowledge_packs(&self) -> Result<Value>;
-    /// List compact document metadata from one pack.
-    async fn list_knowledge_docs(&self, params: Value) -> Result<Value>;
-    /// Read one document manifest from one pack.
-    async fn read_knowledge_doc_manifest(&self, params: Value) -> Result<Value>;
     /// Read one full document from one pack.
     async fn read_knowledge_doc(&self, params: Value) -> Result<Value>;
-    /// Search one pack with document bodies.
-    async fn search_knowledge(&self, params: Value) -> Result<Value>;
     /// Search one pack using metadata only.
-    async fn search_knowledge_paths(&self, params: Value) -> Result<Value>;
-    /// List one pack's document tree.
-    async fn list_knowledge_tree(&self, params: Value) -> Result<Value>;
-    /// List graph neighbors for one document in one pack.
+    async fn search_knowledge(&self, params: Value) -> Result<Value>;
+    /// List outbound graph neighbors for one document in one pack.
     async fn list_knowledge_neighbors(&self, params: Value) -> Result<Value>;
 }
 
@@ -124,7 +114,7 @@ pub trait DomainManifestBackend: Send + Sync {
 }
 
 #[async_trait]
-/// Backend operations for project manifest resources and library knowledge items.
+/// Backend operations for project manifest resources and library knowledge documents.
 pub trait ProjectManifestBackend: Send + Sync {
     /// List visible projects.
     async fn list_projects(&self) -> Result<ProjectsListResult>;
@@ -136,21 +126,18 @@ pub trait ProjectManifestBackend: Send + Sync {
     async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult>;
     /// Delete a project.
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult>;
-    /// Create a library knowledge item.
-    async fn create_knowledge_item(
+    /// Create a library knowledge document.
+    async fn create_knowledge_doc(
         &self,
-        params: KnowledgeItemCreateParams,
-    ) -> Result<KnowledgeItemMutationResult>;
-    /// Update a library knowledge item's content.
-    async fn update_knowledge_item_content(
+        params: KnowledgeDocCreateParams,
+    ) -> Result<KnowledgeDocMutationResult>;
+    /// Update a library knowledge document's content, metadata, and edges.
+    async fn update_knowledge_doc(
         &self,
-        params: KnowledgeItemContentUpdateParams,
-    ) -> Result<KnowledgeItemContentMutationResult>;
-    /// Delete a library knowledge item.
-    async fn delete_knowledge_item(
-        &self,
-        params: KnowledgeItemDeleteParams,
-    ) -> Result<DeleteResult>;
+        params: KnowledgeDocUpdateParams,
+    ) -> Result<KnowledgeDocMutationResult>;
+    /// Delete a library knowledge document.
+    async fn delete_knowledge_doc(&self, params: KnowledgeDocDeleteParams) -> Result<DeleteResult>;
 }
 
 #[async_trait]

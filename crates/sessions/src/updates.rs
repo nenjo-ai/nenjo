@@ -14,13 +14,13 @@ pub struct SessionUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<Uuid>,
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<Uuid>,
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routine_id: Option<Uuid>,
+    pub routine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

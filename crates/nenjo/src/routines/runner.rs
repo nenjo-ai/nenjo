@@ -12,13 +12,14 @@ use crate::routines::{self, RoutineEvent, SessionBinding, StepResult};
 
 /// A routine resolved from the manifest, ready to execute.
 ///
-/// Created via [`Provider::routine_by_id`](crate::provider::Provider::routine_by_id).
+/// Created via [`Provider::routine`](crate::provider::Provider::routine).
 /// Provides the same simple/streaming split as
 /// [`AgentRunner`](crate::AgentRunner).
 ///
 /// ```ignore
-/// let task = nenjo::TaskInput::new(project_id, task_id, "Fix auth", "Repair the login flow");
-/// let result = provider.routine_by_id(id)?
+/// let task = nenjo::TaskInput::new("demo_project", "Fix auth", "Repair the login flow")
+///     .with_task_id(task_id);
+/// let result = provider.routine("triage")?
 ///     .run(task)
 ///     .await?;
 /// ```
@@ -155,7 +156,6 @@ where
 {
     let routine = routine.clone();
     let routine_name = routine.name.clone();
-    let routine_id = routine.id;
     let cancel = CancellationToken::new();
     let cancel_inner = cancel.clone();
 
@@ -172,16 +172,17 @@ where
     let (events_tx, events_rx) = mpsc::unbounded_channel::<RoutineEvent>();
 
     let input = routines::types::RoutineInput::from_routine_run(input);
+    let task_id = input.task_id;
     tracing::debug!(
         is_cron = input.is_cron_trigger,
         "Routine input built from run"
     );
 
     let join = tokio::spawn(async move {
-        let mut state = routines::types::RoutineState::new(routine_id, input);
+        let mut state = routines::types::RoutineState::new(input);
         state.routine_name = Some(routine_name);
 
-        if let Some((schedule, start_at, timeout)) = cron_schedule {
+        let mut result = if let Some((schedule, start_at, timeout)) = cron_schedule {
             routines::cron::executor::execute_routine_cron(
                 &provider,
                 &routine,
@@ -204,7 +205,9 @@ where
                 &cancel_inner,
             )
             .await
-        }
+        }?;
+        result.task_id = task_id;
+        Ok(result)
     });
 
     Ok(RoutineExecutionHandle::new(events_rx, join, cancel))

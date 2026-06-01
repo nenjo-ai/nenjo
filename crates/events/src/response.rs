@@ -21,7 +21,7 @@ pub enum ExecutionType {
 /// Agent identity attached to step events so the frontend can render identicons.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepAgent {
-    pub agent_id: Uuid,
+    pub agent: String,
     pub agent_name: Option<String>,
     pub agent_color: Option<String>,
 }
@@ -94,19 +94,19 @@ pub enum Response {
     /// Confirms that a cron schedule was enabled by the worker.
     #[serde(rename = "cron.scheduled")]
     CronScheduled {
-        routine_id: Uuid,
+        routine: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_run_at: Option<String>,
     },
 
     /// Confirms that a cron schedule was disabled by the worker.
     #[serde(rename = "cron.stopped")]
-    CronStopped { routine_id: Uuid },
+    CronStopped { routine: String },
 
     /// Periodic heartbeat from the agent heartbeat scheduler.
     #[serde(rename = "agent_heartbeat.heartbeat")]
     AgentHeartbeatHeartbeat {
-        agent_id: Uuid,
+        agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_run_at: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,14 +116,14 @@ pub enum Response {
     /// Confirms that an agent heartbeat schedule was enabled by the worker.
     #[serde(rename = "agent_heartbeat.scheduled")]
     AgentHeartbeatScheduled {
-        agent_id: Uuid,
+        agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_run_at: Option<String>,
     },
 
     /// Confirms that an agent heartbeat schedule was disabled by the worker.
     #[serde(rename = "agent_heartbeat.stopped")]
-    AgentHeartbeatStopped { agent_id: Uuid },
+    AgentHeartbeatStopped { agent: String },
 
     /// Signals that a new execution run is starting (e.g. a cron cycle).
     /// The worker pre-generates the UUID; the backend creates the row.
@@ -131,13 +131,13 @@ pub enum Response {
     ExecutionStarted {
         id: Uuid,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<Uuid>,
+        project: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine_id: Option<Uuid>,
+        routine: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routine_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_id: Option<Uuid>,
+        agent: Option<String>,
         config: serde_json::Value,
     },
 
@@ -155,17 +155,17 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_type: Option<ExecutionType>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine_id: Option<Uuid>,
+        routine: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routine_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_id: Option<Uuid>,
+        agent: Option<String>,
     },
 
     /// Repo sync completed (or failed) for a project.
     #[serde(rename = "repo.sync_complete")]
     RepoSyncComplete {
-        project_id: Uuid,
+        project: String,
         success: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -174,7 +174,7 @@ pub enum Response {
     /// Org-scoped encrypted push notification.
     #[serde(rename = "push.notification")]
     PushNotification {
-        agent_id: Uuid,
+        agent: String,
         encrypted_payload: EncryptedPayload,
     },
 
@@ -249,63 +249,56 @@ impl std::fmt::Display for Response {
                 write!(f, "cron.heartbeat(schedules={})", active_schedules.len())
             }
             Self::CronScheduled {
-                routine_id,
+                routine,
                 next_run_at,
             } => {
                 write!(
                     f,
-                    "cron.scheduled(routine={routine_id}, next_run_at={})",
+                    "cron.scheduled(routine={routine}, next_run_at={})",
                     next_run_at.as_deref().unwrap_or("none")
                 )
             }
-            Self::CronStopped { routine_id } => write!(f, "cron.stopped(routine={routine_id})"),
+            Self::CronStopped { routine } => write!(f, "cron.stopped(routine={routine})"),
             Self::AgentHeartbeatHeartbeat {
-                agent_id,
-                next_run_at,
-                ..
+                agent, next_run_at, ..
             } => write!(
                 f,
-                "agent_heartbeat.heartbeat(agent={agent_id}, next_run_at={})",
+                "agent_heartbeat.heartbeat(agent={agent}, next_run_at={})",
                 next_run_at.as_deref().unwrap_or("none")
             ),
-            Self::AgentHeartbeatScheduled {
-                agent_id,
-                next_run_at,
-            } => write!(
+            Self::AgentHeartbeatScheduled { agent, next_run_at } => write!(
                 f,
-                "agent_heartbeat.scheduled(agent={agent_id}, next_run_at={})",
+                "agent_heartbeat.scheduled(agent={agent}, next_run_at={})",
                 next_run_at.as_deref().unwrap_or("none")
             ),
-            Self::AgentHeartbeatStopped { agent_id } => {
-                write!(f, "agent_heartbeat.stopped(agent={agent_id})")
+            Self::AgentHeartbeatStopped { agent } => {
+                write!(f, "agent_heartbeat.stopped(agent={agent})")
             }
             Self::ExecutionStarted {
                 id,
                 routine_name,
-                agent_id,
+                agent,
                 ..
-            } => match (routine_name, agent_id) {
+            } => match (routine_name, agent) {
                 (Some(routine_name), _) => {
                     write!(f, "execution.started(id={id}, routine={routine_name})")
                 }
-                (None, Some(agent_id)) => write!(f, "execution.started(id={id}, agent={agent_id})"),
+                (None, Some(agent)) => write!(f, "execution.started(id={id}, agent={agent})"),
                 (None, None) => write!(f, "execution.started(id={id})"),
             },
             Self::ExecutionCompleted { id, success, .. } => {
                 write!(f, "execution.completed(id={id}, success={success})")
             }
             Self::RepoSyncComplete {
-                project_id,
-                success,
-                ..
+                project, success, ..
             } => {
                 write!(
                     f,
-                    "repo.sync_complete(project={project_id}, success={success})"
+                    "repo.sync_complete(project={project}, success={success})"
                 )
             }
-            Self::PushNotification { agent_id, .. } => {
-                write!(f, "push.notification(agent={agent_id})")
+            Self::PushNotification { agent, .. } => {
+                write!(f, "push.notification(agent={agent})")
             }
             Self::DeliveryReceipt { message_id } => write!(f, "delivery_receipt({message_id})"),
             Self::WorkerPong => write!(f, "worker.pong"),
@@ -392,7 +385,6 @@ pub enum StreamEvent {
     DelegationStarted {
         agent: String,
         target_agent: String,
-        target_agent_id: Uuid,
         delegate_tool_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
@@ -404,7 +396,6 @@ pub enum StreamEvent {
     DelegationCompleted {
         agent: String,
         target_agent: String,
-        target_agent_id: Uuid,
         delegate_tool_name: String,
         success: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,9 +424,9 @@ pub enum StreamEvent {
         #[serde(default)]
         total_output_tokens: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        project_id: Option<Uuid>,
+        project: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_id: Option<Uuid>,
+        agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<Uuid>,
     },
@@ -562,7 +553,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronScheduleStatus {
     /// The routine this status refers to.
-    pub routine_id: String,
+    pub routine: String,
     /// ISO 8601 timestamp of the last successful run, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
@@ -716,9 +707,9 @@ mod tests {
             content: "hello".into(),
             encrypted_content: None,
             hidden: true,
-            project_id: None,
-            routine_id: None,
-            agent_id: Some(Uuid::nil()),
+            project: None,
+            routine: None,
+            agent: Some("demo_agent".into()),
             domain_session_id: None,
             domain_activation: None,
             session_id: Uuid::nil(),
@@ -755,9 +746,9 @@ mod tests {
             content: String::new(),
             encrypted_content: Some(payload.clone()),
             hidden: false,
-            project_id: None,
-            routine_id: None,
-            agent_id: None,
+            project: None,
+            routine: None,
+            agent: None,
             domain_session_id: None,
             domain_activation: None,
             session_id: Uuid::nil(),
@@ -812,8 +803,8 @@ mod tests {
                 encrypted_payload: None,
                 total_input_tokens: 0,
                 total_output_tokens: 0,
-                project_id: None,
-                agent_id: None,
+                project: None,
+                agent: None,
                 session_id: None,
             },
         };
@@ -861,8 +852,8 @@ mod tests {
                 }),
                 total_input_tokens: 0,
                 total_output_tokens: 0,
-                project_id: None,
-                agent_id: None,
+                project: None,
+                agent: None,
                 session_id: None,
             },
         };
@@ -885,7 +876,6 @@ mod tests {
 
     #[test]
     fn response_push_notification_roundtrip() {
-        let agent_id = Uuid::new_v4();
         let payload = EncryptedPayload {
             account_id: Uuid::new_v4(),
             encryption_scope: Some("org".into()),
@@ -897,7 +887,7 @@ mod tests {
             ciphertext: "Y2lwaGVydGV4dA==".into(),
         };
         let resp = Response::PushNotification {
-            agent_id,
+            agent: "reviewer".into(),
             encrypted_payload: payload.clone(),
         };
 
@@ -908,10 +898,10 @@ mod tests {
         let parsed: Response = serde_json::from_str(&json).unwrap();
         match parsed {
             Response::PushNotification {
-                agent_id: parsed_agent_id,
+                agent,
                 encrypted_payload,
             } => {
-                assert_eq!(parsed_agent_id, agent_id);
+                assert_eq!(agent, "reviewer");
                 assert_eq!(encrypted_payload.account_id, payload.account_id);
                 assert_eq!(encrypted_payload.encryption_scope.as_deref(), Some("org"));
                 assert_eq!(encrypted_payload.object_type, "push.notification");
@@ -988,10 +978,10 @@ mod tests {
         let id = Uuid::new_v4();
         let resp = Response::ExecutionStarted {
             id,
-            project_id: None,
-            routine_id: Some(Uuid::nil()),
+            project: None,
+            routine: Some("deploy".into()),
             routine_name: Some("deploy".into()),
-            agent_id: None,
+            agent: None,
             config: serde_json::json!({}),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -1019,9 +1009,9 @@ mod tests {
             total_input_tokens: 1000,
             total_output_tokens: 500,
             execution_type: Some(ExecutionType::Task),
-            routine_id: Some(Uuid::nil()),
+            routine: Some("test_routine".to_string()),
             routine_name: Some("Test Routine".to_string()),
-            agent_id: None,
+            agent: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"execution.completed""#));
@@ -1045,7 +1035,7 @@ mod tests {
     fn response_cron_heartbeat_roundtrip() {
         let resp = Response::CronHeartbeat {
             active_schedules: vec![CronScheduleStatus {
-                routine_id: "r1".into(),
+                routine: "r1".into(),
                 last_run_at: Some("2026-01-01T00:00:00Z".into()),
                 next_fire_at: None,
             }],
@@ -1056,7 +1046,7 @@ mod tests {
         match parsed {
             Response::CronHeartbeat { active_schedules } => {
                 assert_eq!(active_schedules.len(), 1);
-                assert_eq!(active_schedules[0].routine_id, "r1");
+                assert_eq!(active_schedules[0].routine, "r1");
             }
             _ => panic!("wrong variant"),
         }
@@ -1079,7 +1069,7 @@ mod tests {
     #[test]
     fn response_repo_sync_complete_roundtrip() {
         let resp = Response::RepoSyncComplete {
-            project_id: Uuid::nil(),
+            project: "demo_project".into(),
             success: false,
             error: Some("clone failed".into()),
         };
@@ -1098,10 +1088,10 @@ mod tests {
     fn command_task_execute_roundtrip() {
         let cmd = Command::TaskExecute {
             task_id: Uuid::nil(),
-            project_id: Uuid::nil(),
+            project: "demo_project".into(),
             execution_run_id: Uuid::nil(),
-            routine_id: None,
-            assigned_agent_id: None,
+            routine: None,
+            agent: None,
             payload: Some(crate::TaskExecuteContent {
                 title: "Fix bug".into(),
                 description: Some("In auth module".into()),
@@ -1134,9 +1124,9 @@ mod tests {
     fn command_manifest_changed_roundtrip() {
         let cmd = Command::ManifestChanged {
             resource_type: crate::ResourceType::Agent,
-            resource_id: Uuid::nil(),
+            resource: "demo_agent".into(),
             action: crate::ResourceAction::Updated,
-            project_id: None,
+            project: None,
             payload: None,
             encrypted_payload: None,
         };
@@ -1159,8 +1149,8 @@ mod tests {
     #[test]
     fn command_cron_enable_roundtrip() {
         let cmd = Command::CronEnable {
-            routine_id: Uuid::nil(),
-            project_id: None,
+            routine: "demo_routine".into(),
+            project: None,
             schedule: "0 * * * *".into(),
             timezone: Some("America/Chicago".into()),
         };
