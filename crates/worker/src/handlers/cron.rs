@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nenjo::memory::MemoryScope;
-use nenjo::{CronInput, RoutineRun, Slug};
+use nenjo::{CronInput, RoutineEvent, RoutineRun, Slug};
 use nenjo_events::{CronScheduleStatus, Response};
 use nenjo_sessions::{
-    CronScheduleState, ExecutionPhase, RunCompletion, ScheduleState, SchedulerRuntimeSnapshot,
-    SchedulerSessionUpsert, SessionCheckpointUpdate, SessionKind, SessionStatus,
+    CheckpointQuery, CronScheduleState, ExecutionPhase, RunCompletion, ScheduleState,
+    SchedulerRuntimeSnapshot, SchedulerSessionUpsert, SessionCheckpointUpdate, SessionKind,
+    SessionStatus,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -151,6 +152,31 @@ fn emit_cron_heartbeat<S>(
     });
 }
 
+async fn last_persisted_cron_cycle<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
+    routine_id: Uuid,
+) -> u32
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    match harness
+        .sessions()
+        .latest_checkpoint(routine_id, CheckpointQuery::default())
+        .await
+    {
+        Ok(Some(checkpoint)) => checkpoint
+            .scheduler_runtime
+            .and_then(|runtime| runtime.cycle)
+            .unwrap_or(0),
+        Ok(None) => 0,
+        Err(error) => {
+            error!(%routine_id, %error, "Failed to load cron checkpoint; starting cycle counter from zero");
+            0
+        }
+    }
+}
+
 #[async_trait::async_trait]
 /// Worker integration methods for cron routine platform commands.
 ///
@@ -272,6 +298,7 @@ where
             .unwrap_or_else(|| routine_id.to_string());
 
         let opt_project_id = project_id;
+        let persisted_cycle = last_persisted_cron_cycle(self, routine_id).await;
         let initial_next_run_at = start_at.unwrap_or_else(|| cron_schedule.next_fire_at());
         upsert_cron_session(
             self,
@@ -294,6 +321,7 @@ where
         tokio::spawn(async move {
             let mut last_run_at: Option<chrono::DateTime<chrono::Utc>> = None;
             let mut next_run_at = initial_next_run_at;
+            let mut persisted_cycle = persisted_cycle;
 
             emit_cron_heartbeat(
                 &response_sink,
@@ -344,11 +372,15 @@ where
                                                     current_agent_id = *agent_id;
                                                 }
 
-                                                match &event {
-                                                    nenjo::RoutineEvent::CronCycleStarted { cycle } => {
+                                                let mut response_execution_id =
+                                                    current_cycle_id.unwrap_or(routine_id);
+                                                let response_event = match &event {
+                                                    RoutineEvent::CronCycleStarted { cycle } => {
+                                                        let durable_cycle = persisted_cycle.saturating_add(*cycle);
                                                         let cycle_id = Uuid::new_v4();
                                                         current_cycle_id = Some(cycle_id);
-                                                        current_cycle = Some(*cycle);
+                                                        current_cycle = Some(durable_cycle);
+                                                        response_execution_id = cycle_id;
                                                         let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
                                                             session_id: routine_id,
                                                             phase: ExecutionPhase::ExecutingTools,
@@ -356,7 +388,7 @@ where
                                                             active_tool_name: None,
                                                             scheduler_runtime: Some(SchedulerRuntimeSnapshot {
                                                                 active_execution_id: Some(cycle_id),
-                                                                cycle: Some(*cycle),
+                                                                cycle: Some(durable_cycle),
                                                             }),
                                                         }).await;
 
@@ -368,21 +400,27 @@ where
                                                             agent: None,
                                                             config: serde_json::json!({
                                                                 "trigger": "cron",
-                                                                "cycle": cycle,
+                                                                "cycle": durable_cycle,
                                                                 "schedule": schedule_owned,
                                                                 "routine": routine_slug_for_response.clone(),
                                                             }),
                                                         });
+                                                        Some(RoutineEvent::CronCycleStarted {
+                                                            cycle: durable_cycle,
+                                                        })
                                                     }
-                                                    nenjo::RoutineEvent::CronCycleCompleted {
+                                                    RoutineEvent::CronCycleCompleted {
                                                         result,
                                                         total_input_tokens,
                                                         total_output_tokens,
                                                         ..
                                                     } => {
                                                         cycle_completed = true;
+                                                        let durable_cycle = current_cycle
+                                                            .take()
+                                                            .unwrap_or_else(|| persisted_cycle.saturating_add(1));
                                                         if let Some(cycle_id) = current_cycle_id.take() {
-                                                            let cycle = current_cycle.take();
+                                                            response_execution_id = cycle_id;
                                                             let completed_at = chrono::Utc::now();
                                                             last_run_at = Some(completed_at);
                                                             let _ = response_sink.send(Response::ExecutionCompleted {
@@ -400,6 +438,8 @@ where
                                                                 routine_name: Some(routine_name.clone()),
                                                                 agent: None,
                                                             });
+                                                            persisted_cycle =
+                                                                persisted_cycle.max(durable_cycle);
                                                             upsert_cron_session(
                                                                 &harness,
                                                                 &worker_id,
@@ -431,18 +471,25 @@ where
                                                                 active_tool_name: None,
                                                                 scheduler_runtime: Some(SchedulerRuntimeSnapshot {
                                                                     active_execution_id: None,
-                                                                    cycle,
+                                                                    cycle: Some(durable_cycle),
                                                                 }),
                                                             }).await;
                                                         }
+                                                        Some(RoutineEvent::CronCycleCompleted {
+                                                            cycle: durable_cycle,
+                                                            result: result.clone(),
+                                                            total_input_tokens: *total_input_tokens,
+                                                            total_output_tokens: *total_output_tokens,
+                                                        })
                                                     }
-                                                    _ => {}
-                                                }
+                                                    _ => None,
+                                                };
 
-                                                let execution_id = current_cycle_id.unwrap_or(routine_id);
+                                                let event_for_response =
+                                                    response_event.as_ref().unwrap_or(&event);
                                                 if let Some(response) = routine_event_to_response(
-                                                    &event,
-                                                    execution_id,
+                                                    event_for_response,
+                                                    response_execution_id,
                                                     None,
                                                     current_agent_id,
                                                     &provider.manifest_snapshot(),
@@ -457,6 +504,19 @@ where
                                         handle.cancel();
                                         schedule_cancelled = true;
                                         if let Some(cycle_id) = current_cycle_id.take() {
+                                            if let Some(cycle) = current_cycle.take() {
+                                                persisted_cycle = persisted_cycle.max(cycle);
+                                                let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
+                                                    session_id: routine_id,
+                                                    phase: ExecutionPhase::Waiting,
+                                                    worktree: None,
+                                                    active_tool_name: None,
+                                                    scheduler_runtime: Some(SchedulerRuntimeSnapshot {
+                                                        active_execution_id: None,
+                                                        cycle: Some(cycle),
+                                                    }),
+                                                }).await;
+                                            }
                                             let _ = response_sink.send(Response::ExecutionCompleted {
                                                 id: cycle_id,
                                                 success: false,

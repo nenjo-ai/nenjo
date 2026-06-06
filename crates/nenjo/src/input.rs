@@ -25,6 +25,9 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
         AgentRunKind::Chat(chat) => {
             ctx.chat_message = chat.message.clone();
         }
+        AgentRunKind::FollowUp(follow_up) => {
+            ctx.chat_message = follow_up.message.clone();
+        }
         AgentRunKind::Gate(gate) => {
             ctx.gate_criteria = gate.criteria.clone();
             ctx.gate_previous_output = gate.previous_result.output.clone();
@@ -89,7 +92,7 @@ fn git_to_context(location: Option<&ProjectLocation>) -> crate::context::types::
 /// Task execution input supplied by SDK callers.
 #[derive(Debug, Clone)]
 pub struct TaskInput {
-    pub project: Slug,
+    pub project: Option<Slug>,
     pub task_id: Uuid,
     pub title: String,
     pub description: String,
@@ -104,13 +107,9 @@ pub struct TaskInput {
 }
 
 impl TaskInput {
-    pub fn new(
-        project: impl IntoSlug,
-        title: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
-            project: project.into_slug(),
+            project: None,
             task_id: Uuid::new_v4(),
             title: title.into(),
             description: description.into(),
@@ -123,6 +122,11 @@ impl TaskInput {
             slug: None,
             complexity: None,
         }
+    }
+
+    pub fn with_project(mut self, project: impl IntoSlug) -> Self {
+        self.project = Some(project.into_slug());
+        self
     }
 
     pub fn with_task_id(mut self, task_id: Uuid) -> Self {
@@ -197,6 +201,14 @@ impl ChatInput {
         self.history = history;
         self
     }
+}
+
+/// Template-free follow-up input used by internal correction turns.
+#[derive(Debug, Clone)]
+pub struct FollowUpInput {
+    pub project: Option<Slug>,
+    pub message: String,
+    pub history: Vec<ChatMessage>,
 }
 
 /// Gate evaluation input used by routine internals.
@@ -275,6 +287,7 @@ pub struct AgentRun {
 pub enum AgentRunKind {
     Task(TaskInput),
     Chat(ChatInput),
+    FollowUp(FollowUpInput),
     Gate(GateInput),
     CouncilSubtask(CouncilSubtaskInput),
     Cron(CronInput),
@@ -389,12 +402,14 @@ mod tests {
 
     #[test]
     fn task_input_generates_task_id_and_allows_override() {
-        let generated = TaskInput::new("demo_project", "Title", "Description");
+        let generated = TaskInput::new("Title", "Description").with_project("demo_project");
         assert!(!generated.task_id.is_nil());
-        assert_eq!(generated.project.as_str(), "demo_project");
+        assert_eq!(generated.project.as_ref().unwrap().as_str(), "demo_project");
 
         let task_id = Uuid::new_v4();
-        let explicit = TaskInput::new("demo_project", "Title", "Description").with_task_id(task_id);
+        let explicit = TaskInput::new("Title", "Description")
+            .with_project("demo_project")
+            .with_task_id(task_id);
         assert_eq!(explicit.task_id, task_id);
     }
 }

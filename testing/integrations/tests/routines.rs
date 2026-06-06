@@ -89,10 +89,10 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
 
 fn make_task(project: &ProjectManifest) -> TaskInput {
     TaskInput::new(
-        &project.slug,
         "Routine integration smoke test",
         "Reply with a short sentence that includes the marker ROUTINE_OK.",
     )
+    .with_project(project.slug.clone())
     .with_task_id(Uuid::new_v4())
     .source("integration-test")
 }

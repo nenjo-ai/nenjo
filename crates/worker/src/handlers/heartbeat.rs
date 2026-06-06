@@ -307,6 +307,7 @@ where
 
     let harness_for_schedule = harness.clone();
     let timezone_for_log = timezone.clone();
+    let heartbeat_agent_slug_for_log = heartbeat_agent_slug.to_string();
     tokio::spawn(async move {
         let mut next_run_at = initial_next_run_at;
         let _ = response_tx.send(Response::AgentHeartbeatScheduled {
@@ -601,7 +602,12 @@ where
         }
     });
 
-    info!(%agent_id, interval_secs = interval.as_secs(), timezone = timezone_for_log.as_deref(), "Enabled agent heartbeat");
+    info!(
+        agent = %heartbeat_agent_slug_for_log,
+        interval_secs = interval.as_secs(),
+        timezone = timezone_for_log.as_deref(),
+        "Enabled agent heartbeat"
+    );
     Ok(())
 }
 

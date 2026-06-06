@@ -92,16 +92,23 @@ impl ModelProviderFactory for MockFactory {
 struct SequentialResponseMockLlm {
     responses: Arc<Vec<ChatResponse>>,
     call_index: Arc<AtomicUsize>,
+    seen_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
 }
 
 #[async_trait::async_trait]
 impl ModelProvider for SequentialResponseMockLlm {
     async fn chat(
         &self,
-        _request: ChatRequest<'_>,
+        request: ChatRequest<'_>,
         _model: &str,
         _temperature: f64,
     ) -> Result<ChatResponse> {
+        if let Some(seen_messages) = &self.seen_messages {
+            seen_messages
+                .lock()
+                .unwrap()
+                .push(request.messages.to_vec());
+        }
         let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
         let resp = self
             .responses
@@ -127,6 +134,7 @@ impl ModelProvider for SequentialResponseMockLlm {
 struct SequentialResponseMockFactory {
     responses: Arc<Vec<ChatResponse>>,
     call_index: Arc<AtomicUsize>,
+    seen_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
 }
 
 impl SequentialResponseMockFactory {
@@ -134,7 +142,20 @@ impl SequentialResponseMockFactory {
         Self {
             responses: Arc::new(responses),
             call_index: Arc::new(AtomicUsize::new(0)),
+            seen_messages: None,
         }
+    }
+
+    fn with_message_recording(responses: Vec<ChatResponse>) -> Self {
+        Self {
+            responses: Arc::new(responses),
+            call_index: Arc::new(AtomicUsize::new(0)),
+            seen_messages: Some(Arc::new(Mutex::new(Vec::new()))),
+        }
+    }
+
+    fn seen_messages(&self) -> Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>> {
+        self.seen_messages.clone()
     }
 }
 
@@ -143,6 +164,7 @@ impl ModelProviderFactory for SequentialResponseMockFactory {
         Ok(Arc::new(SequentialResponseMockLlm {
             responses: self.responses.clone(),
             call_index: self.call_index.clone(),
+            seen_messages: self.seen_messages.clone(),
         }))
     }
 }
@@ -276,7 +298,8 @@ fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn test_task(_project_id: Uuid, title: &str, desc: &str) -> TaskInput {
-    TaskInput::new("project", title, desc)
+    TaskInput::new(title, desc)
+        .with_project("project")
         .with_task_id(Uuid::nil())
         .source("test")
 }
@@ -580,6 +603,168 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
 }
 
 #[tokio::test]
+async fn cron_triggered_agent_step_uses_task_execution_template() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let mut coder = agent(agent_id, "coder", model_id);
+    coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
+    coder.prompt_config.templates.cron_task = "CRON TEMPLATE".into();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "cron-agent-template".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Cron,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            id: step_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("cron-agent-template"),
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council: None,
+            agent: Some(Slug::derive("coder")),
+            config: serde_json::json!({}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![coder],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+    let factory = RecordingMessagesMockFactory::new(verdict_response(
+        "Implementation complete.",
+        "pass",
+        "Implementation is complete",
+    ));
+    let seen_messages = factory.seen_messages();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let run = RoutineRun::cron(CronInput {
+        task: Some(test_task(
+            Uuid::new_v4(),
+            "Add auth",
+            "Implement JWT authentication",
+        )),
+        project: Some(Slug::derive("project")),
+        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
+        start_at: None,
+        timeout: Duration::from_secs(5),
+    });
+
+    provider
+        .routine("cron-agent-template")
+        .unwrap()
+        .run(run)
+        .await
+        .unwrap();
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, "TASK TEMPLATE"),
+        "cron-triggered agent steps should use task_execution. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        !messages_contain(&seen_messages, "CRON TEMPLATE"),
+        "cron-triggered agent steps should not use cron_task. Messages: {seen_messages:#?}"
+    );
+}
+
+#[tokio::test]
+async fn cron_triggered_agent_step_without_project_uses_task_execution_template() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let mut coder = agent(agent_id, "coder", model_id);
+    coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
+    coder.prompt_config.templates.cron_task = "CRON TEMPLATE".into();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "cron-agent-no-project".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Cron,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            id: step_id,
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("cron-agent-no-project"),
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council: None,
+            agent: Some(Slug::derive("coder")),
+            config: serde_json::json!({}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![coder],
+        models: vec![model(model_id)],
+        projects: vec![],
+        routines: vec![routine],
+        ..Default::default()
+    };
+    let factory = RecordingMessagesMockFactory::new(verdict_response(
+        "Implementation complete.",
+        "pass",
+        "Implementation is complete",
+    ));
+    let seen_messages = factory.seen_messages();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let run = RoutineRun::cron(CronInput {
+        task: None,
+        project: None,
+        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
+        start_at: None,
+        timeout: Duration::from_secs(5),
+    });
+
+    provider
+        .routine("cron-agent-no-project")
+        .unwrap()
+        .run(run)
+        .await
+        .unwrap();
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, "TASK TEMPLATE"),
+        "cron-triggered agent steps without a project should use task_execution. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        !messages_contain(&seen_messages, "CRON TEMPLATE"),
+        "cron-triggered agent steps without a project should not use cron_task. Messages: {seen_messages:#?}"
+    );
+}
+
+#[tokio::test]
 async fn routine_gate_step_renders_step_instructions_context_var() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
@@ -684,31 +869,37 @@ async fn single_agent_step_retries_until_pass_verdict() {
         edges: vec![],
     };
 
+    let mut coder = agent(agent_id, "coder", model_id);
+    coder.prompt_config.templates.chat_task = "CHAT TEMPLATE: {{ chat.message }}".into();
+
     let manifest = Manifest {
-        agents: vec![agent(agent_id, "coder", model_id)],
+        agents: vec![coder],
         models: vec![model(model_id)],
         projects: vec![project()],
         routines: vec![routine],
         ..Default::default()
     };
 
+    let factory = SequentialResponseMockFactory::with_message_recording(vec![
+        ChatResponse {
+            text: Some("Implementation complete.".into()),
+            tool_calls: vec![],
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        },
+        verdict_response(
+            "Implementation complete.",
+            "pass",
+            "Implementation is complete",
+        ),
+    ]);
+    let seen_messages = factory.seen_messages().unwrap();
+
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SequentialResponseMockFactory::new(vec![
-            ChatResponse {
-                text: Some("Implementation complete.".into()),
-                tool_calls: vec![],
-                usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                },
-            },
-            verdict_response(
-                "Implementation complete.",
-                "pass",
-                "Implementation is complete",
-            ),
-        ]))
+        .with_model_factory(factory)
         .with_tool_factory(NoopToolFactory)
         .build()
         .await
@@ -726,6 +917,18 @@ async fn single_agent_step_retries_until_pass_verdict() {
     assert_eq!(result.output, "Implementation complete.");
     assert_eq!(result.input_tokens, 20);
     assert_eq!(result.output_tokens, 10);
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert_eq!(seen_messages.len(), 2);
+    let retry_messages = &seen_messages[1];
+    assert!(
+        messages_contain(std::slice::from_ref(retry_messages), "call `pass_verdict`"),
+        "retry turn should instruct the agent to call pass_verdict. Messages: {retry_messages:#?}"
+    );
+    assert!(
+        !messages_contain(std::slice::from_ref(retry_messages), "CHAT TEMPLATE"),
+        "retry turn should not render the chat template. Messages: {retry_messages:#?}"
+    );
 }
 
 /// Stream events from a single-step routine.
@@ -1947,7 +2150,7 @@ async fn council_vote() {
     assert_eq!(result.output, "Vote tallied and accepted.");
 }
 
-/// Cron execution: runs until the agent signals pass via JSON.
+/// Cron execution: runs one scheduled routine firing.
 #[tokio::test]
 async fn cron_execution() {
     let model_id = Uuid::new_v4();
@@ -1983,8 +2186,8 @@ async fn cron_execution() {
         ..Default::default()
     };
 
-    // Mock returns a pass_verdict tool call → cron routine sees "pass" verdict
-    // and completes after one cycle.
+    // Mock returns a pass_verdict tool call for the gate step. The cron
+    // wrapper should complete this scheduled firing after the DAG run.
     let verdict_response = ChatResponse {
         text: Some("Evaluation complete.".into()),
         tool_calls: vec![ToolCall {
@@ -2041,6 +2244,126 @@ async fn cron_execution() {
         Some("pass"),
         "should have structured verdict data"
     );
+}
+
+/// Cron execution: agent pass_verdict routes to following terminal step.
+#[tokio::test]
+async fn cron_agent_pass_verdict_continues_to_terminal_step() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let agent_step_id = Uuid::new_v4();
+    let terminal_step_id = Uuid::new_v4();
+    let routine_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        id: routine_id,
+        name: "cron-agent-terminal".into(),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Cron,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                id: agent_step_id,
+                slug: Slug::derive(agent_step_id.to_string()),
+                routine: Slug::derive("cron-agent-terminal"),
+                name: "inspect".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("monitor")),
+                config: serde_json::json!({ "description": "Inspect workspace files" }),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                id: terminal_step_id,
+                slug: Slug::derive(terminal_step_id.to_string()),
+                routine: Slug::derive("cron-agent-terminal"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+        ],
+        edges: vec![RoutineEdgeManifest {
+            id: Uuid::new_v4(),
+            routine: Slug::derive("cron-agent-terminal"),
+            source_step: Slug::derive(agent_step_id.to_string()),
+            target_step: Slug::derive(terminal_step_id.to_string()),
+            condition: RoutineEdgeCondition::OnPass,
+            metadata: serde_json::json!({}),
+        }],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "monitor", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![routine],
+        ..Default::default()
+    };
+
+    let verdict_response = ChatResponse {
+        text: Some("Inspection complete.".into()),
+        tool_calls: vec![ToolCall {
+            id: "call_pass_verdict".into(),
+            name: "pass_verdict".into(),
+            arguments:
+                r#"{"verdict":"pass","reasoning":"Workspace inspected","output":"Found files"}"#
+                    .into(),
+        }],
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        },
+    };
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![verdict_response]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let task = RoutineRun::cron(CronInput {
+        task: None,
+        project: None,
+        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
+        start_at: None,
+        timeout: Duration::from_secs(5),
+    });
+
+    let mut handle = provider
+        .routine("cron-agent-terminal")
+        .unwrap()
+        .run_stream(task)
+        .await
+        .unwrap();
+
+    let mut cycles_started = 0u32;
+    let mut cycles_completed = 0u32;
+    let mut step_names = Vec::new();
+
+    while let Some(event) = handle.recv().await {
+        match event {
+            RoutineEvent::CronCycleStarted { .. } => cycles_started += 1,
+            RoutineEvent::CronCycleCompleted { .. } => cycles_completed += 1,
+            RoutineEvent::StepStarted { step_name, .. } => step_names.push(step_name),
+            _ => {}
+        }
+    }
+
+    assert_eq!(cycles_started, 1, "should run one scheduled firing");
+    assert_eq!(cycles_completed, 1, "should complete one cron cycle");
+    assert_eq!(
+        step_names,
+        vec!["inspect", "done"],
+        "pass verdict should allow the next routine step to run"
+    );
+
+    let result = handle.output().await.unwrap();
+    assert!(result.passed);
+    assert_eq!(result.output, "Found files");
 }
 
 /// Cron cancellation: cancel the handle mid-execution and verify it stops.
@@ -2101,7 +2424,8 @@ async fn cron_cancellation() {
         .await
         .unwrap();
 
-    // Wait for at least one cycle to complete, then cancel.
+    // Wait for the scheduled firing to complete, then cancel. The firing may
+    // already be complete, because cron execution runs one DAG cycle.
     let mut saw_cycle = false;
     while let Some(event) = handle.recv().await {
         if let RoutineEvent::CronCycleCompleted { .. } = event {
@@ -2116,12 +2440,8 @@ async fn cron_cancellation() {
         "should have seen at least one cron cycle before cancel"
     );
 
-    // The handle should finish after cancellation.
     let result = handle.output().await.unwrap();
-    assert!(
-        !result.output.is_empty(),
-        "cancelled cron should still return a result"
-    );
+    assert!(result.passed);
 }
 
 // ===========================================================================

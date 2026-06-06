@@ -226,7 +226,7 @@ impl RoutineInput {
 
     fn from_task_input(task: TaskInput) -> Self {
         let mut input = RoutineInput {
-            project: Some(task.project),
+            project: task.project,
             title: task.title,
             description: task.description,
             task_id: None,

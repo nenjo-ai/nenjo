@@ -488,35 +488,8 @@ where
     // Build the task description from template context
     let task_description = build_task_description(step, state);
 
-    // If the routine was triggered by a cron, use AgentRunKind::Cron so the
-    // agent's cron_task template is selected instead of task_execution.
     debug!(is_cron = state.input.is_cron_trigger, step = %step.name, "Building task for agent step");
-    let task = if state.input.is_cron_trigger {
-        // Pass task context only when the cron step runs inside a
-        // task-triggered routine (i.e. there's a real task_id).
-        let inner_task = state
-            .input
-            .task_id
-            .map(|_| build_task(state, task_description))
-            .transpose()?;
-        attach_location(
-            AgentRun {
-                kind: AgentRunKind::Cron(CronInput {
-                    task: inner_task,
-                    project: state.input.project.clone(),
-                    schedule: crate::routines::types::CronSchedule::Interval(
-                        std::time::Duration::from_secs(0),
-                    ),
-                    start_at: None,
-                    timeout: std::time::Duration::from_secs(0),
-                }),
-                execution: Default::default(),
-            },
-            state,
-        )
-    } else {
-        attach_location(AgentRun::task(build_task(state, task_description)?), state)
-    };
+    let task = attach_location(AgentRun::task(build_task(state, task_description)?), state);
 
     let output = gate::execute_with_pass_verdict(
         &runner,
@@ -751,11 +724,6 @@ where
 
 /// Build task input from the routine state.
 fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
-    let project = state
-        .input
-        .project
-        .clone()
-        .context("routine task execution requires a project slug")?;
     Ok(TaskInput {
         task_id: state.input.task_id.unwrap_or_else(Uuid::nil),
         title: state.input.title.clone(),
@@ -767,7 +735,7 @@ fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
             .source
             .clone()
             .or_else(|| Some("routine".to_string())),
-        project,
+        project: state.input.project.clone(),
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
         task_type: state.input.task_type.clone(),

@@ -427,6 +427,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         let task_label = match &run.kind {
             AgentRunKind::Chat { .. } => "chat",
+            AgentRunKind::FollowUp { .. } => "follow_up",
             AgentRunKind::Task(_) => "task",
             AgentRunKind::Cron { .. } => "cron",
             AgentRunKind::Heartbeat { .. } => "heartbeat",
@@ -478,10 +479,10 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         let mut messages: Vec<ChatMessage> =
             build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
 
-        if let AgentRunKind::Chat(ref chat) = run.kind {
-            for msg in &chat.history {
-                messages.push(msg.clone());
-            }
+        match &run.kind {
+            AgentRunKind::Chat(chat) => messages.extend(chat.history.iter().cloned()),
+            AgentRunKind::FollowUp(follow_up) => messages.extend(follow_up.history.iter().cloned()),
+            _ => {}
         }
 
         messages.push(ChatMessage::user(&user_message));
@@ -515,6 +516,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 fn raw_user_message(run: &AgentRun) -> String {
     match &run.kind {
         AgentRunKind::Chat(chat) => chat.message.clone(),
+        AgentRunKind::FollowUp(follow_up) => follow_up.message.clone(),
         AgentRunKind::Task(task) => {
             if task.description.is_empty() {
                 task.title.clone()

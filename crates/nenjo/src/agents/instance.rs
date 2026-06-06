@@ -332,15 +332,16 @@ impl<P: ProviderRuntime> AgentInstance<P> {
 
         // 6. Select the user message template based on task type
         let (task_type_name, task_template) = match &run.kind {
-            AgentRunKind::Task { .. } => ("Task", &prompt_config.templates.task_execution),
-            AgentRunKind::Chat { .. } => ("Chat", &prompt_config.templates.chat_task),
-            AgentRunKind::Gate { .. } => ("Gate", &prompt_config.templates.gate_eval),
+            AgentRunKind::Task { .. } => ("Task", prompt_config.templates.task_execution.as_str()),
+            AgentRunKind::Chat { .. } => ("Chat", prompt_config.templates.chat_task.as_str()),
+            AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
+            AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
             AgentRunKind::CouncilSubtask { .. } => {
-                ("CouncilSubtask", &prompt_config.templates.chat_task)
+                ("CouncilSubtask", prompt_config.templates.chat_task.as_str())
             }
-            AgentRunKind::Cron { .. } => ("Cron", &prompt_config.templates.cron_task),
+            AgentRunKind::Cron { .. } => ("Cron", prompt_config.templates.cron_task.as_str()),
             AgentRunKind::Heartbeat { .. } => {
-                ("Heartbeat", &prompt_config.templates.heartbeat_task)
+                ("Heartbeat", prompt_config.templates.heartbeat_task.as_str())
             }
         };
         tracing::debug!(

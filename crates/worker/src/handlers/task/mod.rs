@@ -618,7 +618,7 @@ where
     };
 
     let task = TaskInput {
-        project: project.clone(),
+        project: Some(project.clone()),
         task_id,
         title: title.to_string(),
         description: description.to_string(),
