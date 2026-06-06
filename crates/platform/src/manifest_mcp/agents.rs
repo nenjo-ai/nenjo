@@ -94,10 +94,6 @@ fn prompt_config_schema() -> serde_json::Value {
                         "type": "string",
                         "description": "Template used when the agent evaluates a gate. Omit to leave unchanged."
                     },
-                    "cron": {
-                        "type": "string",
-                        "description": "Template used when the agent is invoked by a cron schedule. Omit to leave unchanged."
-                    },
                     "heartbeat": {
                         "type": "string",
                         "description": "Template used when the agent is invoked by a heartbeat schedule. Omit to leave unchanged."

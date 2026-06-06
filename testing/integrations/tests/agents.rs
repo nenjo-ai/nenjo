@@ -141,7 +141,6 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
                 chat_task: "{{ chat.message }}".into(),
                 task_execution: String::new(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 ..Default::default()
             },
             ..Default::default()
@@ -152,6 +151,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         platform_scopes: vec![],
         mcp_servers: vec![],
         abilities: vec![],
+        script_tools: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -427,6 +427,7 @@ async fn assigned_ability_tool_with_real_llm() {
         },
         platform_scopes: vec![],
         mcp_servers: vec![],
+        script_tools: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -555,12 +556,12 @@ async fn domain_expansion_with_real_llm() {
         id: prd_domain_id,
         name: "prd".into(),
         path: String::new(),
-        display_name: "PRD Writer".into(),
         description: Some("Write product requirements documents".into()),
         command: "/prd".into(),
         platform_scopes: vec![],
         abilities: vec![],
         mcp_servers: vec![],
+        script_tools: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some("You are now in PRD writing mode. Structure your response as a PRD with sections: Problem Statement, Goals, Non-Goals, User Stories, and Success Metrics. Be concise — one sentence per bullet point.".into()),
         },

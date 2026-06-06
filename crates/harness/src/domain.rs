@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dashmap::DashMap;
 use nenjo::Slug;
+use nenjo::provider::ToolFactory as _;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -42,6 +43,12 @@ where
             } else {
                 warn!(project = %project_slug, agent = %agent, "Project not found in manifest for domain session rebuild");
             }
+            builder = builder.with_work_dir(
+                provider
+                    .tool_factory()
+                    .workspace_dir()
+                    .join(project_slug.as_str()),
+            );
         }
         let base_runner = builder.build().await?;
         let domain_runner = base_runner.domain_expansion(domain_command).await?;

@@ -4,6 +4,7 @@
 //! It is independent of Nenjo platform concepts (NATS, streaming, bootstrap).
 //! Callers build prompts and pass pre-built messages to [`run()`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -19,6 +20,9 @@ use super::compaction::{
 };
 use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
 use crate::agents::instance::AgentInstance;
+use crate::hooks::{
+    ActiveHook, ActiveHookScope, HookBlock, HookEvent, HookRuntime, HookRuntimeEvent,
+};
 use crate::provider::ProviderRuntime;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 use nenjo_models::{ChatMessage, ChatRequest};
@@ -49,6 +53,10 @@ tokio::task_local! {
     static CURRENT_CHAT_HISTORY: Vec<ChatMessage>;
 }
 
+tokio::task_local! {
+    static CURRENT_HOOK_RUNTIME: Option<Arc<HookRuntime>>;
+}
+
 #[derive(Default)]
 struct NestedTokenUsage {
     input_tokens: AtomicU64,
@@ -66,6 +74,14 @@ pub(crate) fn current_events_tx() -> Option<mpsc::UnboundedSender<TurnEvent>> {
 
 pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
+}
+
+pub(crate) fn activate_current_hook_scope(scope: ActiveHookScope) -> bool {
+    let Ok(Some(runtime)) = CURRENT_HOOK_RUNTIME.try_with(Clone::clone) else {
+        return false;
+    };
+    runtime.activate_scope(scope);
+    true
 }
 
 pub(crate) fn record_nested_token_usage(input_tokens: u64, output_tokens: u64) {
@@ -129,6 +145,7 @@ where
     let tools = &agent.runtime.tools;
     let tool_specs = agent.tool_specs();
     let tool_specs = tool_specs.as_slice();
+    let hook_runtime = agent.runtime.hook_runtime.clone();
     let config = TurnLoopConfig {
         max_turns: agent.runtime.config.max_turns as u32,
         parallel_tools: agent.runtime.config.parallel_tools,
@@ -139,6 +156,7 @@ where
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
     let mut total_tool_calls: u32 = 0;
+    let mut user_prompt_submit_hooks_seen = HashSet::new();
 
     let nested_usage = CURRENT_NESTED_TOKEN_USAGE
         .try_with(Clone::clone)
@@ -149,8 +167,9 @@ where
 
     let run_result = CURRENT_NESTED_TOKEN_USAGE
         .scope(nested_usage.clone(), async {
-            CURRENT_EVENTS_TX
-                .scope(events_tx.clone(), async {
+            CURRENT_HOOK_RUNTIME
+                .scope(hook_runtime.clone(), async {
+                    CURRENT_EVENTS_TX.scope(events_tx.clone(), async {
             // Log tool specs being sent to the provider (once, before the loop)
             if !tool_specs.is_empty() {
                 let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();
@@ -214,6 +233,30 @@ where
                     emit_event(events_tx.as_ref(), TurnEvent::Paused);
                     pt.wait_if_paused().await;
                     emit_event(events_tx.as_ref(), TurnEvent::Resumed);
+                }
+
+                if let Some(prompt) = latest_user_prompt(&messages) {
+                    let prompt = prompt.to_string();
+                    let outcome = run_user_prompt_submit_hooks(
+                        agent_name,
+                        hook_runtime.as_ref(),
+                        &prompt,
+                        &messages,
+                        events_tx.as_ref(),
+                        &mut user_prompt_submit_hooks_seen,
+                    )
+                    .await;
+                    if let Some(block) = outcome.block {
+                        final_text =
+                            format!("Blocked by hook {}: {}", block.hook, block.reason);
+                        remove_latest_user_prompt(&mut messages, &prompt);
+                        break;
+                    }
+                    append_user_prompt_hook_contexts(
+                        &mut messages,
+                        events_tx.as_ref(),
+                        outcome.additional_contexts,
+                    );
                 }
 
                 // Call LLM
@@ -372,10 +415,16 @@ where
                             let message_snapshot = messages.clone();
                             let futs = response.tool_calls.iter().map(|tc| {
                                 let current_messages = message_snapshot.clone();
+                                let hook_runtime = hook_runtime.clone();
                                 async move {
-                                    let result =
-                                        execute_tool(agent_name, tools, tc, &current_messages)
-                                            .await;
+                                    let result = execute_tool(
+                                        agent_name,
+                                        tools,
+                                        tc,
+                                        &current_messages,
+                                        hook_runtime,
+                                    )
+                                    .await;
                                     (tc, result)
                                 }
                             });
@@ -383,7 +432,9 @@ where
                         } else {
                             let mut results = Vec::with_capacity(response.tool_calls.len());
                             for tc in &response.tool_calls {
-                                let result = execute_tool(agent_name, tools, tc, &messages).await;
+                                let result =
+                                    execute_tool(agent_name, tools, tc, &messages, hook_runtime.clone())
+                                        .await;
                                 results.push((tc, result));
                             }
                             results
@@ -499,6 +550,23 @@ where
                             .filter(|text| !text.trim().is_empty())
                             .map(ToOwned::to_owned)
                             .unwrap_or(terminal_tool_text);
+                        if let Some(block) = run_stop_hooks(
+                            agent_name,
+                            hook_runtime.as_ref(),
+                            events_tx.as_ref(),
+                            &messages,
+                            &final_text,
+                        )
+                        .await
+                        {
+                            final_text.clear();
+                            append_hook_block_continuation(
+                                &mut messages,
+                                events_tx.as_ref(),
+                                block,
+                            );
+                            continue;
+                        }
                         break;
                     }
 
@@ -536,6 +604,19 @@ where
                         message: assistant_message,
                     },
                 );
+                if let Some(block) = run_stop_hooks(
+                    agent_name,
+                    hook_runtime.as_ref(),
+                    events_tx.as_ref(),
+                    &messages,
+                    &final_text,
+                )
+                .await
+                {
+                    final_text.clear();
+                    append_hook_block_continuation(&mut messages, events_tx.as_ref(), block);
+                    continue;
+                }
                 break;
             }
 
@@ -582,6 +663,8 @@ where
             );
 
             Ok(output)
+                    })
+                    .await
                 })
                 .await
         })
@@ -597,6 +680,7 @@ async fn execute_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &nenjo_models::ToolCall,
     current_messages: &[ChatMessage],
+    hook_runtime: Option<Arc<HookRuntime>>,
 ) -> ToolResult {
     info!(
         agent = agent_name,
@@ -629,10 +713,32 @@ async fn execute_tool(
             };
         }
     };
+    let events_tx = current_events_tx();
+
+    let outcome = run_hooks_for_event(
+        agent_name,
+        hook_runtime.as_ref(),
+        HookRuntimeEvent::PreToolUse {
+            tool_name: &tool_call.name,
+            tool_input: &args,
+            tool_use_id: Some(&tool_call.id),
+        },
+        Some(&tool_call.name),
+        events_tx.as_ref(),
+    )
+    .await;
+    if let Some(block) = outcome.block {
+        return ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("Blocked by hook {}: {}", block.hook, block.reason)),
+        };
+    }
 
     // Execute
+    let tool_args = args.clone();
     let execute = async {
-        match tool.execute(args).await {
+        match tool.execute(tool_args).await {
             Ok(result) => result,
             Err(e) => ToolResult {
                 success: false,
@@ -648,7 +754,7 @@ async fn execute_tool(
         .cloned()
         .collect();
 
-    if let Some(tx) = current_events_tx().or_else(|| None) {
+    let result = if let Some(tx) = events_tx.clone() {
         CURRENT_EVENTS_TX
             .scope(
                 Some(tx),
@@ -659,5 +765,277 @@ async fn execute_tool(
         CURRENT_EVENTS_TX
             .scope(None, CURRENT_CHAT_HISTORY.scope(current_history, execute))
             .await
+    };
+
+    let tool_response = serde_json::json!({
+        "success": result.success,
+        "output": &result.output,
+        "error": &result.error,
+    });
+    let outcome = run_hooks_for_event(
+        agent_name,
+        hook_runtime.as_ref(),
+        HookRuntimeEvent::PostToolUse {
+            tool_name: &tool_call.name,
+            tool_input: &args,
+            tool_response: &tool_response,
+            tool_use_id: Some(&tool_call.id),
+        },
+        Some(&tool_call.name),
+        events_tx.as_ref(),
+    )
+    .await;
+    if let Some(block) = outcome.block {
+        return ToolResult {
+            success: false,
+            output: result.output,
+            error: Some(format!("Blocked by hook {}: {}", block.hook, block.reason)),
+        };
     }
+
+    result
+}
+
+async fn run_stop_hooks(
+    agent_name: &str,
+    hook_runtime: Option<&Arc<HookRuntime>>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    messages: &[ChatMessage],
+    final_text: &str,
+) -> Option<HookBlock> {
+    run_hooks_for_event(
+        agent_name,
+        hook_runtime,
+        HookRuntimeEvent::Stop {
+            messages,
+            final_text,
+        },
+        None,
+        events_tx,
+    )
+    .await
+    .block
+}
+
+#[derive(Default)]
+struct HookRunOutcome {
+    block: Option<HookBlock>,
+    additional_contexts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActiveHookKey {
+    hook_id: uuid::Uuid,
+    source_kind: String,
+    source_name: String,
+}
+
+impl ActiveHookKey {
+    fn from_active(active: &ActiveHook) -> Self {
+        Self {
+            hook_id: active.hook.id,
+            source_kind: active.source.kind().to_string(),
+            source_name: active.source.name().to_string(),
+        }
+    }
+}
+
+async fn run_user_prompt_submit_hooks(
+    agent_name: &str,
+    hook_runtime: Option<&Arc<HookRuntime>>,
+    prompt: &str,
+    messages: &[ChatMessage],
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    seen: &mut HashSet<ActiveHookKey>,
+) -> HookRunOutcome {
+    let Some(runtime) = hook_runtime.map(Arc::as_ref) else {
+        return HookRunOutcome::default();
+    };
+    if runtime.is_empty() {
+        return HookRunOutcome::default();
+    }
+
+    let active_hooks = runtime
+        .matching_hooks(&HookEvent::UserPromptSubmit, None)
+        .into_iter()
+        .filter(|active| seen.insert(ActiveHookKey::from_active(active)))
+        .collect();
+
+    run_selected_hooks_for_event(
+        agent_name,
+        runtime,
+        HookRuntimeEvent::UserPromptSubmit { prompt, messages },
+        active_hooks,
+        events_tx,
+    )
+    .await
+}
+
+async fn run_hooks_for_event(
+    agent_name: &str,
+    hook_runtime: Option<&Arc<HookRuntime>>,
+    event: HookRuntimeEvent<'_>,
+    subject: Option<&str>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+) -> HookRunOutcome {
+    let Some(runtime) = hook_runtime.map(Arc::as_ref) else {
+        return HookRunOutcome::default();
+    };
+    if runtime.is_empty() {
+        return HookRunOutcome::default();
+    }
+
+    let hook_event = hook_event_for_runtime_event(&event);
+    let active_hooks = runtime.matching_hooks(&hook_event, subject);
+    run_selected_hooks_for_event(agent_name, runtime, event, active_hooks, events_tx).await
+}
+
+async fn run_selected_hooks_for_event(
+    agent_name: &str,
+    runtime: &HookRuntime,
+    event: HookRuntimeEvent<'_>,
+    active_hooks: Vec<ActiveHook>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+) -> HookRunOutcome {
+    let mut outcome = HookRunOutcome::default();
+    for active in active_hooks {
+        let hook_label = active.hook.label().to_string();
+        let hook_event = active.hook.event.as_str().to_string();
+        let hook_type = active.hook.hook_type.clone();
+        let source = active.source.kind().to_string();
+        emit_event(
+            events_tx,
+            TurnEvent::HookStarted {
+                hook: hook_label.clone(),
+                hook_event: hook_event.clone(),
+                hook_type: hook_type.clone(),
+                source: source.clone(),
+            },
+        );
+        debug!(
+            agent = agent_name,
+            hook = %hook_label,
+            hook_event = %hook_event,
+            source = %active_hook_source(&active),
+            "Executing hook"
+        );
+        let execution = runtime.execute(&active, event.clone()).await;
+        emit_event(
+            events_tx,
+            TurnEvent::HookCompleted {
+                hook: hook_label.clone(),
+                hook_event,
+                hook_type,
+                source,
+                success: execution.success,
+                blocked: execution.blocked,
+                exit_code: execution.exit_code,
+                output: truncate(&execution.stdout, 1_000),
+                error: (!execution.stderr.trim().is_empty())
+                    .then(|| truncate(&execution.stderr, 1_000)),
+                reason: execution.reason.clone(),
+            },
+        );
+        if let Some(additional_context) = execution
+            .additional_context
+            .clone()
+            .filter(|context| !context.trim().is_empty())
+        {
+            outcome.additional_contexts.push(additional_context);
+        }
+        if execution.blocked {
+            outcome.block = Some(HookBlock {
+                hook: hook_label,
+                reason: hook_block_reason(&execution),
+                system_message: execution.system_message,
+            });
+            return outcome;
+        }
+    }
+    outcome
+}
+
+fn hook_event_for_runtime_event(event: &HookRuntimeEvent<'_>) -> HookEvent {
+    match event {
+        HookRuntimeEvent::UserPromptSubmit { .. } => HookEvent::UserPromptSubmit,
+        HookRuntimeEvent::PreToolUse { .. } => HookEvent::PreToolUse,
+        HookRuntimeEvent::PostToolUse { .. } => HookEvent::PostToolUse,
+        HookRuntimeEvent::Stop { .. } => HookEvent::Stop,
+    }
+}
+
+fn latest_user_prompt(messages: &[ChatMessage]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+}
+
+fn remove_latest_user_prompt(messages: &mut Vec<ChatMessage>, prompt: &str) {
+    if let Some(index) = messages
+        .iter()
+        .rposition(|message| message.role == "user" && message.content == prompt)
+    {
+        messages.remove(index);
+    }
+}
+
+fn append_user_prompt_hook_contexts(
+    messages: &mut Vec<ChatMessage>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    contexts: Vec<String>,
+) {
+    let contexts: Vec<String> = contexts
+        .into_iter()
+        .map(|context| context.trim().to_string())
+        .filter(|context| !context.is_empty())
+        .collect();
+    if contexts.is_empty() {
+        return;
+    }
+    let message = ChatMessage::developer(format!(
+        "Additional context from UserPromptSubmit hooks:\n\n{}",
+        contexts.join("\n\n")
+    ));
+    messages.push(message.clone());
+    emit_event(events_tx, TurnEvent::TranscriptMessage { message });
+}
+
+fn hook_block_reason(execution: &crate::hooks::HookExecution) -> String {
+    execution
+        .reason
+        .as_ref()
+        .filter(|reason| !reason.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            (!execution.stderr.trim().is_empty()).then(|| truncate(&execution.stderr, 1_000))
+        })
+        .unwrap_or_else(|| "Hook blocked continuation without a reason.".to_string())
+}
+
+fn append_hook_block_continuation(
+    messages: &mut Vec<ChatMessage>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    block: HookBlock,
+) {
+    if let Some(system_message) = block
+        .system_message
+        .filter(|message| !message.trim().is_empty())
+    {
+        let message = ChatMessage::developer(system_message);
+        messages.push(message.clone());
+        emit_event(events_tx, TurnEvent::TranscriptMessage { message });
+    }
+
+    let message = ChatMessage::user(format!(
+        "Hook `{}` blocked completion and requested continuation:\n{}",
+        block.hook, block.reason
+    ));
+    messages.push(message.clone());
+    emit_event(events_tx, TurnEvent::TranscriptMessage { message });
+}
+
+fn active_hook_source(active: &ActiveHook) -> String {
+    format!("{}:{}", active.source.kind(), active.source.name())
 }

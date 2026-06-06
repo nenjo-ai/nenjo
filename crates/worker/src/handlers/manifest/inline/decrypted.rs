@@ -6,9 +6,10 @@ use uuid::Uuid;
 
 use crate::handlers::manifest::payload::{
     AbilityDocument, AgentDocument, ContextBlockDocument, DecryptedManifestPayload, DomainDocument,
-    InlineDocumentMeta, ManifestKind,
+    InlineDocumentMeta,
 };
 use crate::handlers::manifest::services::ManifestStore;
+use nenjo_platform::SensitiveContentKind;
 
 use super::plain::apply_inline_upsert;
 
@@ -30,11 +31,11 @@ where
     StoreRt: ManifestStore,
 {
     let object_type = decrypted.object_type;
-    let Some(manifest_kind) = ManifestKind::from_encrypted_object_type(object_type) else {
+    let Some(content_kind) = SensitiveContentKind::from_encrypted_object_type(object_type) else {
         debug!(%rt, %id, object_type, "Encrypted manifest payload not handled inline");
         return false;
     };
-    let handled_inline = manifest_kind.matches_resource_type(rt) && rt != ResourceType::Routine;
+    let handled_inline = content_kind.matches_resource_type(rt) && rt != ResourceType::Routine;
     if !handled_inline {
         debug!(%rt, %id, object_type, "Encrypted manifest payload not handled inline");
         return false;
@@ -51,11 +52,11 @@ where
         },
     };
 
-    match manifest_kind {
-        ManifestKind::ProjectSettings => {
+    match content_kind {
+        SensitiveContentKind::ProjectSettings => {
             apply_decrypted_project_settings(manifest, rt, id, decrypted)
         }
-        ManifestKind::Agent => {
+        SensitiveContentKind::AgentPrompt => {
             let prompt_config = match serde_json::from_str::<PromptConfig>(&plaintext) {
                 Ok(value) => value,
                 Err(error) => {
@@ -103,7 +104,7 @@ where
 
             true
         }
-        ManifestKind::Ability => {
+        SensitiveContentKind::AbilityPrompt => {
             let prompt_config = match serde_json::from_str::<nenjo::types::AbilityPromptConfig>(
                 &plaintext,
             ) {
@@ -149,7 +150,7 @@ where
 
             true
         }
-        ManifestKind::Domain => {
+        SensitiveContentKind::DomainPrompt => {
             let prompt_config = match serde_json::from_str::<nenjo::types::DomainPromptConfig>(
                 &plaintext,
             ) {
@@ -172,7 +173,6 @@ where
                             id: domain.summary.id,
                             name: domain.summary.name,
                             path: domain.summary.path,
-                            display_name: domain.summary.display_name,
                             description: domain.summary.description,
                             command: domain.command,
                             platform_scopes: existing_manifest
@@ -187,6 +187,10 @@ where
                                 .as_ref()
                                 .map(|domain| domain.mcp_servers.clone())
                                 .unwrap_or(domain.mcp_servers),
+                            script_tools: existing_manifest
+                                .as_ref()
+                                .map(|domain| domain.script_tools.clone())
+                                .unwrap_or_default(),
                             prompt_config: prompt_config.clone(),
                         }
                     }
@@ -212,7 +216,7 @@ where
 
             true
         }
-        ManifestKind::ContextBlock => {
+        SensitiveContentKind::ContextBlockContent => {
             let template = match decrypted_string_payload(decrypted.decrypted_payload) {
                 Some(value) => value,
                 None => {
@@ -227,7 +231,6 @@ where
                         id: block.summary.id,
                         name: block.summary.name,
                         path: block.summary.path,
-                        display_name: block.summary.display_name,
                         description: block.summary.description,
                         template,
                     },
@@ -259,7 +262,7 @@ where
 
             true
         }
-        ManifestKind::Document => {
+        SensitiveContentKind::DocumentContent => {
             let metadata = match decrypted
                 .inline_payload
                 .cloned()
@@ -308,11 +311,9 @@ where
 
             true
         }
-        ManifestKind::Task
-        | ManifestKind::Project
-        | ManifestKind::Routine
-        | ManifestKind::Model
-        | ManifestKind::Council => false,
+        SensitiveContentKind::TaskContent
+        | SensitiveContentKind::HeartbeatInstructions
+        | SensitiveContentKind::RoutineCronTask => false,
     }
 }
 

@@ -1,11 +1,14 @@
+use std::process;
+
 use clap::{Parser, Subcommand};
 use eyre::{Result, eyre};
+use nenjo_updater::{maybe_update_notice, run_nenjoup_update};
 use nenjo_worker::RunArgs;
 use tracing::debug;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "nenjo", about = "Nenjo platform agent CLI harness")]
+#[command(name = "nenjo", version, about = "Nenjo platform agent CLI harness")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -15,6 +18,12 @@ struct Cli {
 enum Commands {
     /// Start the agent worker (connect to NATS, process events)
     Run(RunArgs),
+    /// Update the installed Nenjo binary bundle.
+    Update {
+        /// Install a specific release tag or version, for example v0.12.0.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -33,6 +42,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Run(args)) => {
+            print_update_notice("nenjo update");
+
             // Initialize tracing — CLI arg takes priority over RUST_LOG env var
             let log_filter = args
                 .log_level
@@ -49,14 +60,33 @@ async fn main() -> Result<()> {
             } else {
                 base_filter.add_directive("async_nats=warn".parse().expect("valid directive"))
             };
+            let show_log_target = filter
+                .max_level_hint()
+                .is_some_and(|level| level >= LevelFilter::DEBUG);
 
             let _ = tracing_subscriber::registry()
                 .with(filter)
-                .with(tracing_subscriber::fmt::layer().with_target(args.log_target))
+                .with(tracing_subscriber::fmt::layer().with_target(show_log_target))
                 .try_init();
 
             nenjo_worker::run(args).await.map_err(|error| eyre!(error))
         }
+        Some(Commands::Update { version }) => run_bundle_update(version),
         None => Err(eyre!("Command not provided")),
+    }
+}
+
+fn print_update_notice(update_command: &str) {
+    if let Some(notice) = maybe_update_notice(env!("CARGO_PKG_VERSION"), update_command) {
+        eprintln!("{}", notice.render());
+    }
+}
+
+fn run_bundle_update(version: Option<String>) -> Result<()> {
+    let status = run_nenjoup_update(version.as_deref())?;
+    if status.success() {
+        Ok(())
+    } else {
+        process::exit(status.code().unwrap_or(1));
     }
 }

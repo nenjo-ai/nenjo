@@ -72,6 +72,9 @@ fn parses_all_supported_resource_types() {
         ("nenjo.knowledge_ref.v1", PackageKind::Knowledge),
         ("nenjo.skill.v1", PackageKind::Skill),
         ("nenjo.plugin.v1", PackageKind::Plugin),
+        ("nenjo.command.v1", PackageKind::Command),
+        ("nenjo.hook.v1", PackageKind::Hook),
+        ("nenjo.script_tool.v1", PackageKind::ScriptTool),
         ("nenjo.mcp_server.v1", PackageKind::McpServer),
         ("nenjo.routine.v1", PackageKind::Routine),
     ];
@@ -218,7 +221,6 @@ fn reads_resource_manifest_body_name() {
 schema: nenjo.agent.v1
 manifest:
   name: system
-  display_name: Nenji
 "#,
     )
     .unwrap();
@@ -258,7 +260,7 @@ fn rejects_resource_manifest_without_name() {
         r#"
 schema: nenjo.agent.v1
 manifest:
-  display_name: Nenji
+  description: Nenji
 "#,
     )
     .unwrap();
@@ -379,7 +381,6 @@ selector: pkg:nenjo.agent
 root_uri: pkg://nenjo.agent/
 manifest:
   name: system
-  display_name: Nenji
 "#,
     )
     .unwrap();
@@ -733,7 +734,7 @@ modules:
         .unwrap_err();
     let err = format!("{err:?}");
 
-    assert!(err.contains("requires index.yml or index.yaml"));
+    assert!(err.contains("requires index.yml, index.yaml, or SKILL.md"));
     fs::remove_dir_all(root).unwrap();
 }
 

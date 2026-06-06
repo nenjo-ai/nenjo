@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use nenjo::Manifest;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{Harness, ProviderRuntime, Result};
 
@@ -57,7 +57,8 @@ where
             {
                 Ok(session) => {
                     domains.insert(session_id, session);
-                    info!(%session_id, %agent, domain = %domain_command, "Refreshed active domain session after manifest update");
+                    info!("Refreshed active domain session after manifest update");
+                    debug!(%session_id, %agent, domain = %domain_command, "Active domain session refresh details");
                 }
                 Err(error) => {
                     warn!(

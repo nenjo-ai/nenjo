@@ -1,4 +1,3 @@
 schema: nenjo.domain.v1
 manifest:
   name: support
-  display_name: Support

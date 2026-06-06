@@ -532,7 +532,7 @@ where
 
 fn task_input_from_request(request: &TaskRequest, task_slug: String) -> TaskInput {
     TaskInput {
-        project: request.project.clone(),
+        project: Some(request.project.clone()),
         task_id: request.task_id,
         title: request.title.clone(),
         description: request.description.clone(),

@@ -82,7 +82,6 @@ pub(super) async fn apply_upsert(
                     id: summary.id,
                     name: summary.name,
                     path: summary.path,
-                    display_name: summary.display_name,
                     description: summary.description,
                     template,
                 };

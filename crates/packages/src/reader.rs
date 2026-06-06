@@ -302,7 +302,12 @@ where
             return Ok((module_path, source_path));
         }
     }
-    anyhow::bail!("directory module '{module_path}/' requires index.yml or index.yaml")
+    let skill_module_path = format!("{module_path}/SKILL.md");
+    let skill_source_path = package_module_source_path(package_path, &skill_module_path)?;
+    if reader.read_text(&skill_source_path).await.is_ok() {
+        return Ok((module_path.to_string(), skill_source_path));
+    }
+    anyhow::bail!("directory module '{module_path}/' requires index.yml, index.yaml, or SKILL.md")
 }
 
 fn insert_resolved_module_file(

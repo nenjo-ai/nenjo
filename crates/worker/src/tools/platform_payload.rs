@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use nenjo_platform::{ContentScope, ManifestKind, SensitivePayloadEncoder};
+use nenjo_platform::{SensitiveContentKind, SensitivePayloadEncoder};
 
+use crate::crypto::ContentScope;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::{decrypt_text_with_provider, encrypt_text_with_provider};
 
@@ -19,8 +20,15 @@ impl PlatformPayloadEncoder {
 }
 
 fn payload_scope_for_object_type(object_type: &str) -> ContentScope {
-    ManifestKind::from_encrypted_object_type(object_type)
-        .and_then(ManifestKind::encrypted_scope)
+    if object_type == "push.notification" {
+        return ContentScope::Org;
+    }
+    SensitiveContentKind::from_encrypted_object_type(object_type)
+        .map(|kind| kind.encrypted_scope())
+        .map(|scope| match scope {
+            nenjo_platform::ContentScope::User => ContentScope::User,
+            nenjo_platform::ContentScope::Org => ContentScope::Org,
+        })
         .unwrap_or(ContentScope::User)
 }
 
@@ -65,41 +73,31 @@ mod tests {
     fn payload_scope_uses_org_for_org_owned_manifest_resources() {
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::Agent
-                    .encrypted_object_type()
-                    .expect("agent prompt object type"),
+                SensitiveContentKind::AgentPrompt.encrypted_object_type(),
             ),
             ContentScope::Org
         );
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::Ability
-                    .encrypted_object_type()
-                    .expect("ability prompt object type"),
+                SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
             ),
             ContentScope::Org
         );
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::Domain
-                    .encrypted_object_type()
-                    .expect("domain prompt object type"),
+                SensitiveContentKind::DomainPrompt.encrypted_object_type(),
             ),
             ContentScope::Org
         );
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::ContextBlock
-                    .encrypted_object_type()
-                    .expect("context block content object type"),
+                SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
             ),
             ContentScope::Org
         );
         assert_eq!(
             payload_scope_for_object_type(
-                ManifestKind::Document
-                    .encrypted_object_type()
-                    .expect("document content object type"),
+                SensitiveContentKind::DocumentContent.encrypted_object_type(),
             ),
             ContentScope::Org
         );
@@ -110,6 +108,14 @@ mod tests {
         assert_eq!(
             payload_scope_for_object_type("chat.message"),
             ContentScope::User
+        );
+    }
+
+    #[test]
+    fn payload_scope_uses_org_for_push_notifications() {
+        assert_eq!(
+            payload_scope_for_object_type("push.notification"),
+            ContentScope::Org
         );
     }
 }

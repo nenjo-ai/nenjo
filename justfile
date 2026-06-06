@@ -11,7 +11,7 @@ build:
 
 # Build in release mode
 build-release:
-    cargo build -p nenjo --release
+    cargo build -p nenjo-cli -p nenpm-cli -p nenjoup-cli --release
 
 # Run all tests
 test:

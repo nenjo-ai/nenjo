@@ -20,11 +20,10 @@ fn domain_slug_schema() -> serde_json::Value {
 fn domain_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "display_name", "command"],
+        "required": ["name", "command"],
         "properties": {
             "name": { "type": "string", "description": "Stable runtime name for this domain." },
             "path": { "type": "string", "description": "Folder path for this domain. Omit for the root folder." },
-            "display_name": { "type": "string", "description": "Human-readable name shown in the UI." },
             "description": { "type": ["string", "null"], "description": "Optional domain description." },
             "command": { "type": "string", "description": "The slash/hash-style command used to activate this domain, such as `#creator`." },
             "abilities": string_list_schema("Ability names activated by this domain."),
@@ -49,7 +48,6 @@ fn domain_update_schema() -> serde_json::Value {
         "description": "Partial patch for an existing domain. Omit fields you do not want to change.",
         "properties": {
             "name": { "type": "string", "description": "Replace the runtime name." },
-            "display_name": { "type": "string", "description": "Replace the human-readable display name." },
             "description": { "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." },
             "command": { "type": "string", "description": "Replace the activation command for this domain." },
             "abilities": string_list_schema("Full replacement list of ability names activated by this domain."),
@@ -85,7 +83,7 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_domain".to_string(),
-            description: "Get one domain's name, path, display_name, description, command, platform_scopes, abilities, and mcp_servers by slug."
+            description: "Get one domain's name, path, description, command, platform_scopes, abilities, and mcp_servers by slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -109,11 +107,11 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_domain".to_string(),
-            description: "Create one domain with top-level name, path, display_name, description, command, abilities, mcp_servers, and optional prompt_config. Domain platform scopes are managed outside this MCP tool."
+            description: "Create one domain with top-level name, path, description, command, abilities, mcp_servers, and optional prompt_config. Domain platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["name", "display_name", "command"],
+                "required": ["name", "command"],
                 "properties": domain_create_schema()["properties"].clone(),
                 "additionalProperties": false
             }),
@@ -121,7 +119,7 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_domain".to_string(),
-            description: "Update one domain's name, display_name, description, command, abilities, or mcp_servers by slug; use update_domain_prompt to change prompt_config. Domain platform scopes are managed outside this MCP tool."
+            description: "Update one domain's name, description, command, abilities, or mcp_servers by slug; use update_domain_prompt to change prompt_config. Domain platform scopes are managed outside this MCP tool."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -129,7 +127,6 @@ pub fn domain_tools() -> Vec<ToolSpec> {
                 "properties": {
                     "domain": domain_slug_schema(),
                     "name": domain_update_schema()["properties"]["name"].clone(),
-                    "display_name": domain_update_schema()["properties"]["display_name"].clone(),
                     "description": domain_update_schema()["properties"]["description"].clone(),
                     "command": domain_update_schema()["properties"]["command"].clone(),
                     "abilities": domain_update_schema()["properties"]["abilities"].clone(),

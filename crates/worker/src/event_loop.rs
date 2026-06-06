@@ -124,11 +124,12 @@ where
     let worker_id = bus.transport().worker_id();
     let capabilities = ctx.capabilities.clone();
 
-    info!(
+    info!("Subscribing to eventbus");
+    debug!(
         org_id = %ctx.org_id,
         %worker_id,
         ?capabilities,
-        "Subscribing to eventbus"
+        "Eventbus subscription details"
     );
 
     let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<RoutedResponse>();
@@ -195,11 +196,22 @@ where
                             if let Err(e) = result {
                                 warn!(error = %e, "Failed to send response");
                             } else {
-                                debug!(
-                                    target = ?routed.target,
-                                    response = %response_label,
-                                    "Published worker response"
-                                );
+                                match routed.target {
+                                    ResponseTarget::Actor(actor_user_id) => {
+                                        debug!(
+                                            %actor_user_id,
+                                            response = %response_label,
+                                            "Published worker response"
+                                        );
+                                    }
+                                    ResponseTarget::System { org_id } => {
+                                        debug!(
+                                            %org_id,
+                                            response = %response_label,
+                                            "Published worker response"
+                                        );
+                                    }
+                                }
                             }
                         }
                         None => break,
@@ -256,12 +268,13 @@ where
                     continue;
                 }
                 let command_label = command.to_string();
-                info!(
+                info!(command = %command_label, "Received worker command");
+                debug!(
                     actor_user_id = %actor_user_id,
                     %message_id,
                     command = %command_label,
                     source = ?source,
-                    "Received worker command"
+                    "Received worker command details"
                 );
                 ack_received_envelope(ack, message_id, "command");
 

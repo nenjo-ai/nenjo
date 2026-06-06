@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bundle `nenjo`, `nenpm`, and `nenjoup` in binary release artifacts
+- add binary bundle update commands and update-available notices
+- add cron task and heartbeat instructions
+- add create knowledge pack MCP tooling
+- add encrypted push notifications
+- add Claude plugin support
+- add chat with councils
+- support context block imports of other context blocks
+
+### Changed
+
+- `nenpm update` now updates the installed binary bundle; use `nenpm upgrade`
+  to re-resolve package dependencies and rewrite `nenpm.lock.yml`
+- `nenpm upgrade` now keeps locked packages within their current major version
+  by default; use `nenpm upgrade --major` for explicit major upgrades
+
+### Fixed
+
+- fix routine task execution with git repo
+- fix cron routine execution
+
 ## [0.12.0](https://github.com/nenjo-ai/nenjo/compare/v0.11.0...v0.12.0) - 2026-05-17
 
 ### Added

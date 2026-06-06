@@ -1,4 +1,4 @@
-//! Cron poll loop — wraps a routine in a repeating execution cycle.
+//! Cron execution wrapper — runs one scheduled routine firing.
 
 use std::time::Duration;
 
@@ -20,8 +20,8 @@ pub(crate) struct CronExecutionConfig<'a> {
     pub timeout: Duration,
 }
 
-/// Execute a routine on a repeating schedule until a completion signal
-/// is received, the timeout expires, or the execution is cancelled.
+/// Execute one cron routine firing. External schedulers are responsible for
+/// starting subsequent firings.
 pub(crate) async fn execute_routine_cron<P>(
     provider: &P,
     routine: &RoutineManifest,
@@ -34,13 +34,10 @@ where
     let CronExecutionConfig {
         events_tx,
         cancel,
-        schedule,
+        schedule: _schedule,
         start_at,
         timeout,
     } = config;
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut cycle = 0u32;
-    let mut last_result;
 
     info!(
         routine = %routine.name,
@@ -68,82 +65,27 @@ where
         }
     }
 
-    loop {
-        cycle += 1;
+    let cycle = 1;
+    let _ = events_tx.send(RoutineEvent::CronCycleStarted { cycle });
 
-        let _ = events_tx.send(RoutineEvent::CronCycleStarted { cycle });
+    let result = crate::routines::executor::execute_routine_once(
+        provider, routine, state, events_tx, cancel,
+    )
+    .await?;
 
-        // Run the full routine once
-        let result = crate::routines::executor::execute_routine_once(
-            provider, routine, state, events_tx, cancel,
-        )
-        .await?;
+    let _ = events_tx.send(RoutineEvent::CronCycleCompleted {
+        cycle,
+        result: result.clone(),
+        total_input_tokens: state.metrics.total_input_tokens(),
+        total_output_tokens: state.metrics.total_output_tokens(),
+    });
 
-        let _ = events_tx.send(RoutineEvent::CronCycleCompleted {
-            cycle,
-            result: result.clone(),
-            total_input_tokens: state.metrics.total_input_tokens(),
-            total_output_tokens: state.metrics.total_output_tokens(),
-        });
+    info!(
+        cycle,
+        routine = %routine.name,
+        passed = result.passed,
+        "Cron routine firing completed"
+    );
 
-        last_result = result;
-
-        // Check for a structured verdict in the final step result.
-        // A pass_verdict tool call in any step produces {"verdict": "pass"|"fail"}
-        // in the step's data, which propagates to the routine result.
-        if let Some(verdict) = last_result.data.get("verdict").and_then(|v| v.as_str()) {
-            match verdict {
-                "pass" => {
-                    info!(cycle, routine = %routine.name, "Cron routine step completed (pass)");
-                    return Ok(last_result);
-                }
-                "fail" => {
-                    info!(cycle, routine = %routine.name, "Cron routine step completed (fail)");
-                    last_result.passed = false;
-                    return Ok(last_result);
-                }
-                _ => {}
-            }
-        } else {
-            debug!(cycle, routine = %routine.name, "No verdict, will retry");
-        }
-
-        // Check timeout
-        if tokio::time::Instant::now() >= deadline {
-            info!(cycle, routine = %routine.name, "Cron routine timed out");
-            return Ok(StepResult {
-                passed: false,
-                output: format!(
-                    "Cron routine '{}' timed out after {} cycles ({}s)",
-                    routine.name,
-                    cycle,
-                    timeout.as_secs()
-                ),
-                ..Default::default()
-            });
-        }
-
-        // Reset step results for next cycle
-        state.step_results.clear();
-
-        // Cancellable sleep between cycles — computed dynamically for cron
-        // expressions so the next fire aligns with the wall-clock schedule.
-        let delay = schedule.next_delay();
-        debug!(
-            cycle,
-            delay_secs = delay.as_secs(),
-            "Sleeping until next cron cycle"
-        );
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => {}
-            _ = cancel.cancelled() => {
-                info!(cycle, routine = %routine.name, "Cron routine cancelled");
-                return Ok(StepResult {
-                    passed: false,
-                    output: format!("Cron routine '{}' cancelled at cycle {}", routine.name, cycle),
-                    ..Default::default()
-                });
-            }
-        }
-    }
+    Ok(result)
 }

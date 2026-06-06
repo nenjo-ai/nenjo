@@ -342,7 +342,12 @@ impl ApiClient {
 
         match resp.status() {
             StatusCode::OK => {
-                let docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                let mut docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                for doc in &mut docs {
+                    if doc.pack_slug.trim().is_empty() {
+                        doc.pack_slug = pack.to_string();
+                    }
+                }
                 debug!(pack = %pack, count = docs.len(), "Listed knowledge documents");
                 Ok(docs)
             }

@@ -1,0 +1,6 @@
+schema: nenjo.package.v1
+name: "skills"
+version: "0.1.0"
+description: Raw SKILL.md package.
+modules:
+  - skills/review/

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::RoutineEvent;
 use crate::agents::runner::{AgentRunner, types::TurnOutput};
-use crate::input::{AgentRun, ChatInput};
+use crate::input::{AgentRun, FollowUpInput};
 use crate::provider::ProviderRuntime;
 
 /// Tool name constant used for injection and extraction.
@@ -271,14 +271,16 @@ fn verdict_retry_prompt(previous_text: &str) -> String {
     if previous_text.trim().is_empty() {
         format!(
             "You did not call `{}`. Call `{}` exactly once now as your final action. \
-             Do not continue working. Use `verdict` of `pass` or `fail` and include concise `reasoning`.",
+             Do not continue working. Use `verdict` of `pass` or `fail`, include concise `reasoning`, \
+             and include `output` with the final result text for this step.",
             PASS_VERDICT_TOOL_NAME, PASS_VERDICT_TOOL_NAME
         )
     } else {
         format!(
             "Your previous response did not call `{}`. Based on the work you already completed, \
              call `{}` exactly once now as your final action. Do not redo the task. Do not provide \
-             more free-form analysis unless it is needed inside `reasoning`.\n\nPrevious response:\n{}",
+             more free-form analysis unless it is needed inside `reasoning`. Include `output` with \
+             the final result text for this step.\n\nPrevious response:\n{}",
             PASS_VERDICT_TOOL_NAME, PASS_VERDICT_TOOL_NAME, previous_text
         )
     }
@@ -360,11 +362,14 @@ where
             "Agent omitted pass_verdict tool call, retrying with explicit instruction"
         );
 
-        pending_task = AgentRun::chat(ChatInput {
-            message: verdict_retry_prompt(&output.text),
-            history: chat_history(&output.messages),
-            project: project.clone(),
-        });
+        pending_task = AgentRun {
+            kind: crate::input::AgentRunKind::FollowUp(FollowUpInput {
+                message: verdict_retry_prompt(&output.text),
+                history: chat_history(&output.messages),
+                project: project.clone(),
+            }),
+            execution: Default::default(),
+        };
     }
 }
 

@@ -5,6 +5,7 @@ use super::agents::agent_tools;
 use super::context_blocks::context_block_tools;
 use super::councils::council_tools;
 use super::domains::domain_tools;
+use super::library::library_tools;
 use super::models::model_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
@@ -17,19 +18,8 @@ pub fn all_tools() -> Vec<ToolSpec> {
     tools.extend(ability_tools());
     tools.extend(domain_tools());
     tools.extend(knowledge_tools());
-    tools.extend(project_tools().into_iter().filter(|tool| {
-        matches!(
-            tool.name.as_str(),
-            "list_projects"
-                | "get_project"
-                | "create_project"
-                | "update_project"
-                | "delete_project"
-                | "create_knowledge_doc"
-                | "update_knowledge_doc"
-                | "delete_knowledge_doc"
-        )
-    }));
+    tools.extend(project_tools());
+    tools.extend(library_tools());
     tools.extend(routine_tools());
     tools.extend(model_tools());
     tools.extend(council_tools());
@@ -102,6 +92,7 @@ mod tests {
             "read_knowledge_doc_manifest",
             "search_knowledge_paths",
             "list_knowledge_tree",
+            "delete_knowledge_pack",
         ] {
             assert!(!names.contains(removed), "removed tool exposed: {removed}");
         }
@@ -142,6 +133,8 @@ mod tests {
             "update_ability",
             "create_domain",
             "update_domain",
+            "create_knowledge_pack",
+            "update_knowledge_pack",
         ] {
             let tool = tools
                 .iter()
@@ -192,6 +185,8 @@ mod tests {
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),
+                ("create_knowledge_pack".into(), ToolCategory::Write),
+                ("update_knowledge_pack".into(), ToolCategory::Write),
                 ("create_knowledge_doc".into(), ToolCategory::Write),
                 ("delete_knowledge_doc".into(), ToolCategory::Write),
                 ("update_knowledge_doc".into(), ToolCategory::Write),

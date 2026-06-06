@@ -13,6 +13,10 @@ use crate::{
 };
 
 pub(crate) fn parse_module_file(content: &str, source_path: &str) -> Result<Vec<ResourceManifest>> {
+    if is_skill_markdown_path(source_path) {
+        return parse_skill_markdown(content, source_path).map(|manifest| vec![manifest]);
+    }
+
     let value = parse_json_or_yaml(content)
         .with_context(|| format!("failed to parse module file {source_path}"))?;
     let schema = module_schema_from_value(&value, source_path)?;
@@ -32,9 +36,74 @@ pub(crate) fn parse_module_file(content: &str, source_path: &str) -> Result<Vec<
 }
 
 pub(crate) fn module_file_schema(content: &str, source_path: &str) -> Result<String> {
+    if is_skill_markdown_path(source_path) {
+        return Ok("nenjo.skill.v1".to_string());
+    }
+
     let value = parse_json_or_yaml(content)
         .with_context(|| format!("failed to parse module file {source_path}"))?;
     Ok(module_schema_from_value(&value, source_path)?.to_string())
+}
+
+fn is_skill_markdown_path(path: &str) -> bool {
+    path.rsplit('/').next() == Some("SKILL.md")
+}
+
+fn parse_skill_markdown(content: &str, source_path: &str) -> Result<ResourceManifest> {
+    let frontmatter = skill_frontmatter(content, source_path)?;
+    let frontmatter: serde_json::Value = serde_yaml::from_str(frontmatter)
+        .with_context(|| format!("failed to parse skill frontmatter {source_path}"))?;
+    let frontmatter = frontmatter.as_object().ok_or_else(|| {
+        PackageError::invalid_resource_manifest("skill frontmatter must be an object")
+    })?;
+    let name = frontmatter
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            PackageError::invalid_resource_manifest("skill frontmatter is missing name")
+        })?
+        .trim()
+        .to_string();
+    let description = frontmatter
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let root_path = source_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    Ok(ResourceManifest {
+        schema: "nenjo.skill.v1".to_string(),
+        slug: None,
+        root_uri: None,
+        selector: None,
+        imports: BTreeMap::new(),
+        manifest: serde_json::json!({
+            "name": name,
+            "description": description,
+            "entry_path": "SKILL.md",
+            "root_path": root_path,
+        }),
+    })
+}
+
+fn skill_frontmatter<'a>(content: &'a str, source_path: &str) -> Result<&'a str> {
+    let Some(rest) = content.strip_prefix("---") else {
+        bail!("{source_path} is missing required YAML frontmatter");
+    };
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+        .unwrap_or(rest);
+    let Some((frontmatter, _body)) = rest.split_once("\n---") else {
+        bail!("{source_path} is missing closing YAML frontmatter marker");
+    };
+    Ok(frontmatter)
 }
 
 fn module_schema_from_value<'a>(

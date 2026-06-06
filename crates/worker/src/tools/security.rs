@@ -761,6 +761,10 @@ impl SecurityPolicy {
             .canonicalize()
             .unwrap_or_else(|_| self.workspace_dir.clone());
         resolved.starts_with(workspace_root)
+            || self.allowed_runtime_roots.iter().any(|root| {
+                let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+                resolved.starts_with(root)
+            })
     }
 
     /// Check if autonomy level permits any action at all

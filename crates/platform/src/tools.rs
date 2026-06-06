@@ -7,15 +7,16 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use nenjo::manifest::store::ManifestReader;
 use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
+use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    ManifestAccessPolicy, ManifestKind, ManifestMcpBackend, ManifestMcpContract,
-    PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
+    ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract, PlatformManifestClient,
+    ScopeResource, SensitiveContentKind, SensitivePayloadEncoder,
     client::{CreateExecutionRequest, ProjectExecutionListQuery, ProjectTaskListQuery},
-    rest::projects::project_rest_tools,
+    rest::{notifications::notification_tools, projects::project_rest_tools},
 };
 
 const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent", "get_agent_prompt"];
@@ -46,10 +47,17 @@ const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_execution_runs",
     "get_project_execution_run",
 ];
-const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] = &[
-    "create_project",
-    "update_project",
-    "delete_project",
+const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
+    &["create_project", "update_project", "delete_project"];
+const LIBRARY_MANIFEST_READ_TOOLS: &[&str] = &[
+    "list_knowledge_packs",
+    "read_knowledge_doc",
+    "search_knowledge",
+    "list_knowledge_neighbors",
+];
+const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
+    "create_knowledge_pack",
+    "update_knowledge_pack",
     "create_knowledge_doc",
     "update_knowledge_doc",
     "delete_knowledge_doc",
@@ -85,6 +93,19 @@ const CONTEXT_BLOCK_WRITE_TOOLS: &[&str] = &[
     "update_context_block_content",
     "delete_context_block",
 ];
+const NOTIFICATION_READ_TOOLS: &[&str] = &["list_notification_sessions", "list_notifications"];
+const NOTIFICATION_WRITE_TOOLS: &[&str] = &["send_notification"];
+const NOTIFICATION_OBJECT_TYPE: &str = "push.notification";
+
+/// Platform-owned emitter used by notification tools to publish encrypted push events.
+pub trait PlatformNotificationEmitter: Send + Sync {
+    /// Emit an org-scoped encrypted push notification for an agent slug.
+    fn send_push_notification(
+        &self,
+        agent: &str,
+        encrypted_payload: EncryptedPayload,
+    ) -> Result<()>;
+}
 
 const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
     (ScopeResource::Agents, AGENT_READ_TOOLS, AGENT_WRITE_TOOLS),
@@ -97,6 +118,16 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         ScopeResource::Domains,
         DOMAIN_READ_TOOLS,
         DOMAIN_WRITE_TOOLS,
+    ),
+    (
+        ScopeResource::Projects,
+        PROJECT_MANIFEST_READ_TOOLS,
+        PROJECT_MANIFEST_WRITE_TOOLS,
+    ),
+    (
+        ScopeResource::Library,
+        LIBRARY_MANIFEST_READ_TOOLS,
+        LIBRARY_MANIFEST_WRITE_TOOLS,
     ),
     (
         ScopeResource::Routines,
@@ -134,29 +165,41 @@ pub fn add_manifest_tools(
 
 pub fn add_project_rest_tools<S, E>(
     tools: &mut Vec<Arc<dyn Tool>>,
-    manifest_backend: Option<Arc<dyn ManifestMcpBackend>>,
     project_backend: Option<PlatformProjectToolsBackend<S, E>>,
     policy: &ManifestAccessPolicy,
 ) where
     S: ManifestReader + 'static,
     E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
 {
-    let specs = manifest_tool_specs();
-    if policy.can_read_resource(ScopeResource::Projects) {
-        if let Some(backend) = manifest_backend.as_ref() {
-            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_READ_TOOLS);
-        }
-        if let Some(backend) = project_backend.as_ref() {
-            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
-        }
+    if policy.can_read_resource(ScopeResource::Projects)
+        && let Some(backend) = project_backend.as_ref()
+    {
+        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
     }
-    if policy.can_write_resource(ScopeResource::Projects) {
-        if let Some(backend) = manifest_backend.as_ref() {
-            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_WRITE_TOOLS);
-        }
-        if let Some(backend) = project_backend.as_ref() {
-            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
-        }
+    if policy.can_write_resource(ScopeResource::Projects)
+        && let Some(backend) = project_backend.as_ref()
+    {
+        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
+    }
+}
+
+pub fn add_notification_tools<E>(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    notification_backend: Option<PlatformNotificationToolsBackend<E>>,
+    policy: &ManifestAccessPolicy,
+) where
+    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
+{
+    if policy.can_read_resource(ScopeResource::Notify)
+        && let Some(backend) = notification_backend.as_ref()
+    {
+        add_named_notification_tools(tools, backend.clone(), NOTIFICATION_READ_TOOLS);
+    }
+    if policy.can_write_resource(ScopeResource::Notify)
+        && let Some(backend) = notification_backend.as_ref()
+        && backend.notification_sink.is_some()
+    {
+        add_named_notification_tools(tools, backend.clone(), NOTIFICATION_WRITE_TOOLS);
     }
 }
 
@@ -198,6 +241,23 @@ fn add_named_project_rest_tools<S, E>(
     }
 }
 
+fn add_named_notification_tools<E>(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    backend: PlatformNotificationToolsBackend<E>,
+    tool_names: &[&str],
+) where
+    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
+{
+    for tool_name in tool_names {
+        if tools.iter().any(|existing| existing.name() == *tool_name) {
+            continue;
+        }
+        if let Some(tool) = NotificationTool::from_name(tool_name, backend.clone()) {
+            tools.push(Arc::new(tool));
+        }
+    }
+}
+
 fn manifest_tool_specs() -> HashMap<String, nenjo::ToolSpec> {
     ManifestMcpContract::tools()
         .into_iter()
@@ -215,6 +275,29 @@ pub struct PlatformProjectToolsBackend<S, E> {
     pub manifest_store: Arc<S>,
     pub payload_encoder: E,
     pub cached_org_id: Option<Uuid>,
+}
+
+pub struct PlatformNotificationToolsBackend<E> {
+    pub client: Arc<PlatformManifestClient>,
+    pub payload_encoder: E,
+    pub cached_org_id: Option<Uuid>,
+    pub agent: Slug,
+    pub notification_sink: Option<Arc<dyn PlatformNotificationEmitter>>,
+}
+
+impl<E> Clone for PlatformNotificationToolsBackend<E>
+where
+    E: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            payload_encoder: self.payload_encoder.clone(),
+            cached_org_id: self.cached_org_id,
+            agent: self.agent.clone(),
+            notification_sink: self.notification_sink.clone(),
+        }
+    }
 }
 
 impl<S, E> Clone for PlatformProjectToolsBackend<S, E>
@@ -269,9 +352,7 @@ where
             .encode_payload(
                 org_id,
                 task_id,
-                ManifestKind::Task
-                    .encrypted_object_type()
-                    .expect("task content object type"),
+                SensitiveContentKind::TaskContent.encrypted_object_type(),
                 &serde_json::to_value(payload).context("failed to encode task content payload")?,
             )
             .await?
@@ -421,6 +502,49 @@ where
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct NotificationContentPayload {
+    body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+}
+
+impl<E> PlatformNotificationToolsBackend<E>
+where
+    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
+{
+    async fn org_id(&self) -> Result<Uuid> {
+        if let Some(org_id) = self.cached_org_id {
+            return Ok(org_id);
+        }
+
+        self.client
+            .current_org_id()
+            .await
+            .context("failed to derive org_id from authenticated API key")
+    }
+
+    async fn encode_notification_payload(
+        &self,
+        payload: &NotificationContentPayload,
+    ) -> Result<EncryptedPayload> {
+        let org_id = self.org_id().await?;
+        let object_id = Uuid::new_v4();
+        let encrypted_payload = self
+            .payload_encoder
+            .encode_payload(
+                org_id,
+                object_id,
+                NOTIFICATION_OBJECT_TYPE,
+                &serde_json::to_value(payload)
+                    .context("failed to encode notification content payload")?,
+            )
+            .await?
+            .context("notification payload encoder did not produce encrypted payload")?;
+        serde_json::from_value(encrypted_payload).context("invalid encrypted notification payload")
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ProjectRestToolKind {
     ListProjectTasks,
@@ -433,6 +557,32 @@ enum ProjectRestToolKind {
     StartProjectExecution,
     PauseProjectExecution,
     ResumeProjectExecution,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NotificationToolKind {
+    ListNotificationSessions,
+    ListNotifications,
+    SendNotification,
+}
+
+impl NotificationToolKind {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "list_notification_sessions" => Some(Self::ListNotificationSessions),
+            "list_notifications" => Some(Self::ListNotifications),
+            "send_notification" => Some(Self::SendNotification),
+            _ => None,
+        }
+    }
+
+    fn tool_name(&self) -> &'static str {
+        match self {
+            Self::ListNotificationSessions => "list_notification_sessions",
+            Self::ListNotifications => "list_notifications",
+            Self::SendNotification => "send_notification",
+        }
+    }
 }
 
 impl ProjectRestToolKind {
@@ -472,6 +622,26 @@ struct ProjectRestTool<S, E> {
     kind: ProjectRestToolKind,
     backend: PlatformProjectToolsBackend<S, E>,
     spec: nenjo::ToolSpec,
+}
+
+struct NotificationTool<E> {
+    kind: NotificationToolKind,
+    backend: PlatformNotificationToolsBackend<E>,
+    spec: nenjo::ToolSpec,
+}
+
+impl<E> NotificationTool<E>
+where
+    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
+{
+    fn from_name(name: &str, backend: PlatformNotificationToolsBackend<E>) -> Option<Self> {
+        let kind = NotificationToolKind::from_name(name)?;
+        Some(Self {
+            kind,
+            backend,
+            spec: notification_tool_spec(kind)?,
+        })
+    }
 }
 
 impl<S, E> ProjectRestTool<S, E>
@@ -657,6 +827,105 @@ where
     }
 }
 
+#[async_trait]
+impl<E> Tool for NotificationTool<E>
+where
+    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        &self.spec.name
+    }
+
+    fn description(&self) -> &str {
+        &self.spec.description
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.spec.parameters.clone()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let output = match self.kind {
+            NotificationToolKind::ListNotificationSessions => {
+                let args: ListNotificationSessionsArgs = parse_project_tool_args(
+                    args,
+                    "list_notification_sessions",
+                    "Expected optional {\"limit\": 50, \"offset\": 0}.",
+                )?;
+                self.backend
+                    .client
+                    .list_notification_sessions(&crate::client::NotificationSessionListQuery {
+                        limit: args.limit,
+                        offset: args.offset,
+                    })
+                    .await?
+            }
+            NotificationToolKind::ListNotifications => {
+                let args: ListNotificationsArgs = parse_project_tool_args(
+                    args,
+                    "list_notifications",
+                    "Expected {\"session_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                )?;
+                self.backend
+                    .client
+                    .list_notification_messages(
+                        args.session_id,
+                        &crate::client::NotificationMessageListQuery {
+                            limit: args.limit,
+                            before: args.before,
+                        },
+                    )
+                    .await?
+            }
+            NotificationToolKind::SendNotification => {
+                let args: SendNotificationArgs = parse_project_tool_args(
+                    args,
+                    "send_notification",
+                    "Expected {\"body\":\"...\"}.",
+                )?;
+                if args.body.trim().is_empty() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("body is required".into()),
+                    });
+                }
+                let encrypted_payload = self
+                    .backend
+                    .encode_notification_payload(&NotificationContentPayload {
+                        body: args.body.trim().to_string(),
+                        tag: args.tag.filter(|tag| !tag.trim().is_empty()),
+                    })
+                    .await?;
+                let sink = self
+                    .backend
+                    .notification_sink
+                    .as_ref()
+                    .context("notification sink is not available")?;
+                sink.send_push_notification(self.backend.agent.as_str(), encrypted_payload)?;
+                json!({
+                    "sent": true,
+                    "agent": self.backend.agent.as_str(),
+                })
+            }
+        };
+
+        Ok(ToolResult {
+            success: true,
+            output: serde_json::to_string_pretty(&output)?,
+            error: None,
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        self.spec.category
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Platform
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListProjectTasksArgs {
@@ -795,8 +1064,36 @@ struct CommandProjectExecutionArgs {
     execution_run_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListNotificationSessionsArgs {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListNotificationsArgs {
+    session_id: Uuid,
+    limit: Option<i64>,
+    before: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendNotificationArgs {
+    body: String,
+    tag: Option<String>,
+}
+
 fn project_rest_tool_spec(kind: ProjectRestToolKind) -> Option<nenjo::ToolSpec> {
     project_rest_tools()
+        .into_iter()
+        .find(|tool| tool.name == kind.tool_name())
+}
+
+fn notification_tool_spec(kind: NotificationToolKind) -> Option<nenjo::ToolSpec> {
+    notification_tools()
         .into_iter()
         .find(|tool| tool.name == kind.tool_name())
 }

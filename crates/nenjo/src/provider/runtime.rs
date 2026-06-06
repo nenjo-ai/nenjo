@@ -4,8 +4,10 @@ use super::{ProviderError, RoutineRunner, ToolFactory, builder};
 use crate::Slug;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
+use crate::hooks::{ResolvedHook, resolve_command_hooks, resolve_skill_hooks};
 use crate::manifest::{
-    AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
+    AbilityManifest, AgentManifest, CommandManifest, DomainManifest, Manifest, ModelManifest,
+    ProjectManifest, SkillManifest,
 };
 use crate::memory::Memory;
 use crate::tools::Tool;
@@ -108,6 +110,18 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
 
     /// Find a project manifest by slug.
     fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest>;
+
+    /// Resolve hooks that should become active for a command invocation.
+    fn resolve_hooks_for_command(&self, command: &CommandManifest) -> Vec<ResolvedHook> {
+        let manifest = self.manifest_snapshot();
+        resolve_command_hooks(&manifest.hooks, command)
+    }
+
+    /// Resolve hooks that should become active for a skill activation.
+    fn resolve_hooks_for_skill(&self, skill: &SkillManifest) -> Vec<ResolvedHook> {
+        let manifest = self.manifest_snapshot();
+        resolve_skill_hooks(&manifest.hooks, skill)
+    }
 
     /// Create provider-level knowledge tools.
     fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>>;

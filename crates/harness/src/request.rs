@@ -1,8 +1,10 @@
 //! Builder-style request types for harness execution APIs.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use nenjo::hooks::ActiveHookScope;
 use nenjo::{IntoSlug, Slug};
 use uuid::Uuid;
 
@@ -34,6 +36,8 @@ pub struct ChatRequest {
     pub project: Option<Slug>,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<ChatDomainActivation>,
+    pub hook_scopes: Vec<ActiveHookScope>,
+    pub hook_transcript_dir: Option<PathBuf>,
 }
 
 impl ChatRequest {
@@ -46,6 +50,8 @@ impl ChatRequest {
             project: None,
             domain_session_id: None,
             domain_activation: None,
+            hook_scopes: Vec::new(),
+            hook_transcript_dir: None,
         }
     }
 
@@ -74,6 +80,18 @@ impl ChatRequest {
         domain_command: impl Into<String>,
     ) -> Self {
         self.domain_activation = Some(ChatDomainActivation::new(domain_session_id, domain_command));
+        self
+    }
+
+    /// Attach hooks that are active only for this chat turn.
+    pub fn with_hook_scope(mut self, scope: ActiveHookScope) -> Self {
+        self.hook_scopes.push(scope);
+        self
+    }
+
+    /// Store Claude-compatible hook transcript files outside the working tree.
+    pub fn with_hook_transcript_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.hook_transcript_dir = Some(dir.into());
         self
     }
 }
@@ -169,6 +187,7 @@ pub struct HeartbeatRequest {
     pub agent: Slug,
     pub interval: Duration,
     pub start_at: Option<DateTime<Utc>>,
+    pub instructions: Option<String>,
     pub previous_output: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -182,6 +201,7 @@ impl HeartbeatRequest {
             agent: agent.into_slug(),
             interval,
             start_at: None,
+            instructions: None,
             previous_output: None,
             last_run_at: None,
             next_run_at: None,
@@ -192,6 +212,12 @@ impl HeartbeatRequest {
     /// Set the heartbeat start timestamp.
     pub fn with_start_at(mut self, start_at: DateTime<Utc>) -> Self {
         self.start_at = Some(start_at);
+        self
+    }
+
+    /// Attach user-configured heartbeat instructions.
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 

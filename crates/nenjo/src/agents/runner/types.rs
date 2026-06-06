@@ -103,6 +103,33 @@ pub enum TurnEvent {
         tool_args: String,
         result: ToolResult,
     },
+    /// A lifecycle hook started.
+    HookStarted {
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+    },
+    /// A lifecycle hook became active for this turn.
+    HookActivated {
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+    },
+    /// A lifecycle hook completed.
+    HookCompleted {
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+        success: bool,
+        blocked: bool,
+        exit_code: Option<i32>,
+        output: String,
+        error: Option<String>,
+        reason: Option<String>,
+    },
     /// An ability sub-execution finished.
     AbilityCompleted {
         ability_tool_name: String,

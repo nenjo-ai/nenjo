@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, EncryptedPayload, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, Response,
+    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
+use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -155,6 +157,21 @@ impl SecureEnvelopeCodec {
         )?)
     }
 
+    fn validate_sensitive_payload_kind(
+        payload: &EncryptedPayload,
+        kind: SensitiveContentKind,
+    ) -> Result<()> {
+        let expected_object_type = kind.encrypted_object_type();
+        if payload.object_type != expected_object_type {
+            bail!(
+                "encrypted payload object_type '{}' did not match expected '{}'",
+                payload.object_type,
+                expected_object_type
+            );
+        }
+        Ok(())
+    }
+
     async fn encrypt_user_payload(
         &self,
         user_id: Uuid,
@@ -243,6 +260,67 @@ impl SecureEnvelopeCodec {
                 payload: None,
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "ability_result_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::HookActivated {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookActivated {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_activation_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::HookStarted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookStarted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_start_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::HookCompleted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookCompleted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_result_payload", payload)
                     .await?,
             })),
             StreamEvent::DelegationStarted {
@@ -355,6 +433,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 project,
                 routine,
                 agent,
+                target_type,
+                target,
                 session_id,
                 domain_session_id,
                 domain_activation,
@@ -368,6 +448,44 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         project,
                         routine,
                         agent,
+                        target_type,
+                        target,
+                        session_id,
+                        domain_session_id,
+                        domain_activation,
+                    },
+                ))),
+                Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
+                    code: "encrypted_chat_decode_failed",
+                    message: error.to_string(),
+                    session_id: Some(session_id),
+                    project: project.clone(),
+                    agent: agent.clone(),
+                })),
+            },
+            Command::ChatCommand {
+                id,
+                command,
+                content: _,
+                encrypted_content: Some(payload),
+                project,
+                agent,
+                target_type,
+                target,
+                session_id,
+                domain_session_id,
+                domain_activation,
+            } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
+                Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
+                    Command::ChatCommand {
+                        id,
+                        command,
+                        content,
+                        encrypted_content: None,
+                        project,
+                        agent,
+                        target_type,
+                        target,
                         session_id,
                         domain_session_id,
                         domain_activation,
@@ -398,6 +516,10 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     agent,
                     payload: match payload {
                         Some(mut payload) => {
+                            Self::validate_sensitive_payload_kind(
+                                &encrypted_payload,
+                                SensitiveContentKind::TaskContent,
+                            )?;
                             let encrypted = self
                                 .decode_json_payload::<TaskEncryptedContent>(
                                     actor_user_id,
@@ -408,17 +530,121 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                             payload.acceptance_criteria = encrypted.acceptance_criteria;
                             Some(payload)
                         }
-                        None => Some(
-                            self.decode_json_payload::<TaskExecuteContent>(
-                                actor_user_id,
+                        None => {
+                            Self::validate_sensitive_payload_kind(
                                 &encrypted_payload,
+                                SensitiveContentKind::TaskContent,
+                            )?;
+                            Some(
+                                self.decode_json_payload::<TaskExecuteContent>(
+                                    actor_user_id,
+                                    &encrypted_payload,
+                                )
+                                .await?,
                             )
-                            .await?,
-                        ),
+                        }
                     },
                     encrypted_payload: None,
                 },
             ))),
+            Command::CronEnable {
+                routine,
+                project,
+                schedule,
+                timezone,
+                task: _,
+                encrypted_task: Some(encrypted_task),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_task,
+                    SensitiveContentKind::RoutineCronTask,
+                )?;
+                let task = self
+                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::CronEnable {
+                        routine,
+                        project,
+                        schedule,
+                        timezone,
+                        task: Some(task),
+                        encrypted_task: None,
+                    },
+                )))
+            }
+            Command::CronTrigger {
+                routine,
+                project,
+                task: _,
+                encrypted_task: Some(encrypted_task),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_task,
+                    SensitiveContentKind::RoutineCronTask,
+                )?;
+                let task = self
+                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::CronTrigger {
+                        routine,
+                        project,
+                        task: Some(task),
+                        encrypted_task: None,
+                    },
+                )))
+            }
+            Command::AgentHeartbeatEnable {
+                agent,
+                interval,
+                timezone,
+                instructions: _,
+                encrypted_instructions: Some(encrypted_instructions),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_instructions,
+                    SensitiveContentKind::HeartbeatInstructions,
+                )?;
+                let instructions = self
+                    .decode_json_payload::<HeartbeatInstructionsContent>(
+                        actor_user_id,
+                        &encrypted_instructions,
+                    )
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::AgentHeartbeatEnable {
+                        agent,
+                        interval,
+                        timezone,
+                        instructions: Some(instructions),
+                        encrypted_instructions: None,
+                    },
+                )))
+            }
+            Command::AgentHeartbeatTrigger {
+                agent,
+                instructions: _,
+                encrypted_instructions: Some(encrypted_instructions),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_instructions,
+                    SensitiveContentKind::HeartbeatInstructions,
+                )?;
+                let instructions = self
+                    .decode_json_payload::<HeartbeatInstructionsContent>(
+                        actor_user_id,
+                        &encrypted_instructions,
+                    )
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::AgentHeartbeatTrigger {
+                        agent,
+                        instructions: Some(instructions),
+                        encrypted_instructions: None,
+                    },
+                )))
+            }
             Command::ManifestChanged {
                 resource_type,
                 resource,
@@ -458,6 +684,20 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         }));
                     }
                 };
+                info!(
+                    %resource_type,
+                    ?action,
+                    object_type,
+                    "Decoded manifest payload"
+                );
+                debug!(
+                    %resource_type,
+                    ?action,
+                    project = ?project,
+                    object_type,
+                    %object_id,
+                    "Decoded encrypted manifest payload details"
+                );
 
                 let payload = serde_json::json!({
                     "__nenjo_decrypted_manifest_payload": true,
@@ -702,6 +942,8 @@ mod tests {
                     project: None,
                     routine: None,
                     agent: None,
+                    target_type: None,
+                    target: None,
                     domain_session_id: None,
                     domain_activation: None,
                     session_id: Uuid::new_v4(),
@@ -735,6 +977,8 @@ mod tests {
                     project: None,
                     routine: None,
                     agent: None,
+                    target_type: None,
+                    target: None,
                     domain_session_id: None,
                     domain_activation: None,
                     session_id: Uuid::new_v4(),

@@ -20,6 +20,8 @@ pub enum ScopeResource {
     Domains,
     /// Project manifests and project-scoped data.
     Projects,
+    /// Org-level library knowledge documents.
+    Library,
     /// Routine manifests.
     Routines,
     /// Model manifests.
@@ -28,6 +30,8 @@ pub enum ScopeResource {
     Councils,
     /// Context block manifests.
     ContextBlocks,
+    /// User notification sessions and org push notifications.
+    Notify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -72,6 +76,8 @@ impl PlatformScope {
             "domains:write" => Self::write(ScopeResource::Domains),
             "projects:read" => Self::read(ScopeResource::Projects),
             "projects:write" => Self::write(ScopeResource::Projects),
+            "library:read" => Self::read(ScopeResource::Library),
+            "library:write" => Self::write(ScopeResource::Library),
             "routines:read" => Self::read(ScopeResource::Routines),
             "routines:write" => Self::write(ScopeResource::Routines),
             "models:read" => Self::read(ScopeResource::Models),
@@ -80,6 +86,8 @@ impl PlatformScope {
             "councils:write" => Self::write(ScopeResource::Councils),
             "context_blocks:read" => Self::read(ScopeResource::ContextBlocks),
             "context_blocks:write" => Self::write(ScopeResource::ContextBlocks),
+            "notify:read" => Self::read(ScopeResource::Notify),
+            "notify:write" => Self::write(ScopeResource::Notify),
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -129,10 +137,12 @@ impl fmt::Display for PlatformScope {
                     ScopeResource::Abilities => "abilities",
                     ScopeResource::Domains => "domains",
                     ScopeResource::Projects => "projects",
+                    ScopeResource::Library => "library",
                     ScopeResource::Routines => "routines",
                     ScopeResource::Models => "models",
                     ScopeResource::Councils => "councils",
                     ScopeResource::ContextBlocks => "context_blocks",
+                    ScopeResource::Notify => "notify",
                 },
                 match action {
                     ScopeAction::Read => "read",

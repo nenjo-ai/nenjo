@@ -1,8 +1,12 @@
 //! Platform-free chat execution orchestration.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use nenjo::hooks::{ActiveHookScope, HookRuntime};
 use nenjo::memory::MemoryScope;
+use nenjo::provider::ToolFactory as _;
 use nenjo_models::ChatMessage;
 use nenjo_sessions::{
     ChatSessionUpsert, DomainSessionUpsert, DomainState, ExecutionPhase, SessionKind,
@@ -82,6 +86,8 @@ struct PreparedChatExecution {
     project_slug: String,
     effective_content: String,
     effective_domain_session_id: Option<Uuid>,
+    hook_scopes: Vec<ActiveHookScope>,
+    hook_transcript_dir: Option<std::path::PathBuf>,
     history: Vec<ChatMessage>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
@@ -104,6 +110,8 @@ where
         project,
         domain_session_id,
         domain_activation,
+        hook_scopes,
+        hook_transcript_dir,
     } = request;
 
     let sessions = harness.sessions();
@@ -278,6 +286,8 @@ where
                 project_slug: slug,
                 effective_content,
                 effective_domain_session_id,
+                hook_scopes,
+                hook_transcript_dir,
                 transcript_events,
                 events_tx,
                 worker_id,
@@ -298,6 +308,8 @@ where
             project_slug: slug,
             effective_content,
             effective_domain_session_id,
+            hook_scopes,
+            hook_transcript_dir,
             transcript_events,
             events_tx,
             worker_id,
@@ -316,6 +328,8 @@ struct PreparedChatInput {
     project_slug: String,
     effective_content: String,
     effective_domain_session_id: Option<Uuid>,
+    hook_scopes: Vec<ActiveHookScope>,
+    hook_transcript_dir: Option<std::path::PathBuf>,
     transcript_events: Vec<nenjo_sessions::SessionTranscriptEvent>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
@@ -339,6 +353,8 @@ where
         project_slug,
         effective_content,
         effective_domain_session_id,
+        hook_scopes,
+        hook_transcript_dir,
         transcript_events,
         events_tx,
         worker_id,
@@ -379,6 +395,8 @@ where
         project_slug,
         effective_content,
         effective_domain_session_id,
+        hook_scopes,
+        hook_transcript_dir,
         history,
         events_tx,
         worker_id,
@@ -395,6 +413,25 @@ where
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
     let provider = harness.provider();
+    let project_work_dir = (!prepared.project_slug.is_empty()).then(|| {
+        provider
+            .tool_factory()
+            .workspace_dir()
+            .join(&prepared.project_slug)
+    });
+    let hook_workspace_dir = project_work_dir
+        .clone()
+        .unwrap_or_else(|| provider.tool_factory().workspace_dir());
+    let hook_transcript_dir = prepared
+        .hook_transcript_dir
+        .clone()
+        .unwrap_or_else(|| hook_workspace_dir.join(".nenjo").join("hooks"));
+    let hook_runtime = Some(Arc::new(HookRuntime::new(
+        prepared.session_id,
+        hook_workspace_dir,
+        hook_transcript_dir,
+        prepared.hook_scopes.clone(),
+    )));
 
     let runner = if let Some(dsid) = prepared.effective_domain_session_id {
         if !harness.domains().contains_key(&dsid) {
@@ -420,6 +457,7 @@ where
                     .await?;
                 let mut instance = rebuilt.runner.instance().clone();
                 instance.set_active_domain_session_id(dsid);
+                instance.set_hook_runtime(hook_runtime.clone());
                 let runner = nenjo::AgentRunner::from_instance(
                     instance,
                     rebuilt.runner.memory().cloned(),
@@ -483,7 +521,10 @@ where
                 warn!(project = %project_slug, agent = %prepared.agent, "Project not found in manifest for chat session");
             }
         }
-        match harness
+        if let Some(work_dir) = project_work_dir.clone() {
+            builder = builder.with_work_dir(work_dir);
+        }
+        let builder = match harness
             .sessions()
             .memory_namespace(prepared.session_id)
             .await?
@@ -491,10 +532,13 @@ where
         {
             Some(scope) => builder.with_memory_scope(scope),
             None => builder,
-        }
-        .build()
-        .await
-        .map_err(anyhow::Error::from)?
+        };
+        let builder = if let Some(hook_runtime) = hook_runtime {
+            builder.with_hook_runtime(hook_runtime)
+        } else {
+            builder
+        };
+        builder.build().await.map_err(anyhow::Error::from)?
     };
 
     Ok(runner)

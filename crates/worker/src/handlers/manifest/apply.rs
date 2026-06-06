@@ -37,6 +37,41 @@ enum ManifestApplySource {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestPayloadState {
+    None,
+    PlainInline,
+    EncryptedTransport,
+    DecryptedInline,
+}
+
+impl ManifestPayloadState {
+    fn from_parts(
+        payload: Option<&serde_json::Value>,
+        encrypted_payload: Option<&EncryptedPayload>,
+    ) -> Self {
+        if encrypted_payload.is_some() {
+            return Self::EncryptedTransport;
+        }
+        match payload {
+            Some(payload) if parse_decrypted_manifest_payload(payload).is_some() => {
+                Self::DecryptedInline
+            }
+            Some(_) => Self::PlainInline,
+            None => Self::None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PlainInline => "plain_inline",
+            Self::EncryptedTransport => "encrypted_transport",
+            Self::DecryptedInline => "decrypted_inline",
+        }
+    }
+}
+
 pub(super) async fn apply_manifest_change<StoreRt, McpRt>(
     client: &ApiClient,
     store: &StoreRt,
@@ -58,16 +93,27 @@ where
     } = change;
 
     let resource_id = resolve_resource_id(current, resource_type, &resource, payload.as_ref());
+    let payload_state =
+        ManifestPayloadState::from_parts(payload.as_ref(), encrypted_payload.as_ref());
 
     info!(
+        %resource_type,
+        %resource,
+        ?action,
+        payload_state = payload_state.as_str(),
+        "Manifest resource changed"
+    );
+    debug!(
         %resource_type,
         %resource,
         project = ?project,
         resource_id = ?resource_id,
         ?action,
         inline = payload.is_some(),
-        encrypted = encrypted_payload.is_some(),
-        "Manifest resource changed"
+        encrypted_transport = encrypted_payload.is_some(),
+        decrypted_inline = matches!(payload_state, ManifestPayloadState::DecryptedInline),
+        payload_state = payload_state.as_str(),
+        "Manifest resource change details"
     );
 
     let mut manifest = current.clone();

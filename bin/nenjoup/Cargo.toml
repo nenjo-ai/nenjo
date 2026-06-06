@@ -1,0 +1,18 @@
+[package]
+name = "nenjoup-cli"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Updater CLI for the Nenjo binary bundle"
+
+[[bin]]
+name = "nenjoup"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+eyre = { workspace = true }
+nenjo-updater = { workspace = true }
+

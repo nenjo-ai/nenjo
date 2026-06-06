@@ -10,7 +10,8 @@ use crate::manifest_mcp::{
     ContextBlockDocument, ContextBlockUpdateDocument, CouncilDocument, CouncilMemberUpdateDocument,
     CouncilUpdateDocument, DomainCreateDocument, DomainDocument, DomainPromptDocument,
     DomainPromptMutationResult, DomainUpdateDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocSummary, KnowledgeDocUpdateDocument, ModelCreateDocument, ModelDocument,
+    KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
+    KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
     ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
     ResourceRef, RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
 };
@@ -155,10 +156,24 @@ pub struct PlatformKnowledgePackMetadata {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_knowledge_pack_status")]
+    pub status: String,
+    #[serde(default = "default_knowledge_pack_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
     #[serde(default)]
     pub selector: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+}
+
+fn default_knowledge_pack_status() -> String {
+    "active".to_string()
+}
+
+fn default_knowledge_pack_source_type() -> String {
+    "uploaded".to_string()
 }
 
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
@@ -181,7 +196,6 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
                 name: step.name,
                 step_type: match step.step_type.as_str() {
                     "council" => RoutineStepType::Council,
-                    "cron" => RoutineStepType::Cron,
                     "gate" => RoutineStepType::Gate,
                     "terminal" => RoutineStepType::Terminal,
                     "terminal_fail" => RoutineStepType::TerminalFail,
@@ -505,6 +519,28 @@ pub struct ProjectExecutionListQuery {
     /// Optional result offset for pagination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+/// Query parameters for listing notification sessions.
+pub struct NotificationSessionListQuery {
+    /// Optional maximum number of sessions to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Optional result offset for pagination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+/// Query parameters for listing notification messages in a session.
+pub struct NotificationMessageListQuery {
+    /// Optional maximum number of messages to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Optional pagination cursor timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1496,6 +1532,76 @@ impl PlatformManifestClient {
         }
     }
 
+    /// List notification sessions visible to the authenticated account.
+    pub async fn list_notification_sessions(
+        &self,
+        query: &NotificationSessionListQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!("{}/api/v1/notifications/sessions", self.base_url))
+            .context("failed to build notification session list URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+            if let Some(offset) = query.offset {
+                pairs.append_pair("offset", &offset.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("failed to list notification sessions")?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<serde_json::Value>()
+                .await
+                .context("failed to decode notification sessions"),
+            status => bail!("notification session list failed with status {status}"),
+        }
+    }
+
+    /// List notification messages in one notification session.
+    pub async fn list_notification_messages(
+        &self,
+        session_id: Uuid,
+        query: &NotificationMessageListQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!(
+            "{}/api/v1/notifications/{session_id}/messages",
+            self.base_url
+        ))
+        .context("failed to build notification message list URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+            if let Some(before) = query.before.as_ref() {
+                pairs.append_pair("before", before);
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to list notification messages for {session_id}"))?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<serde_json::Value>()
+                .await
+                .context("failed to decode notification messages"),
+            status => bail!("notification message list failed with status {status}"),
+        }
+    }
+
     /// Fetch one project task by ID.
     pub async fn get_project_task(&self, task_id: Uuid) -> Result<serde_json::Value> {
         let response = self
@@ -2310,6 +2416,55 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a user-managed Library knowledge pack.
+    pub async fn create_knowledge_pack(
+        &self,
+        pack: &KnowledgePackCreateDocument,
+    ) -> Result<KnowledgePackDocument> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/knowledge", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(pack)
+            .send()
+            .await
+            .with_context(|| format!("failed to create knowledge pack {}", pack.name))?;
+
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => response
+                .json()
+                .await
+                .map(knowledge_pack_document)
+                .context("failed to decode created knowledge pack"),
+            status => bail!("knowledge pack create failed with status {status}"),
+        }
+    }
+
+    /// Update a user-managed Library knowledge pack.
+    pub async fn update_knowledge_pack(
+        &self,
+        pack: &Slug,
+        update: &KnowledgePackUpdateDocument,
+    ) -> Result<KnowledgePackDocument> {
+        let response = self
+            .http
+            .patch(format!("{}/api/v1/knowledge/{pack}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(update)
+            .send()
+            .await
+            .with_context(|| format!("failed to update knowledge pack {pack}"))?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .map(knowledge_pack_document)
+                .context("failed to decode updated knowledge pack"),
+            status => bail!("knowledge pack update failed with status {status}"),
+        }
+    }
+
     pub async fn resolve_knowledge_pack_slug(&self, pack: &Slug) -> Result<Uuid> {
         self.list_knowledge_packs()
             .await?
@@ -2365,6 +2520,20 @@ fn knowledge_doc_summary(
         tags: document.tags,
         content_type: document.content_type,
         updated_at: document.updated_at,
+    }
+}
+
+fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePackDocument {
+    KnowledgePackDocument {
+        id: pack.id,
+        slug: pack.slug,
+        name: pack.name,
+        description: pack.description,
+        status: pack.status,
+        source_type: pack.source_type,
+        read_only: pack.read_only,
+        selector: pack.selector,
+        version: pack.version,
     }
 }
 

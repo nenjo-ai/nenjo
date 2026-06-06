@@ -18,6 +18,8 @@ pub mod contract;
 pub mod councils;
 /// Tool specs for domain operations.
 pub mod domains;
+/// Tool specs for library knowledge document mutations.
+pub mod library;
 /// Tool specs for model operations.
 pub mod models;
 /// Request parameter types for manifest MCP tools.
@@ -34,8 +36,9 @@ mod types;
 
 pub use backend::{
     AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend, ManifestMcpBackend,
-    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend,
+    LibraryManifestBackend, ManifestMcpBackend, ModelManifestBackend, ProjectManifestBackend,
+    RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{
@@ -48,10 +51,11 @@ pub use params::{
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainPromptGetParams,
     DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, KnowledgeDocCreateParams,
-    KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, ModelCreateParams, ModelDeleteParams,
-    ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
-    ProjectUpdateParams, ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams,
-    RoutineUpdateParams, RoutinesGetParams,
+    KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, KnowledgePackCreateParams,
+    KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
+    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
+    ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
+    RoutinesGetParams,
 };
 pub use results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -61,9 +65,9 @@ pub use results::{
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
     DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
-    KnowledgeDocMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
-    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
-    RoutineMutationResult, RoutinesListResult,
+    KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
+    ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
+    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
 };
 pub use types::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,
@@ -75,6 +79,7 @@ pub use types::{
     DomainDocument, DomainManifestDocument, DomainPromptDocument, DomainSummary,
     DomainUpdateDocument, KnowledgeDocContentDocument, KnowledgeDocCreateDocument,
     KnowledgeDocRelatedDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
+    KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
     ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument, ProjectCreateDocument,
     ProjectDocument, ProjectSummary, ProjectUpdateDocument, RoutineCreateDocument, RoutineDocument,
     RoutineEdgeInput, RoutineGraphInput, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,

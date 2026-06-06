@@ -64,6 +64,10 @@ impl ManifestReader for LocalManifestStore {
             mcp_servers: self.load_json("mcp_servers.json"),
             abilities: self.load_tree("abilities"),
             context_blocks: self.load_tree("context_blocks"),
+            skills: Vec::new(),
+            commands: self.load_json("commands.json"),
+            hooks: self.load_json("hooks.json"),
+            script_tools: self.load_json("script_tools.json"),
         })
     }
 
@@ -203,6 +207,9 @@ impl ManifestWriter for LocalManifestStore {
         atomic_write_json(&self.root, "mcp_servers.json", &manifest.mcp_servers)?;
         sync_tree(&self.root.join("abilities"), &manifest.abilities)?;
         sync_tree(&self.root.join("context_blocks"), &manifest.context_blocks)?;
+        atomic_write_json(&self.root, "commands.json", &manifest.commands)?;
+        atomic_write_json(&self.root, "hooks.json", &manifest.hooks)?;
+        atomic_write_json(&self.root, "script_tools.json", &manifest.script_tools)?;
         Ok(())
     }
 
@@ -411,6 +418,7 @@ mod tests {
             domains: vec![],
             platform_scopes: vec![],
             mcp_servers: vec![],
+            script_tools: vec![],
             abilities: vec![],
             prompt_locked: false,
             heartbeat: None,
@@ -427,6 +435,7 @@ mod tests {
             },
             platform_scopes: vec![],
             mcp_servers: vec![],
+            script_tools: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,

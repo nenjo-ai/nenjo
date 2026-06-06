@@ -213,22 +213,20 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
         },
         TemplateVarGroup {
             name: "Gate",
-            variables: vec![
-                TemplateVarDef {
-                    name: "gate.criteria",
-                    description: "Pass/fail criteria for gate evaluation",
-                    group: "Gate",
-                },
-                TemplateVarDef {
-                    name: "gate.previous_output",
-                    description: "Output from the previous step being evaluated",
-                    group: "Gate",
-                },
-            ],
+            variables: vec![TemplateVarDef {
+                name: "gate.previous_output",
+                description: "Output from the previous step being evaluated",
+                group: "Gate",
+            }],
         },
         TemplateVarGroup {
             name: "Heartbeat",
             variables: vec![
+                TemplateVarDef {
+                    name: "heartbeat.instructions",
+                    description: "User-configured instructions for this heartbeat run, if any",
+                    group: "Heartbeat",
+                },
                 TemplateVarDef {
                     name: "heartbeat.previous_output",
                     description: "Final output from the previous heartbeat run, if any",
@@ -243,21 +241,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     name: "heartbeat.next_run_at",
                     description: "Scheduled timestamp for the next heartbeat run",
                     group: "Heartbeat",
-                },
-            ],
-        },
-        TemplateVarGroup {
-            name: "Subtask",
-            variables: vec![
-                TemplateVarDef {
-                    name: "subtask.parent_task",
-                    description: "Parent task context for council subtasks",
-                    group: "Subtask",
-                },
-                TemplateVarDef {
-                    name: "subtask.description",
-                    description: "Subtask description assigned by the council",
-                    group: "Subtask",
                 },
             ],
         },

@@ -1,4 +1,3 @@
 schema: nenjo.ability.v1
 manifest:
   name: triage
-  display_name: Triage

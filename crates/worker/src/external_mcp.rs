@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 use nenjo::manifest::McpServerManifest;
+use nenjo::skills::SkillMcpToolInfo;
 use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -646,6 +647,87 @@ impl ExternalMcpPool {
     }
 
     /// Call a tool on a specific server.
+    pub(crate) async fn call_skill_mcp_tool(
+        &self,
+        active_servers: &[Slug],
+        requested_server: Option<&str>,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        if active_servers.is_empty() {
+            anyhow::bail!(
+                "No skill MCP servers are active. Activate a skill first with use_skill."
+            );
+        }
+
+        let server_slug = if let Some(requested_server) = requested_server {
+            let requested_slug = Slug::derive(requested_server);
+            active_servers
+                .iter()
+                .find(|slug| slug.as_str() == requested_server || **slug == requested_slug)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "MCP server '{requested_server}' is not active for the current skill"
+                    )
+                })?
+        } else {
+            self.resolve_active_tool_server(active_servers, tool_name)
+                .await?
+        };
+
+        self.call_tool(&server_slug, tool_name, args).await
+    }
+
+    pub(crate) async fn skill_mcp_tool_inventory(
+        &self,
+        active_servers: &[Slug],
+    ) -> Vec<SkillMcpToolInfo> {
+        let servers = self.servers.read().await;
+        let mut inventory = Vec::new();
+        for active_server in active_servers {
+            let Some(server_mutex) = servers.get(active_server) else {
+                continue;
+            };
+            let server = server_mutex.lock().await;
+            for tool in &server.tools {
+                inventory.push(SkillMcpToolInfo {
+                    server: active_server.clone(),
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                });
+            }
+        }
+        inventory
+    }
+
+    async fn resolve_active_tool_server(
+        &self,
+        active_servers: &[Slug],
+        tool_name: &str,
+    ) -> anyhow::Result<Slug> {
+        let servers = self.servers.read().await;
+        let mut matches = Vec::new();
+        for active_server in active_servers {
+            let Some(server_mutex) = servers.get(active_server) else {
+                continue;
+            };
+            let server = server_mutex.lock().await;
+            if server.tools.iter().any(|tool| tool.name == tool_name) {
+                matches.push(active_server.clone());
+            }
+        }
+
+        match matches.len() {
+            0 => anyhow::bail!("MCP tool '{tool_name}' is not available for the active skill"),
+            1 => Ok(matches.remove(0)),
+            _ => anyhow::bail!(
+                "MCP tool '{tool_name}' exists on multiple active skill servers; pass the server parameter"
+            ),
+        }
+    }
+
     async fn call_tool(
         &self,
         server_slug: &Slug,
@@ -748,4 +830,99 @@ fn has_scope(scopes: &[String], required: &str) -> bool {
         return scopes.iter().any(|s| s == &write_scope);
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nenjo::manifest::McpServerManifest;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn claude_plugin_mcp_runtime_uses_plugin_cwd_and_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("plugin");
+        tokio::fs::create_dir_all(&plugin_dir).await.unwrap();
+        let server_script = plugin_dir.join("server.sh");
+        tokio::fs::write(&server_script, mcp_fixture_script())
+            .await
+            .unwrap();
+
+        let server = McpServerManifest {
+            id: Uuid::new_v4(),
+            name: "ralph_loop__review_server".to_string(),
+            display_name: "ralph_loop:review_server".to_string(),
+            description: Some("Review server".to_string()),
+            transport: "stdio".to_string(),
+            command: Some("bash".to_string()),
+            args: Some(vec!["server.sh".to_string()]),
+            url: None,
+            env_schema: json!([]),
+            source_type: "package".to_string(),
+            read_only: true,
+            metadata: json!({
+                "runtime": {
+                    "cwd": plugin_dir.to_string_lossy().to_string(),
+                    "env": {
+                        "MODE": "local",
+                        "PLUGIN_SENTINEL": "present"
+                    }
+                },
+                "claude": {
+                    "plugin": {
+                        "slug": "ralph_loop",
+                        "name": "Ralph Loop"
+                    },
+                    "mcp": {
+                        "name": "review-server",
+                        "slug": "review_server"
+                    }
+                }
+            }),
+        };
+        let pool = Arc::new(ExternalMcpPool::new());
+
+        pool.reconcile(std::slice::from_ref(&server)).await;
+
+        let tools = pool
+            .tools_for_agent(&[Slug::derive(&server.name)], None)
+            .await;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "review");
+        let result = tools[0].execute(json!({})).await.unwrap();
+        assert!(result.success);
+        let expected_cwd = tokio::fs::canonicalize(&plugin_dir).await.unwrap();
+        assert_eq!(
+            result.output,
+            format!("cwd={};mode=local;sentinel=present", expected_cwd.display())
+        );
+    }
+
+    fn mcp_fixture_script() -> String {
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"0.1.0"}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"review","description":"Review","inputSchema":{"type":"object","properties":{}}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      text="cwd=$(pwd);mode=${MODE:-};sentinel=${PLUGIN_SENTINEL:-}"
+      printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$text"
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown method"}}'
+      ;;
+  esac
+done
+"#
+        .to_string()
+    }
 }

@@ -40,6 +40,22 @@ pub struct TaskExecuteContent {
     pub complexity: Option<String>,
 }
 
+/// Content-bearing cron task fields carried in encrypted `cron.*` commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronTaskContent {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<String>,
+}
+
+/// Agent heartbeat instruction content carried in encrypted heartbeat commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatInstructionsContent {
+    pub instructions: String,
+}
+
 /// Encrypted task content fields stored outside the plaintext task row.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskEncryptedContent {

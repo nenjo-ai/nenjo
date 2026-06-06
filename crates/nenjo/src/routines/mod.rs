@@ -6,7 +6,8 @@
 //!
 //! ```ignore
 //! // One-shot task execution
-//! let task = nenjo::TaskInput::new("demo_project", "Fix auth", "Repair the login flow")
+//! let task = nenjo::TaskInput::new("Fix auth", "Repair the login flow")
+//!     .with_project("demo_project")
 //!     .with_task_id(task_id);
 //! let result = provider.routine("triage")?.run(task).await?;
 //!
@@ -35,8 +36,8 @@ use crate::provider::ProviderRuntime;
 pub use event::RoutineEvent;
 pub use runner::{RoutineExecutionHandle, RoutineRunner};
 pub use types::{
-    CronMode, CronStepConfig, EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics,
-    SessionBinding, StepMetrics, StepResult, StepType,
+    EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics,
+    StepResult, StepType,
 };
 
 pub(crate) fn with_agent_step_tools<P>(builder: AgentBuilder<P>) -> AgentBuilder<P>

@@ -192,6 +192,7 @@ fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
         domains: Vec::new(),
         platform_scopes: Vec::new(),
         mcp_servers: Vec::new(),
+        script_tools: Vec::new(),
         abilities: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
@@ -254,6 +255,7 @@ fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
         },
         platform_scopes: Vec::new(),
         mcp_servers: Vec::new(),
+        script_tools: Vec::new(),
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -265,7 +267,6 @@ fn context_block(id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
         id,
         name: name.into(),
         path: String::new(),
-        display_name: Some(name.into()),
         description: None,
         template: template.into(),
     }
@@ -293,12 +294,12 @@ fn domain(id: Uuid, name: &str, prompt: &str) -> DomainManifest {
         id,
         name: name.into(),
         path: String::new(),
-        display_name: name.into(),
         description: None,
         command: name.into(),
         platform_scopes: Vec::new(),
         abilities: Vec::new(),
         mcp_servers: Vec::new(),
+        script_tools: Vec::new(),
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some(prompt.into()),
         },
@@ -492,6 +493,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         context_blocks: vec![context_block(ids[6].1, "context", "template")],
         mcp_servers: vec![mcp_server(ids[7].1, "mcp")],
         domains: vec![domain(ids[8].1, "domain", "prompt")],
+        ..Default::default()
     };
 
     for (resource_type, resource_id) in ids {

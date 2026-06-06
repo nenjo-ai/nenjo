@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::path::Path;
 
 use nenjo_nenpm::{
     AddOptions, CleanOptions, DependencyManifest, InfoOptions, InitOptions, InstallOptions,
@@ -9,6 +10,61 @@ use nenjo_nenpm::{
 };
 
 use support::{copy_dir, fixture, temp_workspace, write_file};
+
+fn write_major_upgrade_registry(root: &Path) {
+    write_file(
+        root,
+        "registry/registry.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "core":
+    - version: "1.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/core-v100/nenjo.package.yaml
+    - version: "1.10.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/core-v110/nenjo.package.yaml
+    - version: "2.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: packages/core-v200/nenjo.package.yaml
+"#,
+    );
+    for (dir, version, name) in [
+        ("core-v100", "1.0.0", "core_v100"),
+        ("core-v110", "1.10.0", "core_v110"),
+        ("core-v200", "2.0.0", "core_v200"),
+    ] {
+        write_file(
+            root,
+            &format!("packages/packages/{dir}/nenjo.package.yaml"),
+            &format!(
+                r#"schema: nenjo.package.v1
+name: "core"
+version: "{version}"
+modules:
+  - context/core.yaml
+"#
+            ),
+        );
+        write_file(
+            root,
+            &format!("packages/packages/{dir}/context/core.yaml"),
+            &format!(
+                r#"schema: nenjo.context_block.v1
+manifest:
+  name: {name}
+  template: {name}
+"#
+            ),
+        );
+    }
+}
 
 #[test]
 fn init_creates_starter_dependency_manifest() {
@@ -157,6 +213,130 @@ packages:
     assert_eq!(module.source_path, "packages/core-v020/context/core.yaml");
     assert_eq!(module.name, "methodology");
     assert_ne!(module.hash, "old-module-hash");
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn update_keeps_locked_packages_within_current_major_by_default() {
+    let workspace = temp_workspace("update-compatible-major");
+    write_major_upgrade_registry(&workspace);
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "core": "^1.0.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.lock.yml",
+        r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "core"
+    version: "1.0.0"
+    manifest_path: packages/core-v100/nenjo.package.yaml
+    hash: old
+    dependencies: {}
+    modules: []
+"#,
+    );
+
+    let report = update(InstallOptions::new(&project)).unwrap();
+    let package = report.lockfile.packages.first().unwrap();
+
+    assert_eq!(package.name, "core");
+    assert_eq!(package.version, "1.10.0");
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn update_rejects_major_upgrade_without_explicit_policy() {
+    let workspace = temp_workspace("update-major-rejected");
+    write_major_upgrade_registry(&workspace);
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "core": "^2.0.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.lock.yml",
+        r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "core"
+    version: "1.0.0"
+    manifest_path: packages/core-v100/nenjo.package.yaml
+    hash: old
+    dependencies: {}
+    modules: []
+"#,
+    );
+
+    let err = update(InstallOptions::new(&project))
+        .expect_err("major upgrade should require an explicit policy")
+        .to_string();
+
+    assert!(err.contains("failed to resolve core from registry"));
+    assert!(err.contains("^2.0.0 and ^1.0.0"));
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn update_allows_major_upgrade_with_explicit_policy() {
+    let workspace = temp_workspace("update-major-allowed");
+    write_major_upgrade_registry(&workspace);
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "core": "^2.0.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.lock.yml",
+        r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "core"
+    version: "1.0.0"
+    manifest_path: packages/core-v100/nenjo.package.yaml
+    hash: old
+    dependencies: {}
+    modules: []
+"#,
+    );
+
+    let report = update(InstallOptions::new(&project).allow_major_updates()).unwrap();
+    let package = report.lockfile.packages.first().unwrap();
+
+    assert_eq!(package.name, "core");
+    assert_eq!(package.version, "2.0.0");
     fs::remove_dir_all(workspace).unwrap();
 }
 

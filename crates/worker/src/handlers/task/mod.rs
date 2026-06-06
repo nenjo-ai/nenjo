@@ -1,6 +1,7 @@
 //! Task execution handlers — with git worktree lifecycle.
 mod runtime;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -16,7 +17,8 @@ use uuid::Uuid;
 
 use nenjo::types::GitContext;
 use nenjo::{ProjectLocation, Slug, TaskInput};
-use nenjo_events::{Response, StepAgent};
+use nenjo_events::{EncryptedPayload, Response, StepAgent};
+use nenjo_platform::tools::PlatformNotificationEmitter;
 use serde_json::json;
 
 use nenjo_harness::events::HarnessEvent;
@@ -32,7 +34,28 @@ use crate::event_bridge::{
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
+use crate::tools::with_platform_notification_emitter;
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
+
+struct TaskNotificationEmitter<S> {
+    response_sink: S,
+}
+
+impl<S> PlatformNotificationEmitter for TaskNotificationEmitter<S>
+where
+    S: ResponseSender,
+{
+    fn send_push_notification(
+        &self,
+        agent: &str,
+        encrypted_payload: EncryptedPayload,
+    ) -> Result<()> {
+        self.response_sink.send(Response::PushNotification {
+            agent: agent.to_string(),
+            encrypted_payload,
+        })
+    }
+}
 
 fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
     agent_name.map(|agent_name| {
@@ -72,12 +95,95 @@ where
     {
         return None;
     }
+
+    if !registered_worktree(
+        Path::new(&worktree.repo_dir),
+        Path::new(&worktree.work_dir),
+        &worktree.branch,
+    )
+    .await
+    {
+        warn!(
+            repo_dir = %worktree.repo_dir,
+            work_dir = %worktree.work_dir,
+            branch = %worktree.branch,
+            "Ignoring task checkpoint with stale or unregistered git worktree"
+        );
+        return None;
+    }
+
+    let repo_url = repo_remote_url(Path::new(&worktree.repo_dir))
+        .await
+        .unwrap_or_default();
+
     Some(GitContext {
         branch: worktree.branch,
         target_branch: worktree.target_branch.unwrap_or_else(|| "main".to_string()),
         work_dir: worktree.work_dir,
-        repo_url: String::new(),
+        repo_url,
     })
+}
+
+async fn registered_worktree(repo_dir: &Path, work_dir: &Path, branch: &str) -> bool {
+    let output = match tokio::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_dir)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let work_dir = work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| work_dir.to_path_buf());
+
+    worktree_listing_contains(&listing, &work_dir, branch)
+}
+
+fn worktree_listing_contains(listing: &str, work_dir: &Path, branch: &str) -> bool {
+    let branch_ref = format!("refs/heads/{branch}");
+
+    listing.split("\n\n").any(|entry| {
+        let mut entry_worktree = None;
+        let mut entry_branch = None;
+
+        for line in entry.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                entry_worktree = Some(Path::new(path));
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                entry_branch = Some(branch);
+            }
+        }
+
+        let Some(entry_worktree) = entry_worktree else {
+            return false;
+        };
+
+        let entry_worktree = entry_worktree
+            .canonicalize()
+            .unwrap_or_else(|_| entry_worktree.to_path_buf());
+
+        entry_worktree == work_dir && entry_branch == Some(branch_ref.as_str())
+    })
+}
+
+async fn repo_remote_url(repo_dir: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
 }
 
 #[derive(Clone)]
@@ -296,7 +402,7 @@ pub struct TaskExecuteRequest<'a> {
 #[async_trait::async_trait]
 pub(crate) trait WorkerTaskHarnessExt<S, W>
 where
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     /// Execute a task command and stream platform responses.
@@ -333,7 +439,7 @@ impl<P, SessionRt, S, W> WorkerTaskHarnessExt<S, W> for Harness<P, SessionRt>
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     async fn handle_task_execute(
@@ -377,7 +483,7 @@ async fn handle_task_execute<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecuteRequest {
@@ -618,7 +724,7 @@ where
     };
 
     let task = TaskInput {
-        project: project.clone(),
+        project: Some(project.clone()),
         task_id,
         title: title.to_string(),
         description: description.to_string(),
@@ -644,6 +750,14 @@ where
         task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
     )
     .await;
+
+    if harness
+        .executions()
+        .get(&task_id)
+        .is_some_and(|active| active.registry_token == registry_token)
+    {
+        harness.executions().remove(&task_id);
+    }
 
     let execution = TaskExecutionShared {
         harness,
@@ -680,7 +794,18 @@ where
 
     let outcome = match result {
         Ok(outcome) => outcome,
-        Err(ref e) => TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0),
+        Err(ref e) => {
+            warn!(
+                task_id = %task_id,
+                execution_run_id = %execution_run_id,
+                routine = ?routine_slug,
+                agent = ?agent_slug,
+                work_dir = ?git_ctx.as_ref().map(|git| git.work_dir.as_str()),
+                error = %format!("{e:#}"),
+                "Task execution failed before terminal outcome"
+            );
+            TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0)
+        }
     };
 
     // If execution itself errored (e.g. routine not found, agent build failure),
@@ -833,7 +958,7 @@ async fn handle_execution_cancel<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut cancelled = 0u32;
@@ -873,7 +998,7 @@ async fn handle_execution_pause<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut paused = 0u32;
@@ -908,7 +1033,7 @@ async fn handle_execution_resume<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut resumed = 0u32;
@@ -983,7 +1108,7 @@ async fn execute_routine_task<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecutionShared {
@@ -998,7 +1123,13 @@ where
     if request.slug.is_none() {
         request = request.with_slug(task_slug.to_string());
     }
-    let mut stream = harness.task_stream(request).await?;
+    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
+        Arc::new(TaskNotificationEmitter {
+            response_sink: ctx.response_sink.clone(),
+        });
+    let mut stream =
+        with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
+            .await?;
 
     // Accumulate token metrics from step events as they stream through.
     let mut total_input_tokens: u64 = 0;
@@ -1080,7 +1211,7 @@ async fn execute_direct_task<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecutionShared {
@@ -1106,7 +1237,13 @@ where
         request = request.with_slug(task_slug.to_string());
     }
     let task_started_at = std::time::Instant::now();
-    let mut stream = harness.task_stream(request).await?;
+    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
+        Arc::new(TaskNotificationEmitter {
+            response_sink: ctx.response_sink.clone(),
+        });
+    let mut stream =
+        with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
+            .await?;
 
     loop {
         tokio::select! {
@@ -1212,5 +1349,55 @@ fn evict_git_lock(
 ) {
     if std::sync::Arc::strong_count(lock) <= 2 {
         locks.remove(repo_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::worktree_listing_contains;
+
+    #[test]
+    fn worktree_listing_contains_registered_branch() {
+        let listing = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/worktrees/abcd-task
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/agent/abcd/task
+";
+
+        assert!(worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/abcd-task"),
+            "agent/abcd/task"
+        ));
+    }
+
+    #[test]
+    fn worktree_listing_rejects_unregistered_or_wrong_branch() {
+        let listing = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/worktrees/abcd-task
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/agent/abcd/other
+";
+
+        assert!(!worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/abcd-task"),
+            "agent/abcd/task"
+        ));
+        assert!(!worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/missing"),
+            "agent/abcd/other"
+        ));
     }
 }

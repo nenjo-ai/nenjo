@@ -10,8 +10,8 @@ use super::types::{
     AbilityDocument, AbilityPromptDocument, AbilitySummary, AgentDocument, AgentPromptDocument,
     AgentSummary, ContextBlockContentDocument, ContextBlockDocument, ContextBlockSummary,
     CouncilDocument, CouncilSummary, DomainDocument, DomainPromptDocument, DomainSummary,
-    KnowledgeDocSummary, ModelDocument, ModelSummary, ProjectDocument, ProjectSummary,
-    RoutineDocument, RoutineSummary,
+    KnowledgeDocSummary, KnowledgePackDocument, ModelDocument, ModelSummary, ProjectDocument,
+    ProjectSummary, RoutineDocument, RoutineSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +134,12 @@ pub struct ProjectGetResult {
 /// Result for `create_project` and `update_project`.
 pub struct ProjectMutationResult {
     pub project: ProjectDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Result for creating or updating a Library knowledge pack.
+pub struct KnowledgePackMutationResult {
+    pub knowledge_pack: KnowledgePackDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 use nenjo::manifest::{context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 /// Remove a deleted resource from the in-memory manifest.
@@ -43,5 +43,6 @@ pub(super) fn apply_delete(
         ResourceType::KnowledgePack => return,
     }
 
-    info!(%rt, %resource, resource_id = ?resource_id, "Removed deleted resource from manifest");
+    info!(%rt, %resource, "Removed deleted resource from manifest");
+    debug!(%rt, %resource, resource_id = ?resource_id, "Deleted manifest resource details");
 }
