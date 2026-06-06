@@ -17,3 +17,4 @@ console = { workspace = true }
 eyre = { workspace = true }
 indicatif = { workspace = true }
 nenjo-nenpm = { workspace = true }
+nenjo-updater = { workspace = true }

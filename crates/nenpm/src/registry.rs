@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use anyhow::{Context, anyhow};
 use nenjo_packages::{LocalPackageResolver, ResolvedPackage, ResolvedPackageGraph};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::dependency::RegistryReference;
@@ -236,14 +238,28 @@ fn source_with_manifest_path(source: &PackageSource, manifest_path: String) -> P
 
 impl PackageRegistry for RegistryIndex {
     fn resolve_version(&self, package: &str, requirement: &str) -> Result<RegistryPackageVersion> {
+        self.resolve_version_matching_all(package, &[requirement.to_string()])
+    }
+}
+
+impl RegistryIndex {
+    pub(crate) fn resolve_version_matching_all(
+        &self,
+        package: &str,
+        requirements: &[String],
+    ) -> Result<RegistryPackageVersion> {
         let versions = self
             .packages
             .get(package)
             .ok_or_else(|| anyhow!("registry has no package {package}"))?;
         Ok(versions
             .iter()
-            .filter(|candidate| nenjo_packages::version_satisfies(&candidate.version, requirement))
-            .max_by(|left, right| left.version.cmp(&right.version))
+            .filter(|candidate| {
+                requirements.iter().all(|requirement| {
+                    nenjo_packages::version_satisfies(&candidate.version, requirement)
+                })
+            })
+            .max_by(|left, right| compare_versions(&left.version, &right.version))
             .map(|candidate| RegistryPackageVersion {
                 name: package.to_string(),
                 version: candidate.version.clone(),
@@ -251,7 +267,12 @@ impl PackageRegistry for RegistryIndex {
                 dependencies: candidate.dependencies.clone(),
                 checksum: candidate.checksum.clone(),
             })
-            .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))?)
+            .ok_or_else(|| {
+                anyhow!(
+                    "registry has no {package} version matching {}",
+                    requirements.join(" and ")
+                )
+            })?)
     }
 }
 
@@ -286,9 +307,18 @@ impl PackageRegistry for InMemoryRegistry {
         Ok(versions
             .iter()
             .filter(|candidate| nenjo_packages::version_satisfies(&candidate.version, requirement))
-            .max_by(|left, right| left.version.cmp(&right.version))
+            .max_by(|left, right| compare_versions(&left.version, &right.version))
             .cloned()
             .ok_or_else(|| anyhow!("registry has no {package} version matching {requirement}"))?)
+    }
+}
+
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    let left_semver = Version::parse(left.trim().trim_start_matches('v'));
+    let right_semver = Version::parse(right.trim().trim_start_matches('v'));
+    match (left_semver, right_semver) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
     }
 }
 

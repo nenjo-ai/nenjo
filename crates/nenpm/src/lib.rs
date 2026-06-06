@@ -26,7 +26,7 @@ pub use dependency::{
 };
 pub use error::{NenpmError, Result};
 pub use github::GitHubRawFetcher;
-pub use install::{InstallOptions, InstallReport, MaterializationReport, install};
+pub use install::{InstallOptions, InstallReport, MaterializationReport, UpgradePolicy, install};
 pub use lockfile::{
     LockedModule, LockedPackage, NenpmLock, PackageInstallIndex, PackageInstallIndexEntry,
     package_install_path, package_install_path_in_packages_dir, package_instance_key,

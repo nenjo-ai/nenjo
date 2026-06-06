@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bundle `nenjo`, `nenpm`, and `nenjoup` in binary release artifacts
+- add binary bundle update commands and update-available notices
+
+### Changed
+
+- `nenpm update` now updates the installed binary bundle; use `nenpm upgrade`
+  to re-resolve package dependencies and rewrite `nenpm.lock.yml`
+- `nenpm upgrade` now keeps locked packages within their current major version
+  by default; use `nenpm upgrade --major` for explicit major upgrades
+
 ## [0.12.0](https://github.com/nenjo-ai/nenjo/compare/v0.11.0...v0.12.0) - 2026-05-17
 
 ### Added

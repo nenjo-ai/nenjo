@@ -23,6 +23,26 @@ fn write_file(root: &Path, path: &str, content: &str) {
     fs::write(full_path, content).unwrap();
 }
 
+fn fixture(path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/nenpm/tests/fixtures")
+        .join(path)
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap();
+        }
+    }
+}
+
 fn write_local_registry(root: &Path, scope: &str) {
     write_file(
         root,
@@ -89,6 +109,70 @@ fn init_creates_nenpm_yml() {
     assert!(!second.status.success());
 
     fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn upgrade_reresolves_package_versions() {
+    let workspace = temp_workspace("upgrade");
+    copy_dir(&fixture("install/registry-workspace"), &workspace);
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "agent": "^0.1.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.lock.yml",
+        r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "core"
+    version: "0.1.0"
+    manifest_path: packages/core-v010/nenjo.package.yaml
+    hash: old
+    dependencies: {}
+    modules: []
+  - name: "agent"
+    version: "0.1.0"
+    manifest_path: packages/agent-v010/nenjo.package.yaml
+    hash: old
+    dependencies:
+      "core": "^0.1.0"
+    modules: []
+"#,
+    );
+
+    let output = nenpm()
+        .args(["upgrade", "--root"])
+        .arg(&project)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let lockfile = fs::read_to_string(project.join("nenpm.lock.yml")).unwrap();
+    assert!(lockfile.contains("0.2.0"));
+    assert!(lockfile.contains("agent"));
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn upgrade_help_documents_major_flag() {
+    let output = nenpm().args(["upgrade", "--help"]).output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--major"));
+    assert!(stdout.contains("new major version"));
 }
 
 #[test]

@@ -12,6 +12,11 @@ Nenjo gives you a programmable agent engine with tool use, persistent memory, mu
 curl -fsSL https://nenjo.ai/install | bash
 ```
 
+The installer places the `nenjo`, `nenpm`, and `nenjoup` binaries in
+`~/.nenjo/bin` by default. `nenjo update` and `nenpm update` update the
+installed binary bundle through the bundled `nenjoup` updater. Set
+`NENJO_NO_UPDATE_CHECK=1` to suppress passive update-available notices.
+
 ## Crates
 
 | Crate | Description |
@@ -29,7 +34,11 @@ curl -fsSL https://nenjo.ai/install | bash
 | [`nenjo-sessions`](crates/sessions) | Shared session contracts for runtime, worker, and future session services |
 | [`nenjo-harness`](crates/harness) | Platform command handlers, active execution/session registries, event bridging, and trace/session runtime hooks around a provider |
 | [`nenjo-worker`](crates/worker) | Platform worker implementation behind `nenjo run` |
+| [`nenjo-nenpm`](crates/nenpm) | Package manager install planning and lockfile/materialization logic |
+| [`nenjo-updater`](crates/updater) | Shared update checks and binary bundle installation logic |
 | [`nenjo-cli`](bin) | CLI package that builds the `nenjo` binary |
+| [`nenpm-cli`](bin/nenpm) | CLI package that builds the `nenpm` package-manager binary |
+| [`nenjoup-cli`](bin/nenjoup) | CLI package that builds the `nenjoup` updater binary |
 | [`nenjo-integration-tests`](testing/integrations) | Integration test crate for provider-backed SDK flows |
 
 ## Separation Boundaries
@@ -43,7 +52,7 @@ Nenjo is split so the SDK can be embedded without pulling in the platform worker
 | Platform transport | `nenjo-eventbus`, `nenjo-secure-envelope`, `nenjo-crypto-auth` | Event delivery, secure envelopes, worker enrollment and keys |
 | Manifest bridge | `nenjo-platform` | Platform REST/MCP manifest operations and local/platform synchronization |
 | Harness | `nenjo-harness` | Platform command handlers, provider swapping, active execution registries, session writes, traces, and event bridging |
-| Worker and CLI | `nenjo-worker`, `nenjo-cli` | Process lifecycle, config/bootstrap, event loop, provider/tool factories, concrete runtime tools, local stores, `nenjo run` |
+| Worker and CLI | `nenjo-worker`, `nenjo-cli`, `nenpm-cli`, `nenjoup-cli`, `nenjo-updater` | Process lifecycle, config/bootstrap, event loop, provider/tool factories, concrete runtime tools, local stores, package-manager CLI, binary updates |
 
 ## CLI Worker
 
@@ -55,6 +64,9 @@ nenjo run
 
 # With verbose logging
 nenjo run --log-level "info,nenjo=debug"
+
+# Update the installed Nenjo command-line tools
+nenjo update
 ```
 
 The worker is resilient to service outages. Startup and the event loop use exponential backoff so the process can recover when platform services or NATS become available again.
