@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use nenjo_models::ChatMessage;
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, is_ability_tool};
@@ -285,7 +285,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
 
-        info!(
+        debug!(
             agent = instance.name(),
             domain = domain_name,
             session_id = %instance.prompt.context.active_domain.as_ref().unwrap().session_id,

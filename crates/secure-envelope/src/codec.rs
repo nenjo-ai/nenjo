@@ -8,7 +8,7 @@ use nenjo_events::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -458,6 +458,20 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         }));
                     }
                 };
+                info!(
+                    %resource_type,
+                    ?action,
+                    object_type,
+                    "Decoded manifest payload"
+                );
+                debug!(
+                    %resource_type,
+                    ?action,
+                    project = ?project,
+                    object_type,
+                    %object_id,
+                    "Decoded encrypted manifest payload details"
+                );
 
                 let payload = serde_json::json!({
                     "__nenjo_decrypted_manifest_payload": true,

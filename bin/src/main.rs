@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use eyre::{Result, eyre};
 use nenjo_worker::RunArgs;
 use tracing::debug;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(name = "nenjo", about = "Nenjo platform agent CLI harness")]
@@ -49,10 +49,13 @@ async fn main() -> Result<()> {
             } else {
                 base_filter.add_directive("async_nats=warn".parse().expect("valid directive"))
             };
+            let show_log_target = filter
+                .max_level_hint()
+                .is_some_and(|level| level >= LevelFilter::DEBUG);
 
             let _ = tracing_subscriber::registry()
                 .with(filter)
-                .with(tracing_subscriber::fmt::layer().with_target(args.log_target))
+                .with(tracing_subscriber::fmt::layer().with_target(show_log_target))
                 .try_init();
 
             nenjo_worker::run(args).await.map_err(|error| eyre!(error))

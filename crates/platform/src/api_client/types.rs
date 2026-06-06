@@ -47,6 +47,7 @@ pub struct KnowledgeDocSyncMeta {
     pub id: Option<Uuid>,
     #[serde(default)]
     pub pack_id: Option<Uuid>,
+    #[serde(default)]
     pub pack_slug: String,
     pub slug: String,
     pub filename: String,

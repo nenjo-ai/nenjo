@@ -77,10 +77,6 @@ pub struct RunArgs {
     #[arg(long, env = "NENJO_CAPABILITIES", value_delimiter = ',')]
     pub capabilities: Option<Vec<String>>,
 
-    /// Show the log target (module path) in log output.
-    #[arg(long, env = "NENJO_LOG_TARGET")]
-    pub log_target: bool,
-
     /// Override the .nenjo directory path (default: ~/.nenjo).
     #[arg(long, env = "NENJO_DIR")]
     pub nenjo_dir: Option<String>,
@@ -232,15 +228,17 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     let identity = auth_provider.identity();
     match auth_provider.enrollment_status().await {
         EnrollmentStatus::Pending => {
-            info!(
+            info!("Worker crypto identity loaded; enrollment pending");
+            debug!(
                 worker_crypto_id = %identity.worker_id,
-                "Worker crypto identity loaded; enrollment pending"
+                "Worker crypto identity details"
             );
         }
         EnrollmentStatus::Active => {
-            info!(
+            info!("Worker crypto identity loaded; user-routed ACK available");
+            debug!(
                 worker_crypto_id = %identity.worker_id,
-                "Worker crypto identity loaded; user-routed ACK available"
+                "Worker crypto identity details"
             );
         }
     }
@@ -283,11 +281,12 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
     let secure_bus = SecureEnvelopeBus::new(bus, crypto.codec.clone());
 
-    info!(
+    info!("Eventbus transport connected");
+    debug!(
         nats_urls = ?nats.urls,
         stream = %nats.stream_name,
         source = %nats.source,
-        "Eventbus transport connected"
+        "Eventbus transport details"
     );
 
     // Wire up the runtime's own shutdown to the global one.
@@ -423,7 +422,8 @@ async fn wait_for_enrollment_approval(
         auth_provider.enrollment_status().await,
         EnrollmentStatus::Active
     ) {
-        info!(%api_key_id, "Worker enrollment approved");
+        info!("Worker enrollment approved");
+        debug!(%api_key_id, "Worker enrollment details");
         return Ok(());
     }
 
@@ -442,7 +442,8 @@ async fn wait_for_enrollment_approval(
             Ok(Some(status)) => match status.state {
                 nenjo_platform::api_client::WorkerEnrollmentState::Active => {
                     auth_provider.apply_backend_enrollment(&status).await?;
-                    info!(%api_key_id, "Worker enrollment approved");
+                    info!("Worker enrollment approved");
+                    debug!(%api_key_id, "Worker enrollment details");
                     return Ok(());
                 }
                 nenjo_platform::api_client::WorkerEnrollmentState::Pending => {}
