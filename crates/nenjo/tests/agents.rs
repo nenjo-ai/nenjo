@@ -152,8 +152,9 @@ fn test_manifest() -> Manifest {
                     "Execute the following task:\n\nTitle: {{ task.title }}\nDescription: {{ task.description }}"
                         .into(),
                 chat_task: "{{ chat.message }}".into(),
-                gate_eval: "Evaluate: {{ gate.criteria }}".into(),
-                cron_task: String::new(),
+                gate_eval:
+                    "Evaluate:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
+                        .into(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()
@@ -353,6 +354,51 @@ async fn instance_builds_prompts() {
 }
 
 #[tokio::test]
+async fn instance_uses_heartbeat_template_for_heartbeat_runs() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.templates.heartbeat_task =
+        "HEARTBEAT {{ heartbeat.previous_output }} {{ agent.name }}".into();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("irrelevant"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let run = nenjo::AgentRun {
+        kind: nenjo::AgentRunKind::Heartbeat(nenjo::HeartbeatInput {
+            agent: Slug::derive("test-coder"),
+            interval: std::time::Duration::from_secs(60),
+            start_at: None,
+            previous_output: Some("previous heartbeat output".into()),
+            last_run_at: None,
+            next_run_at: None,
+        }),
+        execution: nenjo::ExecutionOptions::default(),
+    };
+
+    let prompts = runner.instance().build_prompts(&run);
+
+    assert!(
+        prompts
+            .user_message
+            .contains("HEARTBEAT previous heartbeat output test-coder"),
+        "heartbeat runs should render the heartbeat template, got: {}",
+        prompts.user_message
+    );
+}
+
+#[tokio::test]
 async fn instance_renders_self_prompt_var() {
     let mut manifest = test_manifest();
     manifest.agents[0].prompt_config.system_prompt = "{{ self }}".into();
@@ -476,7 +522,6 @@ fn manifest_with_abilities_and_domains(
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()

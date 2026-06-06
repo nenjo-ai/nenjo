@@ -175,7 +175,7 @@ ctx.context_blocks = rendered_map;
 The template engine uses [MiniJinja](https://docs.rs/minijinja) (Jinja2-compatible) with two important settings:
 
 - **Auto-escaping is disabled.** Prompts contain raw XML that must be preserved verbatim. Template variables that contain XML (like context blocks) are injected as-is.
-- **Undefined variables render as empty strings.** Templates can reference variables that may not be populated for a given execution type (e.g., `{{ gate.criteria }}` is empty for non-gate tasks). Instead of erroring, undefined variables silently produce `""`. MiniJinja's `Chainable` undefined behavior means `{{ context.some.deep.path }}` also works safely.
+- **Undefined variables render as empty strings.** Templates can reference variables that may not be populated for a given execution type (e.g., `{{ chat.message }}` is empty for non-chat tasks). Instead of erroring, undefined variables silently produce `""`. MiniJinja's `Chainable` undefined behavior means `{{ context.some.deep.path }}` also works safely.
 
 **Variable namespaces:**
 
@@ -189,8 +189,7 @@ The template engine uses [MiniJinja](https://docs.rs/minijinja) (Jinja2-compatib
 | `git.*` | `branch`, `target_branch`, `work_dir` |
 | `global.*` | `timestamp`, `run_id` |
 | `chat.*` | `message` |
-| `gate.*` | `criteria`, `previous_output` |
-| `subtask.*` | `parent_task`, `description` |
+| `gate.*` | `previous_output` |
 | `ability.*` | `name`, `prompt` |
 | `context.*` | Context block tree (see below) |
 
@@ -222,7 +221,7 @@ context
 
 ### Context Renderer
 
-The `ContextRenderer` handles 13 built-in block names with hardcoded rendering logic, plus arbitrary custom blocks that are rendered via MiniJinja:
+The `ContextRenderer` handles 11 built-in block names with hardcoded rendering logic, plus arbitrary custom blocks that are rendered via MiniJinja:
 
 | Built-in Block | Data Source | Behavior |
 |----------------|-------------|----------|
@@ -234,8 +233,7 @@ The `ContextRenderer` handles 13 built-in block names with hardcoded rendering l
 | `available_mcp_servers` | `ContextData.mcp_servers` + `platform_scopes` | `<mcp_integrations>` with server entries and platform scope |
 | `current_project` | `RenderContext` fields + `documents_xml` | `<project>` with metadata, git context, documents |
 | `current_task` | `RenderContext` task fields | `<task>` with all fields. Empty if `task_id` is empty. |
-| `current_gate` | `RenderContext` gate fields | `<gate_evaluation>` with criteria + previous output |
-| `current_cron` | `RenderContext` task + timestamp | `<cron_execution>` wrapping task XML |
+| `current_gate` | `RenderContext` gate fields | `<gate_evaluation>` with previous output |
 | `memory` | `ContextData.memory_xml` (pre-loaded) | Raw XML passthrough |
 | `memory_profile` | `ContextData.memory_*_focus` | `<core_focus>` and `<project_focus>` item lists |
 | _(any other name)_ | Template + `RenderContext` | Custom block — rendered entirely by MiniJinja |
@@ -321,7 +319,6 @@ Key design choice: **flat over nested.** The struct uses `task_title`, `project_
 ### Resolved
 
 - ~~`{{items}}` was plain string replacement~~ — now a real MiniJinja variable via `render_template_with_vars`
-- ~~Missing `subtask.*` namespace~~ — added `subtask.parent_task` and `subtask.description`
 - ~~Inconsistent filtering (ToXml vs renderer)~~ — all filtering now happens in `ContextRenderer.render_block()`; `ToXml` impls always render
 - ~~`FromXml` dead API surface~~ — trait removed, `parse` module utilities remain for ad-hoc extraction
 - ~~`render_template()` swallows errors~~ — `try_render_template()` and `try_render_template_with_vars()` added for callers that need error propagation

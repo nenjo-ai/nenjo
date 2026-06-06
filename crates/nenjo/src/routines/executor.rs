@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::AgentBuilder;
-use crate::input::{AgentRun, AgentRunKind, CronInput, GateInput, ProjectLocation, TaskInput};
+use crate::input::{AgentRun, AgentRunKind, GateInput, ProjectLocation, TaskInput};
 use crate::manifest::{
     RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
     RoutineStepType,
@@ -19,7 +19,7 @@ use crate::routines::types::StepResult;
 use crate::routines::{apply_session_binding_memory_scope, gate};
 
 use super::RoutineEvent;
-use super::types::{CronMode, CronStepConfig, RoutineState};
+use super::types::RoutineState;
 use crate::context::{RoutineContext, RoutineStepContext};
 
 const DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS: u32 = 3;
@@ -201,7 +201,7 @@ where
                 if !step_result.passed
                     && matches!(
                         current_step.step_type,
-                        RoutineStepType::Gate | RoutineStepType::Cron | RoutineStepType::Council
+                        RoutineStepType::Gate | RoutineStepType::Council
                     )
                 {
                     let feedback = step_result
@@ -410,9 +410,6 @@ where
         RoutineStepType::Council => {
             super::council::execute_council(provider, step, step_run_id, state, events_tx).await
         }
-        RoutineStepType::Cron => {
-            execute_cron_step(provider, step, step_run_id, state, events_tx).await
-        }
         RoutineStepType::Terminal => {
             // Terminal step: return the most recent step result
             let last = state
@@ -554,12 +551,6 @@ where
         .build()
         .await?;
 
-    let criteria = step
-        .config
-        .get("criteria")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Evaluate whether the previous step output is acceptable.");
-
     let previous_result = state
         .step_results
         .values()
@@ -571,7 +562,6 @@ where
         AgentRun {
             kind: AgentRunKind::Gate(GateInput {
                 previous_result,
-                criteria: criteria.to_string(),
                 project: state.input.project.clone(),
                 task: Some(build_task(state, state.input.description.clone())?),
             }),
@@ -613,109 +603,6 @@ where
         tool_calls: output.tool_calls,
         ..Default::default()
     })
-}
-
-// ---------------------------------------------------------------------------
-// Cron step
-// ---------------------------------------------------------------------------
-
-async fn execute_cron_step<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &mut RoutineState,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-) -> Result<StepResult>
-where
-    P: ProviderRuntime,
-{
-    let config = CronStepConfig::from_config(&step.config, step.agent.clone(), None)?;
-
-    debug!(cycle = 1u32, step = %step.name, "Cron cycle");
-
-    let cycle_result = match &config.mode {
-        CronMode::Agent(agent) => {
-            let (routine_ctx, step_ctx) = build_routine_ctx(state);
-            let builder = apply_session_binding_memory_scope(
-                provider.agent(agent).await?,
-                state.input.session_binding.as_ref(),
-            )
-            .with_routine_context(routine_ctx)
-            .with_step_context(step_ctx);
-            let builder = scope_tools_to_work_dir(builder, state);
-            let runner =
-                super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
-                    .build()
-                    .await?;
-            // Use AgentRunKind::Cron so the agent's cron_task template is selected.
-            let inner_task = state
-                .input
-                .task_id
-                .map(|_| build_task(state, state.input.description.clone()))
-                .transpose()?;
-            let task = attach_location(
-                AgentRun {
-                    kind: AgentRunKind::Cron(CronInput {
-                        task: inner_task,
-                        project: state.input.project.clone(),
-                        schedule: crate::routines::types::CronSchedule::Interval(config.interval),
-                        start_at: None,
-                        timeout: config.timeout,
-                    }),
-                    execution: Default::default(),
-                },
-                state,
-            );
-
-            gate::execute_with_pass_verdict(
-                &runner,
-                task,
-                state.input.project.clone(),
-                step.id,
-                step_run_id,
-                events_tx,
-            )
-            .await?
-        }
-        CronMode::Lambda(lambda_id) => {
-            anyhow::bail!("Cron lambda steps are no longer supported (lambda_id={lambda_id})")
-        }
-    };
-
-    if let Some(passed) = gate::extract_pass_verdict(&cycle_result.messages) {
-        let reasoning = gate::extract_pass_reasoning(&cycle_result.messages);
-        let verdict_output = gate::extract_pass_output(&cycle_result.messages);
-        let step_output = verdict_output
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                reasoning
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or(&cycle_result.text)
-            .to_string();
-        let data = serde_json::json!({
-            "verdict": if passed { "pass" } else { "fail" },
-            "reasoning": reasoning,
-            "output": verdict_output,
-        });
-        return Ok(StepResult {
-            passed,
-            output: step_output,
-            data,
-            step_id: step.id,
-            step_name: step.name.clone(),
-            input_tokens: cycle_result.input_tokens,
-            output_tokens: cycle_result.output_tokens,
-            ..Default::default()
-        });
-    }
-
-    bail!(
-        "Cron step '{}' completed without required pass_verdict",
-        step.name
-    );
 }
 
 // ---------------------------------------------------------------------------

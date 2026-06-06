@@ -213,18 +213,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
         },
         TemplateVarGroup {
             name: "Gate",
-            variables: vec![
-                TemplateVarDef {
-                    name: "gate.criteria",
-                    description: "Pass/fail criteria for gate evaluation",
-                    group: "Gate",
-                },
-                TemplateVarDef {
-                    name: "gate.previous_output",
-                    description: "Output from the previous step being evaluated",
-                    group: "Gate",
-                },
-            ],
+            variables: vec![TemplateVarDef {
+                name: "gate.previous_output",
+                description: "Output from the previous step being evaluated",
+                group: "Gate",
+            }],
         },
         TemplateVarGroup {
             name: "Heartbeat",

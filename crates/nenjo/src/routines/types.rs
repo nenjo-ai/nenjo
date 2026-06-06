@@ -293,7 +293,6 @@ pub use crate::manifest::RoutineEdgeCondition as EdgeCondition;
 pub enum StepType {
     Agent,
     Council,
-    Cron,
     Gate,
     Lambda,
     Terminal,
@@ -304,7 +303,6 @@ impl StepType {
     pub fn from_str_value(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "council" => Self::Council,
-            "cron" => Self::Cron,
             "gate" => Self::Gate,
             "lambda" => Self::Lambda,
             "terminal" => Self::Terminal,
@@ -315,72 +313,8 @@ impl StepType {
 }
 
 // ---------------------------------------------------------------------------
-// CronStepConfig / LambdaStepConfig
+// LambdaStepConfig
 // ---------------------------------------------------------------------------
-
-/// Execution mode for a cron step.
-#[derive(Debug, Clone)]
-pub enum CronMode {
-    Agent(Slug),
-    Lambda(Uuid),
-}
-
-/// Configuration for a cron-type routine step.
-pub struct CronStepConfig {
-    pub interval: Duration,
-    pub timeout: Duration,
-    pub mode: CronMode,
-}
-
-impl CronStepConfig {
-    pub fn from_config(
-        config: &serde_json::Value,
-        agent: Option<Slug>,
-        lambda_id: Option<Uuid>,
-    ) -> Result<Self> {
-        let interval = config
-            .get("interval")
-            .and_then(|v| v.as_str())
-            .map(parse_duration)
-            .transpose()?
-            .unwrap_or(Duration::from_secs(60));
-
-        let timeout = config
-            .get("timeout")
-            .and_then(|v| v.as_str())
-            .map(parse_duration)
-            .transpose()?
-            .unwrap_or(Duration::from_secs(24 * 3600));
-
-        let resolved_lambda = lambda_id.or_else(|| {
-            config
-                .get("lambda_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-        });
-
-        let resolved_agent = agent.or_else(|| {
-            config
-                .get("agent")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Slug::parse(s).ok())
-        });
-
-        let mode = if let Some(lid) = resolved_lambda {
-            CronMode::Lambda(lid)
-        } else if let Some(aid) = resolved_agent {
-            CronMode::Agent(aid)
-        } else {
-            bail!("Cron step requires either an agent or a lambda_id");
-        };
-
-        Ok(Self {
-            interval,
-            timeout,
-            mode,
-        })
-    }
-}
 
 /// Configuration for a lambda-type routine step.
 pub struct LambdaStepConfig {
@@ -677,31 +611,6 @@ mod tests {
     fn parse_schedule_invalid() {
         assert!(parse_schedule("").is_err());
         assert!(parse_schedule("not a schedule").is_err());
-    }
-
-    #[test]
-    fn cron_config_defaults() {
-        let id = Slug::derive("agent");
-        let config = serde_json::json!({});
-        let cron = CronStepConfig::from_config(&config, Some(id.clone()), None).unwrap();
-        assert_eq!(cron.interval, Duration::from_secs(60));
-        assert_eq!(cron.timeout, Duration::from_secs(86400));
-        assert!(matches!(cron.mode, CronMode::Agent(aid) if aid == id));
-    }
-
-    #[test]
-    fn cron_config_lambda_precedence() {
-        let agent_id = Slug::derive("agent");
-        let lambda_id = Uuid::new_v4();
-        let config = serde_json::json!({});
-        let cron = CronStepConfig::from_config(&config, Some(agent_id), Some(lambda_id)).unwrap();
-        assert!(matches!(cron.mode, CronMode::Lambda(lid) if lid == lambda_id));
-    }
-
-    #[test]
-    fn cron_config_missing_both() {
-        let config = serde_json::json!({});
-        assert!(CronStepConfig::from_config(&config, None, None).is_err());
     }
 
     #[test]

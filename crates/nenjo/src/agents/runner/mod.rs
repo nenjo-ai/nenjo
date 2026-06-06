@@ -429,7 +429,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             AgentRunKind::Chat { .. } => "chat",
             AgentRunKind::FollowUp { .. } => "follow_up",
             AgentRunKind::Task(_) => "task",
-            AgentRunKind::Cron { .. } => "cron",
             AgentRunKind::Heartbeat { .. } => "heartbeat",
             AgentRunKind::Gate { .. } => "gate",
         };
@@ -488,9 +487,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         let task_id = match &run.kind {
             AgentRunKind::Task(task) => Some(task.task_id),
-            AgentRunKind::Cron(crate::input::CronInput {
-                task: Some(task), ..
-            }) => Some(task.task_id),
             AgentRunKind::Gate(crate::input::GateInput {
                 task: Some(task), ..
             }) => Some(task.task_id),
@@ -523,18 +519,8 @@ fn raw_user_message(run: &AgentRun) -> String {
                 task.description.clone()
             }
         }
-        AgentRunKind::Cron(crate::input::CronInput {
-            task: Some(task), ..
-        }) => {
-            if task.description.is_empty() {
-                task.title.clone()
-            } else {
-                task.description.clone()
-            }
-        }
-        AgentRunKind::Cron(_) => String::new(),
         AgentRunKind::Heartbeat(_) => String::new(),
-        AgentRunKind::Gate(gate) => gate.criteria.clone(),
+        AgentRunKind::Gate(gate) => gate.previous_result.output.clone(),
     }
 }
 

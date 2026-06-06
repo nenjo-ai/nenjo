@@ -198,7 +198,7 @@ pub struct RoutineMetadata {
     pub entry_steps: Vec<Slug>,
 }
 
-/// A single step in a routine DAG (agent, gate, council, cron, or terminal).
+/// A single step in a routine DAG (agent, gate, council, or terminal).
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct RoutineStepManifest {
@@ -232,7 +232,6 @@ pub enum RoutineStepType {
     #[default]
     Agent,
     Council,
-    Cron,
     Gate,
     Terminal,
     TerminalFail,
@@ -243,7 +242,6 @@ impl std::fmt::Display for RoutineStepType {
         let value = match self {
             Self::Agent => "agent",
             Self::Council => "council",
-            Self::Cron => "cron",
             Self::Gate => "gate",
             Self::Terminal => "terminal",
             Self::TerminalFail => "terminal_fail",
@@ -365,8 +363,6 @@ pub struct PromptTemplates {
     pub chat_task: String,
     #[serde(default, rename = "gate")]
     pub gate_eval: String,
-    #[serde(default, rename = "cron")]
-    pub cron_task: String,
     #[serde(default, rename = "heartbeat")]
     pub heartbeat_task: String,
 }

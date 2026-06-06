@@ -71,7 +71,6 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
                 task_execution: "Task title: {{ task.title }}\nTask description: {{ task.description }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()

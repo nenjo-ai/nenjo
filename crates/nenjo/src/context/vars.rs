@@ -22,7 +22,6 @@ pub struct RenderContextVars {
 
     // Separate vars
     pub chat_message: String,
-    pub gate_criteria: String,
     pub gate_previous_output: String,
     pub heartbeat_previous_output: String,
     pub heartbeat_last_run_at: String,
@@ -115,7 +114,6 @@ impl RenderContextVars {
             // Chat
             ("chat.message", &self.chat_message),
             // Gate
-            ("gate.criteria", &self.gate_criteria),
             ("gate.previous_output", &self.gate_previous_output),
             // Heartbeat
             ("heartbeat.previous_output", &self.heartbeat_previous_output),

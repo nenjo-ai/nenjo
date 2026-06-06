@@ -181,7 +181,6 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
                 name: step.name,
                 step_type: match step.step_type.as_str() {
                     "council" => RoutineStepType::Council,
-                    "cron" => RoutineStepType::Cron,
                     "gate" => RoutineStepType::Gate,
                     "terminal" => RoutineStepType::Terminal,
                     "terminal_fail" => RoutineStepType::TerminalFail,

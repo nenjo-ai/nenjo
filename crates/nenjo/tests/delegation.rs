@@ -40,7 +40,6 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
                 task_execution: "Execute: {{ task.title }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()

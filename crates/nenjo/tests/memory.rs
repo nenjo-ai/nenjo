@@ -90,7 +90,6 @@ fn test_manifest() -> Manifest {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()
@@ -644,7 +643,6 @@ async fn ability_inherits_memory_vars() {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()
@@ -768,7 +766,6 @@ async fn domain_expansion_preserves_memory() {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()

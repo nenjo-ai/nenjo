@@ -237,15 +237,12 @@ impl TaskContext {
 #[serde(rename = "gate_evaluation")]
 pub struct GateContext {
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub criteria: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub previous_output: String,
 }
 
 impl GateContext {
     pub fn from_vars(vars: &HashMap<String, String>) -> Self {
         Self {
-            criteria: vars.get("gate.criteria").cloned().unwrap_or_default(),
             previous_output: vars
                 .get("gate.previous_output")
                 .cloned()
@@ -254,26 +251,7 @@ impl GateContext {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.criteria.is_empty() && self.previous_output.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "cron_execution")]
-pub struct CronContext {
-    pub scheduled_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task: Option<TaskContext>,
-}
-
-impl CronContext {
-    /// Create a new CronContext from a HashMap of variables.
-    pub fn from_vars(vars: &HashMap<String, String>) -> Self {
-        let task = TaskContext::from_vars(vars);
-        Self {
-            scheduled_at: vars.get("global.timestamp").cloned().unwrap_or_default(),
-            task: if task.is_empty() { None } else { Some(task) },
-        }
+        self.previous_output.is_empty()
     }
 }
 
@@ -447,37 +425,11 @@ mod tests {
     #[test]
     fn test_gate_context_xml() {
         let gate = GateContext {
-            criteria: "All tests pass".into(),
             previous_output: "3 tests failed".into(),
         };
         let xml = nenjo_xml::to_xml_pretty(&gate, 2);
         assert!(xml.contains("<gate_evaluation>"));
-        assert!(xml.contains("<criteria>All tests pass</criteria>"));
-    }
-
-    #[test]
-    fn test_cron_context_xml() {
-        let cron = CronContext {
-            scheduled_at: "2026-03-28T10:00:00Z".into(),
-            task: Some(TaskContext {
-                id: "TASK-1".into(),
-                slug: "daily".into(),
-                status: "open".into(),
-                priority: "low".into(),
-                task_type: "cron".into(),
-                title: "Daily check".into(),
-                description: String::new(),
-                acceptance_criteria: String::new(),
-                tags: String::new(),
-                source: String::new(),
-                complexity: String::new(),
-            }),
-        };
-        let xml = nenjo_xml::to_xml_pretty(&cron, 2);
-        assert!(xml.contains("<cron_execution>"));
-        assert!(xml.contains("<scheduled_at>2026-03-28T10:00:00Z</scheduled_at>"));
-        assert!(xml.contains("<task"));
-        assert!(xml.contains("id=\"TASK-1\""));
+        assert!(xml.contains("<previous_output>3 tests failed</previous_output>"));
     }
 
     #[test]

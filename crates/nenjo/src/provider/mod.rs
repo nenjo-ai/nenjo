@@ -395,7 +395,6 @@ where
         debug!(
             agent = %agent.name,
             system_prompt_len = prompt_config.system_prompt.len(),
-            cron_task_len = prompt_config.templates.cron_task.len(),
             task_execution_len = prompt_config.templates.task_execution.len(),
             "Loaded typed prompt_config"
         );

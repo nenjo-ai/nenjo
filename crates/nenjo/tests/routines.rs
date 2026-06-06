@@ -328,9 +328,8 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
                 task_execution: "Execute: {{ task.title }}\n{{ task.description }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval:
-                    "Evaluate: {{ gate.criteria }}\n\nPrevious output:\n{{ gate.previous_output }}"
+                    "Evaluate:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
                         .into(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()
@@ -611,7 +610,6 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
 
     let mut coder = agent(agent_id, "coder", model_id);
     coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
-    coder.prompt_config.templates.cron_task = "CRON TEMPLATE".into();
 
     let routine = RoutineManifest {
         id: routine_id,
@@ -679,10 +677,6 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
         messages_contain(&seen_messages, "TASK TEMPLATE"),
         "cron-triggered agent steps should use task_execution. Messages: {seen_messages:#?}"
     );
-    assert!(
-        !messages_contain(&seen_messages, "CRON TEMPLATE"),
-        "cron-triggered agent steps should not use cron_task. Messages: {seen_messages:#?}"
-    );
 }
 
 #[tokio::test]
@@ -694,7 +688,6 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
 
     let mut coder = agent(agent_id, "coder", model_id);
     coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
-    coder.prompt_config.templates.cron_task = "CRON TEMPLATE".into();
 
     let routine = RoutineManifest {
         id: routine_id,
@@ -758,10 +751,6 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
         messages_contain(&seen_messages, "TASK TEMPLATE"),
         "cron-triggered agent steps without a project should use task_execution. Messages: {seen_messages:#?}"
     );
-    assert!(
-        !messages_contain(&seen_messages, "CRON TEMPLATE"),
-        "cron-triggered agent steps without a project should not use cron_task. Messages: {seen_messages:#?}"
-    );
 }
 
 #[tokio::test]
@@ -774,7 +763,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
 
     let mut reviewer = agent(agent_id, "reviewer", model_id);
     reviewer.prompt_config.templates.gate_eval =
-        "Gate instructions:\n{{ routine.step.instructions }}\n\nCriteria:\n{{ gate.criteria }}"
+        "Gate instructions:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
             .into();
 
     let routine = RoutineManifest {
@@ -792,7 +781,6 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
             council: None,
             agent: Some(Slug::derive("reviewer")),
             config: serde_json::json!({
-                "criteria": "Output satisfies the task.",
                 "instructions": instructions,
             }),
             order_index: 0,
@@ -1275,7 +1263,7 @@ async fn gate_step_pass() {
                 step_type: RoutineStepType::Gate,
                 council: None,
                 agent: Some(Slug::derive("coder")),
-                config: serde_json::json!({ "criteria": "Code must compile and have tests." }),
+                config: serde_json::json!({ "instructions": "Code must compile and have tests." }),
                 order_index: 1,
             },
             RoutineStepManifest {
@@ -1380,7 +1368,7 @@ async fn gate_always_edge_is_invalid() {
                 step_type: RoutineStepType::Gate,
                 council: None,
                 agent: Some(Slug::derive("coder")),
-                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                config: serde_json::json!({ "instructions": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
@@ -1484,7 +1472,7 @@ async fn gate_on_fail_routes_back_before_completion() {
                 step_type: RoutineStepType::Gate,
                 council: None,
                 agent: Some(Slug::derive("coder")),
-                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                config: serde_json::json!({ "instructions": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
@@ -1619,7 +1607,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
                 step_type: RoutineStepType::Gate,
                 council: None,
                 agent: Some(Slug::derive("coder")),
-                config: serde_json::json!({ "criteria": "Acceptance criteria must pass." }),
+                config: serde_json::json!({ "instructions": "Acceptance criteria must pass." }),
                 order_index: 1,
             },
             RoutineStepManifest {
@@ -2152,7 +2140,7 @@ async fn council_vote() {
 
 /// Cron execution: runs one scheduled routine firing.
 #[tokio::test]
-async fn cron_execution() {
+async fn scheduled_cron_routine_execution() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
@@ -2172,7 +2160,7 @@ async fn cron_execution() {
             step_type: RoutineStepType::Gate,
             council: None,
             agent: Some(Slug::derive("monitor")),
-            config: serde_json::json!({ "criteria": "Check system health" }),
+            config: serde_json::json!({ "instructions": "Check system health" }),
             order_index: 0,
         }],
         edges: vec![],

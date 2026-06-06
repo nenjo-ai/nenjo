@@ -336,7 +336,6 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             AgentRunKind::Chat { .. } => ("Chat", prompt_config.templates.chat_task.as_str()),
             AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
             AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
-            AgentRunKind::Cron { .. } => ("Cron", prompt_config.templates.cron_task.as_str()),
             AgentRunKind::Heartbeat { .. } => {
                 ("Heartbeat", prompt_config.templates.heartbeat_task.as_str())
             }

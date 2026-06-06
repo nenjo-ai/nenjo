@@ -29,15 +29,8 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             ctx.chat_message = follow_up.message.clone();
         }
         AgentRunKind::Gate(gate) => {
-            ctx.gate_criteria = gate.criteria.clone();
             ctx.gate_previous_output = gate.previous_result.output.clone();
             if let Some(task) = &gate.task {
-                ctx.task = task_to_context(task);
-            }
-            ctx.git = git_to_context(run.execution.project_location.as_ref());
-        }
-        AgentRunKind::Cron(cron) => {
-            if let Some(task) = &cron.task {
                 ctx.task = task_to_context(task);
             }
             ctx.git = git_to_context(run.execution.project_location.as_ref());
@@ -211,7 +204,6 @@ pub struct FollowUpInput {
 #[derive(Debug, Clone)]
 pub struct GateInput {
     pub previous_result: StepResult,
-    pub criteria: String,
     pub project: Option<Slug>,
     pub task: Option<TaskInput>,
 }
@@ -276,7 +268,6 @@ pub enum AgentRunKind {
     Chat(ChatInput),
     FollowUp(FollowUpInput),
     Gate(GateInput),
-    Cron(CronInput),
     Heartbeat(HeartbeatInput),
 }
 
