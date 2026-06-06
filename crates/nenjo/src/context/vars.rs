@@ -27,8 +27,6 @@ pub struct RenderContextVars {
     pub heartbeat_previous_output: String,
     pub heartbeat_last_run_at: String,
     pub heartbeat_next_run_at: String,
-    pub subtask_parent_task: String,
-    pub subtask_description: String,
     pub timestamp: String,
 
     // Pre-computed memory vars (memories, memories.core, etc.)
@@ -123,9 +121,6 @@ impl RenderContextVars {
             ("heartbeat.previous_output", &self.heartbeat_previous_output),
             ("heartbeat.last_run_at", &self.heartbeat_last_run_at),
             ("heartbeat.next_run_at", &self.heartbeat_next_run_at),
-            // Subtask
-            ("subtask.parent_task", &self.subtask_parent_task),
-            ("subtask.description", &self.subtask_description),
             // Agent (self) — singular XML + fields
             ("self", self_xml.as_str()),
             ("agent.slug", &self._self.slug),

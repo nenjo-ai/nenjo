@@ -1825,7 +1825,7 @@ async fn council_decompose() {
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
             verdict_response("1. Do the thing", "pass", "Decomposition is complete"),
-            verdict_response("Did the thing", "pass", "Subtask is complete"),
+            verdict_response("Did the thing", "pass", "Assignment is complete"),
             verdict_response("Council synthesis complete.", "pass", "Council agrees"),
         ]))
         .with_tool_factory(NoopToolFactory)

@@ -432,7 +432,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             AgentRunKind::Cron { .. } => "cron",
             AgentRunKind::Heartbeat { .. } => "heartbeat",
             AgentRunKind::Gate { .. } => "gate",
-            AgentRunKind::CouncilSubtask { .. } => "council_subtask",
         };
         let domain_label = inst
             .prompt
@@ -536,7 +535,6 @@ fn raw_user_message(run: &AgentRun) -> String {
         AgentRunKind::Cron(_) => String::new(),
         AgentRunKind::Heartbeat(_) => String::new(),
         AgentRunKind::Gate(gate) => gate.criteria.clone(),
-        AgentRunKind::CouncilSubtask(subtask) => subtask.subtask_description.clone(),
     }
 }
 

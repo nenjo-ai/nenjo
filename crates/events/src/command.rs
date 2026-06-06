@@ -74,6 +74,12 @@ pub enum Command {
         /// If set, routes to a specific agent; otherwise uses the default.
         #[serde(default)]
         agent: Option<String>,
+        /// Typed chat target. New clients should send this with `target`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<String>,
+        /// Target slug matching `target_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
         /// Active domain session context, if any.
         #[serde(default)]
         domain_session_id: Option<Uuid>,

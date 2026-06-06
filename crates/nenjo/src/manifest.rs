@@ -199,17 +199,30 @@ pub struct RoutineMetadata {
 }
 
 /// A single step in a routine DAG (agent, gate, council, cron, or terminal).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct RoutineStepManifest {
+    #[builder(default = "Uuid::new_v4()")]
     pub id: Uuid,
     pub slug: Slug,
     pub routine: Slug,
     pub name: String,
+    #[builder(default)]
     pub step_type: RoutineStepType,
+    #[builder(default, setter(strip_option))]
     pub council: Option<Slug>,
+    #[builder(default, setter(strip_option))]
     pub agent: Option<Slug>,
+    #[builder(default = "serde_json::json!({})")]
     pub config: serde_json::Value,
+    #[builder(default)]
     pub order_index: i32,
+}
+
+impl RoutineStepManifest {
+    pub fn builder() -> RoutineStepManifestBuilder {
+        RoutineStepManifestBuilder::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -808,5 +821,26 @@ mod tests {
             model_manifest_slug("openrouter", "anthropic/claude-3.5-sonnet").as_str(),
             "openrouter_anthropic_claude_3_5_sonnet"
         );
+    }
+
+    #[test]
+    fn routine_step_builder_defaults_runtime_fields() {
+        let step = RoutineStepManifest::builder()
+            .with_slug(Slug::derive("council_chat"))
+            .with_routine(Slug::derive("council_chat"))
+            .with_name("Council Chat")
+            .with_step_type(RoutineStepType::Council)
+            .with_council(Slug::derive("strategy_council"))
+            .build()
+            .unwrap();
+
+        assert_eq!(step.step_type, RoutineStepType::Council);
+        assert_eq!(
+            step.council.as_ref().map(Slug::as_str),
+            Some("strategy_council")
+        );
+        assert!(step.agent.is_none());
+        assert_eq!(step.config, serde_json::json!({}));
+        assert_eq!(step.order_index, 0);
     }
 }

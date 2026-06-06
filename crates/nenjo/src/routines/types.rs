@@ -7,8 +7,9 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::Slug;
 use crate::input::{RoutineRun, RoutineRunKind, TaskInput};
-use crate::{IntoSlug, Slug};
+use crate::manifest::ProjectManifest;
 
 /// Outcome of a routine step execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -38,7 +39,7 @@ pub struct StepResult {
 /// Input context for a routine execution.
 ///
 /// ```ignore
-/// let input = RoutineInput::new("demo_project", "Implement auth", "Add JWT authentication")
+/// let input = RoutineInput::new("Implement auth", "Add JWT authentication")
 ///     .with_task_id(task_id)
 ///     .with_execution_run_id(run_id)
 ///     .with_tags(vec!["auth".into(), "security".into()]);
@@ -72,13 +73,9 @@ pub struct SessionBinding {
 }
 
 impl RoutineInput {
-    pub fn new(
-        project: impl IntoSlug,
-        title: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
-            project: Some(project.into_slug()),
+            project: None,
             title: title.into(),
             description: description.into(),
             task_id: None,
@@ -155,13 +152,14 @@ impl RoutineInput {
         self
     }
 
-    pub fn with_project_context(
-        mut self,
-        name: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
-        self.project_name = Some(name.into());
-        self.project_description = Some(description.into());
+    pub fn with_project_context(mut self, project: &ProjectManifest) -> Self {
+        self.project = Some(project.slug.clone());
+        self.project_name = Some(project.name.clone());
+        self.project_description = Some(project.description.clone().unwrap_or_default());
+        let metadata = nenjo_xml::types::metadata_json_to_xml(&project.settings);
+        if !metadata.is_empty() {
+            self.project_metadata = Some(metadata);
+        }
         self
     }
 
@@ -191,31 +189,16 @@ impl RoutineInput {
                 let location = run.execution.project_location;
                 let mut input = match cron.task {
                     Some(task) => RoutineInput::from_task_input(task),
-                    None => RoutineInput {
-                        project: cron.project,
-                        title: "Cron".to_string(),
-                        description: "Cron-triggered routine".to_string(),
-                        task_id: None,
-                        execution_run_id: None,
-                        acceptance_criteria: None,
-                        tags: Vec::new(),
-                        slug: None,
-                        status: None,
-                        priority: None,
-                        task_type: None,
-                        complexity: None,
-                        source: None,
-                        git: None,
-                        project_name: None,
-                        project_description: None,
-                        project_metadata: None,
-                        is_cron_trigger: false,
-                        session_binding: None,
-                    },
-                }
-                .with_git(location.and_then(|location| location.git))
-                .with_cron_trigger()
-                .with_execution_run_id_opt(run.execution.execution_run_id);
+                    None => {
+                        let mut input = RoutineInput::new("Cron", "Cron-triggered routine");
+                        input.project = cron.project;
+                        input
+                    }
+                };
+                input = input
+                    .with_git(location.and_then(|location| location.git))
+                    .with_cron_trigger()
+                    .with_execution_run_id_opt(run.execution.execution_run_id);
                 if let Some(binding) = run.execution.session_binding {
                     input = input.with_session_binding(binding);
                 }
@@ -225,30 +208,11 @@ impl RoutineInput {
     }
 
     fn from_task_input(task: TaskInput) -> Self {
-        let mut input = RoutineInput {
-            project: task.project,
-            title: task.title,
-            description: task.description,
-            task_id: None,
-            execution_run_id: None,
-            acceptance_criteria: None,
-            tags: Vec::new(),
-            slug: None,
-            status: None,
-            priority: None,
-            task_type: None,
-            complexity: None,
-            source: None,
-            git: None,
-            project_name: None,
-            project_description: None,
-            project_metadata: None,
-            is_cron_trigger: false,
-            session_binding: None,
-        }
-        .with_tags(task.tags)
-        .with_acceptance_criteria(task.acceptance_criteria)
-        .with_task_id(task.task_id);
+        let mut input = RoutineInput::new(task.title, task.description)
+            .with_tags(task.tags)
+            .with_acceptance_criteria(task.acceptance_criteria)
+            .with_task_id(task.task_id);
+        input.project = task.project;
         if let Some(slug) = task.slug {
             input = input.with_slug(slug);
         }
@@ -742,7 +706,15 @@ mod tests {
 
     #[test]
     fn routine_input_builder() {
-        let input = RoutineInput::new("demo_project", "Title", "Desc")
+        let project = ProjectManifest {
+            id: Uuid::new_v4(),
+            name: "Demo Project".to_string(),
+            slug: Slug::derive("demo_project"),
+            description: Some("Project description".to_string()),
+            settings: serde_json::json!({}),
+        };
+        let input = RoutineInput::new("Title", "Desc")
+            .with_project_context(&project)
             .with_tags(vec!["a".into()])
             .with_cron_trigger();
         assert_eq!(
@@ -752,6 +724,40 @@ mod tests {
         assert_eq!(input.title, "Title");
         assert!(input.is_cron_trigger);
         assert_eq!(input.tags, vec!["a"]);
+    }
+
+    #[test]
+    fn routine_input_builder_uses_project_context_for_project_data() {
+        let project = ProjectManifest {
+            id: Uuid::new_v4(),
+            name: "Demo Project".to_string(),
+            slug: Slug::derive("demo_project"),
+            description: Some("Project description".to_string()),
+            settings: serde_json::json!({
+                "context": "Use Postgres",
+                "metadata": {
+                    "owner": "platform"
+                }
+            }),
+        };
+
+        let input = RoutineInput::new("Title", "Desc").with_project_context(&project);
+
+        assert_eq!(
+            input.project.as_ref().map(Slug::as_str),
+            Some("demo_project")
+        );
+        assert_eq!(input.project_name.as_deref(), Some("Demo Project"));
+        assert_eq!(
+            input.project_description.as_deref(),
+            Some("Project description")
+        );
+        assert!(
+            input
+                .project_metadata
+                .as_deref()
+                .is_some_and(|metadata| !metadata.is_empty())
+        );
     }
 
     #[test]

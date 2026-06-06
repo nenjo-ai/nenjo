@@ -31,6 +31,8 @@ pub struct ChatCommandRequest<'a> {
     pub content: &'a str,
     pub project: Option<&'a str>,
     pub agent: Option<&'a str>,
+    pub target_type: Option<&'a str>,
+    pub target: Option<&'a str>,
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
@@ -127,12 +129,31 @@ where
         content,
         project,
         agent,
+        target_type,
+        target,
         session_id,
         domain_session_id,
         domain_activation,
     } = request;
 
+    if target_type == Some("council") {
+        return handle_council_chat(
+            harness,
+            ctx,
+            CouncilChatAdapterRequest {
+                content,
+                project,
+                council: target.context("No council target provided for chat")?,
+                session_id,
+                domain_session_id,
+                domain_activation,
+            },
+        )
+        .await;
+    }
+
     let agent_slug = agent
+        .or(target)
         .map(Slug::parse)
         .transpose()?
         .context("No agent provided for chat")?;
@@ -212,6 +233,65 @@ where
     );
     Ok(())
 }
+
+struct CouncilChatAdapterRequest<'a> {
+    content: &'a str,
+    project: Option<&'a str>,
+    council: &'a str,
+    session_id: Uuid,
+    domain_session_id: Option<Uuid>,
+    domain_activation: Option<DomainActivation>,
+}
+
+async fn handle_council_chat<P, SessionRt, S>(
+    harness: &Harness<P, SessionRt>,
+    ctx: &ChatCommandContext<S>,
+    request: CouncilChatAdapterRequest<'_>,
+) -> Result<()>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender + Clone + 'static,
+{
+    if request.domain_session_id.is_some() || request.domain_activation.is_some() {
+        anyhow::bail!("Council chat does not support domain sessions");
+    }
+
+    let council = Slug::parse(request.council)?;
+    let project = request.project.map(Slug::parse).transpose()?;
+    let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = nenjo::routines::council::execute_council_chat(
+        harness.provider().as_ref(),
+        council.clone(),
+        project.clone(),
+        request.content.to_string(),
+        request.session_id,
+        &events_tx,
+    )
+    .await?;
+
+    let payload = serde_json::json!({
+        "final_output": result.output,
+        "data": result.data,
+        "target_type": "council",
+        "target": council.into_string(),
+    });
+    ctx.response_sink.send(Response::AgentResponse {
+        session_id: Some(request.session_id),
+        payload: StreamEvent::Done {
+            payload: Some(payload),
+            encrypted_payload: None,
+            total_input_tokens: result.input_tokens,
+            total_output_tokens: result.output_tokens,
+            project: project.map(|slug| slug.into_string()),
+            agent: None,
+            session_id: Some(request.session_id),
+        },
+    })?;
+
+    Ok(())
+}
+
 /// Cancel in-flight chat executions.
 ///
 /// `ChatCancel` carries `project_id` and optionally `agent_id` but not `session_id`.

@@ -36,10 +36,6 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             }
             ctx.git = git_to_context(run.execution.project_location.as_ref());
         }
-        AgentRunKind::CouncilSubtask(subtask) => {
-            ctx.subtask_parent_task = subtask.parent_task.clone();
-            ctx.subtask_description = subtask.subtask_description.clone();
-        }
         AgentRunKind::Cron(cron) => {
             if let Some(task) = &cron.task {
                 ctx.task = task_to_context(task);
@@ -220,15 +216,6 @@ pub struct GateInput {
     pub task: Option<TaskInput>,
 }
 
-/// Council subtask input used by routine internals.
-#[derive(Debug, Clone)]
-pub struct CouncilSubtaskInput {
-    pub parent_task: String,
-    pub subtask_description: String,
-    pub subtask_index: usize,
-    pub project: Option<Slug>,
-}
-
 /// Cron execution input.
 #[derive(Debug, Clone)]
 pub struct CronInput {
@@ -289,7 +276,6 @@ pub enum AgentRunKind {
     Chat(ChatInput),
     FollowUp(FollowUpInput),
     Gate(GateInput),
-    CouncilSubtask(CouncilSubtaskInput),
     Cron(CronInput),
     Heartbeat(HeartbeatInput),
 }

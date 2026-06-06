@@ -247,21 +247,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             ],
         },
         TemplateVarGroup {
-            name: "Subtask",
-            variables: vec![
-                TemplateVarDef {
-                    name: "subtask.parent_task",
-                    description: "Parent task context for council subtasks",
-                    group: "Subtask",
-                },
-                TemplateVarDef {
-                    name: "subtask.description",
-                    description: "Subtask description assigned by the council",
-                    group: "Subtask",
-                },
-            ],
-        },
-        TemplateVarGroup {
             name: "Git",
             variables: vec![
                 TemplateVarDef {
