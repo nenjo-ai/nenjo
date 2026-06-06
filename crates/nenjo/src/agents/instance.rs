@@ -301,8 +301,10 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             let mut project_context_vars = vars.clone();
             project_context_vars.remove("project");
             project_context_vars.remove("project.context");
-            let rendered_context =
-                nenjo_xml::template::render_template(&ctx.project.context, &project_context_vars);
+            let rendered_context = self
+                .prompt
+                .renderer
+                .render_template(&ctx.project.context, &project_context_vars);
             ctx.project.context = rendered_context.clone();
             if rendered_context.is_empty() {
                 vars.remove("project.context");
@@ -349,9 +351,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         );
 
         // 7. Render all three prompts with the same vars
-        let system = nenjo_xml::template::render_template(&prompt_config.system_prompt, &vars);
-        let developer = nenjo_xml::template::render_template(&developer, &vars);
-        let user_message = nenjo_xml::template::render_template(task_template, &vars);
+        let system = self
+            .prompt
+            .renderer
+            .render_template(&prompt_config.system_prompt, &vars);
+        let developer = self.prompt.renderer.render_template(&developer, &vars);
+        let user_message = self.prompt.renderer.render_template(task_template, &vars);
 
         BuiltPrompts {
             system,
