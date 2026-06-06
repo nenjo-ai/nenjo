@@ -72,12 +72,95 @@ where
     {
         return None;
     }
+
+    if !registered_worktree(
+        Path::new(&worktree.repo_dir),
+        Path::new(&worktree.work_dir),
+        &worktree.branch,
+    )
+    .await
+    {
+        warn!(
+            repo_dir = %worktree.repo_dir,
+            work_dir = %worktree.work_dir,
+            branch = %worktree.branch,
+            "Ignoring task checkpoint with stale or unregistered git worktree"
+        );
+        return None;
+    }
+
+    let repo_url = repo_remote_url(Path::new(&worktree.repo_dir))
+        .await
+        .unwrap_or_default();
+
     Some(GitContext {
         branch: worktree.branch,
         target_branch: worktree.target_branch.unwrap_or_else(|| "main".to_string()),
         work_dir: worktree.work_dir,
-        repo_url: String::new(),
+        repo_url,
     })
+}
+
+async fn registered_worktree(repo_dir: &Path, work_dir: &Path, branch: &str) -> bool {
+    let output = match tokio::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_dir)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let work_dir = work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| work_dir.to_path_buf());
+
+    worktree_listing_contains(&listing, &work_dir, branch)
+}
+
+fn worktree_listing_contains(listing: &str, work_dir: &Path, branch: &str) -> bool {
+    let branch_ref = format!("refs/heads/{branch}");
+
+    listing.split("\n\n").any(|entry| {
+        let mut entry_worktree = None;
+        let mut entry_branch = None;
+
+        for line in entry.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                entry_worktree = Some(Path::new(path));
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                entry_branch = Some(branch);
+            }
+        }
+
+        let Some(entry_worktree) = entry_worktree else {
+            return false;
+        };
+
+        let entry_worktree = entry_worktree
+            .canonicalize()
+            .unwrap_or_else(|_| entry_worktree.to_path_buf());
+
+        entry_worktree == work_dir && entry_branch == Some(branch_ref.as_str())
+    })
+}
+
+async fn repo_remote_url(repo_dir: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
 }
 
 #[derive(Clone)]
@@ -645,6 +728,14 @@ where
     )
     .await;
 
+    if harness
+        .executions()
+        .get(&task_id)
+        .is_some_and(|active| active.registry_token == registry_token)
+    {
+        harness.executions().remove(&task_id);
+    }
+
     let execution = TaskExecutionShared {
         harness,
         command_ctx: ctx,
@@ -680,7 +771,18 @@ where
 
     let outcome = match result {
         Ok(outcome) => outcome,
-        Err(ref e) => TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0),
+        Err(ref e) => {
+            warn!(
+                task_id = %task_id,
+                execution_run_id = %execution_run_id,
+                routine = ?routine_slug,
+                agent = ?agent_slug,
+                work_dir = ?git_ctx.as_ref().map(|git| git.work_dir.as_str()),
+                error = %format!("{e:#}"),
+                "Task execution failed before terminal outcome"
+            );
+            TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0)
+        }
     };
 
     // If execution itself errored (e.g. routine not found, agent build failure),
@@ -1212,5 +1314,55 @@ fn evict_git_lock(
 ) {
     if std::sync::Arc::strong_count(lock) <= 2 {
         locks.remove(repo_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::worktree_listing_contains;
+
+    #[test]
+    fn worktree_listing_contains_registered_branch() {
+        let listing = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/worktrees/abcd-task
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/agent/abcd/task
+";
+
+        assert!(worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/abcd-task"),
+            "agent/abcd/task"
+        ));
+    }
+
+    #[test]
+    fn worktree_listing_rejects_unregistered_or_wrong_branch() {
+        let listing = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/worktrees/abcd-task
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/agent/abcd/other
+";
+
+        assert!(!worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/abcd-task"),
+            "agent/abcd/task"
+        ));
+        assert!(!worktree_listing_contains(
+            listing,
+            Path::new("/repo/worktrees/missing"),
+            "agent/abcd/other"
+        ));
     }
 }

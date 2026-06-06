@@ -79,7 +79,7 @@ impl TaskWorktreeManager for WorkerTaskWorktrees {
             .parent()
             .unwrap_or(repo_dir)
             .join("worktrees")
-            .join(task_slug);
+            .join(format!("{short_id}-{task_slug}"));
 
         if let Some(parent) = worktree_dir.parent() {
             tokio::fs::create_dir_all(parent).await?;
