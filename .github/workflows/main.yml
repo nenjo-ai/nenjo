@@ -14,7 +14,7 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -26,7 +26,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -39,7 +39,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -51,7 +51,7 @@ jobs:
 
   audit:
     name: Audit Dependencies
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -68,7 +68,7 @@ jobs:
   test:
     name: Test
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -77,3 +77,57 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace
+
+  docker:
+    name: Docker Images
+    needs: build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Build runtime image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: nenjo-worker:ci-runtime
+
+      - name: Smoke test runtime image
+        run: |
+          docker run --rm nenjo-worker:ci-runtime --version
+          docker run --rm --entrypoint nenpm nenjo-worker:ci-runtime --version
+          docker run --rm --entrypoint nenjoup nenjo-worker:ci-runtime --version
+          docker run --rm --entrypoint sh nenjo-worker:ci-runtime -c '
+            python3 --version &&
+            python3 -m venv /tmp/venv &&
+            curl --version &&
+            wget --version &&
+            jq --version &&
+            git --version &&
+            git lfs version &&
+            rg --version &&
+            tar --version
+          '
+
+      - name: Build dev image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: dev
+          load: true
+          tags: nenjo-worker:ci-dev
+
+      - name: Smoke test dev image
+        run: |
+          docker run --rm --entrypoint sh nenjo-worker:ci-dev -c '
+            rustc --version &&
+            cargo --version &&
+            node --version &&
+            npm --version &&
+            gh --version &&
+            docker --version &&
+            python3 -m venv /tmp/venv
+          '

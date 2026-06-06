@@ -5,13 +5,14 @@ on:
 
 permissions:
   contents: write
+  packages: write
   pull-requests: read
   id-token: write
 
 jobs:
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: ${{ github.repository_owner == 'nenjo-ai' }}
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -47,7 +48,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-4vcpu-ubuntu-2404
           - target: aarch64-apple-darwin
             os: macos-latest
     steps:
@@ -87,7 +88,7 @@ jobs:
 
   publish:
     name: Publish release artifacts
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release, build-binaries]
     if: ${{ github.repository_owner == 'nenjo-ai' }}
     steps:
@@ -115,3 +116,81 @@ jobs:
             nenjo-x86_64-unknown-linux-gnu.tar.gz.sha256 \
             nenjo-aarch64-apple-darwin.tar.gz \
             nenjo-aarch64-apple-darwin.tar.gz.sha256
+
+  publish-images:
+    name: Publish Docker images
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: release
+    if: ${{ github.repository_owner == 'nenjo-ai' }}
+    env:
+      IMAGE_NAME: ghcr.io/nenjo-ai/nenjo-worker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Resolve image metadata
+        id: metadata
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish runtime image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.release.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=Nenjo Worker
+            org.opencontainers.image.description=Production Nenjo platform worker image
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            VERSION=${{ needs.release.outputs.tag }}
+            REVISION=${{ steps.metadata.outputs.revision }}
+            CREATED=${{ steps.metadata.outputs.created }}
+          provenance: false
+
+      - name: Build and publish dev image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: dev
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.release.outputs.tag }}-dev
+            ${{ env.IMAGE_NAME }}:dev
+          labels: |
+            org.opencontainers.image.title=Nenjo Worker Dev
+            org.opencontainers.image.description=Developer toolbox image for the Nenjo platform worker
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.tag }}-dev
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            VERSION=${{ needs.release.outputs.tag }}-dev
+            REVISION=${{ steps.metadata.outputs.revision }}
+            CREATED=${{ steps.metadata.outputs.created }}
+          provenance: false

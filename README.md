@@ -17,6 +17,68 @@ The installer places the `nenjo`, `nenpm`, and `nenjoup` binaries in
 installed binary bundle through the bundled `nenjoup` updater. Set
 `NENJO_NO_UPDATE_CHECK=1` to suppress passive update-available notices.
 
+## Docker
+
+The worker image is published to GitHub Container Registry:
+
+```bash
+docker run --rm \
+  -e NENJO_API_KEY="$NENJO_API_KEY" \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -v nenjo-data:/home/nenjo/.nenjo \
+  ghcr.io/nenjo-ai/nenjo-worker:latest
+```
+
+The image runs `nenjo run` by default. Persist `/home/nenjo/.nenjo` to keep
+worker config, manifests, package installs, memory, crypto state, and session
+state across container restarts. Mount a host checkout when the worker should
+operate on a specific workspace:
+
+```bash
+docker run --rm \
+  -e NENJO_API_KEY="$NENJO_API_KEY" \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e NENJO_CAPABILITIES=chat,task,repo \
+  -v nenjo-data:/home/nenjo/.nenjo \
+  -v "$PWD:/home/nenjo/.nenjo/workspace" \
+  ghcr.io/nenjo-ai/nenjo-worker:latest
+```
+
+Use versioned tags for pinned deployments:
+
+```bash
+docker pull ghcr.io/nenjo-ai/nenjo-worker:v0.12.0
+```
+
+Container updates should use `docker pull` and container replacement, not
+`nenjo update`. The images set `NENJO_NO_UPDATE_CHECK=1` so container logs do
+not suggest self-updating an immutable image.
+
+Two image variants are published:
+
+| Image | Use |
+|-------|-----|
+| `ghcr.io/nenjo-ai/nenjo-worker:<version>` / `latest` | Production worker baseline with `git`, `git-lfs`, shell utilities, `rg`, `curl`, `wget`, `jq`, Python, and TLS certificates |
+| `ghcr.io/nenjo-ai/nenjo-worker:<version>-dev` / `dev` | Larger toolbox image with compilers, Rust, Node/npm, GitHub CLI, Docker CLI, editors, and debugging utilities |
+
+Open an interactive shell in the dev image with:
+
+```bash
+docker run --rm -it \
+  -v nenjo-data:/home/nenjo/.nenjo \
+  -v "$PWD:/home/nenjo/.nenjo/workspace" \
+  --entrypoint bash \
+  ghcr.io/nenjo-ai/nenjo-worker:dev
+```
+
+Docker-backed sandboxing from inside the worker is an advanced setup. Mounting
+the host Docker socket gives the container Docker access equivalent to the host
+user:
+
+```bash
+-v /var/run/docker.sock:/var/run/docker.sock
+```
+
 ## Crates
 
 | Crate | Description |
