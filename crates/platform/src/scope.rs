@@ -30,6 +30,8 @@ pub enum ScopeResource {
     Councils,
     /// Context block manifests.
     ContextBlocks,
+    /// User notification sessions and org push notifications.
+    Notify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,6 +86,8 @@ impl PlatformScope {
             "councils:write" => Self::write(ScopeResource::Councils),
             "context_blocks:read" => Self::read(ScopeResource::ContextBlocks),
             "context_blocks:write" => Self::write(ScopeResource::ContextBlocks),
+            "notify:read" => Self::read(ScopeResource::Notify),
+            "notify:write" => Self::write(ScopeResource::Notify),
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -138,6 +142,7 @@ impl fmt::Display for PlatformScope {
                     ScopeResource::Models => "models",
                     ScopeResource::Councils => "councils",
                     ScopeResource::ContextBlocks => "context_blocks",
+                    ScopeResource::Notify => "notify",
                 },
                 match action {
                     ScopeAction::Read => "read",

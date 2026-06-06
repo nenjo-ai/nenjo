@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use nenjo_platform::{ContentScope, ManifestKind, SensitivePayloadEncoder};
+use nenjo_platform::{ManifestKind, SensitivePayloadEncoder};
 
+use crate::crypto::ContentScope;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::{decrypt_text_with_provider, encrypt_text_with_provider};
 
@@ -19,8 +20,15 @@ impl PlatformPayloadEncoder {
 }
 
 fn payload_scope_for_object_type(object_type: &str) -> ContentScope {
+    if object_type == "push.notification" {
+        return ContentScope::Org;
+    }
     ManifestKind::from_encrypted_object_type(object_type)
         .and_then(ManifestKind::encrypted_scope)
+        .map(|scope| match scope {
+            nenjo_platform::ContentScope::User => ContentScope::User,
+            nenjo_platform::ContentScope::Org => ContentScope::Org,
+        })
         .unwrap_or(ContentScope::User)
 }
 
@@ -110,6 +118,14 @@ mod tests {
         assert_eq!(
             payload_scope_for_object_type("chat.message"),
             ContentScope::User
+        );
+    }
+
+    #[test]
+    fn payload_scope_uses_org_for_push_notifications() {
+        assert_eq!(
+            payload_scope_for_object_type("push.notification"),
+            ContentScope::Org
         );
     }
 }

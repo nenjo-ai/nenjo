@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -7,7 +8,10 @@ use nenjo::skills::{SkillProvider, SkillRuntimeState};
 use nenjo::{ToolAutonomy, ToolContext, ToolFactory, ToolSecurity};
 use nenjo_platform::{
     ManifestAccessPolicy, ManifestMcpBackend,
-    tools::{add_manifest_tools, add_project_rest_tools},
+    tools::{
+        PlatformNotificationEmitter, PlatformNotificationToolsBackend, add_manifest_tools,
+        add_notification_tools, add_project_rest_tools,
+    },
 };
 
 use crate::config::Config;
@@ -21,6 +25,20 @@ use super::{
     RuntimeAdapter, ScreenshotTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool,
     WebFetchTool, WebSearchTool,
 };
+
+tokio::task_local! {
+    static PLATFORM_NOTIFICATION_EMITTER: Arc<dyn PlatformNotificationEmitter>;
+}
+
+pub(crate) async fn with_platform_notification_emitter<F, T>(
+    emitter: Arc<dyn PlatformNotificationEmitter>,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    PLATFORM_NOTIFICATION_EMITTER.scope(emitter, future).await
+}
 
 /// A tool factory that builds per-agent tool sets for the worker runtime.
 ///
@@ -169,6 +187,28 @@ where
 
         let project_backend = self.platform.project_backend.clone();
         add_project_rest_tools(&mut tools, project_backend, &policy);
+
+        let notification_sink = PLATFORM_NOTIFICATION_EMITTER
+            .try_with(|emitter| emitter.clone())
+            .ok();
+        let notification_backend = self
+            .platform
+            .platform_client
+            .as_ref()
+            .zip(self.platform.payload_encoder.as_ref())
+            .map(
+                |(client, payload_encoder)| PlatformNotificationToolsBackend {
+                    client: client.clone(),
+                    payload_encoder: payload_encoder.clone(),
+                    cached_org_id: self.platform.cached_org_id,
+                    agent: agent
+                        .slug
+                        .clone()
+                        .unwrap_or_else(|| nenjo::Slug::derive(&agent.name)),
+                    notification_sink,
+                },
+            );
+        add_notification_tools(&mut tools, notification_backend, &policy);
 
         // Web fetch (always included with config, deny-by-default via allowed_hosts)
         if self.config.web_fetch.enabled {

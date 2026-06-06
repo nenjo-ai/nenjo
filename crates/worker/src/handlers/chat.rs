@@ -1,6 +1,7 @@
 //! Chat command handlers.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nenjo::commands::{
@@ -17,7 +18,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::Slug;
-use nenjo_events::{DomainActivation, Response, StreamEvent};
+use nenjo_events::{DomainActivation, EncryptedPayload, Response, StreamEvent};
+use nenjo_platform::tools::PlatformNotificationEmitter;
 
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::ExecutionKind;
@@ -27,6 +29,7 @@ use nenjo_harness::{Harness, ProviderRuntime};
 use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_event};
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
+use crate::tools::with_platform_notification_emitter;
 
 #[derive(Clone)]
 pub struct ChatCommandContext<S> {
@@ -59,6 +62,26 @@ pub struct ChatSlashCommandRequest<'a> {
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
+}
+
+struct ChatNotificationEmitter<S> {
+    response_sink: S,
+}
+
+impl<S> PlatformNotificationEmitter for ChatNotificationEmitter<S>
+where
+    S: ResponseSender,
+{
+    fn send_push_notification(
+        &self,
+        agent: &str,
+        encrypted_payload: EncryptedPayload,
+    ) -> Result<()> {
+        self.response_sink.send(Response::PushNotification {
+            agent: agent.to_string(),
+            encrypted_payload,
+        })
+    }
 }
 
 /// Worker integration methods for chat platform commands.
@@ -253,7 +276,12 @@ where
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
     let aname = agent_name(&manifest, agent_id);
-    let mut stream = harness.chat_stream(chat).await?;
+    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
+        Arc::new(ChatNotificationEmitter {
+            response_sink: ctx.response_sink.clone(),
+        });
+    let mut stream =
+        with_platform_notification_emitter(notification_emitter, harness.chat_stream(chat)).await?;
 
     while let Some(event) = stream.recv().await {
         match event {
@@ -963,6 +991,7 @@ mod tests {
             PlatformToolServices {
                 manifest_backend: None,
                 project_backend: None,
+                ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
             registry,
@@ -1196,6 +1225,7 @@ mod tests {
             PlatformToolServices {
                 manifest_backend: None,
                 project_backend: None,
+                ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
             registry,
@@ -1363,6 +1393,7 @@ mod tests {
             PlatformToolServices {
                 manifest_backend: None,
                 project_backend: None,
+                ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
             registry,
@@ -1561,6 +1592,7 @@ mod tests {
             PlatformToolServices {
                 manifest_backend: None,
                 project_backend: None,
+                ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
             registry,
@@ -1736,6 +1768,7 @@ mod tests {
             PlatformToolServices {
                 manifest_backend: None,
                 project_backend: None,
+                ..Default::default()
             },
             external_mcp,
             registry,

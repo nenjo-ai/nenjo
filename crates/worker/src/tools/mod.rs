@@ -60,3 +60,4 @@ mod factory;
 #[cfg(test)]
 mod factory_tests;
 pub use factory::WorkerToolFactory;
+pub(crate) use factory::with_platform_notification_emitter;

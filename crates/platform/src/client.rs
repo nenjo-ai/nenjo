@@ -506,6 +506,28 @@ pub struct ProjectExecutionListQuery {
     pub offset: Option<i64>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, Default)]
+/// Query parameters for listing notification sessions.
+pub struct NotificationSessionListQuery {
+    /// Optional maximum number of sessions to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Optional result offset for pagination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+/// Query parameters for listing notification messages in a session.
+pub struct NotificationMessageListQuery {
+    /// Optional maximum number of messages to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Optional pagination cursor timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 /// Request body for creating a project execution run.
 pub struct CreateExecutionRequest {
@@ -1492,6 +1514,76 @@ impl PlatformManifestClient {
                 Uuid::parse_str(&raw_org_id).context("authenticated org_id was not a valid UUID")
             }
             status => bail!("fetch authenticated org context failed with status {status}"),
+        }
+    }
+
+    /// List notification sessions visible to the authenticated account.
+    pub async fn list_notification_sessions(
+        &self,
+        query: &NotificationSessionListQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!("{}/api/v1/notifications/sessions", self.base_url))
+            .context("failed to build notification session list URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+            if let Some(offset) = query.offset {
+                pairs.append_pair("offset", &offset.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("failed to list notification sessions")?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<serde_json::Value>()
+                .await
+                .context("failed to decode notification sessions"),
+            status => bail!("notification session list failed with status {status}"),
+        }
+    }
+
+    /// List notification messages in one notification session.
+    pub async fn list_notification_messages(
+        &self,
+        session_id: Uuid,
+        query: &NotificationMessageListQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!(
+            "{}/api/v1/notifications/{session_id}/messages",
+            self.base_url
+        ))
+        .context("failed to build notification message list URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+            if let Some(before) = query.before.as_ref() {
+                pairs.append_pair("before", before);
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to list notification messages for {session_id}"))?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<serde_json::Value>()
+                .await
+                .context("failed to decode notification messages"),
+            status => bail!("notification message list failed with status {status}"),
         }
     }
 

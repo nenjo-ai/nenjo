@@ -7,10 +7,11 @@ use nenjo::manifest::{
     AbilityManifest, DomainManifest, Manifest, McpServerManifest, SkillManifest,
 };
 use nenjo::{ManifestWriter, Slug, ToolFactory};
+use nenjo_events::EncryptedPayload;
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
     DomainManifestBackend, DomainsGetParams, ManifestAccessPolicy, PlatformManifestBackend,
-    PlatformManifestClient, ResourceRef,
+    PlatformManifestClient, ResourceRef, tools::PlatformNotificationEmitter,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -20,6 +21,18 @@ use crate::crypto::WorkerAuthProvider;
 use crate::tools::NativeRuntime;
 use crate::tools::platform_payload::PlatformPayloadEncoder;
 use crate::tools::platform_services::PlatformToolServices;
+
+struct TestNotificationSink;
+
+impl PlatformNotificationEmitter for TestNotificationSink {
+    fn send_push_notification(
+        &self,
+        _agent: &str,
+        _encrypted_payload: EncryptedPayload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 fn test_platform_services(
     config: &crate::config::Config,
@@ -545,6 +558,71 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
     assert!(names.iter().any(|name| name == "start_project_execution"));
     assert!(names.iter().any(|name| name == "pause_project_execution"));
     assert!(names.iter().any(|name| name == "resume_project_execution"));
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+
+    let agent = AgentManifest {
+        id: Uuid::new_v4(),
+        name: "tester".into(),
+        slug: Some(Slug::parse("tester").unwrap()),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec!["notify:read".into()],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "list_notification_sessions")
+    );
+    assert!(names.iter().any(|name| name == "list_notifications"));
+    assert!(!names.iter().any(|name| name == "send_notification"));
+
+    let writer = AgentManifest {
+        platform_scopes: vec!["notify:write".into()],
+        ..agent
+    };
+    let tools = super::with_platform_notification_emitter(Arc::new(TestNotificationSink), async {
+        factory.create_tools(&writer).await
+    })
+    .await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "list_notification_sessions")
+    );
+    assert!(names.iter().any(|name| name == "list_notifications"));
+    assert!(names.iter().any(|name| name == "send_notification"));
 }
 
 #[tokio::test]

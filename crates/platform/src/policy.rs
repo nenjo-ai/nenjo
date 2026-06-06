@@ -107,6 +107,11 @@ mod tests {
         assert!(policy.has_scope(PlatformScope::read(ScopeResource::Library)));
         assert!(policy.has_scope(PlatformScope::write(ScopeResource::Library)));
         assert!(!policy.has_scope(PlatformScope::read(ScopeResource::Projects)));
+
+        let policy = ManifestAccessPolicy::new(vec!["notify:write".into()]);
+        assert!(policy.has_scope(PlatformScope::read(ScopeResource::Notify)));
+        assert!(policy.has_scope(PlatformScope::write(ScopeResource::Notify)));
+        assert!(!policy.has_scope(PlatformScope::from("chat:read")));
     }
 
     #[test]

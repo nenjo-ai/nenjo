@@ -1,6 +1,7 @@
 //! Task execution handlers — with git worktree lifecycle.
 mod runtime;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -16,7 +17,8 @@ use uuid::Uuid;
 
 use nenjo::types::GitContext;
 use nenjo::{ProjectLocation, Slug, TaskInput};
-use nenjo_events::{Response, StepAgent};
+use nenjo_events::{EncryptedPayload, Response, StepAgent};
+use nenjo_platform::tools::PlatformNotificationEmitter;
 use serde_json::json;
 
 use nenjo_harness::events::HarnessEvent;
@@ -32,7 +34,28 @@ use crate::event_bridge::{
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
+use crate::tools::with_platform_notification_emitter;
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
+
+struct TaskNotificationEmitter<S> {
+    response_sink: S,
+}
+
+impl<S> PlatformNotificationEmitter for TaskNotificationEmitter<S>
+where
+    S: ResponseSender,
+{
+    fn send_push_notification(
+        &self,
+        agent: &str,
+        encrypted_payload: EncryptedPayload,
+    ) -> Result<()> {
+        self.response_sink.send(Response::PushNotification {
+            agent: agent.to_string(),
+            encrypted_payload,
+        })
+    }
+}
 
 fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
     agent_name.map(|agent_name| {
@@ -379,7 +402,7 @@ pub struct TaskExecuteRequest<'a> {
 #[async_trait::async_trait]
 pub(crate) trait WorkerTaskHarnessExt<S, W>
 where
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     /// Execute a task command and stream platform responses.
@@ -416,7 +439,7 @@ impl<P, SessionRt, S, W> WorkerTaskHarnessExt<S, W> for Harness<P, SessionRt>
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     async fn handle_task_execute(
@@ -460,7 +483,7 @@ async fn handle_task_execute<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecuteRequest {
@@ -935,7 +958,7 @@ async fn handle_execution_cancel<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut cancelled = 0u32;
@@ -975,7 +998,7 @@ async fn handle_execution_pause<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut paused = 0u32;
@@ -1010,7 +1033,7 @@ async fn handle_execution_resume<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let mut resumed = 0u32;
@@ -1085,7 +1108,7 @@ async fn execute_routine_task<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecutionShared {
@@ -1100,7 +1123,13 @@ where
     if request.slug.is_none() {
         request = request.with_slug(task_slug.to_string());
     }
-    let mut stream = harness.task_stream(request).await?;
+    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
+        Arc::new(TaskNotificationEmitter {
+            response_sink: ctx.response_sink.clone(),
+        });
+    let mut stream =
+        with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
+            .await?;
 
     // Accumulate token metrics from step events as they stream through.
     let mut total_input_tokens: u64 = 0;
@@ -1182,7 +1211,7 @@ async fn execute_direct_task<P, SessionRt, S, W>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
-    S: ResponseSender,
+    S: ResponseSender + Clone + 'static,
     W: TaskWorktreeManager,
 {
     let TaskExecutionShared {
@@ -1208,7 +1237,13 @@ where
         request = request.with_slug(task_slug.to_string());
     }
     let task_started_at = std::time::Instant::now();
-    let mut stream = harness.task_stream(request).await?;
+    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
+        Arc::new(TaskNotificationEmitter {
+            response_sink: ctx.response_sink.clone(),
+        });
+    let mut stream =
+        with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
+            .await?;
 
     loop {
         tokio::select! {
