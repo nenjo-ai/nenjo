@@ -90,6 +90,41 @@ pub enum Command {
         session_id: Uuid,
     },
 
+    /// A user-invoked slash command to be expanded by the worker before chat execution.
+    #[serde(rename = "chat.command")]
+    ChatCommand {
+        /// Client-generated message ID for delivery tracking.
+        #[serde(default)]
+        id: Option<String>,
+        /// The installed slash command, including its leading slash.
+        command: String,
+        /// The user's original message text.
+        content: String,
+        /// Optional encrypted content body. When present, workers should prefer this over `content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<EncryptedPayload>,
+        /// Target project for context scoping.
+        #[serde(default)]
+        project: Option<String>,
+        /// If set, routes to a specific agent; otherwise uses the default.
+        #[serde(default)]
+        agent: Option<String>,
+        /// Typed chat target. New clients should send this with `target`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<String>,
+        /// Target slug matching `target_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Active domain session context, if any.
+        #[serde(default)]
+        domain_session_id: Option<Uuid>,
+        /// Domain activation to apply before processing this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain_activation: Option<DomainActivation>,
+        /// Chat session scope.
+        session_id: Uuid,
+    },
+
     /// Exit an active domain session.
     #[serde(rename = "chat.domain_exit")]
     ChatDomainExit {
@@ -259,6 +294,11 @@ impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChatMessage { session_id, .. } => write!(f, "chat.message(session={session_id})"),
+            Self::ChatCommand {
+                session_id,
+                command,
+                ..
+            } => write!(f, "chat.command(command={command}, session={session_id})"),
             Self::ChatDomainExit {
                 domain_session_id, ..
             } => write!(f, "chat.domain_exit(session={domain_session_id})"),
@@ -318,6 +358,7 @@ impl Command {
     pub fn capability(&self) -> Capability {
         match self {
             Command::ChatMessage { .. }
+            | Command::ChatCommand { .. }
             | Command::ChatDomainExit { .. }
             | Command::ChatCancel { .. }
             | Command::ChatSessionDelete { .. } => Capability::Chat,

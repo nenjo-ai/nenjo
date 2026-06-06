@@ -46,10 +46,10 @@ const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_execution_runs",
     "get_project_execution_run",
 ];
-const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] = &[
-    "create_project",
-    "update_project",
-    "delete_project",
+const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
+    &["create_project", "update_project", "delete_project"];
+const LIBRARY_MANIFEST_READ_TOOLS: &[&str] = &[];
+const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_knowledge_doc",
     "update_knowledge_doc",
     "delete_knowledge_doc",
@@ -99,6 +99,16 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         DOMAIN_WRITE_TOOLS,
     ),
     (
+        ScopeResource::Projects,
+        PROJECT_MANIFEST_READ_TOOLS,
+        PROJECT_MANIFEST_WRITE_TOOLS,
+    ),
+    (
+        ScopeResource::Library,
+        LIBRARY_MANIFEST_READ_TOOLS,
+        LIBRARY_MANIFEST_WRITE_TOOLS,
+    ),
+    (
         ScopeResource::Routines,
         ROUTINE_READ_TOOLS,
         ROUTINE_WRITE_TOOLS,
@@ -134,29 +144,21 @@ pub fn add_manifest_tools(
 
 pub fn add_project_rest_tools<S, E>(
     tools: &mut Vec<Arc<dyn Tool>>,
-    manifest_backend: Option<Arc<dyn ManifestMcpBackend>>,
     project_backend: Option<PlatformProjectToolsBackend<S, E>>,
     policy: &ManifestAccessPolicy,
 ) where
     S: ManifestReader + 'static,
     E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
 {
-    let specs = manifest_tool_specs();
-    if policy.can_read_resource(ScopeResource::Projects) {
-        if let Some(backend) = manifest_backend.as_ref() {
-            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_READ_TOOLS);
-        }
-        if let Some(backend) = project_backend.as_ref() {
-            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
-        }
+    if policy.can_read_resource(ScopeResource::Projects)
+        && let Some(backend) = project_backend.as_ref()
+    {
+        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
     }
-    if policy.can_write_resource(ScopeResource::Projects) {
-        if let Some(backend) = manifest_backend.as_ref() {
-            add_named_manifest_tools(tools, backend.clone(), &specs, PROJECT_MANIFEST_WRITE_TOOLS);
-        }
-        if let Some(backend) = project_backend.as_ref() {
-            add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
-        }
+    if policy.can_write_resource(ScopeResource::Projects)
+        && let Some(backend) = project_backend.as_ref()
+    {
+        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
     }
 }
 

@@ -7,6 +7,8 @@
 use anyhow::Result;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
 use uuid::Uuid;
 
 use crate::Slug;
@@ -38,6 +40,14 @@ pub struct Manifest {
     pub mcp_servers: Vec<McpServerManifest>,
     pub abilities: Vec<AbilityManifest>,
     pub context_blocks: Vec<ContextBlockManifest>,
+    #[serde(default)]
+    pub skills: Vec<SkillManifest>,
+    #[serde(default)]
+    pub commands: Vec<CommandManifest>,
+    #[serde(default)]
+    pub hooks: Vec<HookManifest>,
+    #[serde(default)]
+    pub script_tools: Vec<ScriptToolManifest>,
 }
 
 impl Manifest {
@@ -57,6 +67,10 @@ impl Manifest {
         merge_by_slug(&mut self.mcp_servers, other.mcp_servers);
         merge_by_slug(&mut self.abilities, other.abilities);
         merge_by_slug(&mut self.context_blocks, other.context_blocks);
+        merge_by_slug(&mut self.skills, other.skills);
+        merge_commands(&mut self.commands, other.commands);
+        merge_by_slug(&mut self.hooks, other.hooks);
+        merge_by_slug(&mut self.script_tools, other.script_tools);
     }
 
     /// Insert or replace a single resource in this manifest.
@@ -71,6 +85,10 @@ impl Manifest {
             ManifestResource::McpServer(item) => upsert_by_slug(&mut self.mcp_servers, item),
             ManifestResource::Ability(item) => upsert_by_slug(&mut self.abilities, item),
             ManifestResource::ContextBlock(item) => upsert_by_slug(&mut self.context_blocks, item),
+            ManifestResource::Skill(item) => upsert_by_slug(&mut self.skills, item),
+            ManifestResource::Command(item) => upsert_command(&mut self.commands, item),
+            ManifestResource::Hook(item) => upsert_by_slug(&mut self.hooks, item),
+            ManifestResource::ScriptTool(item) => upsert_by_slug(&mut self.script_tools, item),
         }
     }
 
@@ -86,6 +104,10 @@ impl Manifest {
             ManifestResourceKind::McpServer => self.mcp_servers.retain(|item| item.id != id),
             ManifestResourceKind::Ability => self.abilities.retain(|item| item.id != id),
             ManifestResourceKind::ContextBlock => self.context_blocks.retain(|item| item.id != id),
+            ManifestResourceKind::Skill => self.skills.retain(|item| item.id != id),
+            ManifestResourceKind::Command => self.commands.retain(|item| item.id != id),
+            ManifestResourceKind::Hook => self.hooks.retain(|item| item.id != id),
+            ManifestResourceKind::ScriptTool => self.script_tools.retain(|item| item.id != id),
         }
     }
 }
@@ -105,6 +127,44 @@ fn upsert_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: T) {
 fn merge_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: Vec<T>) {
     for item in incoming {
         upsert_by_slug(items, item);
+    }
+}
+
+fn upsert_command(items: &mut Vec<CommandManifest>, mut incoming: CommandManifest) {
+    let incoming_slug = incoming.manifest_slug();
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|item| item.manifest_slug() == incoming_slug)
+    {
+        preserve_command_runtime_paths(existing, &mut incoming);
+        *existing = incoming;
+    } else {
+        items.push(incoming);
+    }
+}
+
+fn merge_commands(items: &mut Vec<CommandManifest>, incoming: Vec<CommandManifest>) {
+    for item in incoming {
+        upsert_command(items, item);
+    }
+}
+
+fn preserve_command_runtime_paths(existing: &CommandManifest, incoming: &mut CommandManifest) {
+    if incoming.root_dir.as_os_str().is_empty() && !existing.root_dir.as_os_str().is_empty() {
+        incoming.root_dir = existing.root_dir.clone();
+    }
+    if incoming.root_path.trim().is_empty() && !existing.root_path.trim().is_empty() {
+        incoming.root_path = existing.root_path.clone();
+    }
+    if incoming.plugin_root_dir.is_none() {
+        incoming
+            .plugin_root_dir
+            .clone_from(&existing.plugin_root_dir);
+    }
+    if incoming.plugin_root_path.is_none() {
+        incoming
+            .plugin_root_path
+            .clone_from(&existing.plugin_root_path);
     }
 }
 
@@ -142,6 +202,206 @@ fn default_mcp_source_type() -> String {
 }
 
 impl HasManifestSlug for McpServerManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
+    }
+}
+
+/// A Claude-style local skill installed from a package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillManifest {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_skill_entry_path")]
+    pub entry_path: String,
+    #[serde(default)]
+    pub root_path: String,
+    #[serde(default)]
+    pub root_dir: PathBuf,
+    #[serde(default)]
+    pub plugin_root_path: Option<String>,
+    #[serde(default)]
+    pub plugin_root_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub scripts: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub assets: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub hooks: Vec<Slug>,
+    #[serde(default = "default_skill_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+fn default_skill_entry_path() -> String {
+    "SKILL.md".to_string()
+}
+
+fn default_skill_source_type() -> String {
+    "package".to_string()
+}
+
+impl HasManifestSlug for SkillManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
+    }
+}
+
+/// A user-facing slash command installed from a package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandManifest {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_command_entry_path")]
+    pub entry_path: String,
+    #[serde(default)]
+    pub root_path: String,
+    #[serde(default)]
+    pub root_dir: PathBuf,
+    #[serde(default)]
+    pub plugin_root_path: Option<String>,
+    #[serde(default)]
+    pub plugin_root_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub hooks: Vec<Slug>,
+    #[serde(default = "default_command_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+fn default_command_entry_path() -> String {
+    "command.md".to_string()
+}
+
+fn default_command_source_type() -> String {
+    "package".to_string()
+}
+
+impl HasManifestSlug for CommandManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
+    }
+}
+
+/// A dormant runtime hook installed from a package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookManifest {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub event: String,
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(rename = "type")]
+    pub hook_type: String,
+    #[serde(default)]
+    pub command: Option<HookCommandManifest>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub plugin_root_path: Option<String>,
+    #[serde(default)]
+    pub plugin_root_dir: Option<PathBuf>,
+    #[serde(default = "default_hook_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookCommandManifest {
+    pub path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+fn default_hook_source_type() -> String {
+    "package".to_string()
+}
+
+impl HasManifestSlug for HookManifest {
+    fn manifest_slug(&self) -> Slug {
+        Slug::derive(&self.name)
+    }
+}
+
+/// A native Nenjo typed script execution tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptToolManifest {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_script_tool_category")]
+    pub category: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    pub command: ScriptToolCommandManifest,
+    #[serde(default)]
+    pub root_path: String,
+    #[serde(default)]
+    pub root_dir: PathBuf,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default = "default_script_tool_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptToolCommandManifest {
+    pub path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_script_tool_cwd")]
+    pub cwd: String,
+}
+
+fn default_script_tool_category() -> String {
+    "read_write".to_string()
+}
+
+fn default_script_tool_cwd() -> String {
+    "workspace".to_string()
+}
+
+fn default_script_tool_source_type() -> String {
+    "package".to_string()
+}
+
+impl HasManifestSlug for ScriptToolManifest {
     fn manifest_slug(&self) -> Slug {
         Slug::derive(&self.name)
     }
@@ -430,6 +690,10 @@ pub struct AgentManifest {
     #[builder(default)]
     /// MCP server slugs assigned to this agent.
     pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    #[builder(default)]
+    /// Native script tool slugs assigned to this agent.
+    pub script_tools: Vec<Slug>,
     /// Ability slugs assigned to this agent.
     #[serde(default)]
     #[builder(default)]
@@ -556,6 +820,10 @@ pub struct AbilityManifest {
     /// MCP server slugs made available while this ability runs.
     #[builder(default)]
     pub mcp_servers: Vec<Slug>,
+    /// Native script tool slugs made available while this ability runs.
+    #[serde(default)]
+    #[builder(default)]
+    pub script_tools: Vec<Slug>,
     /// Source classification for lifecycle behavior such as native, skill, or package.
     #[serde(default = "default_ability_source_type")]
     #[builder(default = "default_ability_source_type()")]
@@ -643,7 +911,6 @@ pub struct ContextBlockManifest {
     pub id: Uuid,
     pub name: String,
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
     pub template: String,
 }
@@ -680,7 +947,6 @@ pub struct DomainManifest {
     pub id: Uuid,
     pub name: String,
     pub path: String,
-    pub display_name: String,
     pub description: Option<String>,
     pub command: String,
     pub platform_scopes: Vec<String>,
@@ -688,6 +954,8 @@ pub struct DomainManifest {
     #[serde(default)]
     pub abilities: Vec<String>,
     pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub script_tools: Vec<Slug>,
     pub prompt_config: DomainPromptConfig,
 }
 
@@ -760,6 +1028,10 @@ pub enum ManifestResource {
     McpServer(McpServerManifest),
     Ability(AbilityManifest),
     ContextBlock(ContextBlockManifest),
+    Skill(SkillManifest),
+    Command(CommandManifest),
+    Hook(HookManifest),
+    ScriptTool(ScriptToolManifest),
 }
 
 impl ManifestResource {
@@ -774,6 +1046,10 @@ impl ManifestResource {
             Self::McpServer(_) => ManifestResourceKind::McpServer,
             Self::Ability(_) => ManifestResourceKind::Ability,
             Self::ContextBlock(_) => ManifestResourceKind::ContextBlock,
+            Self::Skill(_) => ManifestResourceKind::Skill,
+            Self::Command(_) => ManifestResourceKind::Command,
+            Self::Hook(_) => ManifestResourceKind::Hook,
+            Self::ScriptTool(_) => ManifestResourceKind::ScriptTool,
         }
     }
 
@@ -788,6 +1064,10 @@ impl ManifestResource {
             Self::McpServer(item) => item.id,
             Self::Ability(item) => item.id,
             Self::ContextBlock(item) => item.id,
+            Self::Skill(item) => item.id,
+            Self::Command(item) => item.id,
+            Self::Hook(item) => item.id,
+            Self::ScriptTool(item) => item.id,
         }
     }
 }
@@ -805,6 +1085,10 @@ pub enum ManifestResourceKind {
     McpServer,
     Ability,
     ContextBlock,
+    Skill,
+    Command,
+    Hook,
+    ScriptTool,
 }
 
 #[cfg(test)]
@@ -816,6 +1100,67 @@ mod tests {
         assert_eq!(
             model_manifest_slug("openrouter", "anthropic/claude-3.5-sonnet").as_str(),
             "openrouter_anthropic_claude_3_5_sonnet"
+        );
+    }
+
+    #[test]
+    fn command_merge_preserves_existing_runtime_paths_when_incoming_lacks_them() {
+        let mut manifest = Manifest {
+            commands: vec![CommandManifest {
+                id: Uuid::nil(),
+                name: "ralph_loop__ralph_loop".to_string(),
+                command: "/ralph-loop".to_string(),
+                display_name: Some("ralph-loop".to_string()),
+                description: Some("local".to_string()),
+                entry_path: "ralph-loop.md".to_string(),
+                root_path: "commands".to_string(),
+                root_dir: std::path::PathBuf::from("/tmp/platform_pkgs/ralph-loop/commands"),
+                plugin_root_path: Some(".".to_string()),
+                plugin_root_dir: Some(std::path::PathBuf::from("/tmp/platform_pkgs/ralph-loop")),
+                hooks: Vec::new(),
+                source_type: "package".to_string(),
+                read_only: true,
+                metadata: serde_json::json!({}),
+            }],
+            ..Default::default()
+        };
+
+        manifest.merge(Manifest {
+            commands: vec![CommandManifest {
+                id: Uuid::nil(),
+                name: "ralph_loop__ralph_loop".to_string(),
+                command: "/ralph-loop".to_string(),
+                display_name: Some("ralph-loop".to_string()),
+                description: Some("platform".to_string()),
+                entry_path: "ralph-loop.md".to_string(),
+                root_path: String::new(),
+                root_dir: std::path::PathBuf::new(),
+                plugin_root_path: None,
+                plugin_root_dir: None,
+                hooks: Vec::new(),
+                source_type: "package".to_string(),
+                read_only: true,
+                metadata: serde_json::json!({ "runtime": "platform" }),
+            }],
+            ..Default::default()
+        });
+
+        let command = manifest.commands.first().expect("merged command");
+        assert_eq!(manifest.commands.len(), 1);
+        assert_eq!(
+            command.root_dir,
+            std::path::PathBuf::from("/tmp/platform_pkgs/ralph-loop/commands")
+        );
+        assert_eq!(command.root_path, "commands");
+        assert_eq!(
+            command.plugin_root_dir,
+            Some(std::path::PathBuf::from("/tmp/platform_pkgs/ralph-loop"))
+        );
+        assert_eq!(command.plugin_root_path.as_deref(), Some("."));
+        assert_eq!(command.description.as_deref(), Some("platform"));
+        assert_eq!(
+            command.metadata,
+            serde_json::json!({ "runtime": "platform" })
         );
     }
 

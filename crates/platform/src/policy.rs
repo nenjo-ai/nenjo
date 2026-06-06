@@ -102,6 +102,11 @@ mod tests {
         assert!(policy.has_scope(PlatformScope::read(ScopeResource::Projects)));
         assert!(policy.has_scope(PlatformScope::write(ScopeResource::Projects)));
         assert!(!policy.has_scope(PlatformScope::read(ScopeResource::Agents)));
+
+        let policy = ManifestAccessPolicy::new(vec!["library:write".into()]);
+        assert!(policy.has_scope(PlatformScope::read(ScopeResource::Library)));
+        assert!(policy.has_scope(PlatformScope::write(ScopeResource::Library)));
+        assert!(!policy.has_scope(PlatformScope::read(ScopeResource::Projects)));
     }
 
     #[test]
@@ -119,6 +124,7 @@ mod tests {
             platform_scopes: vec!["projects:read".into()],
             mcp_servers: vec![],
             abilities: vec![],
+            script_tools: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -131,6 +137,7 @@ mod tests {
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: vec!["projects:read".into()],
             mcp_servers: vec![],
+            script_tools: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -146,24 +153,24 @@ mod tests {
             id: Uuid::new_v4(),
             name: "domain".into(),
             path: String::new(),
-            display_name: "Domain".into(),
             description: None,
             command: "#domain".into(),
             platform_scopes: vec!["projects:read".into()],
             abilities: vec![],
             mcp_servers: vec![],
+            script_tools: vec![],
             prompt_config: DomainPromptConfig::default(),
         };
         let denied_domain = DomainManifest {
             id: Uuid::new_v4(),
             name: "domain-2".into(),
             path: String::new(),
-            display_name: "Domain 2".into(),
             description: None,
             command: "#domain-2".into(),
             platform_scopes: vec!["projects:write".into()],
             abilities: vec![],
             mcp_servers: vec![],
+            script_tools: vec![],
             prompt_config: DomainPromptConfig::default(),
         };
         assert!(policy.allows_domain(&allowed_domain));

@@ -114,7 +114,7 @@ pub trait DomainManifestBackend: Send + Sync {
 }
 
 #[async_trait]
-/// Backend operations for project manifest resources and library knowledge documents.
+/// Backend operations for project manifest resources.
 pub trait ProjectManifestBackend: Send + Sync {
     /// List visible projects.
     async fn list_projects(&self) -> Result<ProjectsListResult>;
@@ -126,6 +126,11 @@ pub trait ProjectManifestBackend: Send + Sync {
     async fn update_project(&self, params: ProjectUpdateParams) -> Result<ProjectMutationResult>;
     /// Delete a project.
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult>;
+}
+
+#[async_trait]
+/// Backend operations for org-level library knowledge document mutations.
+pub trait LibraryManifestBackend: Send + Sync {
     /// Create a library knowledge document.
     async fn create_knowledge_doc(
         &self,
@@ -245,6 +250,7 @@ pub trait ManifestMcpBackend:
     + DomainManifestBackend
     + KnowledgeManifestBackend
     + ProjectManifestBackend
+    + LibraryManifestBackend
     + RoutineManifestBackend
     + ModelManifestBackend
     + CouncilManifestBackend
@@ -260,6 +266,7 @@ impl<T> ManifestMcpBackend for T where
         + DomainManifestBackend
         + KnowledgeManifestBackend
         + ProjectManifestBackend
+        + LibraryManifestBackend
         + RoutineManifestBackend
         + ModelManifestBackend
         + CouncilManifestBackend

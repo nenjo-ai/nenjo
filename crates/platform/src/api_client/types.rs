@@ -149,6 +149,8 @@ pub struct AgentDetailResponse {
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
     #[serde(default)]
+    pub script_tools: Vec<Slug>,
+    #[serde(default)]
     pub abilities: Vec<String>,
     #[serde(default)]
     pub heartbeat: Option<AgentHeartbeatManifest>,
@@ -167,6 +169,7 @@ impl From<AgentDetailResponse> for AgentManifest {
             domains: d.domains,
             platform_scopes: d.platform_scopes,
             mcp_servers: d.mcp_servers,
+            script_tools: d.script_tools,
             abilities: d.abilities,
             prompt_locked: d.prompt_locked,
             heartbeat: d.heartbeat,
@@ -241,7 +244,6 @@ pub struct DomainManifestResponse {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: String,
     pub description: Option<String>,
     pub command: String,
     #[serde(default)]
@@ -250,6 +252,8 @@ pub struct DomainManifestResponse {
     pub abilities: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub script_tools: Vec<Slug>,
     #[serde(default)]
     pub prompt_config: DomainPromptConfig,
 }
@@ -260,12 +264,12 @@ impl From<DomainManifestResponse> for DomainManifest {
             id: d.id,
             name: d.name,
             path: d.path,
-            display_name: d.display_name,
             description: d.description,
             command: d.command,
             platform_scopes: d.platform_scopes,
             abilities: d.abilities,
             mcp_servers: d.mcp_servers,
+            script_tools: d.script_tools,
             prompt_config: d.prompt_config,
         }
     }
@@ -281,7 +285,6 @@ pub struct ContextBlockSummaryResponse {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
 }
 

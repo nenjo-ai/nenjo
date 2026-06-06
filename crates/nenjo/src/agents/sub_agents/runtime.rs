@@ -765,6 +765,9 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::HookActivated { .. }
+        | TurnEvent::HookStarted { .. }
+        | TurnEvent::HookCompleted { .. }
         | TurnEvent::SubAgentEvent { .. }
         | TurnEvent::SubAgentTranscript { .. }
         | TurnEvent::MessageCompacted { .. }

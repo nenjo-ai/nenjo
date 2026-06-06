@@ -3,7 +3,9 @@ use std::sync::Arc;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
-use nenjo::manifest::{AbilityManifest, DomainManifest, Manifest};
+use nenjo::manifest::{
+    AbilityManifest, DomainManifest, Manifest, McpServerManifest, SkillManifest,
+};
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
@@ -36,6 +38,221 @@ fn test_platform_services(
     )
 }
 
+#[tokio::test]
+async fn worker_factory_always_exposes_use_skill_tool() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+
+    let agent = AgentManifest {
+        id: Uuid::new_v4(),
+        name: "tester".into(),
+        slug: None,
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+
+    assert!(
+        names.iter().any(|name| name == "use_skill"),
+        "worker tool belt should always include use_skill, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "list_installed_skills"),
+        "worker tool belt should always include list_installed_skills, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "call_skill_mcp_tool"),
+        "worker tool belt should always include call_skill_mcp_tool, got: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let workspace_dir = root.join("workspace");
+    let state_dir = root.join("state");
+    let manifests_dir = root.join("manifests");
+    let plugin_dir = workspace_dir
+        .join(".nenjo")
+        .join("plugins")
+        .join("mcp-skill");
+    let skill_dir = plugin_dir.join("skills").join("mcp-skill");
+    tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+    tokio::fs::write(skill_dir.join("SKILL.md"), "# MCP Skill")
+        .await
+        .unwrap();
+    tokio::fs::write(plugin_dir.join("server.sh"), skill_mcp_fixture_script())
+        .await
+        .unwrap();
+
+    let config = crate::config::Config {
+        workspace_dir: workspace_dir.clone(),
+        state_dir,
+        manifests_dir,
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let server = McpServerManifest {
+        id: Uuid::new_v4(),
+        name: "mcp_skill__review_server".to_string(),
+        display_name: "mcp-skill:review-server".to_string(),
+        description: None,
+        transport: "stdio".to_string(),
+        command: Some("bash".to_string()),
+        args: Some(vec!["server.sh".to_string()]),
+        url: None,
+        env_schema: serde_json::json!([]),
+        source_type: "package".to_string(),
+        read_only: true,
+        metadata: serde_json::json!({
+            "runtime": {
+                "cwd": plugin_dir.to_string_lossy().to_string(),
+                "env": {
+                    "MODE": "skill"
+                }
+            }
+        }),
+    };
+    let skill = SkillManifest {
+        id: Uuid::new_v4(),
+        name: "mcp-skill".to_string(),
+        display_name: None,
+        aliases: Vec::new(),
+        description: Some("Skill with MCP".to_string()),
+        entry_path: "SKILL.md".to_string(),
+        root_path: "skills/mcp-skill".to_string(),
+        root_dir: skill_dir,
+        plugin_root_path: Some(".".to_string()),
+        plugin_root_dir: Some(plugin_dir),
+        scripts: Vec::new(),
+        references: Vec::new(),
+        assets: Vec::new(),
+        mcp_servers: vec![Slug::derive(&server.name)],
+        hooks: Vec::new(),
+        source_type: "package".to_string(),
+        read_only: true,
+        metadata: serde_json::Value::Null,
+    };
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    external_mcp.reconcile(std::slice::from_ref(&server)).await;
+    let registry = Arc::new(crate::skills::SkillRegistry::default());
+    registry.reconcile(&[skill], &[]);
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::with_skill_registry(
+        security,
+        NativeRuntime,
+        config,
+        platform,
+        external_mcp,
+        registry,
+    );
+    let agent = AgentManifest {
+        id: Uuid::new_v4(),
+        name: "tester".into(),
+        slug: None,
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let use_skill = tools
+        .iter()
+        .find(|tool| tool.name() == "use_skill")
+        .expect("use_skill tool should exist");
+    let skill_mcp = tools
+        .iter()
+        .find(|tool| tool.name() == "call_skill_mcp_tool")
+        .expect("skill MCP proxy should exist");
+
+    let before = skill_mcp
+        .execute(serde_json::json!({ "tool": "review", "arguments": {} }))
+        .await
+        .unwrap();
+    assert!(!before.success);
+    assert!(
+        before
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("No skill MCP servers are active"))
+    );
+
+    let activation = use_skill
+        .execute(serde_json::json!({ "name": "mcp-skill" }))
+        .await
+        .unwrap();
+    assert!(activation.success);
+
+    let after = skill_mcp
+        .execute(serde_json::json!({ "tool": "review", "arguments": {} }))
+        .await
+        .unwrap();
+    assert!(after.success);
+    assert_eq!(after.output, "review-ok:skill");
+}
+
+fn skill_mcp_fixture_script() -> String {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"0.1.0"}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"review","description":"Review","inputSchema":{"type":"object","properties":{}}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"review-ok:%s"}]}}\n' "${MODE:-missing}"
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown method"}}'
+      ;;
+  esac
+done
+"#
+    .to_string()
+}
+
 async fn scoped_backend(
     caller_scopes: Vec<String>,
 ) -> (
@@ -63,6 +280,7 @@ async fn scoped_backend(
         domains: vec![],
         platform_scopes: vec!["projects:read".into()],
         mcp_servers: vec![],
+        script_tools: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -78,6 +296,7 @@ async fn scoped_backend(
         domains: vec![],
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
+        script_tools: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -94,6 +313,7 @@ async fn scoped_backend(
         },
         platform_scopes: vec!["projects:read".into()],
         mcp_servers: vec![],
+        script_tools: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -109,6 +329,7 @@ async fn scoped_backend(
         },
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
+        script_tools: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -118,24 +339,24 @@ async fn scoped_backend(
         id: Uuid::new_v4(),
         name: "visible-domain".into(),
         path: String::new(),
-        display_name: "Visible Domain".into(),
         description: None,
         command: "#visible".into(),
         platform_scopes: vec!["projects:read".into()],
         abilities: vec![],
         mcp_servers: vec![],
+        script_tools: vec![],
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
     let hidden_domain = DomainManifest {
         id: Uuid::new_v4(),
         name: "hidden-domain".into(),
         path: String::new(),
-        display_name: "Hidden Domain".into(),
         description: None,
         command: "#hidden".into(),
         platform_scopes: vec!["projects:write".into()],
         abilities: vec![],
         mcp_servers: vec![],
+        script_tools: vec![],
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
 
@@ -205,6 +426,7 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
             "projects:read".into(),
         ],
         mcp_servers: vec![],
+        script_tools: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -252,7 +474,7 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
 
     let agent_without_project_scope = AgentManifest {
         platform_scopes: vec!["agents:read".into()],
-        ..agent
+        ..agent.clone()
     };
     let tools = factory.create_tools(&agent_without_project_scope).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
@@ -262,6 +484,19 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     assert!(!names.iter().any(|name| name == "search_knowledge"));
     assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "list_projects"));
+
+    let library_agent = AgentManifest {
+        platform_scopes: vec!["library:write".into()],
+        ..agent
+    };
+    let tools = factory.create_tools(&library_agent).await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+
+    assert!(names.iter().any(|name| name == "create_knowledge_doc"));
+    assert!(names.iter().any(|name| name == "update_knowledge_doc"));
+    assert!(names.iter().any(|name| name == "delete_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "list_projects"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
 }
 
 #[tokio::test]
@@ -295,6 +530,7 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
         domains: vec![],
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
+        script_tools: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,

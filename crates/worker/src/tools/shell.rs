@@ -4,6 +4,7 @@ use crate::tools::runtime::RuntimeAdapter;
 use crate::tools::security::SecurityPolicy;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 use async_trait::async_trait;
+use nenjo::skills::SkillRuntimeState;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,7 @@ where
 {
     security: Arc<SecurityPolicy>,
     runtime: Arc<R>,
+    skill_runtime: Arc<SkillRuntimeState>,
     description: String,
 }
 
@@ -33,10 +35,19 @@ where
     R: RuntimeAdapter,
 {
     pub fn new(security: Arc<SecurityPolicy>, runtime: Arc<R>) -> Self {
+        Self::with_skill_runtime(security, runtime, Arc::new(SkillRuntimeState::default()))
+    }
+
+    pub fn with_skill_runtime(
+        security: Arc<SecurityPolicy>,
+        runtime: Arc<R>,
+        skill_runtime: Arc<SkillRuntimeState>,
+    ) -> Self {
         let description = build_shell_description();
         Self {
             security,
             runtime,
+            skill_runtime,
             description,
         }
     }
@@ -171,6 +182,10 @@ where
 
         // Forward tool-specific credentials (e.g. GITHUB_TOKEN for `gh` CLI).
         for (key, val) in &self.security.forwarded_env {
+            cmd.env(key, val);
+        }
+
+        for (key, val) in self.skill_runtime.shell_env() {
             cmd.env(key, val);
         }
 

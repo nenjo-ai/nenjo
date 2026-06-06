@@ -73,6 +73,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         platform_scopes: vec![],
         mcp_servers: vec![],
         abilities: vec![],
+        script_tools: vec![],
         prompt_locked: false,
         heartbeat: None,
     }

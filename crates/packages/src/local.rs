@@ -317,7 +317,12 @@ impl LocalPackageResolver {
         if self.root.join(&yaml_source_path).is_file() {
             return Ok((yaml_module_path, yaml_source_path));
         }
-        bail!("directory module '{module_path}/' requires index.yml or index.yaml");
+        let skill_module_path = format!("{module_path}/SKILL.md");
+        let skill_source_path = package_module_source_path(package_path, &skill_module_path)?;
+        if self.root.join(&skill_source_path).is_file() {
+            return Ok((module_path.to_string(), skill_source_path));
+        }
+        bail!("directory module '{module_path}/' requires index.yml, index.yaml, or SKILL.md");
     }
 }
 

@@ -339,6 +339,7 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
+        script_tools: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,

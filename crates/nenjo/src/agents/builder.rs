@@ -13,6 +13,7 @@ use crate::agents::error::AgentError;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
+use crate::hooks::HookRuntime;
 use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest};
 use crate::memory::types::MemoryScope;
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
@@ -53,6 +54,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
     /// (shell, file_read, file_write, git) operate in this directory.
     work_dir: Option<PathBuf>,
+    hook_runtime: Option<Arc<HookRuntime>>,
 }
 
 impl<P: ProviderRuntime> AgentBuilder<P> {
@@ -75,6 +77,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
+            hook_runtime: None,
         }
     }
 
@@ -101,6 +104,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
             work_dir: None,
+            hook_runtime: None,
         }
     }
 
@@ -207,6 +211,12 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// confine agents to a git worktree during task execution.
     pub fn with_work_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.work_dir = Some(dir.into());
+        self
+    }
+
+    /// Attach an active hook runtime to this agent execution.
+    pub fn with_hook_runtime(mut self, hook_runtime: Arc<HookRuntime>) -> Self {
+        self.hook_runtime = Some(hook_runtime);
         self
     }
 
@@ -363,6 +373,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 provider_runtime,
                 sub_agent_ctx: self.child_delegation_ctx,
                 execution_mode: self.execution_mode,
+                hook_runtime: self.hook_runtime,
             },
         };
 

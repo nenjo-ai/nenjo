@@ -82,6 +82,7 @@ async fn chat_test_provider()
         platform_scopes: Vec::new(),
         mcp_servers: Vec::new(),
         abilities: Vec::new(),
+        script_tools: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
     };

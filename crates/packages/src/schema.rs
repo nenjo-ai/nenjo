@@ -64,6 +64,12 @@ pub enum PackageKind {
     Skill,
     /// Plugin manifest.
     Plugin,
+    /// User-facing command manifest.
+    Command,
+    /// Runtime hook manifest.
+    Hook,
+    /// Native Nenjo typed script tool manifest.
+    ScriptTool,
     /// MCP server manifest.
     McpServer,
     /// Routine manifest.
@@ -218,6 +224,9 @@ impl PackageKind {
             "knowledge" | "knowledge_ref" => Ok(Self::Knowledge),
             "skill" => Ok(Self::Skill),
             "plugin" => Ok(Self::Plugin),
+            "command" => Ok(Self::Command),
+            "hook" => Ok(Self::Hook),
+            "script_tool" => Ok(Self::ScriptTool),
             "mcp_server" => Ok(Self::McpServer),
             "routine" => Ok(Self::Routine),
             other => Err(PackageError::invalid_schema(
@@ -237,6 +246,9 @@ impl PackageKind {
             Self::Knowledge => "knowledge",
             Self::Skill => "skill",
             Self::Plugin => "plugin",
+            Self::Command => "command",
+            Self::Hook => "hook",
+            Self::ScriptTool => "script_tool",
             Self::McpServer => "mcp_server",
             Self::Routine => "routine",
         }

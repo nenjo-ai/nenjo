@@ -21,7 +21,9 @@ use tracing::{debug, warn};
 use nenjo_events::{Command, Response};
 
 use crate::event_loop::ResponseSender as EventLoopResponseSender;
-use crate::handlers::chat::{ChatCommandContext, ChatCommandRequest, WorkerChatHarnessExt};
+use crate::handlers::chat::{
+    ChatCommandContext, ChatCommandRequest, ChatSlashCommandRequest, WorkerChatHarnessExt,
+};
 use crate::handlers::cron::{CronCommandContext, WorkerCronHarnessExt};
 use crate::handlers::crypto::{CryptoCommandContext, WorkerCryptoHarnessExt};
 use crate::handlers::domain::{DomainCommandContext, WorkerDomainHarnessExt};
@@ -233,6 +235,39 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.chat_context(),
                     ChatCommandRequest {
                         message_id: id.as_deref(),
+                        content: &content,
+                        project: project.as_deref(),
+                        agent: agent.as_deref(),
+                        target_type: target_type.as_deref(),
+                        target: target.as_deref(),
+                        session_id,
+                        domain_session_id,
+                        domain_activation,
+                        hook_scopes: Vec::new(),
+                    },
+                )
+                .await
+        }
+
+        Command::ChatCommand {
+            id,
+            command,
+            content,
+            project,
+            agent,
+            target_type,
+            target,
+            session_id,
+            domain_session_id,
+            domain_activation,
+            ..
+        } => {
+            ctx.harness
+                .handle_chat_command(
+                    &ctx.chat_context(),
+                    ChatSlashCommandRequest {
+                        message_id: id.as_deref(),
+                        command: &command,
                         content: &content,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
@@ -458,6 +493,7 @@ impl CommandContext {
         ChatCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
+            state_dir: self.config.state_dir.clone(),
         }
     }
 

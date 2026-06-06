@@ -29,6 +29,7 @@ use crate::sessions::{
     CronSessionRecovery, DomainSessionRecovery, HeartbeatSessionRecovery,
     WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
 };
+use crate::skills::SkillRegistry;
 
 pub(crate) struct WorkerAccountKeyStore {
     pub auth_provider: Arc<WorkerAuthProvider>,
@@ -79,6 +80,7 @@ pub struct CommandContext {
     pub response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
     pub external_mcp: Arc<ExternalMcpPool>,
+    pub skill_registry: Arc<SkillRegistry>,
     pub worker_name: String,
     pub config: Config,
     pub domains: DomainRegistry<WorkerProvider>,
@@ -96,6 +98,7 @@ pub struct WorkerRuntime {
     api: Arc<ApiClient>,
     auth_provider: Arc<WorkerAuthProvider>,
     external_mcp: Arc<ExternalMcpPool>,
+    skill_registry: Arc<SkillRegistry>,
     worker_name: String,
     session_runtime: WorkerSessionRuntime,
     git_locks: GitLocks,
@@ -196,6 +199,7 @@ impl WorkerRuntime {
             api: Arc::new(assembly.api),
             auth_provider: assembly.auth_provider,
             external_mcp: assembly.external_mcp,
+            skill_registry: assembly.skill_registry,
             worker_name,
             session_runtime: assembly.session_runtime,
             git_locks: Arc::new(DashMap::new()),
@@ -216,6 +220,7 @@ impl WorkerRuntime {
             response_tx,
             auth_provider: self.auth_provider.clone(),
             external_mcp: self.external_mcp.clone(),
+            skill_registry: self.skill_registry.clone(),
             worker_name: self.worker_name.clone(),
             config: self.config.clone(),
             domains: self.harness.domains(),
@@ -335,6 +340,7 @@ mod tests {
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
     use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
+    use crate::skills::SkillRegistry;
     use nenjo::LocalManifestStore;
     use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
@@ -358,11 +364,13 @@ mod tests {
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
         let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
+        let skill_registry = Arc::new(SkillRegistry::default());
         let provider = build_provider(
             &config,
             LocalManifestStore::new(&config.manifests_dir),
             auth_provider.clone(),
             external_mcp.clone(),
+            skill_registry.clone(),
         )
         .await
         .unwrap();
@@ -381,6 +389,7 @@ mod tests {
                 session_runtime,
                 session_stores,
                 external_mcp,
+                skill_registry,
             },
             config,
         )

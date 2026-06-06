@@ -14,7 +14,6 @@ fn context_block_create_schema() -> serde_json::Value {
         "properties": {
             "name": { "type": "string", "description": "Stable runtime name for this context block." },
             "path": { "type": "string", "description": "Folder path for this context block. Omit for the root folder." },
-            "display_name": { "type": ["string", "null"], "description": "Optional human-friendly label for this context block." },
             "description": { "type": ["string", "null"], "description": "Optional description of what this context block injects." },
             "template": { "type": "string", "description": "MiniJinja template content for this context block." }
         },
@@ -28,7 +27,6 @@ fn context_block_update_schema() -> serde_json::Value {
         "description": "Partial patch for an existing context block. Omit fields you do not want to change. Use `update_context_block_content` for template changes.",
         "properties": {
             "name": { "type": "string", "description": "Rename the context block." },
-            "display_name": { "type": ["string", "null"], "description": "Update or clear the display name. Omit to leave unchanged." },
             "description": { "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." }
         },
         "additionalProperties": false
@@ -51,8 +49,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_context_block".to_string(),
-            description: "Get one context block's name, path, display_name, and description by slug."
-                .to_string(),
+            description: "Get one context block's name, path, and description by slug.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["context_block"],
@@ -74,7 +71,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_context_block".to_string(),
-            description: "Create one context block with top-level name, optional path, display_name, description, and template."
+            description: "Create one context block with top-level name, optional path, description, and template."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -86,7 +83,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_context_block".to_string(),
-            description: "Update one context block's name, display_name, or description by slug; use update_context_block_content to change template."
+            description: "Update one context block's name or description by slug; use update_context_block_content to change template."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -94,7 +91,6 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
                 "properties": {
                     "context_block": context_block_ref_schema(),
                     "name": context_block_update_schema()["properties"]["name"].clone(),
-                    "display_name": context_block_update_schema()["properties"]["display_name"].clone(),
                     "description": context_block_update_schema()["properties"]["description"].clone()
                 },
                 "additionalProperties": false

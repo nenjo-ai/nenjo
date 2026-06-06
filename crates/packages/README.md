@@ -83,7 +83,6 @@ selector: pkg:packages.reviewer
 root_uri: pkg://packages.reviewer/
 manifest:
   name: reviewer
-  display_name: Reviewer
   instructions: Review the provided work and return actionable findings.
 ```
 

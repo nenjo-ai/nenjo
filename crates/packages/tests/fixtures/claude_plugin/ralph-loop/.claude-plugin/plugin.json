@@ -1,0 +1,5 @@
+{
+  "name": "Ralph Loop",
+  "version": "0.1.0",
+  "description": "Fixture Claude plugin with a command, skill, and stop hook."
+}

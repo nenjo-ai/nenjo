@@ -41,8 +41,8 @@ use crate::manifest_mcp::{
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
     DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocCreateParams,
     KnowledgeDocDeleteParams, KnowledgeDocMutationResult, KnowledgeDocUpdateParams,
-    KnowledgeManifestBackend, ModelDeleteParams, ModelDocument, ModelGetResult,
-    ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
+    KnowledgeManifestBackend, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
+    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
     ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
     ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
     ProjectsGetParams, ProjectsListResult, ResourceRef, RoutineDeleteParams, RoutineDocument,
@@ -357,6 +357,7 @@ where
             domains: Vec::new(),
             platform_scopes: Vec::new(),
             mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
             abilities: Vec::new(),
             prompt_locked: false,
             heartbeat: None,
@@ -389,6 +390,9 @@ where
         }
         if let Some(domains) = params.data.domains {
             agent.domains = domains;
+        }
+        if let Some(script_tools) = params.data.script_tools {
+            agent.script_tools = script_tools;
         }
         let resource = ManifestResource::Agent(agent.clone());
         self.writer.upsert_resource(&resource).await?;
@@ -475,6 +479,7 @@ where
             prompt_config: params.data.prompt_config,
             platform_scopes: Vec::new(),
             mcp_servers: params.data.mcp_servers.unwrap_or_default(),
+            script_tools: params.data.script_tools.unwrap_or_default(),
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -506,6 +511,9 @@ where
         }
         if let Some(mcp_servers) = params.data.mcp_servers {
             ability.mcp_servers = mcp_servers;
+        }
+        if let Some(script_tools) = params.data.script_tools {
+            ability.script_tools = script_tools;
         }
         self.writer
             .upsert_resource(&ManifestResource::Ability(ability.clone()))
@@ -579,12 +587,12 @@ where
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
-            display_name: params.data.display_name,
             description: params.data.description,
             command: params.data.command,
             platform_scopes: Vec::new(),
             abilities: params.data.abilities.unwrap_or_default(),
             mcp_servers: params.data.mcp_servers.unwrap_or_default(),
+            script_tools: params.data.script_tools.unwrap_or_default(),
             prompt_config: params.data.prompt_config.unwrap_or_default(),
         };
         self.writer
@@ -604,9 +612,6 @@ where
         if let Some(name) = params.data.name {
             domain.name = name;
         }
-        if let Some(display_name) = params.data.display_name {
-            domain.display_name = display_name;
-        }
         if let Some(description) = params.data.description {
             domain.description = description;
         }
@@ -618,6 +623,9 @@ where
         }
         if let Some(mcp_servers) = params.data.mcp_servers {
             domain.mcp_servers = mcp_servers;
+        }
+        if let Some(script_tools) = params.data.script_tools {
+            domain.script_tools = script_tools;
         }
         self.writer
             .upsert_resource(&ManifestResource::Domain(domain.clone()))
@@ -744,7 +752,14 @@ where
             id: project.id,
         })
     }
+}
 
+#[async_trait]
+impl<R, W> LibraryManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
     async fn create_knowledge_doc(
         &self,
         _params: KnowledgeDocCreateParams,
@@ -1153,7 +1168,6 @@ where
             id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
-            display_name: params.data.display_name,
             description: params.data.description,
             template: params.data.template,
         };
@@ -1174,9 +1188,6 @@ where
         let mut context_block = existing.clone();
         if let Some(name) = params.data.name {
             context_block.name = name;
-        }
-        if let Some(display_name) = params.data.display_name {
-            context_block.display_name = display_name;
         }
         if let Some(description) = params.data.description {
             context_block.description = description;
@@ -1304,6 +1315,7 @@ mod tests {
             platform_scopes: vec!["agents:read".into()],
             mcp_servers: vec![],
             abilities: vec![],
+            script_tools: vec![],
             prompt_locked: false,
             heartbeat: None,
         };
@@ -1319,6 +1331,7 @@ mod tests {
             },
             platform_scopes: vec!["projects:read".into()],
             mcp_servers: vec![],
+            script_tools: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1328,12 +1341,12 @@ mod tests {
             id: Uuid::new_v4(),
             name: "creator".into(),
             path: "team".into(),
-            display_name: "Creator".into(),
             description: Some("Creates new resources".into()),
             command: "#creator".into(),
             platform_scopes: vec![],
             abilities: vec![],
             mcp_servers: vec![],
+            script_tools: vec![],
             prompt_config: DomainPromptConfig {
                 developer_prompt_addon: Some("Creator mode".into()),
             },
@@ -1396,7 +1409,6 @@ mod tests {
             id: Uuid::new_v4(),
             name: "repo_summary".into(),
             path: "team/core".into(),
-            display_name: Some("Repo Summary".into()),
             description: Some("Summarizes the current repository.".into()),
             template: "Repository: {{ repo_name }}".into(),
         };
@@ -1553,6 +1565,7 @@ mod tests {
                     model: None,
                     abilities: None,
                     domains: None,
+                    script_tools: None,
                 },
             })
             .await
@@ -1578,6 +1591,7 @@ mod tests {
                     model: Some(None),
                     abilities: None,
                     domains: None,
+                    script_tools: None,
                 },
             })
             .await
@@ -1788,6 +1802,7 @@ mod tests {
                     description: None,
                     activation_condition: Some("when reviewing code".into()),
                     mcp_servers: None,
+                    script_tools: None,
                 },
             })
             .await
@@ -1899,18 +1914,17 @@ mod tests {
                 domain: domain.slug(),
                 data: crate::DomainUpdateDocument {
                     name: None,
-                    display_name: None,
                     description: Some(None),
                     command: None,
                     abilities: None,
                     mcp_servers: None,
+                    script_tools: None,
                 },
             })
             .await
             .unwrap();
 
         assert_eq!(result.domain.summary.name, "creator");
-        assert_eq!(result.domain.summary.display_name, "Creator");
         assert_eq!(result.domain.summary.description, None);
         assert_eq!(result.domain.platform_scopes, domain.platform_scopes);
     }
@@ -1926,7 +1940,7 @@ mod tests {
             "update_domain",
             serde_json::json!({
                 "domain": domain.slug(),
-                "display_name": "Builder",
+                "description": "Updated",
                 "platform_scopes": ["agents:write"]
             }),
         )
@@ -1934,8 +1948,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            result["domain"]["display_name"],
-            serde_json::json!("Builder")
+            result["domain"]["description"],
+            serde_json::json!("Updated")
         );
         assert_eq!(result["domain"]["platform_scopes"], serde_json::json!([]));
     }
@@ -2622,7 +2636,6 @@ mod tests {
                 context_block: context_block.slug(),
                 data: crate::ContextBlockUpdateDocument {
                     name: None,
-                    display_name: None,
                     description: None,
                     template: None,
                 },
@@ -2630,10 +2643,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result.context_block.summary.display_name,
-            Some("Repo Summary".into())
-        );
         assert_eq!(
             result.context_block.summary.description,
             Some("Summarizes the current repository.".into())

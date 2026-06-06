@@ -49,6 +49,12 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     mcp_servers: Vec<nenjo::manifest::McpServerManifest>,
     #[serde(default)]
+    commands: Vec<nenjo::manifest::CommandManifest>,
+    #[serde(default)]
+    hooks: Vec<nenjo::manifest::HookManifest>,
+    #[serde(default)]
+    script_tools: Vec<nenjo::manifest::ScriptToolManifest>,
+    #[serde(default)]
     abilities: Vec<nenjo::manifest::AbilityManifest>,
     #[serde(default)]
     context_blocks: Vec<BootstrapContextBlockManifest>,
@@ -196,6 +202,8 @@ struct BootstrapAgentManifest {
     #[serde(default)]
     mcp_servers: Vec<Slug>,
     #[serde(default)]
+    script_tools: Vec<Slug>,
+    #[serde(default)]
     abilities: Vec<String>,
     #[serde(default)]
     prompt_locked: bool,
@@ -211,7 +219,6 @@ struct BootstrapContextBlockManifest {
     name: String,
     #[serde(default)]
     path: String,
-    display_name: Option<String>,
     description: Option<String>,
     #[serde(default)]
     template: String,
@@ -355,7 +362,6 @@ impl ManifestLoader for LocalManifestLoader {
                     id: Uuid::new_v4(),
                     name,
                     path: "local".to_string(),
-                    display_name: None,
                     description: None,
                     template,
                 });
@@ -420,6 +426,9 @@ pub async fn sync(
         councils = manifest.councils.len(),
         domains = manifest.domains.len(),
         mcp_servers = manifest.mcp_servers.len(),
+        commands = manifest.commands.len(),
+        hooks = manifest.hooks.len(),
+        script_tools = manifest.script_tools.len(),
         "Manifest fetched successfully"
     );
 
@@ -432,6 +441,9 @@ pub async fn sync(
     atomic_write_json(manifests_dir, "agents.json", &manifest.agents)?;
     atomic_write_json(manifests_dir, "councils.json", &manifest.councils)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)?;
+    atomic_write_json(manifests_dir, "commands.json", &manifest.commands)?;
+    atomic_write_json(manifests_dir, "hooks.json", &manifest.hooks)?;
+    atomic_write_json(manifests_dir, "script_tools.json", &manifest.script_tools)?;
     sync_tree(&manifests_dir.join("domains"), &manifest.domains)?;
     sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)?;
     sync_tree(
@@ -477,6 +489,7 @@ async fn hydrate_bootstrap_manifest(
             domains: agent.domains,
             platform_scopes: agent.platform_scopes,
             mcp_servers: agent.mcp_servers,
+            script_tools: agent.script_tools,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
@@ -490,7 +503,6 @@ async fn hydrate_bootstrap_manifest(
             id: block.id,
             name: block.name,
             path: block.path,
-            display_name: block.display_name,
             description: block.description,
             template,
         });
@@ -526,6 +538,10 @@ async fn hydrate_bootstrap_manifest(
             mcp_servers: bootstrap.mcp_servers,
             abilities: bootstrap.abilities,
             context_blocks,
+            skills: Vec::new(),
+            commands: bootstrap.commands,
+            hooks: bootstrap.hooks,
+            script_tools: bootstrap.script_tools,
         },
         nats: bootstrap.nats,
         packages: bootstrap.packages,

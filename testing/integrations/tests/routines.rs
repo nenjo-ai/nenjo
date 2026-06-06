@@ -81,6 +81,7 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         abilities: vec![],
+        script_tools: vec![],
         prompt_locked: false,
         heartbeat: None,
     }

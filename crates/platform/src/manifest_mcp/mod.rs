@@ -18,6 +18,8 @@ pub mod contract;
 pub mod councils;
 /// Tool specs for domain operations.
 pub mod domains;
+/// Tool specs for library knowledge document mutations.
+pub mod library;
 /// Tool specs for model operations.
 pub mod models;
 /// Request parameter types for manifest MCP tools.
@@ -34,8 +36,9 @@ mod types;
 
 pub use backend::{
     AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend, ManifestMcpBackend,
-    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend,
+    LibraryManifestBackend, ManifestMcpBackend, ModelManifestBackend, ProjectManifestBackend,
+    RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{

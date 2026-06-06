@@ -24,6 +24,7 @@ pub mod resource_resolver;
 pub mod runtime;
 pub mod security;
 pub mod sessions;
+pub mod skills;
 pub mod tools;
 
 pub use nenjo_platform::api_client;

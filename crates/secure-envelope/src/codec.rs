@@ -245,6 +245,67 @@ impl SecureEnvelopeCodec {
                     .encrypt_user_payload(user_id, ack, "ability_result_payload", payload)
                     .await?,
             })),
+            StreamEvent::HookActivated {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookActivated {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_activation_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::HookStarted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookStarted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_start_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::HookCompleted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::HookCompleted {
+                agent,
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "hook_result_payload", payload)
+                    .await?,
+            })),
             StreamEvent::DelegationStarted {
                 agent,
                 target_agent,
@@ -369,6 +430,42 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         hidden,
                         project,
                         routine,
+                        agent,
+                        target_type,
+                        target,
+                        session_id,
+                        domain_session_id,
+                        domain_activation,
+                    },
+                ))),
+                Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
+                    code: "encrypted_chat_decode_failed",
+                    message: error.to_string(),
+                    session_id: Some(session_id),
+                    project: project.clone(),
+                    agent: agent.clone(),
+                })),
+            },
+            Command::ChatCommand {
+                id,
+                command,
+                content: _,
+                encrypted_content: Some(payload),
+                project,
+                agent,
+                target_type,
+                target,
+                session_id,
+                domain_session_id,
+                domain_activation,
+            } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
+                Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
+                    Command::ChatCommand {
+                        id,
+                        command,
+                        content,
+                        encrypted_content: None,
+                        project,
                         agent,
                         target_type,
                         target,

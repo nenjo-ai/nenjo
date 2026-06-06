@@ -255,6 +255,7 @@ where
             prompt_config: Default::default(),
             platform_scopes: remote.platform_scopes,
             mcp_servers: remote.mcp_servers,
+            script_tools: remote.script_tools,
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -682,6 +683,7 @@ where
             prompt_config: params.data.prompt_config.clone(),
             platform_scopes: created.platform_scopes.clone(),
             mcp_servers: created.mcp_servers.clone(),
+            script_tools: created.script_tools.clone(),
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -705,26 +707,9 @@ where
                 params.ability
             ));
         }
-        let merged = AbilityUpdateDocument {
-            name: params.data.name.or_else(|| Some(existing.name.clone())),
-            description: Some(
-                params
-                    .data
-                    .description
-                    .unwrap_or_else(|| existing.description.clone()),
-            ),
-            activation_condition: params
-                .data
-                .activation_condition
-                .or_else(|| Some(existing.activation_condition.clone())),
-            mcp_servers: params
-                .data
-                .mcp_servers
-                .or_else(|| Some(existing.mcp_servers.clone())),
-        };
         let updated = self
             .platform_client
-            .update_ability_document(&params.ability, &merged)
+            .update_ability_document(&params.ability, &params.data)
             .await?;
         let local_ability = AbilityManifest {
             id: updated.summary.id,
@@ -735,6 +720,7 @@ where
             prompt_config: existing.prompt_config.clone(),
             platform_scopes: updated.platform_scopes.clone(),
             mcp_servers: updated.mcp_servers.clone(),
+            script_tools: updated.script_tools.clone(),
             source_type: existing.source_type.clone(),
             read_only: existing.read_only,
             metadata: existing.metadata.clone(),
@@ -784,6 +770,7 @@ where
             prompt_config: updated.prompt_config.clone(),
             platform_scopes: existing.platform_scopes,
             mcp_servers: existing.mcp_servers,
+            script_tools: existing.script_tools,
             source_type: existing.source_type,
             read_only: existing.read_only,
             metadata: existing.metadata,
@@ -884,12 +871,12 @@ where
             id: created.summary.id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
-            display_name: created.summary.display_name.clone(),
             description: created.summary.description.clone(),
             command: created.command.clone(),
             platform_scopes: created.platform_scopes.clone(),
             abilities: params.data.abilities.clone().unwrap_or_default(),
             mcp_servers: params.data.mcp_servers.clone().unwrap_or_default(),
+            script_tools: params.data.script_tools.clone().unwrap_or_default(),
             prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
         };
         self.local_store
@@ -909,49 +896,20 @@ where
         if params.data.is_empty() {
             return Err(anyhow!("domain update requires at least one field"));
         }
-        let merged = DomainUpdateDocument {
-            name: params.data.name.or_else(|| Some(existing.name.clone())),
-            display_name: params
-                .data
-                .display_name
-                .or_else(|| Some(existing.display_name.clone())),
-            description: Some(
-                params
-                    .data
-                    .description
-                    .unwrap_or_else(|| existing.description.clone()),
-            ),
-            command: params
-                .data
-                .command
-                .or_else(|| Some(existing.command.clone())),
-            abilities: Some(
-                params
-                    .data
-                    .abilities
-                    .unwrap_or_else(|| existing.abilities.clone()),
-            ),
-            mcp_servers: Some(
-                params
-                    .data
-                    .mcp_servers
-                    .unwrap_or_else(|| existing.mcp_servers.clone()),
-            ),
-        };
         let updated = self
             .platform_client
-            .update_domain_document(&params.domain, &merged)
+            .update_domain_document(&params.domain, &params.data)
             .await?;
         let local_domain = DomainManifest {
             id: updated.summary.id,
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
-            display_name: updated.summary.display_name.clone(),
             description: updated.summary.description.clone(),
             command: updated.command.clone(),
             platform_scopes: updated.platform_scopes.clone(),
             abilities: updated.abilities.clone(),
             mcp_servers: updated.mcp_servers.clone(),
+            script_tools: updated.script_tools.clone(),
             prompt_config: existing.prompt_config.clone(),
         };
         self.local_store
@@ -997,12 +955,12 @@ where
             id: existing.id,
             name: existing.name.clone(),
             path: existing.path.clone(),
-            display_name: existing.display_name.clone(),
             description: existing.description.clone(),
             command: existing.command.clone(),
             platform_scopes: existing.platform_scopes.clone(),
             abilities: existing.abilities.clone(),
             mcp_servers: existing.mcp_servers.clone(),
+            script_tools: existing.script_tools.clone(),
             prompt_config: updated.prompt_config.clone(),
         };
         self.local_store
@@ -1125,7 +1083,14 @@ where
             id: existing.id,
         })
     }
+}
 
+#[async_trait]
+impl<L, E> LibraryManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
     async fn create_knowledge_doc(
         &self,
         params: KnowledgeDocCreateParams,
@@ -1268,24 +1233,12 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let existing = self.cached_routine(&params.routine).await?;
         let merged = RoutineUpdateDocument {
-            name: params.data.name.or_else(|| Some(existing.name.clone())),
-            description: Some(
-                params
-                    .data
-                    .description
-                    .unwrap_or_else(|| existing.description.clone()),
-            ),
-            trigger: params.data.trigger.or(Some(existing.trigger)),
-            metadata: params
-                .data
-                .metadata
-                .or_else(|| Some(existing.metadata.clone())),
-            graph: params
-                .data
-                .graph
-                .or_else(|| Some(RoutineDocument::from(existing).graph_input())),
+            name: params.data.name,
+            description: params.data.description,
+            trigger: params.data.trigger,
+            metadata: params.data.metadata,
+            graph: params.data.graph,
         };
         let updated = self
             .platform_client
@@ -1625,7 +1578,6 @@ where
             id: created.summary.id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
-            display_name: created.summary.display_name.clone(),
             description: created.summary.description.clone(),
             template: params.data.template.clone(),
         };
@@ -1642,31 +1594,14 @@ where
         params: ContextBlockUpdateParams,
     ) -> Result<ContextBlockMutationResult> {
         let existing = self.cached_context_block(&params.context_block).await?;
-        let merged = ContextBlockUpdateDocument {
-            name: params.data.name.or_else(|| Some(existing.name.clone())),
-            display_name: Some(
-                params
-                    .data
-                    .display_name
-                    .unwrap_or_else(|| existing.display_name.clone()),
-            ),
-            description: Some(
-                params
-                    .data
-                    .description
-                    .unwrap_or_else(|| existing.description.clone()),
-            ),
-            template: None,
-        };
         let updated = self
             .platform_client
-            .update_context_block_document(&params.context_block, &merged)
+            .update_context_block_document(&params.context_block, &params.data)
             .await?;
         let local_context_block = ContextBlockManifest {
             id: updated.summary.id,
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
-            display_name: updated.summary.display_name.clone(),
             description: updated.summary.description.clone(),
             template: existing.template.clone(),
         };
@@ -1705,7 +1640,6 @@ where
             id: existing.id,
             name: existing.name.clone(),
             path: existing.path.clone(),
-            display_name: existing.display_name.clone(),
             description: existing.description.clone(),
             template: updated.template.clone(),
         };

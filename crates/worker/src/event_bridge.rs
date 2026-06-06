@@ -94,6 +94,61 @@ pub fn turn_event_to_stream_event(
             })),
             encrypted_payload: None,
         }),
+        nenjo::TurnEvent::HookStarted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => Some(StreamEvent::HookStarted {
+            agent: agent_name.to_string(),
+            hook: hook.clone(),
+            hook_event: hook_event.clone(),
+            hook_type: hook_type.clone(),
+            source: source.clone(),
+            payload: None,
+            encrypted_payload: None,
+        }),
+        nenjo::TurnEvent::HookActivated {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => Some(StreamEvent::HookActivated {
+            agent: agent_name.to_string(),
+            hook: hook.clone(),
+            hook_event: hook_event.clone(),
+            hook_type: hook_type.clone(),
+            source: source.clone(),
+            payload: None,
+            encrypted_payload: None,
+        }),
+        nenjo::TurnEvent::HookCompleted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            success,
+            blocked,
+            exit_code,
+            output,
+            error,
+            reason,
+        } => Some(StreamEvent::HookCompleted {
+            agent: agent_name.to_string(),
+            hook: hook.clone(),
+            hook_event: hook_event.clone(),
+            hook_type: hook_type.clone(),
+            source: source.clone(),
+            success: *success,
+            blocked: *blocked,
+            payload: Some(serde_json::json!({
+                "exit_code": exit_code,
+                "output_preview": summarize_preview(output),
+                "error_preview": error.as_deref().and_then(summarize_preview),
+                "reason": reason,
+            })),
+            encrypted_payload: None,
+        }),
         nenjo::TurnEvent::AbilityCompleted {
             ability_tool_name,
             ability_name,
@@ -203,6 +258,37 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
+        nenjo::TurnEvent::HookStarted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => format!(
+            "hook_started(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        nenjo::TurnEvent::HookActivated {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => format!(
+            "hook_activated(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        nenjo::TurnEvent::HookCompleted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            success,
+            blocked,
+            exit_code,
+            ..
+        } => format!(
+            "hook_completed(hook={hook}, event={hook_event}, type={hook_type}, source={source}, success={success}, blocked={blocked}, exit_code={})",
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
         nenjo::TurnEvent::SubAgentEvent {
             slug,
             agent_name,
@@ -280,6 +366,38 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             ..
         } => format!(
             "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success})"
+        ),
+        StreamEvent::HookActivated {
+            agent,
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            ..
+        } => format!(
+            "hook_activated(agent={agent}, hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        StreamEvent::HookStarted {
+            agent,
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            ..
+        } => format!(
+            "hook_started(agent={agent}, hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        StreamEvent::HookCompleted {
+            agent,
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            success,
+            blocked,
+            ..
+        } => format!(
+            "hook_completed(agent={agent}, hook={hook}, event={hook_event}, type={hook_type}, source={source}, success={success}, blocked={blocked})"
         ),
         StreamEvent::SubAgentEvent {
             agent,
@@ -591,6 +709,9 @@ pub fn turn_event_to_task_step_response(
             agent,
         }),
         nenjo::TurnEvent::SubAgentEvent { .. } => None,
+        nenjo::TurnEvent::HookActivated { .. }
+        | nenjo::TurnEvent::HookStarted { .. }
+        | nenjo::TurnEvent::HookCompleted { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => Some(Response::TaskStepEvent {
             execution_run_id,
             task_id,

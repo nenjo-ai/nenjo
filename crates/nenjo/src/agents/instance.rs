@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::agents::prompts::PromptContext;
 use crate::config::AgentConfig;
+use crate::hooks::HookRuntime;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, ModelManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime};
@@ -73,6 +74,7 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) provider_runtime: Option<P>,
     pub(crate) sub_agent_ctx: Option<DelegationContext>,
     pub(crate) execution_mode: AgentExecutionMode,
+    pub(crate) hook_runtime: Option<Arc<HookRuntime>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +103,7 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             provider_runtime: self.provider_runtime.clone(),
             sub_agent_ctx: self.sub_agent_ctx.clone(),
             execution_mode: self.execution_mode,
+            hook_runtime: self.hook_runtime.clone(),
         }
     }
 }
@@ -192,6 +195,11 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         };
         active_domain.session_id = session_id;
         true
+    }
+
+    /// Attach the active hook runtime for this execution.
+    pub fn set_hook_runtime(&mut self, hook_runtime: Option<Arc<HookRuntime>>) {
+        self.runtime.hook_runtime = hook_runtime;
     }
 
     /// Get tool specs for LLM function calling registration.

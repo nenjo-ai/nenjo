@@ -172,7 +172,6 @@ where
                             id: domain.summary.id,
                             name: domain.summary.name,
                             path: domain.summary.path,
-                            display_name: domain.summary.display_name,
                             description: domain.summary.description,
                             command: domain.command,
                             platform_scopes: existing_manifest
@@ -187,6 +186,10 @@ where
                                 .as_ref()
                                 .map(|domain| domain.mcp_servers.clone())
                                 .unwrap_or(domain.mcp_servers),
+                            script_tools: existing_manifest
+                                .as_ref()
+                                .map(|domain| domain.script_tools.clone())
+                                .unwrap_or_default(),
                             prompt_config: prompt_config.clone(),
                         }
                     }
@@ -227,7 +230,6 @@ where
                         id: block.summary.id,
                         name: block.summary.name,
                         path: block.summary.path,
-                        display_name: block.summary.display_name,
                         description: block.summary.description,
                         template,
                     },
