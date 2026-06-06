@@ -39,7 +39,7 @@ pub use api_client::{ApiClient, ApiClientError, NoopPayloadCodec, PayloadCodec};
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
 pub use local::LocalManifestMcpBackend;
-pub use manifest_contract::{ContentScope, ManifestKind};
+pub use manifest_contract::{ContentScope, ManifestKind, SensitiveContentKind};
 pub use manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityCreateDocument, AbilityCreateParams,
     AbilityDeleteParams, AbilityDocument, AbilityGetResult, AbilityManifestBackend,

@@ -223,6 +223,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             name: "Heartbeat",
             variables: vec![
                 TemplateVarDef {
+                    name: "heartbeat.instructions",
+                    description: "User-configured instructions for this heartbeat run, if any",
+                    group: "Heartbeat",
+                },
+                TemplateVarDef {
                     name: "heartbeat.previous_output",
                     description: "Final output from the previous heartbeat run, if any",
                     group: "Heartbeat",

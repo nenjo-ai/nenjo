@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nenjo::memory::MemoryScope;
-use nenjo::{CronInput, RoutineEvent, RoutineRun, Slug};
-use nenjo_events::{CronScheduleStatus, Response};
+use nenjo::{CronInput, RoutineEvent, RoutineRun, Slug, TaskInput};
+use nenjo_events::{CronScheduleStatus, CronTaskContent, Response};
 use nenjo_sessions::{
     CheckpointQuery, CronScheduleState, ExecutionPhase, RunCompletion, ScheduleState,
     SchedulerRuntimeSnapshot, SchedulerSessionUpsert, SessionCheckpointUpdate, SessionKind,
@@ -29,12 +29,22 @@ pub struct CronCommandContext<S> {
     pub worker_id: String,
 }
 
+pub struct CronEnableRequest<'a> {
+    pub routine: &'a str,
+    pub project: Option<&'a str>,
+    pub schedule: &'a str,
+    pub timezone: Option<&'a str>,
+    pub task_content: Option<CronTaskContent>,
+    pub start_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 struct CronSessionUpsert<'a> {
     routine_id: Uuid,
     project_id: Option<Uuid>,
     memory_namespace: Option<&'a str>,
     schedule: &'a str,
     timezone: Option<&'a str>,
+    task: Option<&'a CronTaskContent>,
     status: SessionStatus,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -55,6 +65,7 @@ async fn upsert_cron_session<P, SessionRt>(
         memory_namespace,
         schedule,
         timezone,
+        task,
         status,
         last_run_at,
         next_run_at,
@@ -83,6 +94,7 @@ async fn upsert_cron_session<P, SessionRt>(
             scheduler: ScheduleState::Cron(CronScheduleState {
                 schedule_expr: schedule.to_string(),
                 timezone: timezone.map(ToString::to_string),
+                task: task.and_then(|task| serde_json::to_value(task).ok()),
                 next_run_at,
                 last_run_at,
                 last_completion,
@@ -152,6 +164,35 @@ fn emit_cron_heartbeat<S>(
     });
 }
 
+fn cron_task_input(content: Option<&CronTaskContent>, project: Option<Slug>) -> Option<TaskInput> {
+    let content = content?;
+    let mut task = TaskInput::new(
+        if content.title.trim().is_empty() {
+            "Cron"
+        } else {
+            content.title.trim()
+        },
+        content
+            .description
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default(),
+    )
+    .source("cron");
+    if let Some(project) = project {
+        task = task.with_project(project);
+    }
+    if let Some(criteria) = content
+        .acceptance_criteria
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        task = task.acceptance_criteria(criteria);
+    }
+    Some(task)
+}
+
 async fn last_persisted_cron_cycle<P, SessionRt>(
     harness: &Harness<P, SessionRt>,
     routine_id: Uuid,
@@ -191,11 +232,7 @@ where
     async fn handle_cron_enable(
         &self,
         ctx: &CronCommandContext<S>,
-        routine: &str,
-        project: Option<&str>,
-        schedule: &str,
-        timezone: Option<&str>,
-        start_at: Option<chrono::DateTime<chrono::Utc>>,
+        request: CronEnableRequest<'_>,
     ) -> Result<()>
     where
         S: Clone + 'static;
@@ -209,6 +246,7 @@ where
         ctx: &CronCommandContext<S>,
         routine: &str,
         project: Option<&str>,
+        task_content: Option<CronTaskContent>,
     ) -> Result<()>;
 }
 
@@ -223,15 +261,19 @@ where
     async fn handle_cron_enable(
         &self,
         ctx: &CronCommandContext<S>,
-        routine: &str,
-        project: Option<&str>,
-        schedule: &str,
-        timezone: Option<&str>,
-        start_at: Option<chrono::DateTime<chrono::Utc>>,
+        request: CronEnableRequest<'_>,
     ) -> Result<()>
     where
         S: Clone + 'static,
     {
+        let CronEnableRequest {
+            routine,
+            project,
+            schedule,
+            timezone,
+            task_content,
+            start_at,
+        } = request;
         let manifest = self.provider().manifest_snapshot();
         let resolver = PlatformResourceResolver::new(&manifest);
         let routine_slug = Slug::parse(routine)?;
@@ -272,9 +314,10 @@ where
         let project = project_id.and_then(|project_id| resolver.project(project_id).ok().flatten());
         let project_slug_for_response = project.as_ref().map(ToString::to_string);
         let routine_slug_for_response = routine_slug.to_string();
+        let cron_task = cron_task_input(task_content.as_ref(), project.clone());
 
-        let task = RoutineRun::cron(CronInput {
-            task: None,
+        let cron_run = RoutineRun::cron(CronInput {
+            task: cron_task,
             project,
             schedule: cron_schedule.clone(),
             start_at: None,
@@ -284,6 +327,7 @@ where
         let response_sink = ctx.response_sink.clone();
         let schedule_owned = schedule.to_string();
         let timezone_owned = timezone.map(ToOwned::to_owned);
+        let task_content_for_session = task_content.clone();
         let provider_cell = self.provider_handle();
         let worker_id = ctx.worker_id.clone();
         let cron_memory_namespace = resolve_cron_memory_namespace(self, routine_id, project_id);
@@ -309,6 +353,7 @@ where
                 memory_namespace: cron_memory_namespace.as_deref(),
                 schedule,
                 timezone,
+                task: task_content.as_ref(),
                 status: SessionStatus::Active,
                 last_run_at: None,
                 next_run_at: Some(initial_next_run_at),
@@ -355,7 +400,7 @@ where
                     }
                 };
                 match provider.routine(&routine_slug) {
-                    Ok(runner) => match runner.run_stream(task.clone()).await {
+                    Ok(runner) => match runner.run_stream(cron_run.clone()).await {
                         Ok(mut handle) => {
                             let mut current_cycle_id: Option<Uuid> = None;
                             let mut current_cycle: Option<u32> = None;
@@ -449,6 +494,7 @@ where
                                                                     memory_namespace: cron_memory_namespace.as_deref(),
                                                                     schedule: &schedule_owned,
                                                                     timezone: timezone_owned.as_deref(),
+                                                                    task: task_content_for_session.as_ref(),
                                                                     status: SessionStatus::Active,
                                                                     last_run_at,
                                                                     next_run_at: Some(next_run_at),
@@ -567,6 +613,7 @@ where
                         memory_namespace: cron_memory_namespace.as_deref(),
                         schedule: &schedule_owned,
                         timezone: timezone_owned.as_deref(),
+                        task: task_content_for_session.as_ref(),
                         status: SessionStatus::Active,
                         last_run_at,
                         next_run_at: Some(next_run_at),
@@ -606,6 +653,7 @@ where
                     memory_namespace: None,
                     schedule: "",
                     timezone: None,
+                    task: None,
                     status: SessionStatus::Cancelled,
                     last_run_at: None,
                     next_run_at: None,
@@ -624,6 +672,7 @@ where
         ctx: &CronCommandContext<S>,
         routine: &str,
         project: Option<&str>,
+        task_content: Option<CronTaskContent>,
     ) -> Result<()> {
         let manifest = self.provider().manifest_snapshot();
         let resolver = PlatformResourceResolver::new(&manifest);
@@ -673,9 +722,10 @@ where
         let resolver = PlatformResourceResolver::new(&manifest);
         let project =
             opt_project_id.and_then(|project_id| resolver.project(project_id).ok().flatten());
+        let cron_task = cron_task_input(task_content.as_ref(), project.clone());
 
-        let task = RoutineRun::cron(CronInput {
-            task: None,
+        let cron_run = RoutineRun::cron(CronInput {
+            task: cron_task,
             project,
             schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_secs(0)),
             start_at: None,
@@ -684,7 +734,7 @@ where
 
         let result = async {
             let routine = resolver.routine(routine_id)?;
-            provider.routine(&routine)?.run(task).await
+            provider.routine(&routine)?.run(cron_run).await
         }
         .await;
 

@@ -1,4 +1,4 @@
-//! Shared manifest resource classification used by worker and platform surfaces.
+//! Shared manifest resource and sensitive-content classification.
 
 use nenjo_events::{EncryptedPayload, ResourceType};
 
@@ -41,12 +41,8 @@ pub enum ManifestKind {
     Domain,
     /// Context block manifest resource.
     ContextBlock,
-    /// Library knowledge document content resource.
+    /// Library knowledge document resource.
     Document,
-    /// Project task content resource.
-    Task,
-    /// Project settings sensitive envelope.
-    ProjectSettings,
     /// Project manifest resource.
     Project,
     /// Routine manifest resource.
@@ -58,61 +54,103 @@ pub enum ManifestKind {
 }
 
 impl ManifestKind {
-    /// Return the event/resource classification when this kind participates in manifest events.
+    /// Return the event/resource classification for this manifest resource kind.
+    pub const fn resource_type(self) -> ResourceType {
+        match self {
+            Self::Agent => ResourceType::Agent,
+            Self::Ability => ResourceType::Ability,
+            Self::Domain => ResourceType::Domain,
+            Self::ContextBlock => ResourceType::ContextBlock,
+            Self::Document => ResourceType::Document,
+            Self::Project => ResourceType::Project,
+            Self::Routine => ResourceType::Routine,
+            Self::Model => ResourceType::Model,
+            Self::Council => ResourceType::Council,
+        }
+    }
+}
+
+/// Sensitive content envelopes attached to platform resources or runtime commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitiveContentKind {
+    /// Agent developer/base prompt content.
+    AgentPrompt,
+    /// Ability developer prompt content.
+    AbilityPrompt,
+    /// Domain prompt content.
+    DomainPrompt,
+    /// Context block template content.
+    ContextBlockContent,
+    /// Library knowledge document body.
+    DocumentContent,
+    /// Project task description and acceptance criteria.
+    TaskContent,
+    /// Project settings sensitive envelope.
+    ProjectSettings,
+    /// Agent heartbeat instruction envelope.
+    HeartbeatInstructions,
+    /// Cron routine task envelope.
+    RoutineCronTask,
+}
+
+impl SensitiveContentKind {
+    /// Return the resource classification this sensitive content is attached to, if any.
     pub const fn resource_type(self) -> Option<ResourceType> {
         match self {
-            Self::Agent => Some(ResourceType::Agent),
-            Self::Ability => Some(ResourceType::Ability),
-            Self::Domain => Some(ResourceType::Domain),
-            Self::ContextBlock => Some(ResourceType::ContextBlock),
-            Self::Document => Some(ResourceType::Document),
+            Self::AgentPrompt => Some(ResourceType::Agent),
+            Self::AbilityPrompt => Some(ResourceType::Ability),
+            Self::DomainPrompt => Some(ResourceType::Domain),
+            Self::ContextBlockContent => Some(ResourceType::ContextBlock),
+            Self::DocumentContent => Some(ResourceType::Document),
             Self::ProjectSettings => Some(ResourceType::Project),
-            Self::Project => Some(ResourceType::Project),
-            Self::Routine => Some(ResourceType::Routine),
-            Self::Model => Some(ResourceType::Model),
-            Self::Council => Some(ResourceType::Council),
-            Self::Task => None,
+            Self::HeartbeatInstructions => Some(ResourceType::Agent),
+            Self::RoutineCronTask => Some(ResourceType::Routine),
+            Self::TaskContent => None,
         }
     }
 
-    /// Return the encrypted payload object type, if this manifest kind carries encrypted content.
-    pub const fn encrypted_object_type(self) -> Option<&'static str> {
+    /// Return the platform encrypted payload object type for this sensitive content.
+    pub const fn encrypted_object_type(self) -> &'static str {
         match self {
-            Self::Agent => Some("manifest.agent.prompt"),
-            Self::Ability => Some("manifest.ability.prompt"),
-            Self::Domain => Some("manifest.domain.prompt"),
-            Self::ContextBlock => Some("manifest.context_block.content"),
-            Self::Document => Some("manifest.document.content"),
-            Self::Task => Some("task_content"),
-            Self::ProjectSettings => Some("project.settings"),
-            Self::Project | Self::Routine | Self::Model | Self::Council => None,
+            Self::AgentPrompt => "manifest.agent.prompt",
+            Self::AbilityPrompt => "manifest.ability.prompt",
+            Self::DomainPrompt => "manifest.domain.prompt",
+            Self::ContextBlockContent => "manifest.context_block.content",
+            Self::DocumentContent => "manifest.document.content",
+            Self::TaskContent => "task_content",
+            Self::ProjectSettings => "project.settings",
+            Self::HeartbeatInstructions => "agent.heartbeat.instructions",
+            Self::RoutineCronTask => "routine.cron_task",
         }
     }
 
-    /// Return the encrypted payload scope, if this manifest kind carries encrypted content.
-    pub const fn encrypted_scope(self) -> Option<ContentScope> {
+    /// Return the content key scope used for this sensitive content.
+    pub const fn encrypted_scope(self) -> ContentScope {
         match self {
-            Self::Agent
-            | Self::Ability
-            | Self::Domain
-            | Self::ContextBlock
-            | Self::Document
-            | Self::Task
-            | Self::ProjectSettings => Some(ContentScope::Org),
-            Self::Project | Self::Routine | Self::Model | Self::Council => None,
+            Self::AgentPrompt
+            | Self::AbilityPrompt
+            | Self::DomainPrompt
+            | Self::ContextBlockContent
+            | Self::DocumentContent
+            | Self::TaskContent
+            | Self::ProjectSettings
+            | Self::HeartbeatInstructions
+            | Self::RoutineCronTask => ContentScope::Org,
         }
     }
 
-    /// Parse an encrypted payload `object_type` back into a canonical manifest kind.
+    /// Parse an encrypted payload `object_type` back into a sensitive content kind.
     pub fn from_encrypted_object_type(object_type: &str) -> Option<Self> {
         match object_type {
-            "manifest.agent.prompt" => Some(Self::Agent),
-            "manifest.ability.prompt" => Some(Self::Ability),
-            "manifest.domain.prompt" => Some(Self::Domain),
-            "manifest.context_block.content" => Some(Self::ContextBlock),
-            "manifest.document.content" => Some(Self::Document),
-            "task_content" => Some(Self::Task),
+            "manifest.agent.prompt" => Some(Self::AgentPrompt),
+            "manifest.ability.prompt" => Some(Self::AbilityPrompt),
+            "manifest.domain.prompt" => Some(Self::DomainPrompt),
+            "manifest.context_block.content" => Some(Self::ContextBlockContent),
+            "manifest.document.content" => Some(Self::DocumentContent),
+            "task_content" => Some(Self::TaskContent),
             "project.settings" => Some(Self::ProjectSettings),
+            "agent.heartbeat.instructions" => Some(Self::HeartbeatInstructions),
+            "routine.cron_task" => Some(Self::RoutineCronTask),
             _ => None,
         }
     }
@@ -125,23 +163,51 @@ impl ManifestKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentScope, ManifestKind};
+    use super::{ContentScope, ManifestKind, SensitiveContentKind};
     use nenjo_events::ResourceType;
 
     #[test]
-    fn encrypted_manifest_kinds_have_stable_object_types_and_org_scope() {
+    fn manifest_kinds_have_resource_types() {
         for (kind, resource_type) in [
             (ManifestKind::Agent, ResourceType::Agent),
             (ManifestKind::Ability, ResourceType::Ability),
             (ManifestKind::Domain, ResourceType::Domain),
             (ManifestKind::ContextBlock, ResourceType::ContextBlock),
             (ManifestKind::Document, ResourceType::Document),
-            (ManifestKind::ProjectSettings, ResourceType::Project),
+            (ManifestKind::Project, ResourceType::Project),
+            (ManifestKind::Routine, ResourceType::Routine),
+            (ManifestKind::Model, ResourceType::Model),
+            (ManifestKind::Council, ResourceType::Council),
         ] {
-            let object_type = kind.encrypted_object_type().expect("encrypted object type");
-            assert_eq!(kind.encrypted_scope(), Some(ContentScope::Org));
+            assert_eq!(kind.resource_type(), resource_type);
+        }
+    }
+
+    #[test]
+    fn sensitive_content_kinds_have_stable_object_types_and_org_scope() {
+        for (kind, resource_type) in [
+            (SensitiveContentKind::AgentPrompt, ResourceType::Agent),
+            (SensitiveContentKind::AbilityPrompt, ResourceType::Ability),
+            (SensitiveContentKind::DomainPrompt, ResourceType::Domain),
+            (
+                SensitiveContentKind::ContextBlockContent,
+                ResourceType::ContextBlock,
+            ),
+            (
+                SensitiveContentKind::DocumentContent,
+                ResourceType::Document,
+            ),
+            (SensitiveContentKind::ProjectSettings, ResourceType::Project),
+            (
+                SensitiveContentKind::HeartbeatInstructions,
+                ResourceType::Agent,
+            ),
+            (SensitiveContentKind::RoutineCronTask, ResourceType::Routine),
+        ] {
+            let object_type = kind.encrypted_object_type();
+            assert_eq!(kind.encrypted_scope(), ContentScope::Org);
             assert_eq!(
-                ManifestKind::from_encrypted_object_type(object_type),
+                SensitiveContentKind::from_encrypted_object_type(object_type),
                 Some(kind)
             );
             assert!(kind.matches_resource_type(resource_type));
@@ -151,13 +217,13 @@ mod tests {
     #[test]
     fn task_content_is_org_scoped_without_manifest_resource_type() {
         assert_eq!(
-            ManifestKind::Task.encrypted_object_type(),
-            Some("task_content")
+            SensitiveContentKind::TaskContent.encrypted_object_type(),
+            "task_content"
         );
         assert_eq!(
-            ManifestKind::Task.encrypted_scope(),
-            Some(ContentScope::Org)
+            SensitiveContentKind::TaskContent.encrypted_scope(),
+            ContentScope::Org
         );
-        assert_eq!(ManifestKind::Task.resource_type(), None);
+        assert_eq!(SensitiveContentKind::TaskContent.resource_type(), None);
     }
 }

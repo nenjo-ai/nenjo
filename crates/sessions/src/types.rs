@@ -205,6 +205,8 @@ pub struct CronScheduleState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
@@ -219,6 +221,8 @@ pub struct HeartbeatScheduleState {
     pub interval_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

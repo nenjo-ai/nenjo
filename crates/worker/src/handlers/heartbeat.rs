@@ -31,6 +31,7 @@ pub struct HeartbeatRestoreRequest {
     pub interval: Duration,
     pub timezone: Option<String>,
     pub start_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub instructions: Option<String>,
     pub previous_output_ref: Option<String>,
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     pub start_paused: bool,
@@ -79,6 +80,7 @@ struct SpawnAgentHeartbeatRequest {
     agent_id: Uuid,
     interval: Duration,
     timezone: Option<String>,
+    instructions: Option<String>,
     start_at: Option<chrono::DateTime<chrono::Utc>>,
     restored_state: HeartbeatRunState,
     start_paused: bool,
@@ -134,6 +136,7 @@ struct HeartbeatSessionUpsert<'a> {
     memory_namespace: Option<&'a str>,
     interval: Duration,
     timezone: Option<&'a str>,
+    instructions: Option<&'a str>,
     status: SessionStatus,
     next_run_at: Option<chrono::DateTime<chrono::Utc>>,
     last_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -156,6 +159,7 @@ async fn upsert_heartbeat_session<P, SessionRt>(
         memory_namespace,
         interval,
         timezone,
+        instructions,
         status,
         next_run_at,
         last_run_at,
@@ -185,6 +189,7 @@ async fn upsert_heartbeat_session<P, SessionRt>(
             scheduler: ScheduleState::Heartbeat(HeartbeatScheduleState {
                 interval_secs: interval.as_secs(),
                 timezone: timezone.map(ToString::to_string),
+                instructions: instructions.map(ToString::to_string),
                 next_run_at,
                 last_run_at,
                 previous_output_ref,
@@ -229,6 +234,7 @@ where
         agent_id,
         interval,
         timezone,
+        instructions,
         start_at,
         restored_state,
         start_paused,
@@ -260,6 +266,7 @@ where
     );
 
     let response_tx = ctx.response_sink.clone();
+    let instructions_for_session = instructions.clone();
     let active_run = Arc::new(Mutex::new(None::<tokio::task::JoinHandle<()>>));
     let active_run_for_schedule = active_run.clone();
     let restored_last_run_at = restored_state.last_run_at;
@@ -290,6 +297,7 @@ where
             memory_namespace: Some(&heartbeat_memory_namespace),
             interval,
             timezone: timezone.as_deref(),
+            instructions: instructions_for_session.as_deref(),
             status: if start_paused {
                 SessionStatus::Paused
             } else {
@@ -353,6 +361,7 @@ where
                             memory_namespace: Some(&heartbeat_memory_namespace),
                             interval,
                             timezone: timezone.as_deref(),
+                            instructions: instructions_for_session.as_deref(),
                             status: SessionStatus::Active,
                             next_run_at: Some(scheduled_next_run_at),
                             last_run_at: None,
@@ -395,6 +404,7 @@ where
                     memory_namespace: Some(&heartbeat_memory_namespace),
                     interval,
                     timezone: timezone.as_deref(),
+                    instructions: instructions_for_session.as_deref(),
                     status: SessionStatus::Active,
                     next_run_at: Some(run_next_run_at),
                     last_run_at: state_snapshot.last_run_at,
@@ -407,6 +417,7 @@ where
             .await;
             let mut active_run_guard = active_run_for_schedule.lock().await;
             let heartbeat_agent_slug_for_run = heartbeat_agent_slug.clone();
+            let instructions_for_run = instructions.clone();
             *active_run_guard = Some(tokio::spawn(async move {
                 let execution_id = Uuid::new_v4();
                 let _ = response_tx.send(Response::ExecutionStarted {
@@ -461,6 +472,7 @@ where
                                 agent: agent.clone(),
                                 interval,
                                 start_at: None,
+                                instructions: instructions_for_run.clone(),
                                 previous_output: task_state.previous_output,
                                 last_run_at: task_state.last_run_at,
                                 next_run_at: task_state.next_run_at,
@@ -500,6 +512,7 @@ where
                                 memory_namespace: Some(&heartbeat_memory_namespace_for_run),
                                 interval,
                                 timezone: timezone_for_run.as_deref(),
+                                instructions: instructions_for_run.as_deref(),
                                 status: SessionStatus::Active,
                                 next_run_at: Some(run_next_run_at),
                                 last_run_at: Some(completed_at),
@@ -544,6 +557,7 @@ where
                                 memory_namespace: Some(&heartbeat_memory_namespace_for_run),
                                 interval,
                                 timezone: timezone_for_run.as_deref(),
+                                instructions: instructions_for_run.as_deref(),
                                 status: SessionStatus::Active,
                                 next_run_at: Some(run_next_run_at),
                                 last_run_at: Some(completed_at),
@@ -628,6 +642,7 @@ where
         agent: &str,
         interval_str: &str,
         timezone: Option<&str>,
+        instructions: Option<String>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
@@ -654,6 +669,7 @@ where
         &self,
         ctx: &HeartbeatCommandContext<S>,
         agent: &str,
+        instructions: Option<String>,
     ) -> Result<()>;
 }
 
@@ -670,6 +686,7 @@ where
         agent: &str,
         interval_str: &str,
         timezone: Option<&str>,
+        instructions: Option<String>,
         start_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()>
     where
@@ -686,6 +703,7 @@ where
                 agent_id,
                 interval,
                 timezone: timezone.map(ToOwned::to_owned),
+                instructions,
                 start_at,
                 restored_state: HeartbeatRunState::default(),
                 start_paused: false,
@@ -707,6 +725,7 @@ where
             interval,
             timezone,
             start_at,
+            instructions,
             previous_output_ref,
             last_run_at,
             start_paused,
@@ -726,6 +745,7 @@ where
                 agent_id,
                 interval,
                 timezone,
+                instructions,
                 start_at,
                 restored_state: HeartbeatRunState {
                     previous_output,
@@ -759,6 +779,7 @@ where
                     memory_namespace: None,
                     interval: Duration::from_secs(0),
                     timezone: None,
+                    instructions: None,
                     status: SessionStatus::Cancelled,
                     next_run_at: None,
                     last_run_at: None,
@@ -777,6 +798,7 @@ where
         &self,
         ctx: &HeartbeatCommandContext<S>,
         agent: &str,
+        instructions: Option<String>,
     ) -> Result<()> {
         let manifest = self.provider().manifest_snapshot();
         let resolver = PlatformResourceResolver::new(&manifest);
@@ -810,6 +832,7 @@ where
                         agent,
                         interval: Duration::from_secs(1),
                         start_at: None,
+                        instructions,
                         previous_output: task_state.previous_output,
                         last_run_at: task_state.last_run_at,
                         next_run_at: task_state.next_run_at,

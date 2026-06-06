@@ -320,7 +320,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             agent,
             execution_run_id,
             payload,
-            ..
+            encrypted_payload: _,
         } => {
             let payload = payload.ok_or_else(|| {
                 anyhow::anyhow!("task.execute missing payload after command decode")
@@ -371,15 +371,20 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             project,
             schedule,
             timezone,
+            task,
+            encrypted_task: _,
         } => {
             ctx.harness
                 .handle_cron_enable(
                     &ctx.cron_context(),
-                    &routine,
-                    project.as_deref(),
-                    &schedule,
-                    timezone.as_deref(),
-                    None,
+                    crate::handlers::cron::CronEnableRequest {
+                        routine: &routine,
+                        project: project.as_deref(),
+                        schedule: &schedule,
+                        timezone: timezone.as_deref(),
+                        task_content: task,
+                        start_at: None,
+                    },
                 )
                 .await
         }
@@ -391,10 +396,13 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::CronTrigger {
-            routine, project, ..
+            routine,
+            project,
+            task,
+            encrypted_task: _,
         } => {
             ctx.harness
-                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref())
+                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref(), task)
                 .await
         }
 
@@ -402,6 +410,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             agent,
             interval,
             timezone,
+            instructions,
+            encrypted_instructions: _,
         } => {
             ctx.harness
                 .handle_agent_heartbeat_enable(
@@ -409,6 +419,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &agent,
                     &interval,
                     timezone.as_deref(),
+                    instructions.map(|content| content.instructions),
                     None,
                 )
                 .await
@@ -420,9 +431,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::AgentHeartbeatTrigger { agent } => {
+        Command::AgentHeartbeatTrigger {
+            agent,
+            instructions,
+            encrypted_instructions: _,
+        } => {
             ctx.harness
-                .handle_agent_heartbeat_trigger(&ctx.heartbeat_context(), &agent)
+                .handle_agent_heartbeat_trigger(
+                    &ctx.heartbeat_context(),
+                    &agent,
+                    instructions.map(|content| content.instructions),
+                )
                 .await
         }
 

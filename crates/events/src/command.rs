@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Capability, EncryptedPayload, TaskExecuteContent};
+use crate::{
+    Capability, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, TaskExecuteContent,
+};
 
 /// Transport delivery policy for a backend-to-worker command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -211,6 +213,10 @@ pub enum Command {
         schedule: String,
         #[serde(default)]
         timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<CronTaskContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_task: Option<EncryptedPayload>,
     },
 
     /// Disable a cron schedule.
@@ -223,6 +229,10 @@ pub enum Command {
         routine: String,
         #[serde(default)]
         project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<CronTaskContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_task: Option<EncryptedPayload>,
     },
 
     /// Enable a recurring heartbeat schedule for an agent.
@@ -232,6 +242,10 @@ pub enum Command {
         interval: String,
         #[serde(default)]
         timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<HeartbeatInstructionsContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_instructions: Option<EncryptedPayload>,
     },
 
     /// Disable a recurring heartbeat schedule for an agent.
@@ -240,7 +254,13 @@ pub enum Command {
 
     /// Trigger a one-time heartbeat run for an agent.
     #[serde(rename = "agent_heartbeat.trigger")]
-    AgentHeartbeatTrigger { agent: String },
+    AgentHeartbeatTrigger {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<HeartbeatInstructionsContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_instructions: Option<EncryptedPayload>,
+    },
 
     // -----------------------------------------------------------------
     // Bootstrap
@@ -335,7 +355,7 @@ impl std::fmt::Display for Command {
             Self::AgentHeartbeatDisable { agent } => {
                 write!(f, "agent_heartbeat.disable(agent={agent})")
             }
-            Self::AgentHeartbeatTrigger { agent } => {
+            Self::AgentHeartbeatTrigger { agent, .. } => {
                 write!(f, "agent_heartbeat.trigger(agent={agent})")
             }
             Self::WorkerPing => write!(f, "worker.ping"),

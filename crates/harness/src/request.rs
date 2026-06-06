@@ -187,6 +187,7 @@ pub struct HeartbeatRequest {
     pub agent: Slug,
     pub interval: Duration,
     pub start_at: Option<DateTime<Utc>>,
+    pub instructions: Option<String>,
     pub previous_output: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -200,6 +201,7 @@ impl HeartbeatRequest {
             agent: agent.into_slug(),
             interval,
             start_at: None,
+            instructions: None,
             previous_output: None,
             last_run_at: None,
             next_run_at: None,
@@ -210,6 +212,12 @@ impl HeartbeatRequest {
     /// Set the heartbeat start timestamp.
     pub fn with_start_at(mut self, start_at: DateTime<Utc>) -> Self {
         self.start_at = Some(start_at);
+        self
+    }
+
+    /// Attach user-configured heartbeat instructions.
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 

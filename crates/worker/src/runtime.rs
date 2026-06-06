@@ -139,15 +139,20 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
             .map(nenjo::Slug::parse)
             .transpose()?;
         let project = project.as_ref().map(|slug| slug.as_str());
+        let task: Option<nenjo_events::CronTaskContent> =
+            request.task.map(serde_json::from_value).transpose()?;
         self.ctx
             .harness
             .handle_cron_enable(
                 &self.ctx.cron_context(),
-                routine.as_str(),
-                project,
-                &request.schedule_expr,
-                request.timezone.as_deref(),
-                request.next_run_at,
+                crate::handlers::cron::CronEnableRequest {
+                    routine: routine.as_str(),
+                    project,
+                    schedule: &request.schedule_expr,
+                    timezone: request.timezone.as_deref(),
+                    task_content: task,
+                    start_at: request.next_run_at,
+                },
             )
             .await?;
         Ok(())
@@ -171,6 +176,7 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
                     interval: request.interval,
                     timezone: request.timezone,
                     start_at: request.next_run_at,
+                    instructions: request.instructions,
                     previous_output_ref: request.previous_output_ref,
                     last_run_at: request.last_run_at,
                     start_paused: request.start_paused,

@@ -24,7 +24,7 @@ use crate::knowledge_backend::{
     parse_library_pack_selector, unknown_pack,
 };
 use crate::library_knowledge::LibraryKnowledgePack;
-use crate::manifest_contract::ManifestKind;
+use crate::manifest_contract::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
@@ -568,9 +568,7 @@ where
             .encode_payload(
                 self.local_manifest_org_id().await?,
                 agent.id,
-                ManifestKind::Agent
-                    .encrypted_object_type()
-                    .expect("agent prompt object type"),
+                SensitiveContentKind::AgentPrompt.encrypted_object_type(),
                 &prompt_payload,
             )
             .await?;
@@ -664,9 +662,7 @@ where
             .encode_payload(
                 self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                ManifestKind::Ability
-                    .encrypted_object_type()
-                    .expect("ability prompt object type"),
+                SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
@@ -753,9 +749,7 @@ where
                     .encode_payload(
                         self.local_manifest_org_id().await?,
                         ability_id,
-                        ManifestKind::Ability
-                            .encrypted_object_type()
-                            .expect("ability prompt object type"),
+                        SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
                         &serde_json::json!(prompt_config.clone()),
                     )
                     .await?,
@@ -857,9 +851,7 @@ where
             .encode_payload(
                 self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                ManifestKind::Domain
-                    .encrypted_object_type()
-                    .expect("domain prompt object type"),
+                SensitiveContentKind::DomainPrompt.encrypted_object_type(),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
@@ -943,9 +935,7 @@ where
                     .encode_payload(
                         self.local_manifest_org_id().await?,
                         existing.id,
-                        ManifestKind::Domain
-                            .encrypted_object_type()
-                            .expect("domain prompt object type"),
+                        SensitiveContentKind::DomainPrompt.encrypted_object_type(),
                         &serde_json::json!(params.prompt_config.clone()),
                     )
                     .await?,
@@ -1124,9 +1114,7 @@ where
             .encode_payload(
                 self.local_manifest_org_id().await?,
                 doc_id,
-                ManifestKind::Document
-                    .encrypted_object_type()
-                    .expect("document content object type"),
+                SensitiveContentKind::DocumentContent.encrypted_object_type(),
                 &serde_json::Value::String(data.content.clone()),
             )
             .await?;
@@ -1153,9 +1141,7 @@ where
                 .encode_payload(
                     self.local_manifest_org_id().await?,
                     doc_id,
-                    ManifestKind::Document
-                        .encrypted_object_type()
-                        .expect("document content object type"),
+                    SensitiveContentKind::DocumentContent.encrypted_object_type(),
                     &serde_json::Value::String(content.to_string()),
                 )
                 .await?;
@@ -1586,9 +1572,7 @@ where
             .encode_payload(
                 self.local_manifest_org_id().await?,
                 Uuid::new_v4(),
-                ManifestKind::ContextBlock
-                    .encrypted_object_type()
-                    .expect("context block content object type"),
+                SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
                 &serde_json::json!(params.data.template.clone()),
             )
             .await?;
@@ -1650,9 +1634,7 @@ where
                     .encode_payload(
                         self.local_manifest_org_id().await?,
                         existing.id,
-                        ManifestKind::ContextBlock
-                            .encrypted_object_type()
-                            .expect("context block content object type"),
+                        SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
                         &serde_json::json!(template.clone()),
                     )
                     .await?,

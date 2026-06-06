@@ -59,6 +59,7 @@ pub struct CronSessionRecovery {
     pub routine: Option<String>,
     pub schedule_expr: String,
     pub timezone: Option<String>,
+    pub task: Option<serde_json::Value>,
     pub next_run_at: Option<DateTime<Utc>>,
 }
 
@@ -68,6 +69,7 @@ pub struct HeartbeatSessionRecovery {
     pub agent: String,
     pub interval: Duration,
     pub timezone: Option<String>,
+    pub instructions: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub previous_output_ref: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
@@ -561,6 +563,7 @@ impl FileSessionRuntime {
                         routine: record.routine.clone(),
                         schedule_expr: state.schedule_expr,
                         timezone: state.timezone,
+                        task: state.task,
                         next_run_at: state.next_run_at,
                     })
                     .await?;
@@ -580,6 +583,7 @@ impl FileSessionRuntime {
                         agent,
                         interval: std::time::Duration::from_secs(state.interval_secs.max(1)),
                         timezone: state.timezone,
+                        instructions: state.instructions,
                         next_run_at: state.next_run_at,
                         previous_output_ref: state.previous_output_ref,
                         last_run_at: state.last_run_at,

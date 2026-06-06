@@ -36,6 +36,7 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             ctx.git = git_to_context(run.execution.project_location.as_ref());
         }
         AgentRunKind::Heartbeat(heartbeat) => {
+            ctx.heartbeat_instructions = heartbeat.instructions.clone().unwrap_or_default();
             ctx.heartbeat_previous_output = heartbeat.previous_output.clone().unwrap_or_default();
             ctx.heartbeat_last_run_at = heartbeat
                 .last_run_at
@@ -224,6 +225,7 @@ pub struct HeartbeatInput {
     pub agent: Slug,
     pub interval: Duration,
     pub start_at: Option<DateTime<Utc>>,
+    pub instructions: Option<String>,
     pub previous_output: Option<String>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,

@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, EncryptedPayload, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, Response,
+    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
+use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::{debug, info, warn};
@@ -153,6 +155,21 @@ impl SecureEnvelopeCodec {
         Ok(serde_json::from_str(
             &self.decrypt_enc_payload(user_id, payload).await?,
         )?)
+    }
+
+    fn validate_sensitive_payload_kind(
+        payload: &EncryptedPayload,
+        kind: SensitiveContentKind,
+    ) -> Result<()> {
+        let expected_object_type = kind.encrypted_object_type();
+        if payload.object_type != expected_object_type {
+            bail!(
+                "encrypted payload object_type '{}' did not match expected '{}'",
+                payload.object_type,
+                expected_object_type
+            );
+        }
+        Ok(())
     }
 
     async fn encrypt_user_payload(
@@ -499,6 +516,10 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     agent,
                     payload: match payload {
                         Some(mut payload) => {
+                            Self::validate_sensitive_payload_kind(
+                                &encrypted_payload,
+                                SensitiveContentKind::TaskContent,
+                            )?;
                             let encrypted = self
                                 .decode_json_payload::<TaskEncryptedContent>(
                                     actor_user_id,
@@ -509,17 +530,121 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                             payload.acceptance_criteria = encrypted.acceptance_criteria;
                             Some(payload)
                         }
-                        None => Some(
-                            self.decode_json_payload::<TaskExecuteContent>(
-                                actor_user_id,
+                        None => {
+                            Self::validate_sensitive_payload_kind(
                                 &encrypted_payload,
+                                SensitiveContentKind::TaskContent,
+                            )?;
+                            Some(
+                                self.decode_json_payload::<TaskExecuteContent>(
+                                    actor_user_id,
+                                    &encrypted_payload,
+                                )
+                                .await?,
                             )
-                            .await?,
-                        ),
+                        }
                     },
                     encrypted_payload: None,
                 },
             ))),
+            Command::CronEnable {
+                routine,
+                project,
+                schedule,
+                timezone,
+                task: _,
+                encrypted_task: Some(encrypted_task),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_task,
+                    SensitiveContentKind::RoutineCronTask,
+                )?;
+                let task = self
+                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::CronEnable {
+                        routine,
+                        project,
+                        schedule,
+                        timezone,
+                        task: Some(task),
+                        encrypted_task: None,
+                    },
+                )))
+            }
+            Command::CronTrigger {
+                routine,
+                project,
+                task: _,
+                encrypted_task: Some(encrypted_task),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_task,
+                    SensitiveContentKind::RoutineCronTask,
+                )?;
+                let task = self
+                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::CronTrigger {
+                        routine,
+                        project,
+                        task: Some(task),
+                        encrypted_task: None,
+                    },
+                )))
+            }
+            Command::AgentHeartbeatEnable {
+                agent,
+                interval,
+                timezone,
+                instructions: _,
+                encrypted_instructions: Some(encrypted_instructions),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_instructions,
+                    SensitiveContentKind::HeartbeatInstructions,
+                )?;
+                let instructions = self
+                    .decode_json_payload::<HeartbeatInstructionsContent>(
+                        actor_user_id,
+                        &encrypted_instructions,
+                    )
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::AgentHeartbeatEnable {
+                        agent,
+                        interval,
+                        timezone,
+                        instructions: Some(instructions),
+                        encrypted_instructions: None,
+                    },
+                )))
+            }
+            Command::AgentHeartbeatTrigger {
+                agent,
+                instructions: _,
+                encrypted_instructions: Some(encrypted_instructions),
+            } => {
+                Self::validate_sensitive_payload_kind(
+                    &encrypted_instructions,
+                    SensitiveContentKind::HeartbeatInstructions,
+                )?;
+                let instructions = self
+                    .decode_json_payload::<HeartbeatInstructionsContent>(
+                        actor_user_id,
+                        &encrypted_instructions,
+                    )
+                    .await?;
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::AgentHeartbeatTrigger {
+                        agent,
+                        instructions: Some(instructions),
+                        encrypted_instructions: None,
+                    },
+                )))
+            }
             Command::ManifestChanged {
                 resource_type,
                 resource,

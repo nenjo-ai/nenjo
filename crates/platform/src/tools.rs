@@ -13,8 +13,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    ManifestAccessPolicy, ManifestKind, ManifestMcpBackend, ManifestMcpContract,
-    PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
+    ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract, PlatformManifestClient,
+    ScopeResource, SensitiveContentKind, SensitivePayloadEncoder,
     client::{CreateExecutionRequest, ProjectExecutionListQuery, ProjectTaskListQuery},
     rest::{notifications::notification_tools, projects::project_rest_tools},
 };
@@ -352,9 +352,7 @@ where
             .encode_payload(
                 org_id,
                 task_id,
-                ManifestKind::Task
-                    .encrypted_object_type()
-                    .expect("task content object type"),
+                SensitiveContentKind::TaskContent.encrypted_object_type(),
                 &serde_json::to_value(payload).context("failed to encode task content payload")?,
             )
             .await?

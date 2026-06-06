@@ -1230,6 +1230,8 @@ mod tests {
             project: None,
             schedule: "0 * * * *".into(),
             timezone: Some("America/Chicago".into()),
+            task: None,
+            encrypted_task: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"cron.enable""#));

@@ -380,6 +380,7 @@ async fn instance_uses_heartbeat_template_for_heartbeat_runs() {
             agent: Slug::derive("test-coder"),
             interval: std::time::Duration::from_secs(60),
             start_at: None,
+            instructions: None,
             previous_output: Some("previous heartbeat output".into()),
             last_run_at: None,
             next_run_at: None,

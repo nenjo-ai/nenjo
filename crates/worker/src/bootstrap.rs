@@ -21,7 +21,7 @@ use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
-use nenjo_platform::ManifestKind;
+use nenjo_platform::SensitiveContentKind;
 use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -901,11 +901,7 @@ async fn decrypt_prompt_config_payload(
     state_dir: &Path,
     agent_id: Uuid,
 ) -> Result<PromptConfig> {
-    if payload.object_type
-        != ManifestKind::Agent
-            .encrypted_object_type()
-            .expect("agent prompt object type")
-    {
+    if payload.object_type != SensitiveContentKind::AgentPrompt.encrypted_object_type() {
         anyhow::bail!(
             "Unsupported encrypted bootstrap payload type '{}' for agent {}",
             payload.object_type,
@@ -948,11 +944,7 @@ async fn decrypt_context_block_template_payload(
     state_dir: &Path,
     block_id: Uuid,
 ) -> Result<String> {
-    if payload.object_type
-        != ManifestKind::ContextBlock
-            .encrypted_object_type()
-            .expect("context block content object type")
-    {
+    if payload.object_type != SensitiveContentKind::ContextBlockContent.encrypted_object_type() {
         anyhow::bail!(
             "Unsupported encrypted bootstrap payload type '{}' for context block {}",
             payload.object_type,
