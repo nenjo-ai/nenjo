@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/nenjo-ai/nenjo/compare/v0.12.0...v0.13.0) - 2026-06-06
+
 ### Added
 
 - bundle `nenjo`, `nenpm`, and `nenjoup` in binary release artifacts
