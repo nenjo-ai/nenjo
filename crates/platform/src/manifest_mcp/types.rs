@@ -38,6 +38,8 @@ pub struct AgentDocument {
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
     #[serde(default)]
+    pub script_tools: Vec<Slug>,
+    #[serde(default)]
     pub abilities: Vec<String>,
     #[serde(default)]
     pub prompt_locked: bool,
@@ -73,6 +75,8 @@ pub struct AgentUpdateDocument {
     pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domains: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_tools: Option<Vec<Slug>>,
 }
 
 fn deserialize_optional_slug_field<'de, D>(
@@ -98,6 +102,7 @@ impl From<AgentManifest> for AgentDocument {
             domains: agent.domains,
             platform_scopes: agent.platform_scopes,
             mcp_servers: agent.mcp_servers,
+            script_tools: agent.script_tools,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
@@ -128,6 +133,7 @@ impl From<AgentDocument> for AgentManifest {
             domains: agent.domains,
             platform_scopes: agent.platform_scopes,
             mcp_servers: agent.mcp_servers,
+            script_tools: agent.script_tools,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
@@ -144,6 +150,7 @@ impl From<AgentDocument> for AgentUpdateDocument {
             model: None,
             abilities: None,
             domains: None,
+            script_tools: None,
         }
     }
 }
@@ -180,6 +187,8 @@ pub struct AbilityDocument {
     pub platform_scopes: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub script_tools: Vec<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +211,8 @@ pub struct AbilityCreateDocument {
     pub prompt_config: AbilityPromptConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_tools: Option<Vec<Slug>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -215,6 +226,8 @@ pub struct AbilityUpdateDocument {
     pub activation_condition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_tools: Option<Vec<Slug>>,
 }
 
 impl AbilityUpdateDocument {
@@ -224,6 +237,7 @@ impl AbilityUpdateDocument {
             && self.description.is_none()
             && self.activation_condition.is_none()
             && self.mcp_servers.is_none()
+            && self.script_tools.is_none()
     }
 }
 
@@ -239,6 +253,7 @@ impl From<AbilityManifest> for AbilityDocument {
             activation_condition: ability.activation_condition,
             platform_scopes: ability.platform_scopes,
             mcp_servers: ability.mcp_servers,
+            script_tools: ability.script_tools,
         }
     }
 }
@@ -268,6 +283,7 @@ impl From<AbilityDocument> for AbilityManifest {
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: ability.platform_scopes,
             mcp_servers: ability.mcp_servers,
+            script_tools: ability.script_tools,
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -283,7 +299,6 @@ pub struct DomainSummary {
     pub slug: Slug,
     #[serde(default)]
     pub path: String,
-    pub display_name: String,
     pub description: Option<String>,
 }
 
@@ -299,6 +314,8 @@ pub struct DomainDocument {
     pub abilities: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
+    #[serde(default)]
+    pub script_tools: Vec<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,7 +333,6 @@ pub struct ContextBlockSummary {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
 }
 
@@ -341,7 +357,6 @@ pub struct ContextBlockCreateDocument {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: Option<String>,
     pub description: Option<String>,
     pub template: String,
 }
@@ -351,8 +366,6 @@ pub struct ContextBlockCreateDocument {
 pub struct ContextBlockUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,13 +378,14 @@ pub struct DomainCreateDocument {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub display_name: String,
     pub description: Option<String>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_tools: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_config: Option<DomainPromptConfig>,
 }
@@ -382,8 +396,6 @@ pub struct DomainUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -391,17 +403,19 @@ pub struct DomainUpdateDocument {
     pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing)]
+    pub script_tools: Option<Vec<Slug>>,
 }
 
 impl DomainUpdateDocument {
     /// Return whether the update contains no effective field changes.
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
-            && self.display_name.is_none()
             && self.description.is_none()
             && self.command.is_none()
             && self.abilities.is_none()
             && self.mcp_servers.is_none()
+            && self.script_tools.is_none()
     }
 }
 
@@ -414,13 +428,13 @@ impl From<DomainManifest> for DomainDocument {
                 name: domain.name,
                 slug,
                 path: domain.path,
-                display_name: domain.display_name,
                 description: domain.description,
             },
             command: domain.command,
             platform_scopes: domain.platform_scopes,
             abilities: domain.abilities,
             mcp_servers: domain.mcp_servers,
+            script_tools: domain.script_tools,
         }
     }
 }
@@ -445,7 +459,6 @@ impl From<ContextBlockManifest> for ContextBlockDocument {
                 id: context_block.id,
                 name: context_block.name,
                 path: context_block.path,
-                display_name: context_block.display_name,
                 description: context_block.description,
             },
         }
@@ -503,8 +516,56 @@ pub struct ProjectUpdateDocument {
     pub repo_url: Option<Option<String>>,
 }
 
+/// Library knowledge pack metadata returned by pack routes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgePackDocument {
+    pub id: Uuid,
+    pub slug: Slug,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    pub source_type: String,
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Request body for creating a user-managed Library knowledge pack.
+pub struct KnowledgePackCreateDocument {
+    pub name: String,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Partial update body for a user-managed Library knowledge pack.
+pub struct KnowledgePackUpdateDocument {
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 /// Library knowledge document metadata returned by knowledge pack routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocSummary {
     pub pack: Slug,
     pub doc: Slug,
@@ -979,6 +1040,7 @@ mod tests {
             model: None,
             abilities: None,
             domains: None,
+            script_tools: None,
         })
         .unwrap();
         assert!(agent.get("platform_scopes").is_none());
@@ -988,17 +1050,18 @@ mod tests {
             description: None,
             activation_condition: None,
             mcp_servers: None,
+            script_tools: None,
         })
         .unwrap();
         assert!(ability.get("platform_scopes").is_none());
 
         let domain = serde_json::to_value(DomainUpdateDocument {
             name: None,
-            display_name: None,
             description: None,
             command: None,
             abilities: None,
             mcp_servers: None,
+            script_tools: None,
         })
         .unwrap();
         assert!(domain.get("platform_scopes").is_none());

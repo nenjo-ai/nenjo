@@ -68,6 +68,307 @@ fn install_resolves_local_repository_override_and_writes_lockfile() {
 }
 
 #[test]
+fn install_adapts_local_claude_plugin_override() {
+    let workspace = temp_workspace("claude-plugin-override");
+    let project = workspace.join("project");
+    let plugin = workspace.join("acme-plugin");
+    fs::create_dir_all(&project).unwrap();
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  acme_tools: "0.1.0"
+
+overrides:
+  acme_tools:
+    kind: local
+    root: ../acme-plugin
+    manifest_path: .claude-plugin/plugin.json
+"#,
+    );
+    write_file(
+        &plugin,
+        ".claude-plugin/plugin.json",
+        r#"{
+  "name": "Acme Tools",
+  "version": "0.1.0",
+  "description": "Plugin fixture"
+}"#,
+    );
+    write_file(
+        &plugin,
+        "skills/review/SKILL.md",
+        r#"---
+description: Review code changes.
+---
+Run $CLAUDE_SKILL_DIR/scripts/review.sh when useful.
+"#,
+    );
+    write_file(
+        &plugin,
+        "skills/review/scripts/review.sh",
+        "#!/usr/bin/env bash\necho review\n",
+    );
+    write_file(
+        &plugin,
+        ".mcp.json",
+        r#"{
+  "mcpServers": {
+    "review-server": {
+      "command": "node",
+      "args": ["servers/review.js"]
+    }
+  }
+}"#,
+    );
+    write_file(&plugin, "servers/review.js", "console.log('review');\n");
+
+    let report = install(InstallOptions::new(&project)).unwrap();
+
+    assert_eq!(report.materialization.installed, 1);
+    assert_eq!(report.lockfile.packages.len(), 1);
+    let package = &report.lockfile.packages[0];
+    assert_eq!(package.name, "acme_tools");
+    assert_eq!(package.manifest_path, "package.yaml");
+    assert!(
+        package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Skill
+                && module.name == "acme_tools__review")
+    );
+    assert!(package.modules.iter().any(|module| module.kind
+        == nenjo_packages::PackageKind::McpServer
+        && module.name == "acme_tools__review_server"));
+
+    let install_root = package_install_path(&project, "acme_tools", "0.1.0");
+    assert!(install_root.join("package.yaml").exists());
+    assert!(
+        install_root
+            .join(".nenjo/generated/claude-plugin/skills/review.yaml")
+            .exists()
+    );
+    assert!(install_root.join("skills/review/SKILL.md").exists());
+    assert!(
+        install_root
+            .join("skills/review/scripts/review.sh")
+            .exists()
+    );
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_materializes_mixed_native_and_claude_plugin_dependencies() {
+    let workspace = temp_workspace("mixed-native-and-claude-plugin");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let project = workspace.join("project");
+    let plugin = workspace.join("acme-plugin");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "agent": "^0.1.0"
+  acme_tools: "0.1.0"
+
+overrides:
+  "agent": file:../packages
+  acme_tools:
+    kind: local
+    root: ../acme-plugin
+    manifest_path: .claude-plugin/plugin.json
+"#,
+    );
+    write_file(
+        &plugin,
+        ".claude-plugin/plugin.json",
+        r#"{
+  "name": "Acme Tools",
+  "version": "0.1.0",
+  "description": "Plugin fixture"
+}"#,
+    );
+    write_file(
+        &plugin,
+        "commands/audit.md",
+        r#"---
+description: Run the audit loop.
+---
+Use the review skill and stop hook.
+"#,
+    );
+    write_file(
+        &plugin,
+        "skills/review/SKILL.md",
+        r#"---
+description: Review code changes.
+hooks:
+  - Stop audit-stop
+---
+Run $CLAUDE_SKILL_DIR/scripts/review.sh when useful.
+"#,
+    );
+    write_file(
+        &plugin,
+        "skills/review/scripts/review.sh",
+        "#!/usr/bin/env bash\necho review\n",
+    );
+    write_file(
+        &plugin,
+        "hooks/hooks.json",
+        r#"{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "scripts/audit-stop.sh" }
+        ]
+      }
+    ]
+  }
+}"#,
+    );
+    write_file(
+        &plugin,
+        "scripts/audit-stop.sh",
+        "#!/usr/bin/env bash\necho stop\n",
+    );
+    write_file(
+        &plugin,
+        ".mcp.json",
+        r#"{
+  "mcpServers": {
+    "review-server": {
+      "command": "node",
+      "args": ["servers/review.js"]
+    }
+  }
+}"#,
+    );
+    write_file(&plugin, "servers/review.js", "console.log('review');\n");
+
+    let report = install(InstallOptions::new(&project)).unwrap();
+
+    assert_eq!(report.materialization.installed, 3);
+    assert_eq!(report.lockfile.packages.len(), 3);
+    let mut package_names = report
+        .lockfile
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect::<Vec<_>>();
+    package_names.sort();
+    assert_eq!(
+        package_names,
+        vec![
+            "acme_tools@0.1.0".to_string(),
+            "agent@0.1.0".to_string(),
+            "core@0.1.0".to_string()
+        ]
+    );
+
+    let agent_package = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "agent")
+        .unwrap();
+    assert!(
+        agent_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Agent
+                && module.name == "support_agent")
+    );
+    assert!(
+        agent_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Ability
+                && module.name == "design_agent")
+    );
+
+    let plugin_package = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "acme_tools")
+        .unwrap();
+    assert_eq!(plugin_package.manifest_path, "package.yaml");
+    assert!(
+        plugin_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Plugin
+                && module.name == "acme_tools")
+    );
+    assert!(
+        plugin_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Skill
+                && module.name == "acme_tools__review")
+    );
+    assert!(
+        plugin_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Command
+                && module.name == "acme_tools__audit")
+    );
+    assert!(
+        plugin_package
+            .modules
+            .iter()
+            .any(|module| module.kind == nenjo_packages::PackageKind::Hook
+                && module.name == "acme_tools__stop_audit_stop")
+    );
+    assert!(plugin_package.modules.iter().any(|module| module.kind
+        == nenjo_packages::PackageKind::McpServer
+        && module.name == "acme_tools__review_server"));
+
+    let agent_install = package_install_path(&project, "agent", "0.1.0");
+    assert!(agent_install.join("agents/support.yaml").exists());
+    assert!(agent_install.join("abilities/design.yaml").exists());
+    let plugin_install = package_install_path(&project, "acme_tools", "0.1.0");
+    assert!(plugin_install.join("package.yaml").exists());
+    assert!(
+        plugin_install
+            .join(".nenjo/generated/claude-plugin/commands/audit.yaml")
+            .exists()
+    );
+    assert!(
+        plugin_install
+            .join(".nenjo/generated/claude-plugin/skills/review.yaml")
+            .exists()
+    );
+    assert!(
+        plugin_install
+            .join(".nenjo/generated/claude-plugin/hooks/stop_audit_stop.yaml")
+            .exists()
+    );
+    assert!(
+        plugin_install
+            .join(".nenjo/generated/claude-plugin/mcp/review_server.yaml")
+            .exists()
+    );
+    assert!(plugin_install.join("skills/review/SKILL.md").exists());
+    assert!(plugin_install.join("scripts/audit-stop.sh").exists());
+
+    let index =
+        PackageInstallIndex::load_file(project.join(".nenjo/packages/.nenpm-index.json")).unwrap();
+    assert!(index.get_package("agent", "0.1.0").is_some());
+    assert!(index.get_package("acme_tools", "0.1.0").is_some());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn install_reuses_verified_package_tree_on_second_run() {
     let workspace = temp_workspace("reuse-package-tree");
     copy_dir(&fixture("local-workspace"), &workspace);

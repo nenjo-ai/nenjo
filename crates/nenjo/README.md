@@ -6,7 +6,7 @@ Agent orchestration SDK for building agentic AI workflows with tool use, memory,
 
 - **Provider-based architecture** — pluggable LLM providers, tool factories, and memory backends
 - **Turn loop engine** — automatic tool call execution, context compaction, and streaming
-- **Multi-agent delegation** — agents delegate subtasks to other agents with cycle detection and depth limiting
+- **Multi-agent delegation** — agents delegate work to other agents with cycle detection and depth limiting
 - **Knowledge packs** — provider-level document packs with reusable search, read, and graph-neighbor tools
 - **Persistent memory** — 3-tier scoped memory (project, core, shared) with automatic prompt injection
 - **Abilities & domains** — structured sub-execution modes and domain-specific interaction sessions

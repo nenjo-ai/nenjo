@@ -63,6 +63,37 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
+        nenjo::TurnEvent::HookStarted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => format!(
+            "hook_started(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        nenjo::TurnEvent::HookActivated {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+        } => format!(
+            "hook_activated(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+        ),
+        nenjo::TurnEvent::HookCompleted {
+            hook,
+            hook_event,
+            hook_type,
+            source,
+            success,
+            blocked,
+            exit_code,
+            ..
+        } => format!(
+            "hook_completed(hook={hook}, event={hook_event}, type={hook_type}, source={source}, success={success}, blocked={blocked}, exit_code={})",
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
         nenjo::TurnEvent::SubAgentEvent {
             slug,
             agent_name,

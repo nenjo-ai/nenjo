@@ -22,7 +22,7 @@ fn routine_step_schema() -> serde_json::Value {
             },
             "step_type": {
                 "type": "string",
-                "enum": ["agent", "council", "cron", "gate", "terminal", "terminal_fail"],
+                "enum": ["agent", "council", "gate", "terminal", "terminal_fail"],
                 "description": "Execution kind for this step."
             },
             "council": {
@@ -31,7 +31,7 @@ fn routine_step_schema() -> serde_json::Value {
             },
             "agent": {
                 "type": ["string", "null"],
-                "description": "Agent slug for agent, gate, or cron steps. Required for agent and gate steps unless a cron step uses a council."
+                "description": "Agent slug for agent and gate steps. Required for agent and gate steps."
             },
             "config": {
                 "type": "object",

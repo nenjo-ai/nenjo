@@ -39,7 +39,7 @@ pub use api_client::{ApiClient, ApiClientError, NoopPayloadCodec, PayloadCodec};
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
 pub use local::LocalManifestMcpBackend;
-pub use manifest_contract::{ContentScope, ManifestKind};
+pub use manifest_contract::{ContentScope, ManifestKind, SensitiveContentKind};
 pub use manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityCreateDocument, AbilityCreateParams,
     AbilityDeleteParams, AbilityDocument, AbilityGetResult, AbilityManifestBackend,
@@ -68,16 +68,18 @@ pub use manifest_mcp::{
     KnowledgeDocCreateDocument, KnowledgeDocCreateParams, KnowledgeDocDeleteParams,
     KnowledgeDocMutationResult, KnowledgeDocRelatedDocument, KnowledgeDocSummary,
     KnowledgeDocUpdateDocument, KnowledgeDocUpdateParams, KnowledgeManifestBackend,
-    ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument, ModelCreateParams,
-    ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
-    ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams, ModelsListResult,
-    ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams, ProjectDocument,
-    ProjectGetResult, ProjectManifestBackend, ProjectMutationResult, ProjectSummary,
-    ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult, ResourceRef,
-    RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams, RoutineDocument,
-    RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
-    RoutineMutationResult, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
-    RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
+    KnowledgePackCreateDocument, KnowledgePackCreateParams, KnowledgePackDocument,
+    KnowledgePackMutationResult, KnowledgePackUpdateDocument, KnowledgePackUpdateParams,
+    LibraryManifestBackend, ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument,
+    ModelCreateParams, ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend,
+    ModelMutationResult, ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams,
+    ModelsListResult, ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams,
+    ProjectDocument, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
+    ProjectSummary, ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams,
+    ProjectsListResult, ResourceRef, RoutineCreateDocument, RoutineCreateParams,
+    RoutineDeleteParams, RoutineDocument, RoutineEdgeInput, RoutineGetResult, RoutineGraphInput,
+    RoutineManifestBackend, RoutineMutationResult, RoutineStepInput, RoutineSummary,
+    RoutineUpdateDocument, RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
 };
 pub use policy::ManifestAccessPolicy;
 pub use scope::{PlatformScope, ScopeAction, ScopeResource};

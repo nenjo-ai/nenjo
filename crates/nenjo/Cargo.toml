@@ -22,7 +22,7 @@ cron = { workspace = true }
 bon = { workspace = true }
 derive_builder = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["fs", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }

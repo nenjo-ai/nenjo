@@ -1,0 +1,4 @@
+schema: nenjo.registry.v1
+name: Raw Skill Fixture Registry
+packages:
+  "skills": packages/skills/nenjo.package.yaml

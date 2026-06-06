@@ -215,7 +215,6 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                             id: block.context_block.summary.id,
                             name: block.context_block.summary.name,
                             path: block.context_block.summary.path,
-                            display_name: block.context_block.summary.display_name,
                             description: block.context_block.summary.description,
                             template: block.template,
                         };
@@ -238,7 +237,6 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 id: block.summary.id,
                                 name: block.summary.name,
                                 path: block.summary.path,
-                                display_name: block.summary.display_name,
                                 description: block.summary.description,
                                 template: existing_template,
                             };
@@ -278,7 +276,6 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                             id: domain.domain.summary.id,
                             name: domain.domain.summary.name,
                             path: domain.domain.summary.path,
-                            display_name: domain.domain.summary.display_name,
                             description: domain.domain.summary.description,
                             command: domain.domain.command,
                             platform_scopes: existing_manifest
@@ -293,6 +290,10 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 .as_ref()
                                 .map(|domain| domain.mcp_servers.clone())
                                 .unwrap_or(domain.domain.mcp_servers),
+                            script_tools: existing_manifest
+                                .as_ref()
+                                .map(|domain| domain.script_tools.clone())
+                                .unwrap_or_default(),
                             prompt_config: domain.prompt_config,
                         };
                         if let Some(pos) = manifest.domains.iter().position(|r| r.id == id) {
@@ -310,12 +311,15 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 id: domain.summary.id,
                                 name: domain.summary.name,
                                 path: domain.summary.path,
-                                display_name: domain.summary.display_name,
                                 description: domain.summary.description,
                                 command: domain.command,
                                 platform_scopes: domain.platform_scopes,
                                 abilities: domain.abilities,
                                 mcp_servers: domain.mcp_servers,
+                                script_tools: existing_manifest
+                                    .as_ref()
+                                    .map(|domain| domain.script_tools.clone())
+                                    .unwrap_or_default(),
                                 prompt_config: existing_manifest
                                     .as_ref()
                                     .map(|domain| domain.prompt_config.clone())
@@ -376,6 +380,7 @@ mod tests {
             domains: Vec::new(),
             platform_scopes: Vec::new(),
             mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
             abilities: Vec::new(),
             prompt_locked: false,
             heartbeat: None,

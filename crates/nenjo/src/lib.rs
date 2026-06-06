@@ -17,14 +17,17 @@
 //! ```
 
 pub mod agents;
+pub mod commands;
 pub mod config;
 pub mod context;
+pub mod hooks;
 pub mod input;
 pub mod manifest;
 pub mod memory;
 pub mod provider;
 pub mod repo_manifest;
 pub mod routines;
+pub mod skills;
 pub mod slug;
 pub mod tools;
 pub mod types;
@@ -32,6 +35,7 @@ pub mod types;
 // Re-export key types at the crate root.
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{ExecutionHandle, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnOutput};
+pub use commands::{CommandProvider, LoadedCommand};
 pub use config::AgentConfig;
 pub use input::{
     AgentRun, AgentRunKind, ChatInput, CronInput, ExecutionOptions, GateInput, HeartbeatInput,
@@ -45,6 +49,10 @@ pub use manifest::{
 pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,
     ProviderRuntime, RoutineRunner, ToolContext, ToolFactory, TypedModelProviderFactory,
+};
+pub use skills::{
+    ActiveSkill, ListInstalledSkillsTool, LoadedSkill, SkillProvider, SkillRuntimeState,
+    UseSkillTool,
 };
 pub use slug::{IntoSlug, Slug, SlugError};
 

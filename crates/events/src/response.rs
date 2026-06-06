@@ -367,6 +367,47 @@ pub enum StreamEvent {
         encrypted_payload: Option<EncryptedPayload>,
     },
 
+    /// A hook referenced by the active command or skill was activated.
+    HookActivated {
+        agent: String,
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// An active hook started executing.
+    HookStarted {
+        agent: String,
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// An active hook completed executing.
+    HookCompleted {
+        agent: String,
+        hook: String,
+        hook_event: String,
+        hook_type: String,
+        source: String,
+        success: bool,
+        blocked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
     /// A sub-agent lifecycle or signal event.
     SubAgentEvent {
         agent: String,
@@ -489,6 +530,38 @@ impl std::fmt::Display for StreamEvent {
             } => write!(
                 f,
                 "ability_completed({ability}, agent={agent}, success={success})"
+            ),
+            Self::HookActivated {
+                agent,
+                hook,
+                hook_event,
+                source,
+                ..
+            } => write!(
+                f,
+                "hook_activated({hook}, event={hook_event}, source={source}, agent={agent})"
+            ),
+            Self::HookStarted {
+                agent,
+                hook,
+                hook_event,
+                source,
+                ..
+            } => write!(
+                f,
+                "hook_started({hook}, event={hook_event}, source={source}, agent={agent})"
+            ),
+            Self::HookCompleted {
+                agent,
+                hook,
+                hook_event,
+                source,
+                success,
+                blocked,
+                ..
+            } => write!(
+                f,
+                "hook_completed({hook}, event={hook_event}, source={source}, agent={agent}, success={success}, blocked={blocked})"
             ),
             Self::SubAgentEvent {
                 agent, slug, kind, ..
@@ -710,6 +783,8 @@ mod tests {
             project: None,
             routine: None,
             agent: Some("demo_agent".into()),
+            target_type: None,
+            target: None,
             domain_session_id: None,
             domain_activation: None,
             session_id: Uuid::nil(),
@@ -749,6 +824,8 @@ mod tests {
             project: None,
             routine: None,
             agent: None,
+            target_type: None,
+            target: None,
             domain_session_id: None,
             domain_activation: None,
             session_id: Uuid::nil(),
@@ -1153,6 +1230,8 @@ mod tests {
             project: None,
             schedule: "0 * * * *".into(),
             timezone: Some("America/Chicago".into()),
+            task: None,
+            encrypted_task: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"cron.enable""#));

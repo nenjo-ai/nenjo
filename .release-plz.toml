@@ -22,12 +22,16 @@ changelog_include = [
     "nenjo-harness",
     "nenjo-integration-tests",
     "nenjo-knowledge",
+    "nenjo-nenpm",
     "nenjo-platform",
     "nenjo-packages",
     "nenjo-secure-envelope",
     "nenjo-sessions",
     "nenjo-tool-api",
+    "nenjo-updater",
     "nenjo-worker",
+    "nenjoup-cli",
+    "nenpm-cli",
 ]
 
 [[package]]
@@ -35,6 +39,18 @@ name = "nenjo-cli"
 # The CLI is distributed as a binary artifact attached to the `nenjo` GitHub
 # release. Keep it out of cargo publish while still letting it use the
 # workspace version that drives the binary release flow.
+publish = false
+
+[[package]]
+name = "nenpm-cli"
+publish = false
+
+[[package]]
+name = "nenjoup-cli"
+publish = false
+
+[[package]]
+name = "nenjo-updater"
 publish = false
 
 [[package]]

@@ -4,7 +4,7 @@ use uuid::Uuid;
 pub use nenjo_platform::{
     AbilityDocument, AbilityPromptDocument, AgentDocument, AgentPromptDocument,
     ContextBlockContentDocument, ContextBlockDocument, CouncilDocument, DomainDocument,
-    DomainPromptDocument, ManifestKind, ProjectDocument,
+    DomainPromptDocument, ProjectDocument,
 };
 
 #[derive(Debug, Deserialize)]

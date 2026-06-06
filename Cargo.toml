@@ -15,9 +15,11 @@ members = [
     "crates/tool-api",
     "crates/models",
     "crates/nenpm",
+    "crates/updater",
     "crates/xml",
     "bin",
     "bin/nenpm",
+    "bin/nenjoup",
     "testing/integrations",
 ]
 
@@ -36,6 +38,7 @@ nenjo-packages = { path = "crates/packages", version = "0.12.0" }
 nenjo-xml = { path = "crates/xml", version = "0.12.0" }
 nenjo-models = { path = "crates/models", version = "0.12.0" }
 nenjo-nenpm = { path = "crates/nenpm", version = "0.12.0" }
+nenjo-updater = { path = "crates/updater", version = "0.12.0" }
 nenjo-events = { path = "crates/events", version = "0.12.0" }
 nenjo-eventbus = { path = "crates/eventbus", version = "0.12.0" }
 nenjo-harness = { path = "crates/harness", version = "0.12.0" }
@@ -83,6 +86,7 @@ regex = "1.12"
 reqwest = "0.13"
 rustls = { version = "0.23", default-features = false }
 rustls-webpki = "0.103.13"
+semver = "1"
 serde = "1.0"
 serde_json = "1.0"
 serde_yaml = "0.9"

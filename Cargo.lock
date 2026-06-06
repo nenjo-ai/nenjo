@@ -1979,6 +1979,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "eyre",
+ "nenjo-updater",
  "nenjo-worker",
  "rustls",
  "tokio",
@@ -2119,6 +2120,7 @@ dependencies = [
  "nenjo-packages",
  "rayon",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2210,6 +2212,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-updater"
+version = "0.12.0"
+dependencies = [
+ "directories",
+ "flate2",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "nenjo-worker"
 version = "0.12.0"
 dependencies = [
@@ -2285,6 +2303,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjoup-cli"
+version = "0.12.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "nenjo-updater",
+]
+
+[[package]]
 name = "nenpm-cli"
 version = "0.12.0"
 dependencies = [
@@ -2293,6 +2320,7 @@ dependencies = [
  "eyre",
  "indicatif",
  "nenjo-nenpm",
+ "nenjo-updater",
 ]
 
 [[package]]

@@ -21,7 +21,9 @@ use tracing::{debug, warn};
 use nenjo_events::{Command, Response};
 
 use crate::event_loop::ResponseSender as EventLoopResponseSender;
-use crate::handlers::chat::{ChatCommandContext, ChatCommandRequest, WorkerChatHarnessExt};
+use crate::handlers::chat::{
+    ChatCommandContext, ChatCommandRequest, ChatSlashCommandRequest, WorkerChatHarnessExt,
+};
 use crate::handlers::cron::{CronCommandContext, WorkerCronHarnessExt};
 use crate::handlers::crypto::{CryptoCommandContext, WorkerCryptoHarnessExt};
 use crate::handlers::domain::{DomainCommandContext, WorkerDomainHarnessExt};
@@ -79,7 +81,7 @@ impl TaskWorktreeManager for WorkerTaskWorktrees {
             .parent()
             .unwrap_or(repo_dir)
             .join("worktrees")
-            .join(task_slug);
+            .join(format!("{short_id}-{task_slug}"));
 
         if let Some(parent) = worktree_dir.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -221,6 +223,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             content,
             project,
             agent,
+            target_type,
+            target,
             session_id,
             domain_session_id,
             domain_activation,
@@ -234,6 +238,41 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         content: &content,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
+                        target_type: target_type.as_deref(),
+                        target: target.as_deref(),
+                        session_id,
+                        domain_session_id,
+                        domain_activation,
+                        hook_scopes: Vec::new(),
+                    },
+                )
+                .await
+        }
+
+        Command::ChatCommand {
+            id,
+            command,
+            content,
+            project,
+            agent,
+            target_type,
+            target,
+            session_id,
+            domain_session_id,
+            domain_activation,
+            ..
+        } => {
+            ctx.harness
+                .handle_chat_command(
+                    &ctx.chat_context(),
+                    ChatSlashCommandRequest {
+                        message_id: id.as_deref(),
+                        command: &command,
+                        content: &content,
+                        project: project.as_deref(),
+                        agent: agent.as_deref(),
+                        target_type: target_type.as_deref(),
+                        target: target.as_deref(),
                         session_id,
                         domain_session_id,
                         domain_activation,
@@ -281,7 +320,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             agent,
             execution_run_id,
             payload,
-            ..
+            encrypted_payload: _,
         } => {
             let payload = payload.ok_or_else(|| {
                 anyhow::anyhow!("task.execute missing payload after command decode")
@@ -332,15 +371,20 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             project,
             schedule,
             timezone,
+            task,
+            encrypted_task: _,
         } => {
             ctx.harness
                 .handle_cron_enable(
                     &ctx.cron_context(),
-                    &routine,
-                    project.as_deref(),
-                    &schedule,
-                    timezone.as_deref(),
-                    None,
+                    crate::handlers::cron::CronEnableRequest {
+                        routine: &routine,
+                        project: project.as_deref(),
+                        schedule: &schedule,
+                        timezone: timezone.as_deref(),
+                        task_content: task,
+                        start_at: None,
+                    },
                 )
                 .await
         }
@@ -352,10 +396,13 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::CronTrigger {
-            routine, project, ..
+            routine,
+            project,
+            task,
+            encrypted_task: _,
         } => {
             ctx.harness
-                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref())
+                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref(), task)
                 .await
         }
 
@@ -363,6 +410,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             agent,
             interval,
             timezone,
+            instructions,
+            encrypted_instructions: _,
         } => {
             ctx.harness
                 .handle_agent_heartbeat_enable(
@@ -370,6 +419,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &agent,
                     &interval,
                     timezone.as_deref(),
+                    instructions.map(|content| content.instructions),
                     None,
                 )
                 .await
@@ -381,9 +431,17 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::AgentHeartbeatTrigger { agent } => {
+        Command::AgentHeartbeatTrigger {
+            agent,
+            instructions,
+            encrypted_instructions: _,
+        } => {
             ctx.harness
-                .handle_agent_heartbeat_trigger(&ctx.heartbeat_context(), &agent)
+                .handle_agent_heartbeat_trigger(
+                    &ctx.heartbeat_context(),
+                    &agent,
+                    instructions.map(|content| content.instructions),
+                )
                 .await
         }
 
@@ -454,6 +512,7 @@ impl CommandContext {
         ChatCommandContext {
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
+            state_dir: self.config.state_dir.clone(),
         }
     }
 

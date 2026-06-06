@@ -11,7 +11,7 @@ use crate::dependency::{DependencyManifest, LoadedDependencyManifest};
 use crate::lockfile::{LockedSource, NenpmLock, lockfile_from_plan};
 use crate::plan::InstallPlan;
 use crate::registry::{
-    PackageRegistry, RegistryPackageVersion, registry_record_manifest_path, verify_registry_package,
+    RegistryPackageVersion, registry_record_manifest_path, verify_registry_package,
 };
 use crate::source::{
     DefaultPackageSourceFetcher, PackageSource, PackageSourceFetcher, normalize_source_paths,
@@ -27,6 +27,15 @@ use materialize::materialize_packages;
 use registries::ConfiguredRegistries;
 pub(crate) use registries::is_registry_manifest_path;
 
+/// Major-version behavior for `nenpm upgrade`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradePolicy {
+    /// Upgrade locked packages only within their current major version.
+    Compatible,
+    /// Allow packages to move to a new major version when requirements permit it.
+    AllowMajor,
+}
+
 /// Options for installing a dependency manifest.
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
@@ -38,6 +47,8 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Re-resolve registry versions instead of preserving lockfile pins.
     pub update: bool,
+    /// Major-version policy used when `update` is true.
+    pub upgrade_policy: UpgradePolicy,
     /// Require `nenpm.lock.yml` to exist and match the resolved dependency graph.
     pub locked: bool,
 }
@@ -52,6 +63,7 @@ impl InstallOptions {
             packages_dir,
             dry_run: false,
             update: false,
+            upgrade_policy: UpgradePolicy::Compatible,
             locked: false,
         }
     }
@@ -71,6 +83,12 @@ impl InstallOptions {
     /// Re-resolve registry versions instead of preserving lockfile pins.
     pub fn update(mut self, update: bool) -> Self {
         self.update = update;
+        self
+    }
+
+    /// Allow `update`/`upgrade` to move locked packages to a new major version.
+    pub fn allow_major_updates(mut self) -> Self {
+        self.upgrade_policy = UpgradePolicy::AllowMajor;
         self
     }
 
@@ -116,10 +134,15 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
     }
     let loaded = DependencyManifest::load_from_dir(&options.root)?;
     let lockfile_path = options.root.join("nenpm.lock.yml");
-    let existing_lockfile = if options.update || !lockfile_path.exists() {
+    let loaded_lockfile = if lockfile_path.exists() {
+        Some(NenpmLock::load_file(&lockfile_path)?)
+    } else {
+        None
+    };
+    let existing_lockfile = if options.update {
         None
     } else {
-        Some(NenpmLock::load_file(&lockfile_path)?)
+        loaded_lockfile.as_ref()
     };
     if options.locked && existing_lockfile.is_none() {
         bail!(
@@ -127,14 +150,18 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
             lockfile_path.display()
         );
     }
-    let locked_versions = existing_lockfile
-        .as_ref()
-        .map(NenpmLock::versions_by_package)
-        .unwrap_or_default();
-    let resolved = resolve_dependency_manifest(&loaded, &locked_versions)?;
+    let locked_version_policy = locked_version_policy(options.update, options.upgrade_policy);
+    let locked_versions = match locked_version_policy {
+        LockedVersionPolicy::Ignore => BTreeMap::new(),
+        LockedVersionPolicy::Exact | LockedVersionPolicy::SameMajor => loaded_lockfile
+            .as_ref()
+            .map(NenpmLock::versions_by_package)
+            .unwrap_or_default(),
+    };
+    let resolved = resolve_dependency_manifest(&loaded, &locked_versions, locked_version_policy)?;
     let plan = InstallPlan::from_graph(resolved.graph)?;
     let lockfile = lockfile_from_plan(&plan, &resolved.sources)?;
-    if let Some(existing_lockfile) = &existing_lockfile {
+    if let Some(existing_lockfile) = existing_lockfile {
         verify_lockfile_integrity(existing_lockfile, &lockfile)?;
         if options.locked && existing_lockfile != &lockfile {
             bail!("nenpm.lock.yml is out of date; run nenpm install to update it");
@@ -161,9 +188,27 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockedVersionPolicy {
+    Exact,
+    SameMajor,
+    Ignore,
+}
+
+fn locked_version_policy(update: bool, upgrade_policy: UpgradePolicy) -> LockedVersionPolicy {
+    if !update {
+        return LockedVersionPolicy::Exact;
+    }
+    match upgrade_policy {
+        UpgradePolicy::Compatible => LockedVersionPolicy::SameMajor,
+        UpgradePolicy::AllowMajor => LockedVersionPolicy::Ignore,
+    }
+}
+
 fn resolve_dependency_manifest(
     loaded: &LoadedDependencyManifest,
     locked_versions: &BTreeMap<String, String>,
+    locked_version_policy: LockedVersionPolicy,
 ) -> Result<ResolvedInstall> {
     let manifest_dir = loaded
         .path
@@ -245,12 +290,13 @@ fn resolve_dependency_manifest(
         }
 
         let registry = registries.for_package(&name)?;
-        let registry_requirement = locked_versions
-            .get(&name)
-            .filter(|version| nenjo_packages::version_satisfies(version, &requirement))
-            .unwrap_or(&requirement);
+        let requirements = registry_requirements(
+            &requirement,
+            locked_versions.get(&name).map(String::as_str),
+            locked_version_policy,
+        )?;
         let record = registry
-            .resolve_version(&name, registry_requirement)
+            .resolve_version_matching_all(&name, &requirements)
             .with_context(|| format!("failed to resolve {name} from registry"))?;
         for (dependency, requirement) in &record.dependencies {
             stack.push((dependency.clone(), requirement.clone()));
@@ -268,6 +314,33 @@ fn resolve_dependency_manifest(
     };
     graph.validate_versions()?;
     Ok(ResolvedInstall { graph, sources })
+}
+
+fn registry_requirements(
+    requirement: &str,
+    locked_version: Option<&str>,
+    locked_version_policy: LockedVersionPolicy,
+) -> Result<Vec<String>> {
+    match (locked_version_policy, locked_version) {
+        (LockedVersionPolicy::Ignore, _) | (_, None) => Ok(vec![requirement.to_string()]),
+        (LockedVersionPolicy::Exact, Some(version))
+            if nenjo_packages::version_satisfies(version, requirement) =>
+        {
+            Ok(vec![version.to_string()])
+        }
+        (LockedVersionPolicy::Exact, Some(_)) => Ok(vec![requirement.to_string()]),
+        (LockedVersionPolicy::SameMajor, Some(version)) => {
+            let compatibility = same_major_requirement(version)?;
+            Ok(vec![requirement.to_string(), compatibility])
+        }
+    }
+}
+
+fn same_major_requirement(version: &str) -> Result<String> {
+    let normalized = version.trim().trim_start_matches('v');
+    semver::Version::parse(normalized)
+        .with_context(|| format!("locked package version {version} is not semantic"))?;
+    Ok(format!("^{normalized}"))
 }
 
 fn resolve_override_source(

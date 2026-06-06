@@ -350,7 +350,8 @@ where
     /// Look up a routine by slug and return a builder for configuring execution.
     ///
     /// ```ignore
-    /// let task = nenjo::TaskInput::new("demo_project", "Fix auth", "Repair the login flow")
+    /// let task = nenjo::TaskInput::new("Fix auth", "Repair the login flow")
+    ///     .with_project("demo_project")
     ///     .with_task_id(task_id);
     /// let result = provider.routine("triage")?
     ///     .run(task)
@@ -394,7 +395,6 @@ where
         debug!(
             agent = %agent.name,
             system_prompt_len = prompt_config.system_prompt.len(),
-            cron_task_len = prompt_config.templates.cron_task.len(),
             task_execution_len = prompt_config.templates.task_execution.len(),
             "Loaded typed prompt_config"
         );

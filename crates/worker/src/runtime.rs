@@ -29,6 +29,7 @@ use crate::sessions::{
     CronSessionRecovery, DomainSessionRecovery, HeartbeatSessionRecovery,
     WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
 };
+use crate::skills::SkillRegistry;
 
 pub(crate) struct WorkerAccountKeyStore {
     pub auth_provider: Arc<WorkerAuthProvider>,
@@ -79,6 +80,7 @@ pub struct CommandContext {
     pub response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
     pub external_mcp: Arc<ExternalMcpPool>,
+    pub skill_registry: Arc<SkillRegistry>,
     pub worker_name: String,
     pub config: Config,
     pub domains: DomainRegistry<WorkerProvider>,
@@ -96,6 +98,7 @@ pub struct WorkerRuntime {
     api: Arc<ApiClient>,
     auth_provider: Arc<WorkerAuthProvider>,
     external_mcp: Arc<ExternalMcpPool>,
+    skill_registry: Arc<SkillRegistry>,
     worker_name: String,
     session_runtime: WorkerSessionRuntime,
     git_locks: GitLocks,
@@ -136,15 +139,20 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
             .map(nenjo::Slug::parse)
             .transpose()?;
         let project = project.as_ref().map(|slug| slug.as_str());
+        let task: Option<nenjo_events::CronTaskContent> =
+            request.task.map(serde_json::from_value).transpose()?;
         self.ctx
             .harness
             .handle_cron_enable(
                 &self.ctx.cron_context(),
-                routine.as_str(),
-                project,
-                &request.schedule_expr,
-                request.timezone.as_deref(),
-                request.next_run_at,
+                crate::handlers::cron::CronEnableRequest {
+                    routine: routine.as_str(),
+                    project,
+                    schedule: &request.schedule_expr,
+                    timezone: request.timezone.as_deref(),
+                    task_content: task,
+                    start_at: request.next_run_at,
+                },
             )
             .await?;
         Ok(())
@@ -168,6 +176,7 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
                     interval: request.interval,
                     timezone: request.timezone,
                     start_at: request.next_run_at,
+                    instructions: request.instructions,
                     previous_output_ref: request.previous_output_ref,
                     last_run_at: request.last_run_at,
                     start_paused: request.start_paused,
@@ -196,6 +205,7 @@ impl WorkerRuntime {
             api: Arc::new(assembly.api),
             auth_provider: assembly.auth_provider,
             external_mcp: assembly.external_mcp,
+            skill_registry: assembly.skill_registry,
             worker_name,
             session_runtime: assembly.session_runtime,
             git_locks: Arc::new(DashMap::new()),
@@ -216,6 +226,7 @@ impl WorkerRuntime {
             response_tx,
             auth_provider: self.auth_provider.clone(),
             external_mcp: self.external_mcp.clone(),
+            skill_registry: self.skill_registry.clone(),
             worker_name: self.worker_name.clone(),
             config: self.config.clone(),
             domains: self.harness.domains(),
@@ -335,6 +346,7 @@ mod tests {
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
     use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
+    use crate::skills::SkillRegistry;
     use nenjo::LocalManifestStore;
     use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
@@ -358,11 +370,13 @@ mod tests {
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
         let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
+        let skill_registry = Arc::new(SkillRegistry::default());
         let provider = build_provider(
             &config,
             LocalManifestStore::new(&config.manifests_dir),
             auth_provider.clone(),
             external_mcp.clone(),
+            skill_registry.clone(),
         )
         .await
         .unwrap();
@@ -381,6 +395,7 @@ mod tests {
                 session_runtime,
                 session_stores,
                 external_mcp,
+                skill_registry,
             },
             config,
         )

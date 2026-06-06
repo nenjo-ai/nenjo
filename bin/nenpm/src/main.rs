@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process;
 
 use clap::{Parser, Subcommand};
 use console::style;
@@ -8,11 +9,12 @@ use nenjo_nenpm::{
     PackageSpec, PrepareOptions, RemoveOptions, ValidateOptions, add, clean, info, init, install,
     list, prepare, remove, update, validate,
 };
+use nenjo_updater::{maybe_update_notice, run_nenjoup_update};
 
 mod pm_ui;
 
 #[derive(Parser)]
-#[command(name = "nenpm", about = "Nenjo package manager")]
+#[command(name = "nenpm", version, about = "Nenjo package manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -75,8 +77,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Re-resolve registry versions and rewrite nenpm.lock.yml.
+    /// Update the installed Nenjo binary bundle.
     Update {
+        /// Install a specific release tag or version, for example v0.12.0.
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Re-resolve registry versions and rewrite nenpm.lock.yml.
+    Upgrade {
         /// Directory containing nenpm.yml or nenpm.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
@@ -86,6 +94,9 @@ enum Commands {
         /// Resolve and print without writing nenpm.lock.yml.
         #[arg(long)]
         dry_run: bool,
+        /// Allow packages to move to a new major version.
+        #[arg(long)]
+        major: bool,
     },
     /// Remove derived package install artifacts.
     Clean {
@@ -140,8 +151,9 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let should_print_update_notice = cli.command.should_print_update_notice();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Init { root } => {
             pm_ui::print_header("nenpm init");
             let report = pm_ui::run_phase("initializing dependency manifest", || {
@@ -193,18 +205,23 @@ fn main() -> Result<()> {
             print_install_report(&report.install);
             Ok(())
         }
-        Commands::Update {
+        Commands::Update { version } => run_bundle_update(version),
+        Commands::Upgrade {
             root,
             packages_dir,
             dry_run,
+            major,
         } => {
-            pm_ui::print_header("nenpm update");
-            let report = pm_ui::run_phase("updating package graph", || {
-                update(
-                    apply_install_packages_dir(InstallOptions::new(root), packages_dir)
-                        .dry_run(dry_run),
-                )
-                .wrap_err("failed to update packages")
+            pm_ui::print_header("nenpm upgrade");
+            let report = pm_ui::run_phase("upgrading package graph", || {
+                let options = apply_install_packages_dir(InstallOptions::new(root), packages_dir)
+                    .dry_run(dry_run);
+                let options = if major {
+                    options.allow_major_updates()
+                } else {
+                    options
+                };
+                update(options).wrap_err("failed to upgrade packages")
             })?;
             print_install_report(&report);
             Ok(())
@@ -277,6 +294,33 @@ fn main() -> Result<()> {
             println!("wrote {}", report.output_path.display());
             Ok(())
         }
+    };
+
+    if result.is_ok() && should_print_update_notice {
+        print_update_notice("nenpm update");
+    }
+
+    result
+}
+
+impl Commands {
+    fn should_print_update_notice(&self) -> bool {
+        !matches!(self, Self::Update { .. })
+    }
+}
+
+fn print_update_notice(update_command: &str) {
+    if let Some(notice) = maybe_update_notice(env!("CARGO_PKG_VERSION"), update_command) {
+        eprintln!("{}", notice.render());
+    }
+}
+
+fn run_bundle_update(version: Option<String>) -> Result<()> {
+    let status = run_nenjoup_update(version.as_deref())?;
+    if status.success() {
+        Ok(())
+    } else {
+        process::exit(status.code().unwrap_or(1));
     }
 }
 

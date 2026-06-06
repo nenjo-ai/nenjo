@@ -106,6 +106,7 @@ where
                                 agent: request.agent.clone(),
                                 interval: request.interval,
                                 start_at: Some(scheduled_for),
+                                instructions: request.instructions.clone(),
                                 previous_output: previous_output.clone(),
                                 last_run_at,
                                 next_run_at: Some(next_run_at),

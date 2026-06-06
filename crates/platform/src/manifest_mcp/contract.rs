@@ -14,9 +14,10 @@ use super::params::{
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainPromptGetParams, DomainPromptUpdateParams, DomainUpdateParams,
     DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
-    ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
-    ProjectDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
-    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
+    KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
+    ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
+    ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams,
+    RoutineUpdateParams, RoutinesGetParams,
 };
 use super::tools::all_tools;
 
@@ -171,6 +172,14 @@ impl ManifestMcpContract {
             "delete_project" => {
                 let args: ProjectDeleteParams = serde_json::from_value(params)?;
                 to_json(backend.delete_project(args).await?)
+            }
+            "create_knowledge_pack" => {
+                let args: KnowledgePackCreateParams = serde_json::from_value(params)?;
+                to_json(backend.create_knowledge_pack(args).await?)
+            }
+            "update_knowledge_pack" => {
+                let args: KnowledgePackUpdateParams = serde_json::from_value(params)?;
+                to_json(backend.update_knowledge_pack(args).await?)
             }
             "create_knowledge_doc" => {
                 let args: KnowledgeDocCreateParams = serde_json::from_value(params)?;

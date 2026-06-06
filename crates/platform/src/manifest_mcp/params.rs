@@ -11,8 +11,9 @@ use super::types::{
     ContextBlockCreateDocument, ContextBlockUpdateDocument, CouncilCreateDocument,
     CouncilCreateMemberDocument, CouncilMemberUpdateDocument, CouncilUpdateDocument,
     DomainCreateDocument, DomainUpdateDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocUpdateDocument, ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument,
-    ProjectUpdateDocument, RoutineCreateDocument, RoutineUpdateDocument,
+    KnowledgeDocUpdateDocument, KnowledgePackCreateDocument, KnowledgePackUpdateDocument,
+    ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument, ProjectUpdateDocument,
+    RoutineCreateDocument, RoutineUpdateDocument,
 };
 use nenjo::Slug;
 
@@ -172,6 +173,21 @@ pub struct ProjectUpdateParams {
 /// Parameters for `delete_project`.
 pub struct ProjectDeleteParams {
     pub project: Slug,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Parameters for `create_knowledge_pack`.
+pub struct KnowledgePackCreateParams {
+    #[serde(flatten)]
+    pub data: KnowledgePackCreateDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Parameters for `update_knowledge_pack`.
+pub struct KnowledgePackUpdateParams {
+    pub pack: Slug,
+    #[serde(flatten)]
+    pub data: KnowledgePackUpdateDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

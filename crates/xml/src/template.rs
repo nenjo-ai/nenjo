@@ -80,6 +80,62 @@ pub fn try_render_template(
         })
 }
 
+/// Render a template with additional named templates registered in the same
+/// MiniJinja environment.
+///
+/// This is used for context-block composition where prompts can include named
+/// context block templates with MiniJinja's native `{% include %}` mechanism.
+pub fn render_template_with_named_templates(
+    template: &str,
+    vars: &HashMap<String, String>,
+    named_templates: &HashMap<String, String>,
+) -> String {
+    match try_render_template_with_named_templates(template, vars, named_templates) {
+        Ok(rendered) => rendered,
+        Err(e) => {
+            warn!(
+                error = %e.message,
+                detail = %e.detail,
+                "MiniJinja render failed, returning original template"
+            );
+            template.to_string()
+        }
+    }
+}
+
+/// Like [`render_template_with_named_templates`] but returns an error on
+/// failure instead of falling back to the original template.
+pub fn try_render_template_with_named_templates(
+    template: &str,
+    vars: &HashMap<String, String>,
+    named_templates: &HashMap<String, String>,
+) -> Result<String, TemplateError> {
+    if template.is_empty() {
+        return Ok(String::new());
+    }
+
+    let template = &escape_backslash_braces(template);
+    let context_value = vars_to_value(vars);
+
+    let mut env = Environment::new();
+    env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
+    env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
+
+    for (name, source) in named_templates {
+        env.add_template_owned(name.clone(), escape_backslash_braces(source))
+            .map_err(|e| TemplateError {
+                message: e.to_string(),
+                detail: e.display_debug_info().to_string(),
+            })?;
+    }
+
+    env.render_str(template, &context_value)
+        .map_err(|e| TemplateError {
+            message: e.to_string(),
+            detail: e.display_debug_info().to_string(),
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Backslash escape pre-processing
 // ---------------------------------------------------------------------------
@@ -409,6 +465,88 @@ Task: {{ task.title }}"#;
     #[test]
     fn try_render_empty() {
         assert_eq!(try_render_template("", &HashMap::new()).unwrap(), "");
+    }
+
+    #[test]
+    fn render_with_named_template_include() {
+        let v = vars(&[("agent.name", "Nenji")]);
+        let templates = HashMap::from([(
+            "pkg/nenjo/core/methodology".to_string(),
+            "<methodology>{{ agent.name }}</methodology>".to_string(),
+        )]);
+
+        let rendered = render_template_with_named_templates(
+            r#"{% include "pkg/nenjo/core/methodology" %}"#,
+            &v,
+            &templates,
+        );
+
+        assert_eq!(rendered, "<methodology>Nenji</methodology>");
+    }
+
+    #[test]
+    fn render_with_named_templates_supports_nested_includes() {
+        let v = vars(&[("agent.name", "Nenji")]);
+        let templates = HashMap::from([
+            (
+                "base".to_string(),
+                "<base>{{ agent.name }}</base>".to_string(),
+            ),
+            (
+                "wrapper".to_string(),
+                "<wrapper>{% include \"base\" %}</wrapper>".to_string(),
+            ),
+        ]);
+
+        let rendered =
+            render_template_with_named_templates(r#"{% include "wrapper" %}"#, &v, &templates);
+
+        assert_eq!(rendered, "<wrapper><base>Nenji</base></wrapper>");
+    }
+
+    #[test]
+    fn try_render_with_named_templates_errors_on_missing_include() {
+        let result = try_render_template_with_named_templates(
+            r#"{% include "missing" %}"#,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().message.is_empty());
+    }
+
+    #[test]
+    fn try_render_with_named_templates_errors_on_include_cycle() {
+        let templates = HashMap::from([
+            ("a".to_string(), r#"{% include "b" %}"#.to_string()),
+            ("b".to_string(), r#"{% include "a" %}"#.to_string()),
+        ]);
+
+        let result = try_render_template_with_named_templates(
+            r#"{% include "a" %}"#,
+            &HashMap::new(),
+            &templates,
+        );
+
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().message.is_empty());
+    }
+
+    #[test]
+    fn named_templates_preserve_literal_escaped_jinja_syntax() {
+        let templates = HashMap::from([(
+            "guide".to_string(),
+            r#"Use \{{ variable }} literally."#.to_string(),
+        )]);
+
+        let rendered = render_template_with_named_templates(
+            r#"{% include "guide" %}"#,
+            &HashMap::new(),
+            &templates,
+        );
+
+        assert_eq!(rendered, "Use {{ variable }} literally.");
     }
 
     #[test]

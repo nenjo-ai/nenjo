@@ -651,9 +651,11 @@ pub fn transcript_payloads_from_turn_event(
         nenjo::TurnEvent::Done { output } => vec![SessionTranscriptEventPayload::TurnCompleted {
             final_output: preview(&output.text),
         }],
-        nenjo::TurnEvent::SubAgentEvent { .. } | nenjo::TurnEvent::SubAgentTranscript { .. } => {
-            Vec::new()
-        }
+        nenjo::TurnEvent::HookActivated { .. }
+        | nenjo::TurnEvent::HookStarted { .. }
+        | nenjo::TurnEvent::HookCompleted { .. }
+        | nenjo::TurnEvent::SubAgentEvent { .. }
+        | nenjo::TurnEvent::SubAgentTranscript { .. } => Vec::new(),
         nenjo::TurnEvent::MessageCompacted { .. }
         | nenjo::TurnEvent::Paused
         | nenjo::TurnEvent::Resumed => Vec::new(),
@@ -792,6 +794,9 @@ pub fn trace_events_from_turn_event(
                 ..TraceEventFields::default()
             },
         )],
+        nenjo::TurnEvent::HookActivated { .. }
+        | nenjo::TurnEvent::HookStarted { .. }
+        | nenjo::TurnEvent::HookCompleted { .. } => Vec::new(),
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
             messages_after,

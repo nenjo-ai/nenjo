@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::agents::prompts::PromptContext;
 use crate::config::AgentConfig;
+use crate::hooks::HookRuntime;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, ModelManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime};
@@ -73,6 +74,7 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) provider_runtime: Option<P>,
     pub(crate) sub_agent_ctx: Option<DelegationContext>,
     pub(crate) execution_mode: AgentExecutionMode,
+    pub(crate) hook_runtime: Option<Arc<HookRuntime>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +103,7 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             provider_runtime: self.provider_runtime.clone(),
             sub_agent_ctx: self.sub_agent_ctx.clone(),
             execution_mode: self.execution_mode,
+            hook_runtime: self.hook_runtime.clone(),
         }
     }
 }
@@ -192,6 +195,11 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         };
         active_domain.session_id = session_id;
         true
+    }
+
+    /// Attach the active hook runtime for this execution.
+    pub fn set_hook_runtime(&mut self, hook_runtime: Option<Arc<HookRuntime>>) {
+        self.runtime.hook_runtime = hook_runtime;
     }
 
     /// Get tool specs for LLM function calling registration.
@@ -301,8 +309,10 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             let mut project_context_vars = vars.clone();
             project_context_vars.remove("project");
             project_context_vars.remove("project.context");
-            let rendered_context =
-                nenjo_xml::template::render_template(&ctx.project.context, &project_context_vars);
+            let rendered_context = self
+                .prompt
+                .renderer
+                .render_template(&ctx.project.context, &project_context_vars);
             ctx.project.context = rendered_context.clone();
             if rendered_context.is_empty() {
                 vars.remove("project.context");
@@ -330,15 +340,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
 
         // 6. Select the user message template based on task type
         let (task_type_name, task_template) = match &run.kind {
-            AgentRunKind::Task { .. } => ("Task", &prompt_config.templates.task_execution),
-            AgentRunKind::Chat { .. } => ("Chat", &prompt_config.templates.chat_task),
-            AgentRunKind::Gate { .. } => ("Gate", &prompt_config.templates.gate_eval),
-            AgentRunKind::CouncilSubtask { .. } => {
-                ("CouncilSubtask", &prompt_config.templates.chat_task)
-            }
-            AgentRunKind::Cron { .. } => ("Cron", &prompt_config.templates.cron_task),
+            AgentRunKind::Task { .. } => ("Task", prompt_config.templates.task_execution.as_str()),
+            AgentRunKind::Chat { .. } => ("Chat", prompt_config.templates.chat_task.as_str()),
+            AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
+            AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
             AgentRunKind::Heartbeat { .. } => {
-                ("Heartbeat", &prompt_config.templates.heartbeat_task)
+                ("Heartbeat", prompt_config.templates.heartbeat_task.as_str())
             }
         };
         tracing::debug!(
@@ -349,9 +356,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         );
 
         // 7. Render all three prompts with the same vars
-        let system = nenjo_xml::template::render_template(&prompt_config.system_prompt, &vars);
-        let developer = nenjo_xml::template::render_template(&developer, &vars);
-        let user_message = nenjo_xml::template::render_template(task_template, &vars);
+        let system = self
+            .prompt
+            .renderer
+            .render_template(&prompt_config.system_prompt, &vars);
+        let developer = self.prompt.renderer.render_template(&developer, &vars);
+        let user_message = self.prompt.renderer.render_template(task_template, &vars);
 
         BuiltPrompts {
             system,

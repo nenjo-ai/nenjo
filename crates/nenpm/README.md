@@ -123,12 +123,24 @@ cargo run --bin nenpm -- install --root . --packages-dir ~/.nenjo/packages
 ```
 
 `install` preserves package versions already pinned in `nenpm.lock.yml` when
-they still satisfy `nenpm.yml`. Use `update` to intentionally re-resolve from
-the registry and rewrite those pins:
+they still satisfy `nenpm.yml`. Use `upgrade` to intentionally re-resolve from
+the registry and rewrite those pins. By default, `upgrade` keeps already locked
+packages within their current major version and only applies compatible minor
+and patch upgrades:
 
 ```bash
-cargo run --bin nenpm -- update --root .
+cargo run --bin nenpm -- upgrade --root .
 ```
+
+Use `--major` only when you explicitly want locked packages to move to a new
+major version allowed by `nenpm.yml`:
+
+```bash
+cargo run --bin nenpm -- upgrade --root . --major
+```
+
+`nenpm update` updates the installed Nenjo command-line tools through the
+bundled `nenjoup` updater.
 
 The lockfile records package source metadata, requested dependency ranges,
 exact resolved dependency versions, package manifest hashes, and module hashes.
@@ -172,6 +184,7 @@ Common dependency commands:
 cargo run --bin nenpm -- init --root .
 cargo run --bin nenpm -- add @nenjo-ai/nenji@^0.1.0 --root .
 cargo run --bin nenpm -- remove @nenjo-ai/nenji --root .
+cargo run --bin nenpm -- upgrade --root .
 cargo run --bin nenpm -- clean --root .
 cargo run --bin nenpm -- list --root .
 cargo run --bin nenpm -- info @nenjo-ai/nenji --root .

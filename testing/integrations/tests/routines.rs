@@ -71,7 +71,6 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
                 task_execution: "Task title: {{ task.title }}\nTask description: {{ task.description }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 heartbeat_task: String::new(),
             },
             ..Default::default()
@@ -82,6 +81,7 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         abilities: vec![],
+        script_tools: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -89,10 +89,10 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
 
 fn make_task(project: &ProjectManifest) -> TaskInput {
     TaskInput::new(
-        &project.slug,
         "Routine integration smoke test",
         "Reply with a short sentence that includes the marker ROUTINE_OK.",
     )
+    .with_project(project.slug.clone())
     .with_task_id(Uuid::new_v4())
     .source("integration-test")
 }

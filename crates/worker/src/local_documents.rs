@@ -293,7 +293,7 @@ pub async fn sync_pack(
         downloads = diff.to_download.len(),
         renames = diff.to_rename.len(),
         deletes = diff.to_delete.len(),
-        "Syncing knowledge pack"
+        "Knowledge pack sync started"
     );
 
     // Track which library documents were successfully downloaded.
@@ -322,7 +322,7 @@ pub async fn sync_pack(
                 })?;
 
                 write_document_content(pack_dir, &library_doc_relative_path(doc), &content)?;
-                info!(doc = %doc.slug, filename = %doc.filename, "Downloaded knowledge document");
+                debug!(doc = %doc.slug, filename = %doc.filename, "Downloaded knowledge document");
             }
             Err(e) => {
                 warn!(
@@ -360,6 +360,14 @@ pub async fn sync_pack(
         pack_dir,
         &build_library_knowledge_manifest(pack_slug, &synced_docs, &edges_by_doc),
     )?;
+    info!(
+        pack_slug = %pack_slug,
+        downloaded = diff.to_download.len().saturating_sub(failed_docs.len()),
+        renamed = diff.to_rename.len(),
+        deleted = diff.to_delete.len(),
+        failed = failed_docs.len(),
+        "Knowledge pack sync completed"
+    );
 
     Ok(())
 }

@@ -170,6 +170,28 @@ fn resolves_transitive_local_module_imports_from_entrypoints() {
 }
 
 #[test]
+fn resolves_raw_skill_markdown_directory_module() {
+    let graph = LocalPackageResolver::new(fixture("raw-skill"))
+        .resolve_package_graph("skills")
+        .unwrap();
+
+    let package = &graph.packages["skills"];
+    let skill = &package.modules["skills/review"];
+    assert_eq!(skill.kind, PackageKind::Skill);
+    assert_eq!(skill.source_path, "packages/skills/skills/review/SKILL.md");
+    assert_eq!(skill.name(), "review");
+    assert_eq!(
+        skill.manifest.manifest["description"],
+        "Review code changes with repository-local evidence."
+    );
+    assert_eq!(skill.manifest.manifest["entry_path"], "SKILL.md");
+    assert_eq!(
+        skill.manifest.manifest["root_path"],
+        "packages/skills/skills/review"
+    );
+}
+
+#[test]
 fn rejects_missing_transitive_local_module_import() {
     let err = LocalPackageResolver::new(fixture("missing-transitive-import"))
         .resolve_package_graph("agent")

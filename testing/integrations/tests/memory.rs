@@ -63,7 +63,6 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
                 chat_task: "{{ chat.message }}".into(),
                 task_execution: String::new(),
                 gate_eval: String::new(),
-                cron_task: String::new(),
                 ..Default::default()
             },
             ..Default::default()
@@ -74,6 +73,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         platform_scopes: vec![],
         mcp_servers: vec![],
         abilities: vec![],
+        script_tools: vec![],
         prompt_locked: false,
         heartbeat: None,
     }

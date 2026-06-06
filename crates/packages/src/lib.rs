@@ -12,6 +12,7 @@ macro_rules! bail {
     };
 }
 
+mod claude_plugin;
 mod error;
 mod github;
 mod identity;
@@ -22,6 +23,17 @@ mod reader;
 mod resolved;
 mod schema;
 
+pub use claude_plugin::{
+    ClaudeMarketplaceManifest, ClaudeMarketplacePlugin, ClaudePluginCommand,
+    ClaudePluginDependency, ClaudePluginHook, ClaudePluginManifest, ClaudePluginMcpServer,
+    ClaudePluginResource, ClaudePluginSkill, ClaudePluginUnsupportedComponent,
+    claude_command_resource_manifest, claude_hook_resource_manifest,
+    claude_mcp_server_resource_manifest, claude_plugin_resource_manifest, claude_plugin_resources,
+    claude_skill_resource_manifest, detect_unsupported_claude_plugin_components,
+    parse_claude_marketplace_manifest, parse_claude_plugin_command,
+    parse_claude_plugin_dependencies, parse_claude_plugin_hooks, parse_claude_plugin_manifest,
+    parse_claude_plugin_mcp_servers, parse_claude_plugin_skill,
+};
 pub use error::{PackageError, Result};
 pub use github::{GitHubFetcher, GitHubSource};
 pub use identity::{

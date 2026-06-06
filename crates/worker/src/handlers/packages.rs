@@ -23,6 +23,8 @@ pub async fn handle_package_graph_changed(
     }
     let manifest = crate::assembly::load_runtime_manifest(&ctx.config).await?;
     ctx.external_mcp.reconcile(&manifest.mcp_servers).await;
+    ctx.skill_registry
+        .reconcile(&manifest.skills, &manifest.hooks);
     ctx.harness.manifests().replace(manifest).await?;
 
     info!("Applied platform package graph update");

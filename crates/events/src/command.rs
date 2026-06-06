@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Capability, EncryptedPayload, TaskExecuteContent};
+use crate::{
+    Capability, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, TaskExecuteContent,
+};
 
 /// Transport delivery policy for a backend-to-worker command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +76,47 @@ pub enum Command {
         /// If set, routes to a specific agent; otherwise uses the default.
         #[serde(default)]
         agent: Option<String>,
+        /// Typed chat target. New clients should send this with `target`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<String>,
+        /// Target slug matching `target_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Active domain session context, if any.
+        #[serde(default)]
+        domain_session_id: Option<Uuid>,
+        /// Domain activation to apply before processing this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain_activation: Option<DomainActivation>,
+        /// Chat session scope.
+        session_id: Uuid,
+    },
+
+    /// A user-invoked slash command to be expanded by the worker before chat execution.
+    #[serde(rename = "chat.command")]
+    ChatCommand {
+        /// Client-generated message ID for delivery tracking.
+        #[serde(default)]
+        id: Option<String>,
+        /// The installed slash command, including its leading slash.
+        command: String,
+        /// The user's original message text.
+        content: String,
+        /// Optional encrypted content body. When present, workers should prefer this over `content`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<EncryptedPayload>,
+        /// Target project for context scoping.
+        #[serde(default)]
+        project: Option<String>,
+        /// If set, routes to a specific agent; otherwise uses the default.
+        #[serde(default)]
+        agent: Option<String>,
+        /// Typed chat target. New clients should send this with `target`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<String>,
+        /// Target slug matching `target_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
         /// Active domain session context, if any.
         #[serde(default)]
         domain_session_id: Option<Uuid>,
@@ -170,6 +213,10 @@ pub enum Command {
         schedule: String,
         #[serde(default)]
         timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<CronTaskContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_task: Option<EncryptedPayload>,
     },
 
     /// Disable a cron schedule.
@@ -182,6 +229,10 @@ pub enum Command {
         routine: String,
         #[serde(default)]
         project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<CronTaskContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_task: Option<EncryptedPayload>,
     },
 
     /// Enable a recurring heartbeat schedule for an agent.
@@ -191,6 +242,10 @@ pub enum Command {
         interval: String,
         #[serde(default)]
         timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<HeartbeatInstructionsContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_instructions: Option<EncryptedPayload>,
     },
 
     /// Disable a recurring heartbeat schedule for an agent.
@@ -199,7 +254,13 @@ pub enum Command {
 
     /// Trigger a one-time heartbeat run for an agent.
     #[serde(rename = "agent_heartbeat.trigger")]
-    AgentHeartbeatTrigger { agent: String },
+    AgentHeartbeatTrigger {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<HeartbeatInstructionsContent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_instructions: Option<EncryptedPayload>,
+    },
 
     // -----------------------------------------------------------------
     // Bootstrap
@@ -253,6 +314,11 @@ impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChatMessage { session_id, .. } => write!(f, "chat.message(session={session_id})"),
+            Self::ChatCommand {
+                session_id,
+                command,
+                ..
+            } => write!(f, "chat.command(command={command}, session={session_id})"),
             Self::ChatDomainExit {
                 domain_session_id, ..
             } => write!(f, "chat.domain_exit(session={domain_session_id})"),
@@ -289,7 +355,7 @@ impl std::fmt::Display for Command {
             Self::AgentHeartbeatDisable { agent } => {
                 write!(f, "agent_heartbeat.disable(agent={agent})")
             }
-            Self::AgentHeartbeatTrigger { agent } => {
+            Self::AgentHeartbeatTrigger { agent, .. } => {
                 write!(f, "agent_heartbeat.trigger(agent={agent})")
             }
             Self::WorkerPing => write!(f, "worker.ping"),
@@ -312,6 +378,7 @@ impl Command {
     pub fn capability(&self) -> Capability {
         match self {
             Command::ChatMessage { .. }
+            | Command::ChatCommand { .. }
             | Command::ChatDomainExit { .. }
             | Command::ChatCancel { .. }
             | Command::ChatSessionDelete { .. } => Capability::Chat,

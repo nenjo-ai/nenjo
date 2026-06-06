@@ -765,6 +765,9 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::HookActivated { .. }
+        | TurnEvent::HookStarted { .. }
+        | TurnEvent::HookCompleted { .. }
         | TurnEvent::SubAgentEvent { .. }
         | TurnEvent::SubAgentTranscript { .. }
         | TurnEvent::MessageCompacted { .. }
@@ -795,8 +798,9 @@ fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
         acceptance_criteria.push_str(&format.instructions());
     }
 
-    let task =
-        TaskInput::new("sub_agent", request.task.goal.trim(), description).source("sub_agent");
+    let task = TaskInput::new(request.task.goal.trim(), description)
+        .with_project("sub_agent")
+        .source("sub_agent");
 
     if acceptance_criteria.trim().is_empty() {
         task
