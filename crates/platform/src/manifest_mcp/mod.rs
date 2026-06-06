@@ -51,10 +51,11 @@ pub use params::{
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainPromptGetParams,
     DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, KnowledgeDocCreateParams,
-    KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, ModelCreateParams, ModelDeleteParams,
-    ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
-    ProjectUpdateParams, ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams,
-    RoutineUpdateParams, RoutinesGetParams,
+    KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, KnowledgePackCreateParams,
+    KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
+    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
+    ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
+    RoutinesGetParams,
 };
 pub use results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -64,9 +65,9 @@ pub use results::{
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
     DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
-    KnowledgeDocMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
-    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
-    RoutineMutationResult, RoutinesListResult,
+    KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
+    ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
+    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
 };
 pub use types::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,
@@ -78,6 +79,7 @@ pub use types::{
     DomainDocument, DomainManifestDocument, DomainPromptDocument, DomainSummary,
     DomainUpdateDocument, KnowledgeDocContentDocument, KnowledgeDocCreateDocument,
     KnowledgeDocRelatedDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
+    KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
     ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument, ProjectCreateDocument,
     ProjectDocument, ProjectSummary, ProjectUpdateDocument, RoutineCreateDocument, RoutineDocument,
     RoutineEdgeInput, RoutineGraphInput, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,

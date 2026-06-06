@@ -1091,6 +1091,28 @@ where
     L: ManifestReader + ManifestWriter + Send + Sync,
     E: SensitivePayloadEncoder + Send + Sync,
 {
+    async fn create_knowledge_pack(
+        &self,
+        params: KnowledgePackCreateParams,
+    ) -> Result<KnowledgePackMutationResult> {
+        let knowledge_pack = self
+            .platform_client
+            .create_knowledge_pack(&params.data)
+            .await?;
+        Ok(KnowledgePackMutationResult { knowledge_pack })
+    }
+
+    async fn update_knowledge_pack(
+        &self,
+        params: KnowledgePackUpdateParams,
+    ) -> Result<KnowledgePackMutationResult> {
+        let knowledge_pack = self
+            .platform_client
+            .update_knowledge_pack(&params.pack, &params.data)
+            .await?;
+        Ok(KnowledgePackMutationResult { knowledge_pack })
+    }
+
     async fn create_knowledge_doc(
         &self,
         params: KnowledgeDocCreateParams,

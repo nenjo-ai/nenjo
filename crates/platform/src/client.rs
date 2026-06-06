@@ -10,7 +10,8 @@ use crate::manifest_mcp::{
     ContextBlockDocument, ContextBlockUpdateDocument, CouncilDocument, CouncilMemberUpdateDocument,
     CouncilUpdateDocument, DomainCreateDocument, DomainDocument, DomainPromptDocument,
     DomainPromptMutationResult, DomainUpdateDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocSummary, KnowledgeDocUpdateDocument, ModelCreateDocument, ModelDocument,
+    KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
+    KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
     ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
     ResourceRef, RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
 };
@@ -155,10 +156,24 @@ pub struct PlatformKnowledgePackMetadata {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_knowledge_pack_status")]
+    pub status: String,
+    #[serde(default = "default_knowledge_pack_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
     #[serde(default)]
     pub selector: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+}
+
+fn default_knowledge_pack_status() -> String {
+    "active".to_string()
+}
+
+fn default_knowledge_pack_source_type() -> String {
+    "uploaded".to_string()
 }
 
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
@@ -2401,6 +2416,55 @@ impl PlatformManifestClient {
         }
     }
 
+    /// Create a user-managed Library knowledge pack.
+    pub async fn create_knowledge_pack(
+        &self,
+        pack: &KnowledgePackCreateDocument,
+    ) -> Result<KnowledgePackDocument> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/knowledge", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(pack)
+            .send()
+            .await
+            .with_context(|| format!("failed to create knowledge pack {}", pack.name))?;
+
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => response
+                .json()
+                .await
+                .map(knowledge_pack_document)
+                .context("failed to decode created knowledge pack"),
+            status => bail!("knowledge pack create failed with status {status}"),
+        }
+    }
+
+    /// Update a user-managed Library knowledge pack.
+    pub async fn update_knowledge_pack(
+        &self,
+        pack: &Slug,
+        update: &KnowledgePackUpdateDocument,
+    ) -> Result<KnowledgePackDocument> {
+        let response = self
+            .http
+            .patch(format!("{}/api/v1/knowledge/{pack}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(update)
+            .send()
+            .await
+            .with_context(|| format!("failed to update knowledge pack {pack}"))?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .map(knowledge_pack_document)
+                .context("failed to decode updated knowledge pack"),
+            status => bail!("knowledge pack update failed with status {status}"),
+        }
+    }
+
     pub async fn resolve_knowledge_pack_slug(&self, pack: &Slug) -> Result<Uuid> {
         self.list_knowledge_packs()
             .await?
@@ -2456,6 +2520,20 @@ fn knowledge_doc_summary(
         tags: document.tags,
         content_type: document.content_type,
         updated_at: document.updated_at,
+    }
+}
+
+fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePackDocument {
+    KnowledgePackDocument {
+        id: pack.id,
+        slug: pack.slug,
+        name: pack.name,
+        description: pack.description,
+        status: pack.status,
+        source_type: pack.source_type,
+        read_only: pack.read_only,
+        selector: pack.selector,
+        version: pack.version,
     }
 }
 

@@ -68,6 +68,8 @@ pub use manifest_mcp::{
     KnowledgeDocCreateDocument, KnowledgeDocCreateParams, KnowledgeDocDeleteParams,
     KnowledgeDocMutationResult, KnowledgeDocRelatedDocument, KnowledgeDocSummary,
     KnowledgeDocUpdateDocument, KnowledgeDocUpdateParams, KnowledgeManifestBackend,
+    KnowledgePackCreateDocument, KnowledgePackCreateParams, KnowledgePackDocument,
+    KnowledgePackMutationResult, KnowledgePackUpdateDocument, KnowledgePackUpdateParams,
     LibraryManifestBackend, ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument,
     ModelCreateParams, ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend,
     ModelMutationResult, ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams,

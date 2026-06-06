@@ -92,6 +92,7 @@ mod tests {
             "read_knowledge_doc_manifest",
             "search_knowledge_paths",
             "list_knowledge_tree",
+            "delete_knowledge_pack",
         ] {
             assert!(!names.contains(removed), "removed tool exposed: {removed}");
         }
@@ -132,6 +133,8 @@ mod tests {
             "update_ability",
             "create_domain",
             "update_domain",
+            "create_knowledge_pack",
+            "update_knowledge_pack",
         ] {
             let tool = tools
                 .iter()
@@ -182,6 +185,8 @@ mod tests {
                 ("create_project".into(), ToolCategory::Write),
                 ("update_project".into(), ToolCategory::Write),
                 ("delete_project".into(), ToolCategory::Write),
+                ("create_knowledge_pack".into(), ToolCategory::Write),
+                ("update_knowledge_pack".into(), ToolCategory::Write),
                 ("create_knowledge_doc".into(), ToolCategory::Write),
                 ("delete_knowledge_doc".into(), ToolCategory::Write),
                 ("update_knowledge_doc".into(), ToolCategory::Write),

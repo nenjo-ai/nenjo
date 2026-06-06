@@ -41,7 +41,8 @@ use crate::manifest_mcp::{
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
     DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocCreateParams,
     KnowledgeDocDeleteParams, KnowledgeDocMutationResult, KnowledgeDocUpdateParams,
-    KnowledgeManifestBackend, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
+    KnowledgeManifestBackend, KnowledgePackCreateParams, KnowledgePackMutationResult,
+    KnowledgePackUpdateParams, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
     ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
     ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
     ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
@@ -760,6 +761,20 @@ where
     R: ManifestReader + Send + Sync,
     W: ManifestWriter + Send + Sync,
 {
+    async fn create_knowledge_pack(
+        &self,
+        _params: KnowledgePackCreateParams,
+    ) -> Result<KnowledgePackMutationResult> {
+        bail!("library knowledge pack tools require the platform backend")
+    }
+
+    async fn update_knowledge_pack(
+        &self,
+        _params: KnowledgePackUpdateParams,
+    ) -> Result<KnowledgePackMutationResult> {
+        bail!("library knowledge pack tools require the platform backend")
+    }
+
     async fn create_knowledge_doc(
         &self,
         _params: KnowledgeDocCreateParams,

@@ -15,9 +15,41 @@ fn pack_id_schema() -> serde_json::Value {
     })
 }
 
-/// Return manifest MCP tool definitions for library knowledge document mutations.
+/// Return manifest MCP tool definitions for Library knowledge mutations.
 pub fn library_tools() -> Vec<ToolSpec> {
     vec![
+        ToolSpec {
+            name: "create_knowledge_pack".to_string(),
+            description: "Create a new user-managed org-level Library knowledge pack. This does not install package or GitHub-backed packs.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string", "description": "Human-readable knowledge pack name." },
+                    "slug": { "type": ["string", "null"], "description": "Optional stable pack slug. Omit to derive one from the name." },
+                    "description": { "type": ["string", "null"], "description": "Optional pack description." }
+                },
+                "additionalProperties": false
+            }),
+            category: ToolCategory::Write,
+        },
+        ToolSpec {
+            name: "update_knowledge_pack".to_string(),
+            description: "Update a user-managed Library knowledge pack's name, slug, description, or status.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["pack"],
+                "properties": {
+                    "pack": pack_id_schema(),
+                    "name": { "type": ["string", "null"], "description": "Optional replacement name." },
+                    "slug": { "type": ["string", "null"], "description": "Optional replacement slug." },
+                    "description": { "type": ["string", "null"], "description": "Optional replacement description. Use null to clear." },
+                    "status": { "type": ["string", "null"], "enum": ["active", "archived", null], "description": "Optional replacement status." }
+                },
+                "additionalProperties": false
+            }),
+            category: ToolCategory::Write,
+        },
         ToolSpec {
             name: "create_knowledge_doc".to_string(),
             description: "Create a new org-level library knowledge document with optional metadata and outbound graph relationships. Use list_knowledge_packs to choose pack first.".to_string(),

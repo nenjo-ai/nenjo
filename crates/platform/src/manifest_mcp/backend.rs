@@ -12,9 +12,10 @@ use super::params::{
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
     DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainUpdateParams,
     DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
-    ModelCreateParams, ModelDeleteParams, ModelUpdateParams, ModelsGetParams, ProjectCreateParams,
-    ProjectDeleteParams, ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams,
-    RoutineDeleteParams, RoutineUpdateParams, RoutinesGetParams,
+    KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
+    ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
+    ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams,
+    RoutineUpdateParams, RoutinesGetParams,
 };
 use super::results::{
     AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
@@ -23,9 +24,10 @@ use super::results::{
     ContextBlockContentMutationResult, ContextBlockGetResult, ContextBlockMutationResult,
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
     DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
-    DomainMutationResult, DomainsListResult, KnowledgeDocMutationResult, ModelGetResult,
-    ModelMutationResult, ModelsListResult, ProjectGetResult, ProjectMutationResult,
-    ProjectsListResult, RoutineGetResult, RoutineMutationResult, RoutinesListResult,
+    DomainMutationResult, DomainsListResult, KnowledgeDocMutationResult,
+    KnowledgePackMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
+    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
+    RoutineMutationResult, RoutinesListResult,
 };
 
 #[async_trait]
@@ -131,6 +133,16 @@ pub trait ProjectManifestBackend: Send + Sync {
 #[async_trait]
 /// Backend operations for org-level library knowledge document mutations.
 pub trait LibraryManifestBackend: Send + Sync {
+    /// Create a user-managed Library knowledge pack.
+    async fn create_knowledge_pack(
+        &self,
+        params: KnowledgePackCreateParams,
+    ) -> Result<KnowledgePackMutationResult>;
+    /// Update a user-managed Library knowledge pack.
+    async fn update_knowledge_pack(
+        &self,
+        params: KnowledgePackUpdateParams,
+    ) -> Result<KnowledgePackMutationResult>;
     /// Create a library knowledge document.
     async fn create_knowledge_doc(
         &self,

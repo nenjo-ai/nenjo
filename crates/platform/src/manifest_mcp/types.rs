@@ -516,8 +516,56 @@ pub struct ProjectUpdateDocument {
     pub repo_url: Option<Option<String>>,
 }
 
+/// Library knowledge pack metadata returned by pack routes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgePackDocument {
+    pub id: Uuid,
+    pub slug: Slug,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    pub source_type: String,
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Request body for creating a user-managed Library knowledge pack.
+pub struct KnowledgePackCreateDocument {
+    pub name: String,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned")]
+/// Partial update body for a user-managed Library knowledge pack.
+pub struct KnowledgePackUpdateDocument {
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 /// Library knowledge document metadata returned by knowledge pack routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocSummary {
     pub pack: Slug,
     pub doc: Slug,
