@@ -177,6 +177,17 @@ Registry installs resolve the full version graph from registry metadata before
 fetching sources. Selected registry sources are fetched concurrently using the
 host CPU count.
 
+Set `NENPM_FETCH_MODE` to control how git-backed sources are fetched:
+
+- `git` uses the existing `git clone` path and is the default.
+- `provider` uses GitHub/GitLab HTTP APIs and fails for unsupported hosts.
+- `raw` is accepted as an alias for `provider`.
+- `auto` uses provider APIs for supported hosts and falls back to `git clone`.
+
+Provider mode still materializes fetched files into a bounded temporary
+directory so the existing package resolver and Claude plugin adapter can use the
+same filesystem path. Set `GITHUB_TOKEN` or `GH_TOKEN` for GitHub provider
+requests, and `GITLAB_TOKEN` or `GL_TOKEN` for GitLab provider requests.
 
 Common dependency commands:
 
@@ -299,8 +310,8 @@ remain GitHub-oriented because those upstream formats are repository-specific.
 The default source fetcher supports all four source kinds:
 
 - local sources are read directly from a checkout.
-- git sources are cloned and checked out at the requested branch, tag, or
-  commit.
+- git sources use `git clone` by default, or provider HTTP APIs when
+  `NENPM_FETCH_MODE=provider` or `NENPM_FETCH_MODE=auto`.
 - artifact sources are downloaded or read from disk as `.tar.gz` archives and
   verified by SHA-256 checksum.
 - remote sources are downloaded or read from disk as direct package manifests.
