@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/nenjo-ai/nenjo/compare/v0.13.0...v0.14.0) - 2026-06-07
+
+### Added
+
+- enable raw web fetch for packages & plugins ([#59](https://github.com/nenjo-ai/nenjo/pull/59))
+
 ## [0.13.0](https://github.com/nenjo-ai/nenjo/compare/v0.12.0...v0.13.0) - 2026-06-06
 
 ### Added
