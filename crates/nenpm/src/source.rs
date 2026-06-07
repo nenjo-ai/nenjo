@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::Result;
 use anyhow::Context;
@@ -15,6 +16,47 @@ use nenjo_packages::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tempfile::TempDir;
+
+const NENPM_FETCH_MODE_ENV: &str = "NENPM_FETCH_MODE";
+const PROVIDER_USER_AGENT: &str = "nenjo-nenpm";
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_MAX_FILES: usize = 10_000;
+const PROVIDER_MAX_BYTES: usize = 50 * 1024 * 1024;
+const PROVIDER_MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Strategy for fetching git-backed package sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchMode {
+    /// Use `git clone` for git-backed package sources.
+    Git,
+    /// Use provider APIs for supported git hosts and fail for unsupported hosts.
+    Provider,
+    /// Use provider APIs for supported git hosts and fall back to `git clone`.
+    Auto,
+}
+
+impl FetchMode {
+    /// Parse a fetch mode from a user-facing string.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "git" | "clone" => Ok(Self::Git),
+            "provider" | "raw" => Ok(Self::Provider),
+            "auto" => Ok(Self::Auto),
+            other => {
+                bail!("unsupported fetch mode '{other}'; expected git, provider, raw, or auto")
+            }
+        }
+    }
+
+    /// Read `NENPM_FETCH_MODE`, defaulting to `git` when it is unset.
+    pub fn from_env() -> Result<Self> {
+        match std::env::var(NENPM_FETCH_MODE_ENV) {
+            Ok(value) => Self::parse(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Git),
+            Err(error) => Err(crate::NenpmError::source(error.to_string())),
+        }
+    }
+}
 
 /// Source location for a registry package version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,18 +147,65 @@ pub trait PackageSourceFetcher {
 }
 
 /// Default package source fetcher for local, git, artifact, and remote sources.
-#[derive(Debug, Clone, Default)]
-pub struct DefaultPackageSourceFetcher;
+#[derive(Debug, Clone)]
+pub struct DefaultPackageSourceFetcher {
+    fetch_mode: FetchModeSelection,
+}
+
+#[derive(Debug, Clone)]
+enum FetchModeSelection {
+    Mode(FetchMode),
+    InvalidEnv(String),
+}
+
+impl FetchModeSelection {
+    fn from_env() -> Self {
+        match FetchMode::from_env() {
+            Ok(fetch_mode) => Self::Mode(fetch_mode),
+            Err(error) => Self::InvalidEnv(error.to_string()),
+        }
+    }
+
+    fn resolve(&self) -> Result<FetchMode> {
+        match self {
+            Self::Mode(fetch_mode) => Ok(*fetch_mode),
+            Self::InvalidEnv(error) => Err(crate::NenpmError::source(format!(
+                "invalid {NENPM_FETCH_MODE_ENV}: {error}"
+            ))),
+        }
+    }
+}
 
 impl DefaultPackageSourceFetcher {
     /// Create the default source fetcher.
     pub fn new() -> Self {
-        Self
+        Self {
+            fetch_mode: FetchModeSelection::from_env(),
+        }
+    }
+
+    /// Create a source fetcher with an explicit git fetch mode.
+    pub fn with_fetch_mode(fetch_mode: FetchMode) -> Self {
+        Self {
+            fetch_mode: FetchModeSelection::Mode(fetch_mode),
+        }
+    }
+
+    /// Return the configured git fetch mode.
+    pub fn fetch_mode(&self) -> Result<FetchMode> {
+        self.fetch_mode.resolve()
+    }
+}
+
+impl Default for DefaultPackageSourceFetcher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl PackageSourceFetcher for DefaultPackageSourceFetcher {
     fn fetch(&self, source: &PackageSource) -> Result<FetchedPackageSource> {
+        let fetch_mode = self.fetch_mode.resolve()?;
         let fetched = match source {
             PackageSource::Local {
                 root,
@@ -130,7 +219,7 @@ impl PackageSourceFetcher for DefaultPackageSourceFetcher {
                 url,
                 reference,
                 manifest_path,
-            } => fetch_git_source(url, reference, manifest_path),
+            } => fetch_git_source_for_mode(url, reference, manifest_path, fetch_mode),
             PackageSource::Artifact {
                 url,
                 checksum,
@@ -227,7 +316,7 @@ pub(crate) fn source_fetch_key(source: &PackageSource) -> String {
 
 pub fn package_source_scope(source: &PackageSource) -> Option<String> {
     match source {
-        PackageSource::Git { url, .. } => github_org_from_url(url).map(github_org_to_scope),
+        PackageSource::Git { url, .. } => git_namespace_from_url(url).map(git_namespace_to_scope),
         PackageSource::Artifact { .. } | PackageSource::Remote { .. } => None,
         PackageSource::Local { scope, .. } => scope.clone(),
     }
@@ -242,28 +331,20 @@ fn validate_local_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn github_org_to_scope(org: String) -> String {
-    format!("@{org}")
+fn git_namespace_to_scope(namespace: String) -> String {
+    format!("@{namespace}")
 }
 
-fn github_org_from_url(url: &str) -> Option<String> {
-    let trimmed = url.trim().trim_end_matches('/');
-    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
-        rest
-    } else {
-        return None;
-    };
-    let org = path.split('/').next()?.trim();
-    if org.is_empty() || org == "." || org == ".." {
+fn git_namespace_from_url(url: &str) -> Option<String> {
+    if let Some((owner, _)) = parse_github_url(url) {
+        return Some(owner);
+    }
+    let (_, path) = parse_gitlab_url(url)?;
+    let namespace = path.split('/').next()?.trim();
+    if namespace.is_empty() || namespace == "." || namespace == ".." {
         return None;
     }
-    Some(org.to_string())
+    Some(namespace.to_string())
 }
 
 pub(crate) fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
@@ -285,6 +366,25 @@ pub(crate) fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 
 fn is_relative_file_reference(value: &str) -> bool {
     !value.contains("://") && !Path::new(value).is_absolute()
+}
+
+fn fetch_git_source_for_mode(
+    url: &str,
+    reference: &str,
+    manifest_path: &str,
+    fetch_mode: FetchMode,
+) -> Result<FetchedPackageSource> {
+    match fetch_mode {
+        FetchMode::Git => fetch_git_source(url, reference, manifest_path),
+        FetchMode::Provider => fetch_provider_git_source(url, reference, manifest_path),
+        FetchMode::Auto => {
+            if ProviderGitSource::parse(url, reference, manifest_path).is_some() {
+                fetch_provider_git_source(url, reference, manifest_path)
+            } else {
+                fetch_git_source(url, reference, manifest_path)
+            }
+        }
+    }
 }
 
 fn fetch_git_source(
@@ -340,6 +440,389 @@ fn fetch_git_source(
         manifest_path.to_string(),
         temp_dir,
     ))
+}
+
+fn fetch_provider_git_source(
+    url: &str,
+    reference: &str,
+    manifest_path: &str,
+) -> Result<FetchedPackageSource> {
+    let Some(source) = ProviderGitSource::parse(url, reference, manifest_path) else {
+        bail!("provider fetch mode does not support git source {url}");
+    };
+    let manifest_path = nenjo_packages::validate_source_path(manifest_path)
+        .context("provider source manifest path is invalid")?;
+    let client = provider_client()?;
+    let resolved_ref = source.resolve_ref(&client)?;
+    let files = source.list_files(&client, &resolved_ref)?;
+    if files.len() > PROVIDER_MAX_FILES {
+        bail!(
+            "provider source {} contains {} files, which exceeds the limit of {}",
+            source.display_url(),
+            files.len(),
+            PROVIDER_MAX_FILES
+        );
+    }
+    if !files.iter().any(|path| path == &manifest_path) {
+        bail!(
+            "provider source {} at {resolved_ref} does not contain {manifest_path}",
+            source.display_url()
+        );
+    }
+
+    let temp_dir = tempfile::tempdir().context("failed to create provider fetch temp dir")?;
+    let root = temp_dir.path().join("provider");
+    fs::create_dir_all(&root).context("failed to create provider fetch dir")?;
+
+    let mut total_bytes = 0usize;
+    for path in files {
+        let path = nenjo_packages::validate_source_path(&path)
+            .with_context(|| format!("provider returned invalid path {path}"))?;
+        let bytes = source.fetch_file(&client, &resolved_ref, &path)?;
+        if bytes.len() > PROVIDER_MAX_FILE_BYTES {
+            bail!(
+                "provider source file {path} is {} bytes, which exceeds the per-file limit of {}",
+                bytes.len(),
+                PROVIDER_MAX_FILE_BYTES
+            );
+        }
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if total_bytes > PROVIDER_MAX_BYTES {
+            bail!(
+                "provider source {} exceeds the total fetch limit of {} bytes",
+                source.display_url(),
+                PROVIDER_MAX_BYTES
+            );
+        }
+        let output_path = root.join(&path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&output_path, bytes)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+    }
+
+    Ok(FetchedPackageSource::temporary(
+        root,
+        manifest_path,
+        temp_dir,
+    ))
+}
+
+#[derive(Debug, Clone)]
+enum ProviderGitSource {
+    GitHub {
+        owner: String,
+        repo: String,
+        reference: String,
+    },
+    GitLab {
+        host: String,
+        project_path: String,
+        reference: String,
+    },
+}
+
+impl ProviderGitSource {
+    fn parse(url: &str, reference: &str, manifest_path: &str) -> Option<Self> {
+        nenjo_packages::validate_source_path(manifest_path).ok()?;
+        parse_github_url(url)
+            .map(|(owner, repo)| Self::GitHub {
+                owner,
+                repo,
+                reference: reference.to_string(),
+            })
+            .or_else(|| {
+                parse_gitlab_url(url).map(|(host, project_path)| Self::GitLab {
+                    host,
+                    project_path,
+                    reference: reference.to_string(),
+                })
+            })
+    }
+
+    fn display_url(&self) -> String {
+        match self {
+            Self::GitHub { owner, repo, .. } => format!("https://github.com/{owner}/{repo}.git"),
+            Self::GitLab {
+                host, project_path, ..
+            } => format!("https://{host}/{project_path}.git"),
+        }
+    }
+
+    fn resolve_ref(&self, client: &reqwest::blocking::Client) -> Result<String> {
+        match self {
+            Self::GitHub {
+                owner,
+                repo,
+                reference,
+            } => {
+                let url = format!(
+                    "https://api.github.com/repos/{owner}/{repo}/commits/{}",
+                    encode_path_segment(reference)
+                );
+                let value: GitHubCommitResponse = get_json(client, &url)
+                    .with_context(|| format!("failed to resolve GitHub ref {reference}"))?;
+                Ok(value.sha)
+            }
+            Self::GitLab {
+                host,
+                project_path,
+                reference,
+            } => {
+                let url = format!(
+                    "https://{host}/api/v4/projects/{}/repository/commits/{}",
+                    encode_gitlab_project_path(project_path),
+                    encode_path_segment(reference)
+                );
+                let value: GitLabCommitResponse = get_json(client, &url)
+                    .with_context(|| format!("failed to resolve GitLab ref {reference}"))?;
+                Ok(value.id)
+            }
+        }
+    }
+
+    fn list_files(
+        &self,
+        client: &reqwest::blocking::Client,
+        resolved_ref: &str,
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::GitHub { owner, repo, .. } => {
+                let url = format!(
+                    "https://api.github.com/repos/{owner}/{repo}/git/trees/{}?recursive=1",
+                    encode_path_segment(resolved_ref)
+                );
+                let value: GitHubTreeResponse = get_json(client, &url)
+                    .with_context(|| format!("failed to list GitHub tree for {owner}/{repo}"))?;
+                if value.truncated.unwrap_or(false) {
+                    bail!(
+                        "GitHub tree for {owner}/{repo} is truncated; provider fetch cannot continue safely"
+                    );
+                }
+                Ok(value
+                    .tree
+                    .into_iter()
+                    .filter(|entry| entry.kind == "blob")
+                    .map(|entry| entry.path)
+                    .collect())
+            }
+            Self::GitLab {
+                host, project_path, ..
+            } => {
+                let mut files = Vec::new();
+                let mut page = 1usize;
+                loop {
+                    let url = format!(
+                        "https://{host}/api/v4/projects/{}/repository/tree?ref={}&recursive=true&per_page=100&page={page}",
+                        encode_gitlab_project_path(project_path),
+                        urlencoding::encode(resolved_ref)
+                    );
+                    let page_files: Vec<GitLabTreeEntry> =
+                        get_json(client, &url).with_context(|| {
+                            format!("failed to list GitLab tree for {project_path}")
+                        })?;
+                    if page_files.is_empty() {
+                        break;
+                    }
+                    files.extend(
+                        page_files
+                            .into_iter()
+                            .filter(|entry| entry.kind == "blob")
+                            .map(|entry| entry.path),
+                    );
+                    page += 1;
+                    if page > 1_000 {
+                        bail!("GitLab tree for {project_path} exceeded pagination limit");
+                    }
+                }
+                Ok(files)
+            }
+        }
+    }
+
+    fn fetch_file(
+        &self,
+        client: &reqwest::blocking::Client,
+        resolved_ref: &str,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::GitHub { owner, repo, .. } => {
+                let url = format!(
+                    "https://raw.githubusercontent.com/{owner}/{repo}/{}/{}",
+                    encode_path_segment(resolved_ref),
+                    encode_path(path)
+                );
+                Ok(get_bytes(client, &url)
+                    .with_context(|| format!("failed to fetch GitHub file {path}"))?)
+            }
+            Self::GitLab {
+                host, project_path, ..
+            } => {
+                let url = format!(
+                    "https://{host}/api/v4/projects/{}/repository/files/{}/raw?ref={}",
+                    encode_gitlab_project_path(project_path),
+                    encode_gitlab_file_path(path),
+                    urlencoding::encode(resolved_ref)
+                );
+                Ok(get_bytes(client, &url)
+                    .with_context(|| format!("failed to fetch GitLab file {path}"))?)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCommitResponse {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubTreeResponse {
+    tree: Vec<GitHubTreeEntry>,
+    truncated: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabCommitResponse {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+fn provider_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(PROVIDER_TIMEOUT)
+        .user_agent(PROVIDER_USER_AGENT)
+        .build()
+        .context("failed to build provider HTTP client")
+        .map_err(Into::into)
+}
+
+fn get_json<T>(client: &reqwest::blocking::Client, url: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    Ok(provider_get(client, url)
+        .send()
+        .with_context(|| format!("failed to request {url}"))?
+        .error_for_status()
+        .with_context(|| format!("failed to fetch {url}"))?
+        .json()
+        .with_context(|| format!("failed to parse JSON from {url}"))?)
+}
+
+fn get_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
+    Ok(provider_get(client, url)
+        .send()
+        .with_context(|| format!("failed to request {url}"))?
+        .error_for_status()
+        .with_context(|| format!("failed to fetch {url}"))?
+        .bytes()
+        .with_context(|| format!("failed to read response body from {url}"))?
+        .to_vec())
+}
+
+fn provider_get(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> reqwest::blocking::RequestBuilder {
+    let request = client.get(url);
+    if (url.contains("github.com/") || url.contains("githubusercontent.com/"))
+        && let Some(token) = env_token(["GITHUB_TOKEN", "GH_TOKEN"])
+    {
+        return request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if url.contains("gitlab.com/")
+        && let Some(token) = env_token(["GITLAB_TOKEN", "GL_TOKEN"])
+    {
+        return request.header("PRIVATE-TOKEN", token);
+    }
+    request
+}
+
+fn env_token<const N: usize>(names: [&str; N]) -> Option<String> {
+    names.into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn parse_github_url(url: &str) -> Option<(String, String)> {
+    let path = git_url_host_path(url, "github.com")?;
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn parse_gitlab_url(url: &str) -> Option<(String, String)> {
+    let (host, path) = git_url_host_and_path(url)?;
+    if host != "gitlab.com" || !path.contains('/') {
+        return None;
+    }
+    Some((host, path))
+}
+
+fn git_url_host_path(url: &str, expected_host: &str) -> Option<String> {
+    let (host, path) = git_url_host_and_path(url)?;
+    (host == expected_host).then_some(path)
+}
+
+fn git_url_host_and_path(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let (host, path) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        rest.split_once('/')?
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        rest.split_once('/')?
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@") {
+        rest.split_once('/')?
+    } else if let Some(rest) = trimmed.strip_prefix("git@") {
+        rest.split_once(':')?
+    } else {
+        return None;
+    };
+    let path = path.trim_matches('/');
+    if host.is_empty() || path.is_empty() || path.contains("..") {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), path.to_string()))
+}
+
+fn encode_path(path: &str) -> String {
+    path.split('/')
+        .map(encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn encode_path_segment(segment: &str) -> String {
+    urlencoding::encode(segment).into_owned()
+}
+
+fn encode_gitlab_project_path(path: &str) -> String {
+    urlencoding::encode(path).into_owned()
+}
+
+fn encode_gitlab_file_path(path: &str) -> String {
+    urlencoding::encode(path).into_owned()
 }
 
 fn fetch_artifact_source(
@@ -693,10 +1176,152 @@ mod tests {
     }
 
     #[test]
-    fn non_github_git_sources_do_not_have_scope() {
-        assert_eq!(package_source_scope(&git_source("../packages")), None);
+    fn derives_scope_from_gitlab_namespace() {
         assert_eq!(
             package_source_scope(&git_source("https://gitlab.com/acme/packages.git")),
+            Some("@acme".to_string())
+        );
+        assert_eq!(
+            package_source_scope(&git_source("git@gitlab.com:acme/platform/packages.git")),
+            Some("@acme".to_string())
+        );
+    }
+
+    #[test]
+    fn local_git_sources_do_not_have_scope() {
+        assert_eq!(package_source_scope(&git_source("../packages")), None);
+    }
+
+    #[test]
+    fn unsupported_git_hosts_do_not_have_scope() {
+        assert_eq!(
+            package_source_scope(&git_source("https://example.com/acme/packages.git")),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_fetch_modes() {
+        assert_eq!(FetchMode::parse("git").unwrap(), FetchMode::Git);
+        assert_eq!(FetchMode::parse("provider").unwrap(), FetchMode::Provider);
+        assert_eq!(FetchMode::parse("raw").unwrap(), FetchMode::Provider);
+        assert_eq!(FetchMode::parse("auto").unwrap(), FetchMode::Auto);
+        assert!(FetchMode::parse("archive").is_err());
+    }
+
+    #[test]
+    fn provider_mode_parses_github_sources() {
+        let source = ProviderGitSource::parse(
+            "https://github.com/nenjo-ai/packages.git",
+            "main",
+            "packages.yaml",
+        )
+        .unwrap();
+        match source {
+            ProviderGitSource::GitHub {
+                owner,
+                repo,
+                reference,
+            } => {
+                assert_eq!(owner, "nenjo-ai");
+                assert_eq!(repo, "packages");
+                assert_eq!(reference, "main");
+            }
+            ProviderGitSource::GitLab { .. } => panic!("expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn provider_mode_parses_gitlab_sources() {
+        let source = ProviderGitSource::parse(
+            "git@gitlab.com:acme/platform/packages.git",
+            "main",
+            "packages.yaml",
+        )
+        .unwrap();
+        match source {
+            ProviderGitSource::GitLab {
+                host,
+                project_path,
+                reference,
+            } => {
+                assert_eq!(host, "gitlab.com");
+                assert_eq!(project_path, "acme/platform/packages");
+                assert_eq!(reference, "main");
+            }
+            ProviderGitSource::GitHub { .. } => panic!("expected GitLab source"),
+        }
+    }
+
+    #[test]
+    fn provider_mode_rejects_unsupported_sources() {
+        assert!(ProviderGitSource::parse("../packages", "main", "packages.yaml").is_none());
+        assert!(
+            ProviderGitSource::parse(
+                "https://example.com/acme/packages.git",
+                "main",
+                "packages.yaml"
+            )
+            .is_none()
+        );
+        assert!(
+            ProviderGitSource::parse(
+                "https://github.com/acme/packages.git",
+                "main",
+                "../packages.yaml"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_mode_fails_without_git_fallback_for_unsupported_sources() {
+        let err = DefaultPackageSourceFetcher::with_fetch_mode(FetchMode::Provider)
+            .fetch(&git_source("../packages"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("provider fetch mode does not support git source"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn auto_mode_falls_back_to_git_for_unsupported_sources() {
+        let err = DefaultPackageSourceFetcher::with_fetch_mode(FetchMode::Auto)
+            .fetch(&git_source("../missing-packages"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("failed to run git clone") || err.contains("git clone failed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn encodes_provider_paths() {
+        assert_eq!(
+            encode_path("skills/my skill/SKILL.md"),
+            "skills/my%20skill/SKILL.md"
+        );
+        assert_eq!(
+            encode_gitlab_project_path("acme/platform/packages"),
+            "acme%2Fplatform%2Fpackages"
+        );
+        assert_eq!(
+            encode_gitlab_file_path("skills/my skill/SKILL.md"),
+            "skills%2Fmy%20skill%2FSKILL.md"
+        );
+    }
+
+    #[test]
+    fn non_git_sources_do_not_have_scope() {
+        assert_eq!(
+            package_source_scope(&PackageSource::Artifact {
+                url: "https://example.com/packages.tar.gz".to_string(),
+                checksum: "abc".to_string(),
+                manifest_path: "packages.yaml".to_string(),
+            }),
             None
         );
     }

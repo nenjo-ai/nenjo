@@ -42,8 +42,8 @@ pub use registry::{
     RegistryPackageResolver, RegistryPackageVersion,
 };
 pub use source::{
-    DefaultPackageSourceFetcher, FetchedPackageSource, PackageSource, PackageSourceFetcher,
-    package_source_scope,
+    DefaultPackageSourceFetcher, FetchMode, FetchedPackageSource, PackageSource,
+    PackageSourceFetcher, package_source_scope,
 };
 pub use validate::{
     PrepareOptions, PrepareReport, PreparedModule, PreparedPackage, PreparedRegistry,
