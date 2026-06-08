@@ -473,6 +473,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::ManifestChanged {
+            schema: _,
             resource_type,
             resource,
             action,

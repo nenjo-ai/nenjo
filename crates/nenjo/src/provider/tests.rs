@@ -497,6 +497,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "routine".into(),
+        slug: None,
         description: None,
         trigger: crate::manifest::RoutineTrigger::Task,
         metadata: crate::manifest::RoutineMetadata::default(),

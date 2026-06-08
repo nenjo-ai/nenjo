@@ -8,6 +8,21 @@ pub use nenjo_platform::{
 };
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ManifestResourcePayload {
+    pub schema: String,
+    pub data: serde_json::Value,
+}
+
+pub(super) fn canonical_resource_payload_data(
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    match serde_json::from_value::<ManifestResourcePayload>(value.clone()) {
+        Ok(envelope) if envelope.schema == "manifest.resource.v1" => Some(envelope.data),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct InlineDocumentMeta {
     pub id: Uuid,
     #[serde(default)]

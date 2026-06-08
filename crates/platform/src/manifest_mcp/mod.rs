@@ -54,7 +54,7 @@ pub use params::{
     KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, KnowledgePackCreateParams,
     KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
     ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
-    ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
+    ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
     RoutinesGetParams,
 };
 pub use results::{
@@ -82,5 +82,6 @@ pub use types::{
     KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
     ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument, ProjectCreateDocument,
     ProjectDocument, ProjectSummary, ProjectUpdateDocument, RoutineCreateDocument, RoutineDocument,
-    RoutineEdgeInput, RoutineGraphInput, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
+    RoutineEdgeDocument, RoutineEdgeInput, RoutineGraphInput, RoutineStepDocument,
+    RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
 };

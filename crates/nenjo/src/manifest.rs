@@ -428,6 +428,8 @@ impl HasManifestSlug for ProjectManifest {
 pub struct RoutineManifest {
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
     pub description: Option<String>,
     pub trigger: RoutineTrigger,
     pub metadata: RoutineMetadata,
@@ -435,9 +437,17 @@ pub struct RoutineManifest {
     pub edges: Vec<RoutineEdgeManifest>,
 }
 
+impl RoutineManifest {
+    pub fn slug(&self) -> Slug {
+        self.slug
+            .clone()
+            .unwrap_or_else(|| Slug::derive(&self.name))
+    }
+}
+
 impl HasManifestSlug for RoutineManifest {
     fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
+        self.slug()
     }
 }
 

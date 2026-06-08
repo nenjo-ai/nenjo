@@ -215,6 +215,7 @@ fn routine(id: Uuid, name: &str) -> RoutineManifest {
     RoutineManifest {
         id,
         name: name.into(),
+        slug: None,
         description: None,
         trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -596,16 +597,19 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 action: ResourceAction::Updated,
                 project: Some(Slug::derive("project")),
                 payload: Some(serde_json::json!({
-                "id": document_id,
-                "pack_id": pack_id,
-                "pack_slug": "project",
-                "filename": "guide.md",
-                "path": "docs",
-                "title": "Guide",
-                "kind": "markdown",
-                "summary": null,
-                "tags": [],
-                "updated_at": "2026-05-10T00:00:00Z"
+                    "schema": "manifest.resource.v1",
+                    "data": {
+                        "id": document_id,
+                        "pack_id": pack_id,
+                        "pack_slug": "project",
+                        "filename": "guide.md",
+                        "path": "docs",
+                        "title": "Guide",
+                        "kind": "markdown",
+                        "summary": null,
+                        "tags": [],
+                        "updated_at": "2026-05-10T00:00:00Z"
+                    }
                 })),
                 encrypted_payload: None,
             },
@@ -622,16 +626,19 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 action: ResourceAction::Deleted,
                 project: Some(Slug::derive("project")),
                 payload: Some(serde_json::json!({
-                "id": document_id,
-                "pack_id": pack_id,
-                "pack_slug": "project",
-                "filename": "guide.md",
-                "path": "docs",
-                "title": "Guide",
-                "kind": "markdown",
-                "summary": null,
-                "tags": [],
-                "updated_at": "2026-05-10T00:00:00Z"
+                    "schema": "manifest.resource.v1",
+                    "data": {
+                        "id": document_id,
+                        "pack_id": pack_id,
+                        "pack_slug": "project",
+                        "filename": "guide.md",
+                        "path": "docs",
+                        "title": "Guide",
+                        "kind": "markdown",
+                        "summary": null,
+                        "tags": [],
+                        "updated_at": "2026-05-10T00:00:00Z"
+                    }
                 })),
                 encrypted_payload: None,
             },

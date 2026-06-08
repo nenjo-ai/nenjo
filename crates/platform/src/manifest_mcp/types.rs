@@ -3,7 +3,6 @@
 use derive_builder::Builder;
 use nenjo::Slug;
 use serde::{Deserialize, Deserializer, Serialize};
-use uuid::Uuid;
 
 use nenjo::manifest::{
     AbilityManifest, AgentHeartbeatManifest, AgentManifest, ContextBlockManifest,
@@ -16,7 +15,6 @@ use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig, model_manifest_sl
 /// Canonical prompt-free agent document used by manifest list/get/update/delete operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
-    pub id: Uuid,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<Slug>,
@@ -92,7 +90,6 @@ impl From<AgentManifest> for AgentDocument {
     fn from(agent: AgentManifest) -> Self {
         Self {
             summary: AgentSummary {
-                id: agent.id,
                 name: agent.name,
                 slug: agent.slug,
                 description: agent.description,
@@ -116,27 +113,6 @@ impl From<AgentManifest> for AgentPromptDocument {
         Self {
             agent: AgentDocument::from(agent),
             prompt_config,
-        }
-    }
-}
-
-impl From<AgentDocument> for AgentManifest {
-    fn from(agent: AgentDocument) -> Self {
-        Self {
-            id: agent.summary.id,
-            name: agent.summary.name,
-            slug: agent.summary.slug,
-            description: agent.summary.description,
-            prompt_config: PromptConfig::default(),
-            color: agent.summary.color,
-            model: agent.summary.model,
-            domains: agent.domains,
-            platform_scopes: agent.platform_scopes,
-            mcp_servers: agent.mcp_servers,
-            script_tools: agent.script_tools,
-            abilities: agent.abilities,
-            prompt_locked: agent.prompt_locked,
-            heartbeat: agent.heartbeat,
         }
     }
 }
@@ -170,7 +146,6 @@ pub struct AgentCreateDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Prompt-free ability metadata returned by list/get operations.
 pub struct AbilitySummary {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub path: String,
@@ -245,7 +220,6 @@ impl From<AbilityManifest> for AbilityDocument {
     fn from(ability: AbilityManifest) -> Self {
         Self {
             summary: AbilitySummary {
-                id: ability.id,
                 name: ability.name,
                 path: ability.path.unwrap_or_default(),
                 description: ability.description,
@@ -268,33 +242,9 @@ impl From<AbilityManifest> for AbilityPromptDocument {
     }
 }
 
-impl From<AbilityDocument> for AbilityManifest {
-    fn from(ability: AbilityDocument) -> Self {
-        Self {
-            id: ability.summary.id,
-            name: ability.summary.name,
-            path: if ability.summary.path.is_empty() {
-                None
-            } else {
-                Some(ability.summary.path)
-            },
-            description: ability.summary.description,
-            activation_condition: ability.activation_condition,
-            prompt_config: AbilityPromptConfig::default(),
-            platform_scopes: ability.platform_scopes,
-            mcp_servers: ability.mcp_servers,
-            script_tools: ability.script_tools,
-            source_type: "native".to_string(),
-            read_only: false,
-            metadata: serde_json::json!({}),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Prompt-free domain metadata returned by list/get operations.
 pub struct DomainSummary {
-    pub id: Uuid,
     pub name: String,
     pub slug: Slug,
     #[serde(default)]
@@ -329,7 +279,6 @@ pub struct DomainPromptDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Prompt-free context block metadata returned by list/get operations.
 pub struct ContextBlockSummary {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub path: String,
@@ -424,7 +373,6 @@ impl From<DomainManifest> for DomainDocument {
         let slug = domain.slug();
         Self {
             summary: DomainSummary {
-                id: domain.id,
                 name: domain.name,
                 slug,
                 path: domain.path,
@@ -456,7 +404,6 @@ impl From<ContextBlockManifest> for ContextBlockDocument {
     fn from(context_block: ContextBlockManifest) -> Self {
         Self {
             summary: ContextBlockSummary {
-                id: context_block.id,
                 name: context_block.name,
                 path: context_block.path,
                 description: context_block.description,
@@ -478,7 +425,6 @@ impl From<ContextBlockManifest> for ContextBlockContentDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Project metadata returned by list/get operations.
 pub struct ProjectSummary {
-    pub id: Uuid,
     pub name: String,
     pub slug: Slug,
     pub description: Option<String>,
@@ -519,7 +465,6 @@ pub struct ProjectUpdateDocument {
 /// Library knowledge pack metadata returned by pack routes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgePackDocument {
-    pub id: Uuid,
     pub slug: Slug,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -671,7 +616,6 @@ impl From<ProjectManifest> for ProjectDocument {
     fn from(project: ProjectManifest) -> Self {
         Self {
             summary: ProjectSummary {
-                id: project.id,
                 name: project.name,
                 slug: project.slug,
                 description: project.description,
@@ -681,25 +625,40 @@ impl From<ProjectManifest> for ProjectDocument {
     }
 }
 
-impl From<ProjectDocument> for ProjectManifest {
-    fn from(project: ProjectDocument) -> Self {
-        Self {
-            id: project.summary.id,
-            name: project.summary.name,
-            slug: project.summary.slug,
-            description: project.summary.description,
-            settings: project.settings,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Routine metadata returned by list/get operations.
 pub struct RoutineSummary {
-    pub id: Uuid,
+    pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
     pub trigger: RoutineTrigger,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One routine step returned by list/get operations.
+pub struct RoutineStepDocument {
+    pub slug: Slug,
+    pub routine: Slug,
+    pub name: String,
+    pub step_type: RoutineStepType,
+    #[serde(default)]
+    pub council: Option<Slug>,
+    #[serde(default)]
+    pub agent: Option<Slug>,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    pub order_index: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One routine edge returned by list/get operations.
+pub struct RoutineEdgeDocument {
+    pub routine: Slug,
+    pub source_step: Slug,
+    pub target_step: Slug,
+    pub condition: RoutineEdgeCondition,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -710,9 +669,9 @@ pub struct RoutineDocument {
     #[serde(default)]
     pub metadata: RoutineMetadata,
     #[serde(default)]
-    pub steps: Vec<RoutineStepManifest>,
+    pub steps: Vec<RoutineStepDocument>,
     #[serde(default)]
-    pub edges: Vec<RoutineEdgeManifest>,
+    pub edges: Vec<RoutineEdgeDocument>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -824,16 +783,52 @@ impl RoutineDocument {
 
 impl From<RoutineManifest> for RoutineDocument {
     fn from(routine: RoutineManifest) -> Self {
+        let slug = routine.slug();
         Self {
             summary: RoutineSummary {
-                id: routine.id,
+                slug,
                 name: routine.name,
                 description: routine.description,
                 trigger: routine.trigger,
             },
             metadata: routine.metadata,
-            steps: routine.steps,
-            edges: routine.edges,
+            steps: routine
+                .steps
+                .into_iter()
+                .map(RoutineStepDocument::from)
+                .collect(),
+            edges: routine
+                .edges
+                .into_iter()
+                .map(RoutineEdgeDocument::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<RoutineStepManifest> for RoutineStepDocument {
+    fn from(step: RoutineStepManifest) -> Self {
+        Self {
+            slug: step.slug,
+            routine: step.routine,
+            name: step.name,
+            step_type: step.step_type,
+            council: step.council,
+            agent: step.agent,
+            config: step.config,
+            order_index: step.order_index,
+        }
+    }
+}
+
+impl From<RoutineEdgeManifest> for RoutineEdgeDocument {
+    fn from(edge: RoutineEdgeManifest) -> Self {
+        Self {
+            routine: edge.routine,
+            source_step: edge.source_step,
+            target_step: edge.target_step,
+            condition: edge.condition,
+            metadata: edge.metadata,
         }
     }
 }
@@ -841,7 +836,6 @@ impl From<RoutineManifest> for RoutineDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Model metadata returned by list/get operations.
 pub struct ModelSummary {
-    pub id: Uuid,
     pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
@@ -894,7 +888,6 @@ impl From<ModelManifest> for ModelDocument {
         let slug = model_manifest_slug(&model.model_provider, &model.model);
         Self {
             summary: ModelSummary {
-                id: model.id,
                 slug,
                 name: model.name,
                 description: model.description,
@@ -910,7 +903,6 @@ impl From<ModelManifest> for ModelDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Council metadata returned by list/get operations.
 pub struct CouncilSummary {
-    pub id: Uuid,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
     pub leader_agent: Slug,
@@ -990,7 +982,6 @@ impl From<CouncilManifest> for CouncilDocument {
     fn from(council: CouncilManifest) -> Self {
         Self {
             summary: CouncilSummary {
-                id: council.id,
                 name: council.name,
                 delegation_strategy: council.delegation_strategy,
                 leader_agent: council.leader_agent,
@@ -1001,25 +992,6 @@ impl From<CouncilManifest> for CouncilDocument {
                 .map(|member| CouncilMemberDocument {
                     agent: member.agent.clone(),
                     agent_name: member.agent.to_string(),
-                    priority: member.priority,
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<CouncilDocument> for CouncilManifest {
-    fn from(council: CouncilDocument) -> Self {
-        Self {
-            id: council.summary.id,
-            name: council.summary.name,
-            delegation_strategy: council.summary.delegation_strategy,
-            leader_agent: council.summary.leader_agent,
-            members: council
-                .members
-                .into_iter()
-                .map(|member| nenjo::manifest::CouncilMemberManifest {
-                    agent: member.agent,
                     priority: member.priority,
                 })
                 .collect(),

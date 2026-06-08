@@ -393,6 +393,7 @@ async fn single_agent_step() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "simple-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -455,6 +456,7 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "tool-check-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -543,6 +545,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "agent-instructions".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -615,6 +618,7 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "cron-agent-template".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
@@ -693,6 +697,7 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
     let routine = RoutineManifest {
         id: routine_id,
         name: "cron-agent-no-project".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
@@ -770,6 +775,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "gate-instructions".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -841,6 +847,7 @@ async fn single_agent_step_retries_until_pass_verdict() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "retry-for-pass-verdict".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -931,6 +938,7 @@ async fn stream_events_single_step() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "stream-test".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1022,6 +1030,7 @@ async fn two_step_chain() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "code-review".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1117,6 +1126,7 @@ async fn agent_step_fail_verdict_terminates_routine() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "agent-fail-stops-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1241,6 +1251,7 @@ async fn gate_step_pass() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "gated-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1346,6 +1357,7 @@ async fn gate_always_edge_is_invalid() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "invalid-gate-routing".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1450,6 +1462,7 @@ async fn gate_on_fail_routes_back_before_completion() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "retry-gated-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1585,6 +1598,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "retry-exhaustion-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1717,6 +1731,7 @@ async fn terminal_fail_step() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "fail-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1772,6 +1787,7 @@ async fn council_decompose() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "council-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1847,6 +1863,7 @@ async fn council_broadcast() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "broadcast-council-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -1950,6 +1967,7 @@ async fn council_round_robin() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "round-robin-council-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -2049,6 +2067,7 @@ async fn council_vote() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "vote-council-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -2150,6 +2169,7 @@ async fn scheduled_cron_routine_execution() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "cron-routine".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
@@ -2247,6 +2267,7 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "cron-agent-terminal".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
@@ -2365,6 +2386,7 @@ async fn cron_cancellation() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "cancel-cron".into(),
+        slug: None,
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),

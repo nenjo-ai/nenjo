@@ -11,7 +11,7 @@ use nenjo_events::EncryptedPayload;
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
     DomainManifestBackend, DomainsGetParams, ManifestAccessPolicy, PlatformManifestBackend,
-    PlatformManifestClient, ResourceRef, tools::PlatformNotificationEmitter,
+    PlatformManifestClient, tools::PlatformNotificationEmitter,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -660,7 +660,7 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
 
     let agents = backend.list_agents().await.unwrap();
     assert_eq!(agents.agents.len(), 1);
-    assert_eq!(agents.agents[0].id, visible_agent.id);
+    assert_eq!(agents.agents[0].name, visible_agent.name);
     assert!(
         backend
             .get_agent(AgentsGetParams {
@@ -672,11 +672,11 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
 
     let abilities = backend.list_abilities().await.unwrap();
     assert_eq!(abilities.abilities.len(), 1);
-    assert_eq!(abilities.abilities[0].id, visible_ability.id);
+    assert_eq!(abilities.abilities[0].name, visible_ability.name);
     assert!(
         backend
             .get_ability(AbilitiesGetParams {
-                ability: ResourceRef::Id(hidden_ability.id)
+                ability: Slug::derive(&hidden_ability.name)
             })
             .await
             .is_err()
@@ -688,7 +688,7 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
         domains
             .domains
             .iter()
-            .any(|domain| domain.id == visible_domain.id)
+            .any(|domain| domain.slug == visible_domain.slug())
     );
     assert!(
         backend

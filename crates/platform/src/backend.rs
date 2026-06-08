@@ -33,9 +33,32 @@ fn string_to_manifest_path(path: String) -> Option<String> {
     if path.is_empty() { None } else { Some(path) }
 }
 
-fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
+fn local_agent_from_document(
+    id: Uuid,
+    agent: AgentDocument,
+    prompt_config: nenjo::agents::prompts::PromptConfig,
+) -> AgentManifest {
+    AgentManifest {
+        id,
+        name: agent.summary.name,
+        slug: agent.summary.slug,
+        description: agent.summary.description,
+        prompt_config,
+        color: agent.summary.color,
+        model: agent.summary.model,
+        domains: agent.domains,
+        platform_scopes: agent.platform_scopes,
+        mcp_servers: agent.mcp_servers,
+        script_tools: agent.script_tools,
+        abilities: agent.abilities,
+        prompt_locked: agent.prompt_locked,
+        heartbeat: agent.heartbeat,
+    }
+}
+
+fn local_council_from_document(id: Uuid, council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {
-        id: council.summary.id,
+        id,
         name: council.summary.name.clone(),
         leader_agent: council.summary.leader_agent.clone(),
         members: council
@@ -47,6 +70,71 @@ fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
             })
             .collect(),
         delegation_strategy: council.summary.delegation_strategy,
+    }
+}
+
+fn local_routine_from_document(
+    id: Uuid,
+    routine: &RoutineDocument,
+    existing: Option<&RoutineManifest>,
+) -> RoutineManifest {
+    RoutineManifest {
+        id,
+        name: routine.summary.name.clone(),
+        slug: Some(routine.summary.slug.clone()),
+        description: routine.summary.description.clone(),
+        trigger: routine.summary.trigger,
+        steps: routine
+            .steps
+            .iter()
+            .map(|step| {
+                let step_id = existing
+                    .and_then(|existing| {
+                        existing
+                            .steps
+                            .iter()
+                            .find(|existing_step| existing_step.slug == step.slug)
+                    })
+                    .map(|step| step.id)
+                    .unwrap_or_else(Uuid::new_v4);
+                nenjo::manifest::RoutineStepManifest {
+                    id: step_id,
+                    slug: step.slug.clone(),
+                    routine: step.routine.clone(),
+                    name: step.name.clone(),
+                    step_type: step.step_type,
+                    council: step.council.clone(),
+                    agent: step.agent.clone(),
+                    config: step.config.clone(),
+                    order_index: step.order_index,
+                }
+            })
+            .collect(),
+        edges: routine
+            .edges
+            .iter()
+            .map(|edge| {
+                let edge_id = existing
+                    .and_then(|existing| {
+                        existing.edges.iter().find(|existing_edge| {
+                            existing_edge.source_step == edge.source_step
+                                && existing_edge.target_step == edge.target_step
+                                && existing_edge.condition == edge.condition
+                        })
+                    })
+                    .map(|edge| edge.id)
+                    .unwrap_or_else(Uuid::new_v4);
+                nenjo::manifest::RoutineEdgeManifest {
+                    id: edge_id,
+                    routine: edge.routine.clone(),
+                    source_step: edge.source_step.clone(),
+                    target_step: edge.target_step.clone(),
+                    condition: edge.condition,
+                    metadata: edge.metadata.clone(),
+                }
+            })
+            .collect(),
+        metadata: routine.metadata.clone(),
     }
 }
 
@@ -221,16 +309,13 @@ where
         Ok(())
     }
 
-    async fn cached_or_remote_ability(&self, ability_ref: &ResourceRef) -> Result<AbilityManifest> {
-        let local = match ability_ref {
-            ResourceRef::Id(id) => self.local_store.get_ability(*id).await?,
-            ResourceRef::Slug(name) => self
-                .local_store
-                .list_abilities()
-                .await?
-                .into_iter()
-                .find(|ability| ability.name == *name),
-        };
+    async fn cached_or_remote_ability(&self, ability_ref: &Slug) -> Result<AbilityManifest> {
+        let local = self
+            .local_store
+            .list_abilities()
+            .await?
+            .into_iter()
+            .find(|ability| Slug::derive(&ability.name) == *ability_ref);
         if let Some(ability) = local {
             return Ok(ability);
         }
@@ -247,7 +332,7 @@ where
         };
 
         let hydrated = AbilityManifest {
-            id: remote.summary.id,
+            id: Uuid::new_v4(),
             name: remote.summary.name,
             path: string_to_manifest_path(remote.summary.path),
             description: remote.summary.description,
@@ -504,6 +589,7 @@ where
     }
 
     async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
+        let agent_id = Uuid::new_v4();
         let create = AgentCreateDocument {
             name: params.data.name,
             description: params.data.description,
@@ -511,9 +597,12 @@ where
             model: params.data.model,
         };
 
-        let created = self.platform_client.create_agent_document(&create).await?;
+        let created = self
+            .platform_client
+            .create_agent_document(&create, Some(agent_id))
+            .await?;
 
-        let local_agent: AgentManifest = created.clone().into();
+        let local_agent = local_agent_from_document(agent_id, created.clone(), Default::default());
         self.local_store
             .upsert_resource(&ManifestResource::Agent(local_agent))
             .await?;
@@ -534,8 +623,8 @@ where
             .update_agent_document(&params.agent, &params.data)
             .await?;
 
-        let mut local_agent: AgentManifest = updated.clone().into();
-        local_agent.prompt_config = existing.prompt_config.clone();
+        let mut local_agent =
+            local_agent_from_document(existing.id, updated.clone(), existing.prompt_config.clone());
         local_agent.heartbeat = existing.heartbeat.clone();
         self.local_store
             .upsert_resource(&ManifestResource::Agent(local_agent))
@@ -602,10 +691,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Agent, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -657,21 +743,22 @@ where
     }
 
     async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
+        let ability_id = Uuid::new_v4();
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                Uuid::new_v4(),
+                ability_id,
                 SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
         let created = self
             .platform_client
-            .create_ability_document(&params.data, encrypted_payload)
+            .create_ability_document(&params.data, Some(ability_id), encrypted_payload)
             .await?;
         let local_ability = AbilityManifest {
-            id: created.summary.id,
+            id: ability_id,
             name: created.summary.name.clone(),
             path: string_to_manifest_path(created.summary.path.clone()),
             description: created.summary.description.clone(),
@@ -708,7 +795,7 @@ where
             .update_ability_document(&params.ability, &params.data)
             .await?;
         let local_ability = AbilityManifest {
-            id: updated.summary.id,
+            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: string_to_manifest_path(updated.summary.path.clone()),
             description: updated.summary.description.clone(),
@@ -791,10 +878,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Ability, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -846,21 +930,22 @@ where
     }
 
     async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
+        let domain_id = Uuid::new_v4();
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                Uuid::new_v4(),
+                domain_id,
                 SensitiveContentKind::DomainPrompt.encrypted_object_type(),
                 &serde_json::json!(params.data.prompt_config.clone()),
             )
             .await?;
         let created = self
             .platform_client
-            .create_domain_document(&params.data, encrypted_payload)
+            .create_domain_document(&params.data, Some(domain_id), encrypted_payload)
             .await?;
         let local_domain = DomainManifest {
-            id: created.summary.id,
+            id: domain_id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
             description: created.summary.description.clone(),
@@ -893,7 +978,7 @@ where
             .update_domain_document(&params.domain, &params.data)
             .await?;
         let local_domain = DomainManifest {
-            id: updated.summary.id,
+            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
             description: updated.summary.description.clone(),
@@ -975,10 +1060,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Domain, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1007,12 +1089,13 @@ where
     }
 
     async fn create_project(&self, params: ProjectCreateParams) -> Result<ProjectMutationResult> {
+        let project_id = Uuid::new_v4();
         let created = self
             .platform_client
-            .create_project_document(&params.data)
+            .create_project_document(&params.data, Some(project_id))
             .await?;
         let local_project = ProjectManifest {
-            id: created.summary.id,
+            id: project_id,
             name: created.summary.name.clone(),
             slug: created.summary.slug.clone(),
             description: created.summary.description.clone(),
@@ -1048,7 +1131,7 @@ where
             .update_project_document(&params.project, &merged)
             .await?;
         let local_project = ProjectManifest {
-            id: updated.summary.id,
+            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             slug: updated.summary.slug.clone(),
             description: updated.summary.description.clone(),
@@ -1068,10 +1151,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Project, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1177,17 +1257,10 @@ where
     }
 
     async fn delete_knowledge_doc(&self, params: KnowledgeDocDeleteParams) -> Result<DeleteResult> {
-        let doc_id = self
-            .platform_client
-            .resolve_knowledge_doc_slug(&params.pack, &params.doc)
-            .await?;
         self.platform_client
             .delete_knowledge_doc(&params.pack, &params.doc)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: doc_id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1209,26 +1282,19 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = self.cached_routine(&params.routine).await?;
+        let routine = self.cached_routine(&params.slug).await?;
         Ok(RoutineGetResult {
             routine: RoutineDocument::from(routine),
         })
     }
 
     async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
+        let routine_id = Uuid::new_v4();
         let created = self
             .platform_client
-            .create_routine_document(&params.data)
+            .create_routine_document(&params.data, Some(routine_id))
             .await?;
-        let local_routine = RoutineManifest {
-            id: created.summary.id,
-            name: created.summary.name.clone(),
-            description: created.summary.description.clone(),
-            trigger: created.summary.trigger,
-            steps: created.steps.clone(),
-            edges: created.edges.clone(),
-            metadata: created.metadata.clone(),
-        };
+        let local_routine = local_routine_from_document(routine_id, &created, None);
         self.local_store
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
@@ -1241,26 +1307,12 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let merged = RoutineUpdateDocument {
-            name: params.data.name,
-            description: params.data.description,
-            trigger: params.data.trigger,
-            metadata: params.data.metadata,
-            graph: params.data.graph,
-        };
+        let existing = self.cached_routine(&params.slug).await?;
         let updated = self
             .platform_client
-            .update_routine_document(&params.routine, &merged)
+            .update_routine_document(&params.slug, &params.data)
             .await?;
-        let local_routine = RoutineManifest {
-            id: updated.summary.id,
-            name: updated.summary.name.clone(),
-            description: updated.summary.description.clone(),
-            trigger: updated.summary.trigger,
-            steps: updated.steps.clone(),
-            edges: updated.edges.clone(),
-            metadata: updated.metadata.clone(),
-        };
+        let local_routine = local_routine_from_document(existing.id, &updated, Some(&existing));
         self.local_store
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
@@ -1268,17 +1320,14 @@ where
     }
 
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
-        let existing = self.cached_routine(&params.routine).await?;
+        let existing = self.cached_routine(&params.slug).await?;
         self.platform_client
-            .delete_routine_document(&params.routine)
+            .delete_routine_document(&params.slug)
             .await?;
         self.local_store
             .delete_resource(ManifestResourceKind::Routine, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1312,7 +1361,7 @@ where
             .create_model_document(&params.data)
             .await?;
         let local_model = ModelManifest {
-            id: created.summary.id,
+            id: Uuid::new_v4(),
             name: created.summary.name.clone(),
             description: created.summary.description.clone(),
             model: created.summary.model.clone(),
@@ -1349,7 +1398,7 @@ where
             .update_model_document(&params.model, &merged)
             .await?;
         let local_model = ModelManifest {
-            id: updated.summary.id,
+            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             description: updated.summary.description.clone(),
             model: updated.summary.model.clone(),
@@ -1371,10 +1420,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Model, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1422,7 +1468,7 @@ where
         };
         let mut created = self.platform_client.create_council_document(&body).await?;
         created.summary.leader_agent = leader_agent;
-        let local_council = local_council_from_document(&created);
+        let local_council = local_council_from_document(Uuid::new_v4(), &created);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1445,7 +1491,7 @@ where
             .update_council_document(&params.council, &merged)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(&updated);
+        let local_council = local_council_from_document(existing.id, &updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1467,7 +1513,7 @@ where
             .add_council_member_document(&params.council, &member)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(&updated);
+        let local_council = local_council_from_document(existing.id, &updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1487,7 +1533,7 @@ where
             .update_council_member_document(&params.council, &params.agent, &params.data)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(&updated);
+        let local_council = local_council_from_document(existing.id, &updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1504,7 +1550,7 @@ where
             .remove_council_member_document(&params.council, &params.agent)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(&updated);
+        let local_council = local_council_from_document(existing.id, &updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1519,10 +1565,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::Council, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1567,21 +1610,22 @@ where
         &self,
         params: ContextBlockCreateParams,
     ) -> Result<ContextBlockMutationResult> {
+        let context_block_id = Uuid::new_v4();
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                Uuid::new_v4(),
+                context_block_id,
                 SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
                 &serde_json::json!(params.data.template.clone()),
             )
             .await?;
         let created = self
             .platform_client
-            .create_context_block_document(&params.data, encrypted_payload)
+            .create_context_block_document(&params.data, Some(context_block_id), encrypted_payload)
             .await?;
         let local_context_block = ContextBlockManifest {
-            id: created.summary.id,
+            id: context_block_id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
             description: created.summary.description.clone(),
@@ -1605,7 +1649,7 @@ where
             .update_context_block_document(&params.context_block, &params.data)
             .await?;
         let local_context_block = ContextBlockManifest {
-            id: updated.summary.id,
+            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
             description: updated.summary.description.clone(),
@@ -1663,10 +1707,7 @@ where
         self.local_store
             .delete_resource(ManifestResourceKind::ContextBlock, existing.id)
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: existing.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 

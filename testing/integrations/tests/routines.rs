@@ -117,6 +117,7 @@ async fn single_step_routine_with_real_llm() {
     let routine = RoutineManifest {
         id: routine_id,
         name: "smoke-routine".into(),
+        slug: None,
         description: Some("Single-step routine integration test".into()),
         trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),

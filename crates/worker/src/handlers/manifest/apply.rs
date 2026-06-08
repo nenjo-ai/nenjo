@@ -9,7 +9,9 @@ use uuid::Uuid;
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::payload::{InlineDocumentMeta, parse_decrypted_manifest_payload};
+use super::payload::{
+    InlineDocumentMeta, canonical_resource_payload_data, parse_decrypted_manifest_payload,
+};
 use super::services::{ManifestStore, McpRuntime};
 
 #[derive(Debug, Clone)]
@@ -166,34 +168,13 @@ where
             ) {
                 source = ManifestApplySource::Ignored;
             } else {
-                let Some(resource_id) = resource_id else {
-                    warn!(
-                        %resource_type,
-                        %resource,
-                        "Manifest change did not include a resolvable resource id, falling back to full refresh"
-                    );
-                    manifest = store.full_refresh(client).await?;
-                    if let Some(mcp) = mcp {
-                        mcp.reconcile_mcp(&manifest.mcp_servers).await;
-                    }
-                    source = ManifestApplySource::FullRefresh;
-                    return finish_manifest_change(
-                        store,
-                        manifest,
-                        resource_type,
-                        &resource,
-                        source,
-                    )
-                    .await;
-                };
-                if let Err(e) =
-                    apply_upsert(&mut manifest, client, resource_type, resource_id).await
+                if let Err(e) = apply_upsert(&mut manifest, client, resource_type, &resource).await
                 {
                     warn!(
                         error = %e,
                         %resource_type,
                         %resource,
-                        %resource_id,
+                        resource_id = ?resource_id,
                         "Incremental fetch failed, falling back to full refresh"
                     );
                     manifest = store.full_refresh(client).await?;
@@ -264,23 +245,6 @@ where
     Ok(ManifestChangeResult { manifest })
 }
 
-async fn finish_manifest_change<StoreRt>(
-    store: &StoreRt,
-    manifest: Manifest,
-    resource_type: ResourceType,
-    resource: &Slug,
-    source: ManifestApplySource,
-) -> Result<ManifestChangeResult>
-where
-    StoreRt: ManifestStore,
-{
-    if let Err(e) = store.persist_resource(&manifest, resource_type).await {
-        warn!(error = %e, rt = %resource_type, "Failed to persist resource cache");
-    }
-    debug!(?source, %resource_type, %resource, "Manifest change applied");
-    Ok(ManifestChangeResult { manifest })
-}
-
 struct DocumentSideEffectContext<'a, StoreRt>
 where
     StoreRt: ManifestStore,
@@ -308,9 +272,11 @@ where
 
     let metadata_value = payload.and_then(|payload| {
         if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
-            decrypted.inline_payload.cloned()
+            decrypted.inline_payload.and_then(|inline| {
+                canonical_resource_payload_data(inline).or_else(|| Some(inline.clone()))
+            })
         } else {
-            Some(payload.clone())
+            canonical_resource_payload_data(payload).or_else(|| Some(payload.clone()))
         }
     });
 
@@ -374,7 +340,6 @@ fn resolve_resource_id(
 ) -> Option<Uuid> {
     payload
         .and_then(resource_id_from_payload)
-        .or_else(|| Uuid::parse_str(resource.as_str()).ok())
         .or_else(|| resource_id_from_manifest(manifest, resource_type, resource))
 }
 
@@ -385,6 +350,7 @@ fn resource_id_from_payload(payload: &serde_json::Value) -> Option<Uuid> {
             .and_then(resource_id_from_payload)
             .or(Some(decrypted.object_id));
     }
+    let payload = payload.get("data").unwrap_or(payload);
     payload
         .get("id")
         .and_then(|value| serde_json::from_value(value.clone()).ok())

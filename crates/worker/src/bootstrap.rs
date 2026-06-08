@@ -242,6 +242,8 @@ struct BootstrapProjectManifest {
 struct BootstrapRoutineManifest {
     id: Uuid,
     name: String,
+    #[serde(default)]
+    slug: Option<Slug>,
     description: Option<String>,
     #[serde(default)]
     trigger: nenjo::manifest::RoutineTrigger,
@@ -672,10 +674,14 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
 fn bootstrap_routine_manifest(
     routine: BootstrapRoutineManifest,
 ) -> nenjo::manifest::RoutineManifest {
-    let routine_slug = Slug::derive(&routine.name);
+    let routine_slug = routine
+        .slug
+        .clone()
+        .unwrap_or_else(|| Slug::derive(&routine.name));
     nenjo::manifest::RoutineManifest {
         id: routine.id,
         name: routine.name,
+        slug: Some(routine_slug.clone()),
         description: routine.description,
         trigger: routine.trigger,
         metadata: routine.metadata,

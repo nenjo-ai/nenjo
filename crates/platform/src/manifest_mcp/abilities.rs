@@ -80,7 +80,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_ability".to_string(),
-            description: "Get one ability's name, path, description, activation_condition, platform_scopes, and mcp_servers by ability slug or id."
+            description: "Get one ability's name, path, description, activation_condition, platform_scopes, and mcp_servers by ability slug."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -92,7 +92,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_ability_prompt".to_string(),
-            description: "Get one ability's prompt_config by ability slug or id.".to_string(),
+            description: "Get one ability's prompt_config by ability slug.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["ability"],
@@ -103,7 +103,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_ability".to_string(),
-            description: "Create one ability using the provided top-level fields and prompt_config.developer_prompt that will run when the ability is invoked. Ability platform scopes are managed outside this MCP tool."
+            description: "Create one ability using the provided top-level fields and prompt_config.developer_prompt that will run when the ability is invoked."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -115,7 +115,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_ability".to_string(),
-            description: "Update one ability by ability slug or id. For normal metadata edits, send only the requested metadata fields such as name or description. Use update_ability_prompt for prompt_config changes. Ability platform scopes are managed outside this MCP tool."
+            description: "Update one ability by ability slug. For normal metadata edits, send only the requested metadata fields such as name or description. Use update_ability_prompt for prompt_config changes."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -133,7 +133,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_ability_prompt".to_string(),
-            description: "Update one ability's prompt_config by ability slug or id using prompt_config.developer_prompt."
+            description: "Update one ability's prompt_config by ability slug using prompt_config.developer_prompt."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -148,7 +148,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_ability".to_string(),
-            description: "Delete one ability by ability slug or id when you want it removed from the manifest."
+            description: "Delete one ability by ability slug when you want it removed from the manifest."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

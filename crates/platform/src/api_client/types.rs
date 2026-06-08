@@ -355,6 +355,7 @@ impl From<RoutineDetailResponse> for RoutineManifest {
         Self {
             id: d.id,
             name: d.name,
+            slug: Some(routine_slug.clone()),
             description: d.description,
             trigger: d.trigger,
             metadata: d.metadata,

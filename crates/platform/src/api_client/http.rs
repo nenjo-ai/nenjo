@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::error::ApiClientError;
 use super::types::*;
+use nenjo::Slug;
 use nenjo::manifest::*;
 
 /// Result alias for client operations.
@@ -177,20 +178,21 @@ impl ApiClient {
     // Single-resource fetch (for incremental bootstrap sync)
     // -----------------------------------------------------------------------
 
-    pub async fn fetch_model(&self, id: Uuid) -> Result<Option<ModelManifest>> {
-        self.fetch_resource(&format!("/api/v1/models/{id}")).await
+    pub async fn fetch_model(&self, resource: &Slug) -> Result<Option<ModelManifest>> {
+        self.fetch_resource(&format!("/api/v1/models/{resource}"))
+            .await
     }
 
-    pub async fn fetch_project(&self, id: Uuid) -> Result<Option<ProjectManifest>> {
+    pub async fn fetch_project(&self, resource: &Slug) -> Result<Option<ProjectManifest>> {
         let detail: Option<ProjectDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/projects/{id}"))
+            .fetch_resource(&format!("/api/v1/projects/{resource}"))
             .await?;
         Ok(self.decode_project_settings(detail).await?.map(Into::into))
     }
 
-    pub async fn fetch_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
+    pub async fn fetch_routine(&self, resource: &Slug) -> Result<Option<RoutineManifest>> {
         let detail: Option<RoutineDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/routines/{id}"))
+            .fetch_resource(&format!("/api/v1/routines/{resource}"))
             .await?;
         Ok(detail.map(Into::into))
     }
@@ -238,14 +240,14 @@ impl ApiClient {
             .await
     }
 
-    pub async fn fetch_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
-        let url = format!("{}/api/v1/domains/{id}/manifest", self.base_url);
+    pub async fn fetch_domain(&self, resource: &Slug) -> Result<Option<DomainManifest>> {
+        let url = format!("{}/api/v1/domains/{resource}/manifest", self.base_url);
         let resp = self.get(&url).await?;
         match resp.status() {
             StatusCode::OK => {
                 let response: DomainManifestResponse = resp.json().await.map_err(|source| {
                     ApiClientError::Parse(format!(
-                        "Failed to parse /api/v1/domains/{id}/manifest: {source}"
+                        "Failed to parse /api/v1/domains/{resource}/manifest: {source}"
                     ))
                 })?;
                 Ok(Some(response.into()))
@@ -255,39 +257,40 @@ impl ApiClient {
         }
     }
 
-    pub async fn fetch_mcp_server(&self, id: Uuid) -> Result<Option<McpServerManifest>> {
-        self.fetch_resource(&format!("/api/v1/mcp-servers/{id}"))
+    pub async fn fetch_mcp_server(&self, resource: &Slug) -> Result<Option<McpServerManifest>> {
+        self.fetch_resource(&format!("/api/v1/mcp-servers/{resource}"))
             .await
     }
 
-    pub async fn fetch_ability(&self, id: Uuid) -> Result<Option<AbilityManifest>> {
-        self.fetch_resource(&format!("/api/v1/abilities/{id}"))
+    pub async fn fetch_ability(&self, resource: &Slug) -> Result<Option<AbilityManifest>> {
+        self.fetch_resource(&format!("/api/v1/abilities/{resource}"))
             .await
     }
 
     pub async fn fetch_context_block_summary(
         &self,
-        id: Uuid,
+        resource: &Slug,
     ) -> Result<Option<ContextBlockSummaryResponse>> {
-        self.fetch_resource(&format!("/api/v1/context-blocks/{id}"))
+        self.fetch_resource(&format!("/api/v1/context-blocks/{resource}"))
             .await
     }
 
     pub async fn fetch_context_block_content(
         &self,
-        id: Uuid,
+        resource: &Slug,
     ) -> Result<Option<ContextBlockContentResponse>> {
         let content = self
             .fetch_resource::<ContextBlockContentResponse>(&format!(
-                "/api/v1/context-blocks/{id}/content"
+                "/api/v1/context-blocks/{resource}/content"
             ))
             .await?;
         self.decode_context_block_content(content).await
     }
 
-    pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
-        let detail: Option<AgentDetailResponse> =
-            self.fetch_resource(&format!("/api/v1/agents/{id}")).await?;
+    pub async fn fetch_agent(&self, resource: &Slug) -> Result<Option<AgentManifest>> {
+        let detail: Option<AgentDetailResponse> = self
+            .fetch_resource(&format!("/api/v1/agents/{resource}"))
+            .await?;
         Ok(detail.map(Into::into))
     }
 
@@ -311,9 +314,9 @@ impl ApiClient {
         }
     }
 
-    pub async fn fetch_council(&self, id: Uuid) -> Result<Option<CouncilManifest>> {
+    pub async fn fetch_council(&self, resource: &Slug) -> Result<Option<CouncilManifest>> {
         let detail: Option<CouncilDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/councils/{id}"))
+            .fetch_resource(&format!("/api/v1/councils/{resource}"))
             .await?;
         Ok(detail.map(|d| d.into()))
     }
