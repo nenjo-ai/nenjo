@@ -1,13 +1,27 @@
 //! Canonical wire types for manifest resources (REST, events, worker sync).
 
+pub mod ability;
+pub mod agent;
 pub mod context_block;
+pub mod council;
+pub mod domain;
 pub mod knowledge;
+pub mod model;
+pub mod project;
+pub mod routine;
 pub mod wire;
 
+pub use ability::{AbilityPromptRecord, AbilityRecord};
+pub use agent::{AgentPromptRecord, AgentRecord};
 pub use context_block::{ContextBlockContentRecord, ContextBlockRecord};
+pub use council::{CouncilMemberRecord, CouncilRecord};
+pub use domain::{DomainPromptRecord, DomainRecord};
 pub use knowledge::{
     KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, ParsedKnowledgeDocument,
     parse_doc_edge_type, parse_doc_kind, parse_document_payload, to_agent_manifest,
     wrap_document_record,
 };
+pub use model::ModelRecord;
+pub use project::ProjectRecord;
+pub use routine::{RoutineEdgeRecord, RoutineRecord, RoutineStepRecord};
 pub use wire::{data_field_present, parse_resource_payload, wrap_resource_record, PlatformRecord};
