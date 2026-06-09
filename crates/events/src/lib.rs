@@ -32,6 +32,7 @@ mod capability;
 mod command;
 mod content;
 mod envelope;
+mod manifest;
 mod response;
 mod subject;
 
@@ -39,5 +40,6 @@ pub use capability::*;
 pub use command::*;
 pub use content::*;
 pub use envelope::*;
+pub use manifest::*;
 pub use response::*;
 pub use subject::*;
