@@ -69,11 +69,7 @@ pub(super) async fn apply_upsert(
             Some(record) => {
                 let item = record.to_manifest();
                 let item_slug = item.slug.clone();
-                if let Some(pos) = manifest
-                    .routines
-                    .iter()
-                    .position(|r| r.slug == item_slug)
-                {
+                if let Some(pos) = manifest.routines.iter().position(|r| r.slug == item_slug) {
                     manifest.routines[pos] = item;
                     debug!(%rt, %item_slug, "Updated existing resource");
                 } else {
@@ -144,8 +140,7 @@ pub(super) async fn apply_upsert(
                     .context_blocks
                     .iter()
                     .find(|block| {
-                        nenjo::manifest::context_block_slug(&block.path, &block.name)
-                            == block_slug
+                        nenjo::manifest::context_block_slug(&block.path, &block.name) == block_slug
                     })
                     .map(|block| block.template.clone())
                     .unwrap_or_default();

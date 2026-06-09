@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use super::types::ActiveAgentHeartbeatState;
+use crate::manifest_contract::ProjectRecord;
 use async_trait::async_trait;
 use nenjo_events::EncryptedPayload;
-use crate::manifest_contract::ProjectRecord;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -660,7 +660,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            decoded.prompt_config.as_ref().unwrap().developer_prompt_addon.as_deref(),
+            decoded
+                .prompt_config
+                .as_ref()
+                .unwrap()
+                .developer_prompt_addon
+                .as_deref(),
             Some("You are helpful.")
         );
         assert!(decoded.encrypted_payload.is_none());

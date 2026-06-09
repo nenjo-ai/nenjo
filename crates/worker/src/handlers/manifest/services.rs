@@ -215,7 +215,11 @@ where
         (**self).sync_document(client, doc, metadata).await
     }
 
-    async fn remove_document(&self, doc: &Slug, metadata: Option<&KnowledgeDocumentRecord>) -> Result<()> {
+    async fn remove_document(
+        &self,
+        doc: &Slug,
+        metadata: Option<&KnowledgeDocumentRecord>,
+    ) -> Result<()> {
         (**self).remove_document(doc, metadata).await
     }
 

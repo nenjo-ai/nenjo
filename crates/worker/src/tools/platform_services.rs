@@ -30,9 +30,7 @@ impl PlatformToolServices {
         library_dir: std::path::PathBuf,
     ) -> Self {
         let manifest_backend = platform_client.as_ref().map(|client| {
-            let resource_ids = Arc::new(PlatformResourceIdStore::new(
-                manifest_store.root().to_path_buf(),
-            ));
+            let resource_ids = Arc::new(PlatformResourceIdStore::new(manifest_store.root()));
             Arc::new(
                 PlatformManifestBackend::new(
                     manifest_store.clone(),

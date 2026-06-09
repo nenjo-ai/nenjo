@@ -73,7 +73,11 @@ impl DomainRecord {
             command: self.command.clone(),
             platform_scopes: self.platform_scopes.clone(),
             abilities: self.abilities.clone(),
-            mcp_servers: self.mcp_servers.iter().map(|value| slug_from_str(value)).collect(),
+            mcp_servers: self
+                .mcp_servers
+                .iter()
+                .map(|value| slug_from_str(value))
+                .collect(),
             script_tools: self
                 .script_tools
                 .iter()
@@ -95,8 +99,7 @@ impl DomainPromptRecord {
     }
 
     pub fn to_manifest(&self) -> DomainManifest {
-        self.domain
-            .to_manifest(self.resolved_prompt_config())
+        self.domain.to_manifest(self.resolved_prompt_config())
     }
 
     pub fn to_document(&self) -> crate::manifest_mcp::DomainPromptDocument {

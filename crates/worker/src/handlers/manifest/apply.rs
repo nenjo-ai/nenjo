@@ -9,9 +9,7 @@ use uuid::Uuid;
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::knowledge::{
-    document_edges_source, parse_knowledge_document_payload,
-};
+use super::knowledge::{document_edges_source, parse_knowledge_document_payload};
 use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
 use nenjo_platform::PlatformResourceKind;
@@ -358,12 +356,7 @@ where
     let needs_content_fetch = encrypted_payload.is_some() && !applied_inline;
     let result = if applied_inline || !needs_content_fetch {
         store
-            .sync_document_metadata(
-                client,
-                resource,
-                Some(&metadata),
-                Some(edges_source),
-            )
+            .sync_document_metadata(client, resource, Some(&metadata), Some(edges_source))
             .await
     } else {
         store.sync_document(client, resource, Some(&metadata)).await

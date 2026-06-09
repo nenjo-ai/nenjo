@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::{
-    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest,
-    RoutineStepType, RoutineTrigger,
+    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
+    RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -114,8 +114,16 @@ impl RoutineRecord {
             description: self.description.clone(),
             trigger: parse_trigger(&self.trigger),
             metadata: self.routine_metadata(),
-            steps: self.steps.iter().map(RoutineStepRecord::to_manifest).collect(),
-            edges: self.edges.iter().map(RoutineEdgeRecord::to_manifest).collect(),
+            steps: self
+                .steps
+                .iter()
+                .map(RoutineStepRecord::to_manifest)
+                .collect(),
+            edges: self
+                .edges
+                .iter()
+                .map(RoutineEdgeRecord::to_manifest)
+                .collect(),
         }
     }
 

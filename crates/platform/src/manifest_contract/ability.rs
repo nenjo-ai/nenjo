@@ -76,7 +76,11 @@ impl AbilityRecord {
             activation_condition: self.activation_condition.clone(),
             prompt_config,
             platform_scopes: self.platform_scopes.clone(),
-            mcp_servers: self.mcp_servers.iter().map(|value| slug_from_str(value)).collect(),
+            mcp_servers: self
+                .mcp_servers
+                .iter()
+                .map(|value| slug_from_str(value))
+                .collect(),
             script_tools: self
                 .script_tools
                 .iter()
@@ -100,8 +104,7 @@ impl AbilityPromptRecord {
     }
 
     pub fn to_manifest(&self) -> AbilityManifest {
-        self.ability
-            .to_manifest(self.resolved_prompt_config())
+        self.ability.to_manifest(self.resolved_prompt_config())
     }
 
     pub fn to_document(&self) -> crate::manifest_mcp::AbilityPromptDocument {

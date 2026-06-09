@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use nenjo_events::{ManifestResourcePayload, MANIFEST_RESOURCE_SCHEMA};
+use nenjo_events::{MANIFEST_RESOURCE_SCHEMA, ManifestResourcePayload};
 
 pub(super) struct DecryptedManifestPayload<'a> {
     pub object_type: &'a str,
@@ -31,9 +31,7 @@ pub(super) fn parse_decrypted_manifest_payload(
     })
 }
 
-pub(super) fn parse_inline_record<T: DeserializeOwned>(
-    value: &serde_json::Value,
-) -> Option<T> {
+pub(super) fn parse_inline_record<T: DeserializeOwned>(value: &serde_json::Value) -> Option<T> {
     ManifestResourcePayload::<T>::parse(value).map(|envelope| envelope.data)
 }
 

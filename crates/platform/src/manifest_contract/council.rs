@@ -13,8 +13,7 @@ fn slug_from_str(value: &str) -> Slug {
 }
 
 fn parse_delegation_strategy(value: &str) -> CouncilDelegationStrategy {
-    serde_json::from_value(serde_json::Value::String(value.to_string()))
-        .unwrap_or_default()
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap_or_default()
 }
 
 /// One council member embedded in a council wire record.

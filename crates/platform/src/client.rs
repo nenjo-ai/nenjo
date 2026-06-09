@@ -2516,10 +2516,7 @@ impl PlatformManifestClient {
     }
 }
 
-fn knowledge_doc_summary(
-    pack: &Slug,
-    document: KnowledgeDocumentRecord,
-) -> KnowledgeDocSummary {
+fn knowledge_doc_summary(pack: &Slug, document: KnowledgeDocumentRecord) -> KnowledgeDocSummary {
     let updated_at = document.updated_at_rfc3339();
     KnowledgeDocSummary {
         pack: pack.clone(),

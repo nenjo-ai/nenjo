@@ -1,7 +1,7 @@
 //! Shared helpers for `manifest.resource.v1` envelopes.
 
-use nenjo_events::{ManifestResourcePayload, MANIFEST_RESOURCE_SCHEMA};
-use serde::{de::DeserializeOwned, Serialize};
+use nenjo_events::{MANIFEST_RESOURCE_SCHEMA, ManifestResourcePayload};
+use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 /// Minimal identity shared by manifest wire records.

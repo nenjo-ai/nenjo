@@ -14,9 +14,9 @@ use tracing::{debug, info, warn};
 
 use crate::api_client::{ApiClient, KnowledgeDocumentRecord};
 
-use crate::handlers::manifest::knowledge::DocumentEdgesSource;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
+use crate::handlers::manifest::knowledge::DocumentEdgesSource;
 use nenjo_platform::library_knowledge::{
     LibraryKnowledgePackManifest, build_library_knowledge_manifest, library_doc_relative_path,
     library_knowledge_doc_relative_path, load_library_knowledge_manifest,

@@ -1,6 +1,6 @@
 use nenjo::Manifest;
-use nenjo::manifest::{context_block_slug, HasManifestSlug};
 use nenjo::Slug;
+use nenjo::manifest::{HasManifestSlug, context_block_slug};
 use nenjo_events::ResourceType;
 use nenjo_platform::manifest_contract::{
     AbilityPromptRecord, AgentPromptRecord, ContextBlockContentRecord, CouncilRecord,
@@ -67,7 +67,11 @@ fn apply_model_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_js
     true
 }
 
-fn apply_routine_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
+fn apply_routine_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
     let Some(record) = parse_inline_record::<RoutineRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;
@@ -78,7 +82,11 @@ fn apply_routine_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_
     true
 }
 
-fn apply_project_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
+fn apply_project_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
     let Some(record) = parse_inline_record::<ProjectRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;
@@ -101,7 +109,11 @@ fn apply_project_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_
     true
 }
 
-fn apply_council_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
+fn apply_council_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
     let Some(record) = parse_inline_record::<CouncilRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;
@@ -112,7 +124,11 @@ fn apply_council_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_
     true
 }
 
-fn apply_ability_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
+fn apply_ability_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
     let Some(record) = parse_inline_record::<AbilityPromptRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;
@@ -156,7 +172,10 @@ fn apply_context_block_inline(
             .unwrap_or_default()
     });
 
-    upsert_by_slug(&mut manifest.context_blocks, record.block.to_manifest(template));
+    upsert_by_slug(
+        &mut manifest.context_blocks,
+        record.block.to_manifest(template),
+    );
     debug!(%rt, "Applied inline resource payload");
     true
 }
@@ -176,7 +195,11 @@ fn apply_mcp_server_inline(
     true
 }
 
-fn apply_domain_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
+fn apply_domain_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
     let Some(record) = parse_inline_record::<DomainPromptRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;

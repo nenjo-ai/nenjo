@@ -1,6 +1,5 @@
 use nenjo_platform::knowledge_contract::{
-    parse_document_payload, KnowledgeDocumentEdgeRecord,
-    ParsedKnowledgeDocument,
+    KnowledgeDocumentEdgeRecord, ParsedKnowledgeDocument, parse_document_payload,
 };
 
 pub(super) fn parse_knowledge_document_payload(
@@ -24,4 +23,3 @@ pub(super) fn document_edges_source<'a>(
         DocumentEdgesSource::FetchFromApi
     }
 }
-

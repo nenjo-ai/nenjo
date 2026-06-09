@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
-use nenjo::manifest::{AgentHeartbeatManifest, AgentManifest};
 use nenjo::manifest::PromptConfig;
+use nenjo::manifest::{AgentHeartbeatManifest, AgentManifest};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -77,9 +77,17 @@ impl AgentRecord {
             prompt_config,
             color: self.color.clone(),
             model: self.model.as_ref().map(|value| slug_from_str(value)),
-            domains: self.domains.iter().map(|value| slug_from_str(value)).collect(),
+            domains: self
+                .domains
+                .iter()
+                .map(|value| slug_from_str(value))
+                .collect(),
             platform_scopes: self.platform_scopes.clone(),
-            mcp_servers: self.mcp_servers.iter().map(|value| slug_from_str(value)).collect(),
+            mcp_servers: self
+                .mcp_servers
+                .iter()
+                .map(|value| slug_from_str(value))
+                .collect(),
             script_tools: self
                 .script_tools
                 .iter()

@@ -21,10 +21,10 @@ pub mod knowledge_contract;
 pub mod library_knowledge;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
-/// Shared manifest resource and encrypted-content classification.
-pub mod manifest_kinds;
 /// Canonical wire record types for manifest resources.
 pub mod manifest_contract;
+/// Shared manifest resource and encrypted-content classification.
+pub mod manifest_kinds;
 /// Manifest MCP contract types, params, results, and dispatch helpers.
 pub mod manifest_mcp;
 /// Access-policy helpers for filtering manifest resources by platform scopes.
@@ -46,13 +46,13 @@ pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, Sensitiv
 pub use client::PlatformManifestClient;
 
 pub use local::LocalManifestMcpBackend;
-pub use manifest_kinds::{ContentScope, ManifestKind, SensitiveContentKind};
 pub use manifest_contract::{
     ContextBlockContentRecord, ContextBlockRecord, KnowledgeDocumentEdgeRecord,
     KnowledgeDocumentRecord, ParsedKnowledgeDocument, PlatformRecord, parse_doc_edge_type,
     parse_doc_kind, parse_document_payload, parse_resource_payload, to_agent_manifest,
     wrap_document_record, wrap_resource_record,
 };
+pub use manifest_kinds::{ContentScope, ManifestKind, SensitiveContentKind};
 pub use manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityCreateDocument, AbilityCreateParams,
     AbilityDeleteParams, AbilityDocument, AbilityGetResult, AbilityManifestBackend,

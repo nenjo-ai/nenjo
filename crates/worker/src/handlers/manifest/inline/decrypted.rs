@@ -7,13 +7,13 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::handlers::manifest::payload::{
-    is_canonical_inline_envelope, parse_inline_record, DecryptedManifestPayload,
+    DecryptedManifestPayload, is_canonical_inline_envelope, parse_inline_record,
 };
 use crate::handlers::manifest::services::ManifestStore;
+use nenjo_platform::SensitiveContentKind;
 use nenjo_platform::manifest_contract::{
     AbilityRecord, AgentRecord, ContextBlockRecord, DomainRecord,
 };
-use nenjo_platform::SensitiveContentKind;
 
 use super::plain::{apply_inline_upsert, upsert_by_slug};
 
@@ -197,12 +197,11 @@ where
             true
         }
         SensitiveContentKind::DocumentContent => {
-            let metadata = match decrypted
-                .inline_payload
-                .and_then(nenjo_events::ManifestResourcePayload::<
+            let metadata = match decrypted.inline_payload.and_then(
+                nenjo_events::ManifestResourcePayload::<
                     nenjo_platform::knowledge_contract::KnowledgeDocumentRecord,
-                >::parse)
-            {
+                >::parse,
+            ) {
                 Some(payload) => payload.data,
                 None => {
                     warn!(%rt, %id, "Encrypted document payload received without inline metadata");

@@ -3,11 +3,13 @@
 //! Pipeline: DB row → [`KnowledgeDocumentRecord`] → local library manifest →
 //! [`nenjo_knowledge::KnowledgeDocManifest`] (agent runtime).
 
+use super::wire::{PlatformRecord, data_field_present, wrap_resource_record};
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
-use super::wire::{data_field_present, wrap_resource_record, PlatformRecord};
 use nenjo_events::ManifestResourcePayload;
-use nenjo_knowledge::{KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest};
+use nenjo_knowledge::{
+    KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -101,10 +103,7 @@ impl KnowledgeDocumentRecord {
     }
 
     pub fn library_selector(&self, pack_slug: &str) -> String {
-        format!(
-            "library://{pack_slug}/{}",
-            self.library_doc_relative_path()
-        )
+        format!("library://{pack_slug}/{}", self.library_doc_relative_path())
     }
 }
 

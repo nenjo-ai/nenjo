@@ -1,7 +1,7 @@
 //! Context block wire records.
 
 use chrono::{DateTime, Utc};
-use nenjo::manifest::{context_block_slug, ContextBlockManifest};
+use nenjo::manifest::{ContextBlockManifest, context_block_slug};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
