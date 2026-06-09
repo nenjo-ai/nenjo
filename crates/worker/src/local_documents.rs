@@ -13,6 +13,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use crate::api_client::{ApiClient, DocumentSyncEdge, DocumentSyncMeta};
+use crate::handlers::manifest::knowledge::DocumentEdgesSource;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo_platform::library_knowledge::{
@@ -520,6 +521,7 @@ pub async fn sync_document_metadata(
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
     metadata: Option<&DocumentSyncMeta>,
+    edges: Option<DocumentEdgesSource<'_>>,
 ) -> Result<()> {
     let pack_slug = pack_dir
         .file_name()
@@ -538,10 +540,13 @@ pub async fn sync_document_metadata(
             })?
     };
 
-    let edges = api
-        .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
-        .await
-        .unwrap_or_default();
+    let edges = match edges {
+        Some(DocumentEdgesSource::Inline(edges)) => edges.to_vec(),
+        Some(DocumentEdgesSource::FetchFromApi) | None => api
+            .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
+            .await
+            .unwrap_or_default(),
+    };
 
     if let Some(existing) = library_knowledge_doc_relative_path(pack_dir, doc_slug) {
         reconcile_document_file_location(

@@ -60,6 +60,7 @@ impl ManifestStore for RecordingManifestStore {
         _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
         _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _edges: Option<nenjo_worker::handlers::manifest::DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         self.metadata_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -360,6 +361,7 @@ async fn manifest_inline_upserts_each_provider_resource() {
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
+                    resource_id: Uuid::nil(),
                     resource_type,
                     resource: resource.clone(),
                     action: ResourceAction::Created,
@@ -468,6 +470,7 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: Uuid::nil(),
                 resource_type: ResourceType::Agent,
                 resource: Slug::derive("old"),
                 action: ResourceAction::Updated,
@@ -534,6 +537,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
+                    resource_id: Uuid::nil(),
                     resource_type,
                     resource: resource.clone(),
                     action: ResourceAction::Deleted,
@@ -626,6 +630,7 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: document_id,
                 resource_type: ResourceType::Document,
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Updated,
@@ -636,13 +641,17 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                         "id": document_id,
                         "pack_id": pack_id,
                         "pack_slug": "project",
+                        "slug": "guide",
                         "filename": "guide.md",
                         "path": "docs",
                         "title": "Guide",
                         "kind": "markdown",
                         "summary": null,
                         "tags": [],
-                        "updated_at": "2026-05-10T00:00:00Z"
+                        "content_type": "text/markdown",
+                        "created_at": "2026-05-10T00:00:00Z",
+                        "updated_at": "2026-05-10T00:00:00Z",
+                        "edges": []
                     }
                 })),
                 encrypted_payload: None,
@@ -655,6 +664,7 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: document_id,
                 resource_type: ResourceType::Document,
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Deleted,
@@ -665,13 +675,17 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                         "id": document_id,
                         "pack_id": pack_id,
                         "pack_slug": "project",
+                        "slug": "guide",
                         "filename": "guide.md",
                         "path": "docs",
                         "title": "Guide",
                         "kind": "markdown",
                         "summary": null,
                         "tags": [],
-                        "updated_at": "2026-05-10T00:00:00Z"
+                        "content_type": "text/markdown",
+                        "created_at": "2026-05-10T00:00:00Z",
+                        "updated_at": "2026-05-10T00:00:00Z",
+                        "edges": []
                     }
                 })),
                 encrypted_payload: None,
@@ -681,10 +695,10 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .unwrap();
 
     assert_eq!(
-        env.store.content_syncs.lock().unwrap().as_slice(),
+        env.store.metadata_syncs.lock().unwrap().as_slice(),
         &["guide".to_string()]
     );
-    assert!(env.store.metadata_syncs.lock().unwrap().is_empty());
+    assert!(env.store.content_syncs.lock().unwrap().is_empty());
     assert_eq!(
         env.store.removals.lock().unwrap().as_slice(),
         &["guide".to_string()]
@@ -708,6 +722,7 @@ async fn manifest_mcp_changes_reconcile_mcp_runtime() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: id,
                 resource_type: ResourceType::McpServer,
                 resource: Slug::derive("mcp"),
                 action: ResourceAction::Created,

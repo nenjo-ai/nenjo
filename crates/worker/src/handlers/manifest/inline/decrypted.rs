@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::handlers::manifest::payload::{
     AbilityDocument, AgentDocument, ContextBlockDocument, DecryptedManifestPayload, DomainDocument,
-    InlineDocumentMeta, ManifestResourcePayload, canonical_resource_payload_data,
+    ManifestResourcePayload,
 };
 use crate::handlers::manifest::services::ManifestStore;
 use nenjo_platform::SensitiveContentKind;
@@ -281,16 +281,11 @@ where
         SensitiveContentKind::DocumentContent => {
             let metadata = match decrypted
                 .inline_payload
-                .map(|inline| {
-                    canonical_resource_payload_data(inline).unwrap_or_else(|| inline.clone())
-                })
-                .map(serde_json::from_value::<InlineDocumentMeta>)
+                .and_then(nenjo_events::ManifestResourcePayload::<
+                    nenjo_events::KnowledgeDocumentResource,
+                >::parse)
             {
-                Some(Ok(metadata)) => metadata,
-                Some(Err(error)) => {
-                    warn!(%rt, %id, error = %error, "Failed to deserialize inline document metadata payload");
-                    return false;
-                }
+                Some(payload) => payload.data,
                 None => {
                     warn!(%rt, %id, "Encrypted document payload received without inline metadata");
                     return false;
@@ -310,12 +305,8 @@ where
                 _ => metadata.filename.clone(),
             };
 
-            let pack = match metadata.pack_slug.as_deref().map(Slug::parse).transpose() {
-                Ok(Some(pack)) => pack,
-                Ok(None) => {
-                    warn!(%rt, %id, "Encrypted document payload received without pack slug metadata");
-                    return false;
-                }
+            let pack = match Slug::parse(&metadata.pack_slug) {
+                Ok(pack) => pack,
                 Err(error) => {
                     warn!(%rt, %id, error = %error, "Encrypted document payload contained invalid pack slug metadata");
                     return false;

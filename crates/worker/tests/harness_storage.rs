@@ -125,6 +125,7 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
             &api,
             &Slug::derive("alpha"),
             Some(&document_meta(document_id)),
+            None,
         )
         .await
         .expect("sync document metadata");

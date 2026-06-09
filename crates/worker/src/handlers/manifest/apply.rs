@@ -2,16 +2,18 @@ use anyhow::Result;
 use nenjo::manifest::{context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
-use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::api_client::ApiClient;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::payload::{
-    InlineDocumentMeta, canonical_resource_payload_data, parse_decrypted_manifest_payload,
+use super::knowledge::{
+    document_edges_source, document_sync_edges, document_sync_meta,
+    parse_knowledge_document_payload,
 };
+use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
 use nenjo_platform::PlatformResourceKind;
 
@@ -239,6 +241,7 @@ where
                 resource: &resource,
                 action,
                 payload: payload.as_ref(),
+                encrypted_payload: encrypted_payload.as_ref(),
                 applied_inline,
             })
             .await;
@@ -294,6 +297,7 @@ where
     resource: &'a Slug,
     action: ResourceAction,
     payload: Option<&'a serde_json::Value>,
+    encrypted_payload: Option<&'a EncryptedPayload>,
     applied_inline: bool,
 }
 
@@ -307,65 +311,64 @@ where
         resource,
         action,
         payload,
+        encrypted_payload,
         applied_inline,
     } = ctx;
 
-    let metadata_value = payload.and_then(|payload| {
-        if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
-            decrypted.inline_payload.and_then(|inline| {
-                canonical_resource_payload_data(inline).or_else(|| Some(inline.clone()))
-            })
-        } else {
-            canonical_resource_payload_data(payload).or_else(|| Some(payload.clone()))
-        }
-    });
-
-    let metadata = metadata_value
-        .map(serde_json::from_value::<InlineDocumentMeta>)
-        .transpose()
-        .map_err(|error| {
-            warn!(%resource, error = %error, "Failed to deserialize inline document metadata");
-            error
-        })
-        .ok()
-        .flatten()
-        .map(|meta| DocumentSyncMeta {
-            id: Some(meta.id),
-            pack_id: meta.pack_id,
-            pack_slug: meta.pack_slug.unwrap_or_else(|| "default".to_string()),
-            slug: meta.slug.unwrap_or_else(|| meta.filename.clone()),
-            filename: meta.filename,
-            path: meta.path,
-            title: meta.title,
-            kind: meta.kind,
-            summary: meta.summary,
-            tags: meta.tags,
-            content_type: "application/octet-stream".to_string(),
-            updated_at: meta.updated_at.to_rfc3339(),
-        });
-
-    let Some(metadata) = metadata
-        .as_ref()
-        .filter(|meta| !meta.pack_slug.trim().is_empty())
-    else {
-        warn!(%resource, "Document change without knowledge pack slug, skipping sync");
-        return;
-    };
-    let pack = metadata.pack_slug.as_str();
-
     if action == ResourceAction::Deleted {
-        if let Err(error) = store.remove_document(resource, Some(metadata)).await {
-            warn!(%pack, %resource, error = %error, "Failed to update local knowledge manifest");
+        let metadata = payload.and_then(|payload| {
+            let envelope = if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+                decrypted.inline_payload
+            } else {
+                Some(payload)
+            }?;
+            let parsed = parse_knowledge_document_payload(envelope)?;
+            Some(document_sync_meta(&parsed.resource))
+        });
+        if let Err(error) = store.remove_document(resource, metadata.as_ref()).await {
+            warn!(%resource, error = %error, "Failed to update local knowledge manifest");
         }
         return;
     }
 
-    let result = if applied_inline {
+    let envelope = payload.and_then(|payload| {
+        if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+            decrypted.inline_payload
+        } else {
+            Some(payload)
+        }
+    });
+
+    let Some(parsed) = envelope.and_then(parse_knowledge_document_payload) else {
+        let result = store.sync_document(client, resource, None).await;
+        if let Err(error) = result {
+            warn!(%resource, error = %error, "Document sync failed without inline payload");
+        }
+        return;
+    };
+
+    let metadata = document_sync_meta(&parsed.resource);
+    let edges = document_sync_edges(&parsed.resource.edges);
+    let edges_source = document_edges_source(&parsed, &edges);
+
+    if metadata.pack_slug.trim().is_empty() {
+        warn!(%resource, "Document change without knowledge pack slug, skipping sync");
+        return;
+    }
+    let pack = metadata.pack_slug.as_str();
+
+    let needs_content_fetch = encrypted_payload.is_some() && !applied_inline;
+    let result = if applied_inline || !needs_content_fetch {
         store
-            .sync_document_metadata(client, resource, Some(metadata))
+            .sync_document_metadata(
+                client,
+                resource,
+                Some(&metadata),
+                Some(edges_source),
+            )
             .await
     } else {
-        store.sync_document(client, resource, Some(metadata)).await
+        store.sync_document(client, resource, Some(&metadata)).await
     };
     if let Err(e) = result {
         warn!(%pack, %resource, error = %e, "Document sync failed");

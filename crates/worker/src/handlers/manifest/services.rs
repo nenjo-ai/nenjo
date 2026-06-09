@@ -8,6 +8,8 @@ use nenjo_platform::PlatformResourceKind;
 use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use uuid::Uuid;
 
+use super::knowledge::DocumentEdgesSource;
+
 /// Host-owned manifest persistence and document side-effect hooks.
 ///
 /// Manifest change handling is worker-owned because local caches, document
@@ -75,6 +77,7 @@ pub trait ManifestStore: Send + Sync {
         _client: &ApiClient,
         _doc: &Slug,
         _metadata: Option<&DocumentSyncMeta>,
+        _edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         Ok(())
     }
@@ -196,8 +199,11 @@ where
         client: &ApiClient,
         doc: &Slug,
         metadata: Option<&DocumentSyncMeta>,
+        edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
-        (**self).sync_document_metadata(client, doc, metadata).await
+        (**self)
+            .sync_document_metadata(client, doc, metadata, edges)
+            .await
     }
 
     async fn sync_document(
