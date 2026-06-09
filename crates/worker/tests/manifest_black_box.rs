@@ -177,11 +177,10 @@ impl TestHarness {
     }
 }
 
-fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
+fn agent(_id: Uuid, name: &str, prompt: &str) -> AgentManifest {
     AgentManifest {
-        id,
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("{name} description")),
         prompt_config: PromptConfig {
             developer_prompt: prompt.into(),
@@ -199,9 +198,9 @@ fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
     }
 }
 
-fn model(id: Uuid, name: &str) -> ModelManifest {
+fn model(_id: Uuid, name: &str) -> ModelManifest {
     ModelManifest {
-        id,
+        slug: Slug::derive(name),
         name: name.into(),
         description: None,
         model: "gpt-test".into(),
@@ -211,11 +210,10 @@ fn model(id: Uuid, name: &str) -> ModelManifest {
     }
 }
 
-fn routine(id: Uuid, name: &str) -> RoutineManifest {
+fn routine(_id: Uuid, name: &str) -> RoutineManifest {
     RoutineManifest {
-        id,
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: None,
         trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -224,9 +222,8 @@ fn routine(id: Uuid, name: &str) -> RoutineManifest {
     }
 }
 
-fn project(id: Uuid, name: &str) -> ProjectManifest {
+fn project(_id: Uuid, name: &str) -> ProjectManifest {
     ProjectManifest {
-        id,
         name: name.into(),
         slug: Slug::derive(name),
         description: None,
@@ -234,9 +231,8 @@ fn project(id: Uuid, name: &str) -> ProjectManifest {
     }
 }
 
-fn council(id: Uuid, name: &str) -> CouncilManifest {
+fn council(_id: Uuid, name: &str) -> CouncilManifest {
     CouncilManifest {
-        id,
         name: name.into(),
         delegation_strategy: CouncilDelegationStrategy::Decompose,
         leader_agent: Slug::derive("leader"),
@@ -244,9 +240,8 @@ fn council(id: Uuid, name: &str) -> CouncilManifest {
     }
 }
 
-fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
+fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     AbilityManifest {
-        id,
         name: name.into(),
         path: None,
         description: None,
@@ -263,9 +258,8 @@ fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     }
 }
 
-fn context_block(id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
+fn context_block(_id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     ContextBlockManifest {
-        id,
         name: name.into(),
         path: String::new(),
         description: None,
@@ -273,9 +267,8 @@ fn context_block(id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     }
 }
 
-fn mcp_server(id: Uuid, name: &str) -> McpServerManifest {
+fn mcp_server(_id: Uuid, name: &str) -> McpServerManifest {
     McpServerManifest {
-        id,
         name: name.into(),
         display_name: name.into(),
         description: None,
@@ -290,9 +283,8 @@ fn mcp_server(id: Uuid, name: &str) -> McpServerManifest {
     }
 }
 
-fn domain(id: Uuid, name: &str, prompt: &str) -> DomainManifest {
+fn domain(_id: Uuid, name: &str, prompt: &str) -> DomainManifest {
     DomainManifest {
-        id,
         name: name.into(),
         path: String::new(),
         description: None,
@@ -351,24 +343,25 @@ async fn manifest_inline_upserts_each_provider_resource() {
     ];
 
     for (resource_type, payload) in cases {
+        let resource = Slug::derive(match resource_type {
+            ResourceType::Agent => "agent",
+            ResourceType::Model => "model",
+            ResourceType::Routine => "routine",
+            ResourceType::Project => "project",
+            ResourceType::Council => "council",
+            ResourceType::Ability => "ability",
+            ResourceType::ContextBlock => "context",
+            ResourceType::McpServer => "mcp",
+            ResourceType::Domain => "domain",
+            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+        });
         let env = test_harness(Manifest::default()).await;
         env.harness
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
                     resource_type,
-                    resource: Slug::derive(match resource_type {
-                        ResourceType::Agent => "agent",
-                        ResourceType::Model => "model",
-                        ResourceType::Routine => "routine",
-                        ResourceType::Project => "project",
-                        ResourceType::Council => "council",
-                        ResourceType::Ability => "ability",
-                        ResourceType::ContextBlock => "context",
-                        ResourceType::McpServer => "mcp",
-                        ResourceType::Domain => "domain",
-                        ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
-                    }),
+                    resource: resource.clone(),
                     action: ResourceAction::Created,
                     project: None,
                     payload: Some(payload),
@@ -382,19 +375,31 @@ async fn manifest_inline_upserts_each_provider_resource() {
         let manifest = manifest.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
-                let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
+                let item = manifest
+                    .agents
+                    .iter()
+                    .find(|item| item.slug == resource)
+                    .unwrap();
                 assert_eq!(item.name, "agent");
                 assert_eq!(item.prompt_config.developer_prompt, "agent prompt");
             }
-            ResourceType::Model => assert!(manifest.models.iter().any(|item| item.id == id)),
-            ResourceType::Routine => assert!(manifest.routines.iter().any(|item| item.id == id)),
-            ResourceType::Project => assert!(manifest.projects.iter().any(|item| item.id == id)),
-            ResourceType::Council => assert!(manifest.councils.iter().any(|item| item.id == id)),
+            ResourceType::Model => {
+                assert!(manifest.models.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Routine => {
+                assert!(manifest.routines.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Project => {
+                assert!(manifest.projects.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Council => {
+                assert!(manifest.councils.iter().any(|item| item.name == "council"))
+            }
             ResourceType::Ability => {
                 let item = manifest
                     .abilities
                     .iter()
-                    .find(|item| item.id == id)
+                    .find(|item| Slug::derive(&item.name) == resource)
                     .unwrap();
                 assert_eq!(item.prompt_config.developer_prompt, "ability prompt");
             }
@@ -402,15 +407,24 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 let item = manifest
                     .context_blocks
                     .iter()
-                    .find(|item| item.id == id)
+                    .find(|item| Slug::derive(&item.name) == resource)
                     .unwrap();
                 assert_eq!(item.template, "template");
             }
             ResourceType::McpServer => {
-                assert!(manifest.mcp_servers.iter().any(|item| item.id == id))
+                assert!(
+                    manifest
+                        .mcp_servers
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Domain => {
-                let item = manifest.domains.iter().find(|item| item.id == id).unwrap();
+                let item = manifest
+                    .domains
+                    .iter()
+                    .find(|item| Slug::derive(&item.name) == resource)
+                    .unwrap();
                 assert_eq!(
                     item.prompt_config.developer_prompt_addon.as_deref(),
                     Some("domain prompt")
@@ -438,6 +452,7 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
     let metadata_payload = serde_json::json!({
         "id": id,
         "name": "renamed",
+        "slug": "old",
         "description": null,
         "color": null,
         "model": null,
@@ -454,7 +469,7 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
             &env.manifest_context(),
             ManifestChangedCommand {
                 resource_type: ResourceType::Agent,
-                resource: Slug::derive("renamed"),
+                resource: Slug::derive("old"),
                 action: ResourceAction::Updated,
                 project: None,
                 payload: Some(metadata_payload),
@@ -466,7 +481,11 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
 
     let provider = env.harness.provider();
     let manifest = provider.manifest_snapshot();
-    let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
+    let item = manifest
+        .agents
+        .iter()
+        .find(|item| item.slug == Slug::derive("old"))
+        .unwrap();
     assert_eq!(item.name, "renamed");
     assert_eq!(item.prompt_config.developer_prompt, "cached prompt");
 }
@@ -497,7 +516,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         ..Default::default()
     };
 
-    for (resource_type, resource_id) in ids {
+    for (resource_type, _resource_id) in ids {
         let resource = match resource_type {
             ResourceType::Agent => Slug::derive("agent"),
             ResourceType::Model => Slug::derive("model"),
@@ -516,7 +535,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                 &env.manifest_context(),
                 ManifestChangedCommand {
                     resource_type,
-                    resource,
+                    resource: resource.clone(),
                     action: ResourceAction::Deleted,
                     project: None,
                     payload: None,
@@ -530,29 +549,39 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         let manifest = provider.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
-                assert!(!manifest.agents.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.agents.iter().any(|item| item.slug == resource))
             }
             ResourceType::Model => {
-                assert!(!manifest.models.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.models.iter().any(|item| item.slug == resource))
             }
             ResourceType::Routine => {
-                assert!(!manifest.routines.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.routines.iter().any(|item| item.slug == resource))
             }
             ResourceType::Project => {
-                assert!(!manifest.projects.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.projects.iter().any(|item| item.slug == resource))
             }
             ResourceType::Council => {
-                assert!(!manifest.councils.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .councils
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Ability => {
-                assert!(!manifest.abilities.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .abilities
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::ContextBlock => {
                 assert!(
                     !manifest
                         .context_blocks
                         .iter()
-                        .any(|item| item.id == resource_id)
+                        .any(|item| Slug::derive(&item.name) == resource)
                 )
             }
             ResourceType::McpServer => {
@@ -560,11 +589,16 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                     !manifest
                         .mcp_servers
                         .iter()
-                        .any(|item| item.id == resource_id)
+                        .any(|item| Slug::derive(&item.name) == resource)
                 )
             }
             ResourceType::Domain => {
-                assert!(!manifest.domains.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .domains
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
         }

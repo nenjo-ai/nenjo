@@ -647,6 +647,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
             }
             Command::ManifestChanged {
                 schema,
+                resource_id,
                 resource_type,
                 resource,
                 action,
@@ -658,6 +659,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     return Ok(DecodeCommandResult::Command(Box::new(
                         Command::ManifestChanged {
                             schema,
+                            resource_id,
                             resource_type,
                             resource,
                             action,
@@ -713,6 +715,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::ManifestChanged {
                         schema,
+                        resource_id,
                         resource_type,
                         resource,
                         action,

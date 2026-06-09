@@ -52,7 +52,7 @@ fn routine_edge_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "required": ["source_step", "target_step", "condition"],
-        "description": "Routine graphs must be acyclic after removing on_fail edges. Use on_fail for failure recovery, retry loops, or remediation paths; always and on_pass edges must not create cycles.",
+        "description": "Routine graphs must be acyclic after removing on_fail edges. Use on_fail only from gate steps for failure recovery, retry loops, or remediation paths; always and on_pass edges must not create cycles.",
         "properties": {
             "source_step": {
                 "type": "string",
@@ -65,11 +65,11 @@ fn routine_edge_schema() -> serde_json::Value {
             "condition": {
                 "type": "string",
                 "enum": ["always", "on_pass", "on_fail"],
-                "description": "Routing condition for this edge."
+                "description": "Routing condition for this edge. on_fail may only originate from gate steps."
             },
             "metadata": {
                 "type": "object",
-                "description": "Optional edge metadata. For an on_fail retry edge, max_attempts and on_exhausted_step_id can be used to bound retries and route after exhaustion.",
+                "description": "Optional edge metadata. For an on_fail retry edge from a gate step, max_attempts and on_exhausted_step_id can be used to bound retries and route after exhaustion.",
                 "additionalProperties": true
             }
         },
@@ -94,7 +94,7 @@ fn routine_graph_schema() -> serde_json::Value {
             },
             "edges": {
                 "type": "array",
-                "description": "Full routine edge list for this graph. Cycles are allowed only through on_fail edges; the graph formed by always and on_pass edges must remain acyclic.",
+                "description": "Full routine edge list for this graph. Cycles are allowed only through on_fail edges from gate steps; the graph formed by always and on_pass edges must remain acyclic.",
                 "items": routine_edge_schema()
             }
         },

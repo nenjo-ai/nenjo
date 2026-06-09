@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use nenjo::Slug;
 use nenjo::manifest::{Manifest, ManifestLoader};
 use nenjo_nenpm::{
     LockedModule, NenpmLock, PackageInstallIndex, PackageSource,
@@ -560,6 +561,7 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
     object
         .entry("id")
         .or_insert_with(|| Value::String(defaults.id.to_string()));
+    ensure_slug(object, defaults.kind);
     object
         .entry("source_type")
         .or_insert_with(|| Value::String("package".to_string()));
@@ -784,6 +786,23 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
         PackageKind::Routine | PackageKind::Knowledge | PackageKind::Plugin => {}
     }
     value
+}
+
+fn ensure_slug(object: &mut serde_json::Map<String, Value>, kind: PackageKind) {
+    if object.contains_key("slug") {
+        return;
+    }
+
+    let slug = match kind {
+        PackageKind::Agent | PackageKind::Routine => {
+            object.get("name").and_then(Value::as_str).map(Slug::derive)
+        }
+        _ => None,
+    };
+
+    if let Some(slug) = slug {
+        object.insert("slug".to_string(), Value::String(slug.to_string()));
+    }
 }
 
 fn skill_root_path(object: &serde_json::Map<String, Value>, source_path: &str) -> String {
@@ -1149,7 +1168,7 @@ mod tests {
             },
         );
         let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.id, uuid::Uuid::nil());
+        assert_eq!(block.name, "guide");
         assert_eq!(block.path, "pkg/nenjo/core/context");
         assert_eq!(block.template, "Use the guide.");
     }

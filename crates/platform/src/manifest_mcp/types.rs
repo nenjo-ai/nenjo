@@ -16,8 +16,7 @@ use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig, model_manifest_sl
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
+    pub slug: Slug,
     pub description: Option<String>,
     pub color: Option<String>,
     #[serde(default)]
@@ -280,6 +279,8 @@ pub struct DomainPromptDocument {
 /// Prompt-free context block metadata returned by list/get operations.
 pub struct ContextBlockSummary {
     pub name: String,
+    pub slug: Slug,
+    pub selector: String,
     #[serde(default)]
     pub path: String,
     pub description: Option<String>,
@@ -402,13 +403,33 @@ pub type DomainManifestDocument = DomainPromptDocument;
 
 impl From<ContextBlockManifest> for ContextBlockDocument {
     fn from(context_block: ContextBlockManifest) -> Self {
+        let slug = context_block.slug();
+        let selector = format!(
+            "{{{{ {} }}}}",
+            context_block_selector(&context_block.path, &context_block.name)
+        );
         Self {
             summary: ContextBlockSummary {
                 name: context_block.name,
+                slug,
+                selector,
                 path: context_block.path,
                 description: context_block.description,
             },
         }
+    }
+}
+
+fn context_block_selector(path: &str, name: &str) -> String {
+    if path.trim().is_empty() {
+        name.to_string()
+    } else {
+        let path = path
+            .split('/')
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(".");
+        format!("{path}.{name}")
     }
 }
 
@@ -783,7 +804,7 @@ impl RoutineDocument {
 
 impl From<RoutineManifest> for RoutineDocument {
     fn from(routine: RoutineManifest) -> Self {
-        let slug = routine.slug();
+        let slug = routine.slug().clone();
         Self {
             summary: RoutineSummary {
                 slug,

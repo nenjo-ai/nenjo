@@ -123,14 +123,14 @@ pub enum SessionTranscriptEventPayload {
         domain_session_id: Uuid,
         domain_command: String,
         domain_name: String,
-        agent_id: Uuid,
+        agent_id: Option<Uuid>,
         user_message_preview: Option<String>,
     },
     DomainDeactivated {
         domain_session_id: Uuid,
         domain_command: String,
         domain_name: String,
-        agent_id: Uuid,
+        agent_id: Option<Uuid>,
     },
     ToolCalls {
         parent_tool_name: Option<String>,

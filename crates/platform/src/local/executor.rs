@@ -8,9 +8,9 @@ use nenjo::{
     ManifestReader, ManifestResource, ManifestResourceKind, ManifestWriter, Slug,
     manifest::{
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
-        CouncilManifest, CouncilMemberManifest, DomainManifest, ModelManifest, ProjectManifest,
-        PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest,
-        RoutineTrigger,
+        CouncilManifest, CouncilMemberManifest, DomainManifest, HasManifestSlug, ModelManifest,
+        ProjectManifest, PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
+        RoutineStepManifest, RoutineTrigger,
     },
 };
 use nenjo_knowledge::tools::{
@@ -19,7 +19,6 @@ use nenjo_knowledge::tools::{
     knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
 };
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
-use uuid::Uuid;
 
 use crate::knowledge_backend::unknown_pack;
 use crate::manifest_mcp::{
@@ -70,21 +69,12 @@ fn graph_input_to_manifest_parts(
         return (Vec::new(), Vec::new(), metadata);
     };
 
-    let step_ids: std::collections::HashMap<Slug, uuid::Uuid> = graph
-        .steps
-        .iter()
-        .map(|step| (step.slug.clone(), uuid::Uuid::new_v4()))
-        .collect();
-
     metadata.entry_steps = graph.entry_steps.clone();
 
     let steps = graph
         .steps
         .into_iter()
         .map(|step| RoutineStepManifest {
-            id: *step_ids
-                .get(&step.slug)
-                .expect("step id mapping should exist"),
             slug: step.slug,
             routine: routine.clone(),
             name: step.name,
@@ -100,7 +90,6 @@ fn graph_input_to_manifest_parts(
         .edges
         .into_iter()
         .map(|edge| RoutineEdgeManifest {
-            id: uuid::Uuid::new_v4(),
             routine: routine.clone(),
             source_step: edge.source_step,
             target_step: edge.target_step,
@@ -339,10 +328,10 @@ where
     }
 
     async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
+        let name = params.data.name;
         let agent = AgentManifest {
-            id: uuid::Uuid::new_v4(),
-            name: params.data.name,
-            slug: None,
+            slug: Slug::derive(&name),
+            name,
             description: params.data.description,
             prompt_config: PromptConfig::default(),
             color: params.data.color,
@@ -415,7 +404,7 @@ where
     async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
         let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Agent, agent.id)
+            .delete_resource(ManifestResourceKind::Agent, &agent.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -457,7 +446,6 @@ where
 
     async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: if params.data.path.is_empty() {
                 None
@@ -529,7 +517,7 @@ where
     async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
         let ability = self.resolve_ability(&params.ability).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Ability, ability.id)
+            .delete_resource(ManifestResourceKind::Ability, &ability.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -571,7 +559,6 @@ where
 
     async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
         let domain = DomainManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
             description: params.data.description,
@@ -638,7 +625,7 @@ where
     async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
         let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Domain, domain.id)
+            .delete_resource(ManifestResourceKind::Domain, &domain.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -676,7 +663,6 @@ where
             obj.insert("repo_url".into(), serde_json::json!(repo_url));
         }
         let project = ProjectManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name.clone(),
             slug: params.data.slug,
             description: params.data.description,
@@ -729,7 +715,7 @@ where
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
         let project = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Project, project.id)
+            .delete_resource(ManifestResourceKind::Project, &project.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -810,9 +796,8 @@ where
             params.data.graph,
         );
         let routine = RoutineManifest {
-            id: Uuid::new_v4(),
             name: params.data.name,
-            slug: Some(routine_slug),
+            slug: routine_slug,
             description: params.data.description,
             trigger: params.data.trigger.unwrap_or(RoutineTrigger::Task),
             metadata,
@@ -836,7 +821,7 @@ where
         let existing = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         let mut routine = existing.clone();
         if let Some(name) = params.data.name {
-            routine.slug = Some(Slug::derive(&name));
+            routine.slug = Slug::derive(&name);
             routine.name = name;
         }
         if let Some(description) = params.data.description {
@@ -850,7 +835,7 @@ where
         }
         if let Some(graph) = params.data.graph {
             let (steps, edges, metadata) = graph_input_to_manifest_parts(
-                routine.slug(),
+                routine.slug().clone(),
                 routine.metadata.clone(),
                 Some(graph),
             );
@@ -869,7 +854,7 @@ where
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
         let routine = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Routine, routine.id)
+            .delete_resource(ManifestResourceKind::Routine, &routine.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -902,8 +887,11 @@ where
 
     async fn create_model(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
         let model = ModelManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
+            slug: nenjo::manifest::model_manifest_slug(
+                params.data.model_provider.as_deref().unwrap_or("openai"),
+                &params.data.model,
+            ),
             description: params.data.description,
             model: params.data.model,
             model_provider: params
@@ -953,7 +941,7 @@ where
     async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
         let model = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Model, model.id)
+            .delete_resource(ManifestResourceKind::Model, &model.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -986,7 +974,6 @@ where
 
     async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
         let council = CouncilManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             delegation_strategy: params
                 .data
@@ -1099,7 +1086,7 @@ where
     async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
         let council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Council, council.id)
+            .delete_resource(ManifestResourceKind::Council, &council.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1150,7 +1137,6 @@ where
         params: ContextBlockCreateParams,
     ) -> Result<ContextBlockMutationResult> {
         let context_block = ContextBlockManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
             description: params.data.description,
@@ -1205,7 +1191,10 @@ where
         let context_block =
             local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::ContextBlock, context_block.id)
+            .delete_resource(
+                ManifestResourceKind::ContextBlock,
+                &context_block.manifest_slug(),
+            )
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1216,7 +1205,6 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::tempdir;
-    use uuid::Uuid;
 
     use nenjo::manifest::local::LocalManifestStore;
     use nenjo::manifest::{
@@ -1257,7 +1245,7 @@ mod tests {
 
     fn sample_manifest() -> SampleManifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: Slug::derive("test-model"),
             name: "test-model".into(),
             description: None,
             model: "gpt-4o".into(),
@@ -1267,7 +1255,7 @@ mod tests {
         };
 
         let alt_model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: Slug::derive("reasoner"),
             name: "reasoner".into(),
             description: Some("Reasoning model".into()),
             model: "gpt-5".into(),
@@ -1277,9 +1265,8 @@ mod tests {
         };
 
         let agent = AgentManifest {
-            id: Uuid::new_v4(),
             name: "coder".into(),
-            slug: None,
+            slug: Slug::derive("coder"),
             description: Some("writes code".into()),
             prompt_config: PromptConfig {
                 system_prompt: "You are a coding agent.".into(),
@@ -1303,7 +1290,6 @@ mod tests {
         };
 
         let ability = AbilityManifest {
-            id: Uuid::new_v4(),
             name: "review_helper".into(),
             path: Some("team/core".into()),
             description: Some("Helps review code".into()),
@@ -1320,7 +1306,6 @@ mod tests {
         };
 
         let domain = DomainManifest {
-            id: Uuid::new_v4(),
             name: "creator".into(),
             path: "team".into(),
             description: Some("Creates new resources".into()),
@@ -1335,7 +1320,6 @@ mod tests {
         };
 
         let project = ProjectManifest {
-            id: Uuid::new_v4(),
             name: "workspace".into(),
             slug: Slug::derive("workspace"),
             description: Some("Main working project".into()),
@@ -1344,12 +1328,9 @@ mod tests {
             }),
         };
 
-        let routine_id = Uuid::new_v4();
-        let step_id = Uuid::new_v4();
         let routine = RoutineManifest {
-            id: routine_id,
             name: "nightly-build".into(),
-            slug: Some(Slug::derive("nightly-build")),
+            slug: Slug::derive("nightly-build"),
             description: Some("Runs the nightly build".into()),
             trigger: RoutineTrigger::Cron,
             metadata: nenjo::manifest::RoutineMetadata {
@@ -1357,7 +1338,6 @@ mod tests {
                 entry_steps: vec![Slug::derive("compile")],
             },
             steps: vec![RoutineStepManifest {
-                id: step_id,
                 slug: Slug::derive("compile"),
                 routine: Slug::derive("nightly-build"),
                 name: "compile".into(),
@@ -1368,7 +1348,6 @@ mod tests {
                 order_index: 0,
             }],
             edges: vec![RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("nightly-build"),
                 source_step: Slug::derive("compile"),
                 target_step: Slug::derive("compile"),
@@ -1378,7 +1357,6 @@ mod tests {
         };
 
         let council = CouncilManifest {
-            id: Uuid::new_v4(),
             name: "triage".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
             leader_agent: Slug::derive(&agent.name),
@@ -1389,7 +1367,6 @@ mod tests {
         };
 
         let context_block = ContextBlockManifest {
-            id: Uuid::new_v4(),
             name: "repo_summary".into(),
             path: "team/core".into(),
             description: Some("Summarizes the current repository.".into()),
@@ -1488,7 +1465,6 @@ mod tests {
             ..
         } = sample_manifest();
         manifest.agents[0].heartbeat = Some(nenjo::manifest::AgentHeartbeatManifest {
-            id: Uuid::new_v4(),
             agent: Slug::derive(&agent.name),
             interval: "5m".into(),
             is_active: true,
@@ -2066,7 +2042,7 @@ mod tests {
                 project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: Some("workspace-v2".into()),
-                    slug: None,
+                    slug: Some(Slug::derive("test-agent")),
                     description: None,
                     repo_url: None,
                 },
@@ -2096,7 +2072,7 @@ mod tests {
                 project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: None,
-                    slug: None,
+                    slug: Some(Slug::derive("test-agent")),
                     description: Some(None),
                     repo_url: None,
                 },
@@ -2139,7 +2115,7 @@ mod tests {
 
         let list = backend.list_routines().await.unwrap();
         assert_eq!(list.routines.len(), 1);
-        assert_eq!(list.routines[0].slug, routine.slug());
+        assert_eq!(list.routines[0].slug, routine.slug().clone());
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["routines"][0].get("id").is_none());
         assert_eq!(
@@ -2582,6 +2558,15 @@ mod tests {
         let list = backend.list_context_blocks().await.unwrap();
         assert_eq!(list.context_blocks.len(), 1);
         assert_eq!(list.context_blocks[0].name, context_block.name);
+        assert_eq!(list.context_blocks[0].slug, context_block.slug());
+        assert_eq!(
+            list.context_blocks[0].slug.as_str(),
+            "team-core-repo_summary"
+        );
+        assert_eq!(
+            list.context_blocks[0].selector,
+            "{{ team.core.repo_summary }}"
+        );
         assert!(
             serde_json::to_value(&list).unwrap()["context_blocks"][0]
                 .get("template")
@@ -2595,6 +2580,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get.context_block.summary.name, "repo_summary");
+        assert_eq!(get.context_block.summary.slug, context_block.slug());
+        assert_eq!(
+            get.context_block.summary.selector,
+            "{{ team.core.repo_summary }}"
+        );
         assert!(
             serde_json::to_value(&get).unwrap()["context_block"]
                 .get("template")

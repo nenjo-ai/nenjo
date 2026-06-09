@@ -1,8 +1,8 @@
 use nenjo::Manifest;
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::manifest::HasManifestSlug;
 use nenjo_events::ResourceType;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 use crate::handlers::manifest::payload::{
     AbilityDocument, AbilityPromptDocument, AgentDocument, AgentPromptDocument,
@@ -16,7 +16,6 @@ use crate::handlers::manifest::payload::{
 pub(in crate::handlers::manifest) fn apply_inline_upsert(
     manifest: &mut Manifest,
     rt: ResourceType,
-    id: Uuid,
     data: &serde_json::Value,
 ) -> bool {
     let owned_data;
@@ -30,7 +29,6 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         Ok(envelope) => {
             warn!(
                 %rt,
-                %id,
                 schema = %envelope.schema,
                 "Unsupported inline manifest payload schema, will fetch"
             );
@@ -39,37 +37,30 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         Err(_) => data,
     };
 
-    if canonical {
-        macro_rules! canonical_upsert {
-            ($field:ident, $ty:ty) => {{
-                match serde_json::from_value::<$ty>(data.clone()) {
-                    Ok(item) => {
-                        let id = item.id;
-                        if let Some(pos) = manifest.$field.iter().position(|r| r.id == id) {
-                            manifest.$field[pos] = item;
-                        } else {
-                            manifest.$field.push(item);
-                        }
-                        debug!(%rt, %id, "Applied canonical inline resource payload");
-                        true
-                    }
-                    Err(error) => {
-                        warn!(%rt, error = %error, "Failed to deserialize canonical inline payload, will fetch");
-                        false
-                    }
+    macro_rules! canonical_upsert {
+        ($field:ident, $ty:ty) => {{
+            match serde_json::from_value::<$ty>(data.clone()) {
+                Ok(item) => {
+                    upsert_by_slug(&mut manifest.$field, item);
+                    debug!(%rt, "Applied inline resource payload");
+                    true
                 }
-            }};
-        }
+                Err(error) => {
+                    warn!(%rt, error = %error, "Failed to deserialize inline payload, will fetch");
+                    false
+                }
+            }
+        }};
+    }
 
+    if canonical {
         return match rt {
             ResourceType::Agent => canonical_upsert!(agents, nenjo::manifest::AgentManifest),
             ResourceType::Model => canonical_upsert!(models, nenjo::manifest::ModelManifest),
             ResourceType::Routine => canonical_upsert!(routines, nenjo::manifest::RoutineManifest),
             ResourceType::Project => canonical_upsert!(projects, nenjo::manifest::ProjectManifest),
             ResourceType::Council => canonical_upsert!(councils, nenjo::manifest::CouncilManifest),
-            ResourceType::Ability => {
-                canonical_upsert!(abilities, nenjo::manifest::AbilityManifest)
-            }
+            ResourceType::Ability => canonical_upsert!(abilities, nenjo::manifest::AbilityManifest),
             ResourceType::ContextBlock => {
                 canonical_upsert!(context_blocks, nenjo::manifest::ContextBlockManifest)
             }
@@ -85,20 +76,26 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         if data.get("prompt_config").is_some() {
             return match serde_json::from_value::<nenjo::manifest::AgentManifest>(data.clone()) {
                 Ok(agent) => {
-                    upsert_agent(manifest, id, agent);
-                    debug!(%rt, %id, "Applied inline agent payload");
+                    upsert_by_slug(&mut manifest.agents, agent);
+                    debug!(%rt, "Applied inline agent payload");
                     true
                 }
                 Err(_) => match serde_json::from_value::<AgentPromptDocument>(data.clone()) {
                     Ok(agent) => {
+                        let slug = agent.agent.summary.slug.clone();
+                        let existing_prompt = manifest
+                            .agents
+                            .iter()
+                            .find(|r| r.slug == slug)
+                            .map(|r| r.prompt_config.clone());
                         let agent: nenjo::manifest::AgentManifest =
-                            agent_with_prompt_document(id, agent, None);
-                        upsert_agent(manifest, id, agent);
-                        debug!(%rt, %id, "Applied inline agent prompt document payload");
+                            agent_with_prompt_document(agent, existing_prompt);
+                        upsert_by_slug(&mut manifest.agents, agent);
+                        debug!(%rt, "Applied inline agent prompt document payload");
                         true
                     }
                     Err(e) => {
-                        warn!(%rt, %id, error = %e, "Failed to deserialize inline agent prompt payload, will fetch");
+                        warn!(%rt, error = %e, "Failed to deserialize inline agent prompt payload, will fetch");
                         false
                     }
                 },
@@ -107,80 +104,50 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
 
         return match serde_json::from_value::<AgentDocument>(data.clone()) {
             Ok(agent) => {
+                let slug = agent.summary.slug.clone();
                 let existing_prompt = manifest
                     .agents
                     .iter()
-                    .find(|r| r.id == id)
+                    .find(|r| r.slug == slug)
                     .map(|r| r.prompt_config.clone());
                 let agent = agent_with_prompt_document(
-                    id,
                     AgentPromptDocument {
                         agent,
                         prompt_config: existing_prompt.clone().unwrap_or_default(),
                     },
                     existing_prompt,
                 );
-                upsert_agent(manifest, id, agent);
-                debug!(%rt, %id, "Applied inline agent document payload");
+                upsert_by_slug(&mut manifest.agents, agent);
+                debug!(%rt, "Applied inline agent document payload");
                 true
             }
             Err(e) => {
-                warn!(%rt, %id, error = %e, "Failed to deserialize inline agent payload, will fetch");
+                warn!(%rt, error = %e, "Failed to deserialize inline agent payload, will fetch");
                 false
             }
         };
     }
 
-    macro_rules! inline_upsert {
-        ($field:ident, $ty:ty) => {{
-            match serde_json::from_value::<$ty>(data.clone()) {
-                Ok(mut item) => {
-                    item.id = id;
-                    if let Some(pos) = manifest.$field.iter().position(|r| r.id == id) {
-                        manifest.$field[pos] = item;
-                    } else {
-                        manifest.$field.push(item);
-                    }
-                    debug!(%rt, %id, "Applied inline resource payload");
-                    true
-                }
-                Err(e) => {
-                    warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
-                    false
-                }
-            }
-        }};
-    }
-
     match rt {
         ResourceType::Agent => false,
-        ResourceType::Model => inline_upsert!(models, nenjo::manifest::ModelManifest),
-        ResourceType::Routine => inline_upsert!(routines, nenjo::manifest::RoutineManifest),
+        ResourceType::Model => canonical_upsert!(models, nenjo::manifest::ModelManifest),
+        ResourceType::Routine => canonical_upsert!(routines, nenjo::manifest::RoutineManifest),
         ResourceType::Project => {
             match serde_json::from_value::<nenjo::manifest::ProjectManifest>(data.clone()) {
-                Ok(mut item) => {
-                    item.id = id;
-                    if let Some(pos) = manifest.projects.iter().position(|r| r.id == id) {
-                        manifest.projects[pos] = item;
-                    } else {
-                        manifest.projects.push(item);
-                    }
-                    debug!(%rt, %id, "Applied inline project payload");
+                Ok(item) => {
+                    upsert_by_slug(&mut manifest.projects, item);
+                    debug!(%rt, "Applied inline project payload");
                     true
                 }
                 Err(_) => match serde_json::from_value::<ProjectDocument>(data.clone()) {
                     Ok(item) => {
-                        let item = project_from_document(id, item);
-                        if let Some(pos) = manifest.projects.iter().position(|r| r.id == id) {
-                            manifest.projects[pos] = item;
-                        } else {
-                            manifest.projects.push(item);
-                        }
-                        debug!(%rt, %id, "Applied inline project resource payload");
+                        let item = project_from_document(item);
+                        upsert_by_slug(&mut manifest.projects, item);
+                        debug!(%rt, "Applied inline project resource payload");
                         true
                     }
                     Err(e) => {
-                        warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                        warn!(%rt, error = %e, "Failed to deserialize inline payload, will fetch");
                         false
                     }
                 },
@@ -188,29 +155,20 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         }
         ResourceType::Council => {
             match serde_json::from_value::<nenjo::manifest::CouncilManifest>(data.clone()) {
-                Ok(mut item) => {
-                    item.id = id;
-                    if let Some(pos) = manifest.councils.iter().position(|r| r.id == id) {
-                        manifest.councils[pos] = item;
-                    } else {
-                        manifest.councils.push(item);
-                    }
-                    debug!(%rt, %id, "Applied inline council payload");
+                Ok(item) => {
+                    upsert_by_slug(&mut manifest.councils, item);
+                    debug!(%rt, "Applied inline council payload");
                     true
                 }
                 Err(_) => match serde_json::from_value::<CouncilDocument>(data.clone()) {
                     Ok(item) => {
-                        let item = council_from_document(id, item);
-                        if let Some(pos) = manifest.councils.iter().position(|r| r.id == id) {
-                            manifest.councils[pos] = item;
-                        } else {
-                            manifest.councils.push(item);
-                        }
-                        debug!(%rt, %id, "Applied inline council document payload");
+                        let item = council_from_document(item);
+                        upsert_by_slug(&mut manifest.councils, item);
+                        debug!(%rt, "Applied inline council document payload");
                         true
                     }
                     Err(e) => {
-                        warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                        warn!(%rt, error = %e, "Failed to deserialize inline payload, will fetch");
                         false
                     }
                 },
@@ -218,46 +176,34 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         }
         ResourceType::Ability => {
             match serde_json::from_value::<nenjo::manifest::AbilityManifest>(data.clone()) {
-                Ok(mut ability) => {
-                    ability.id = id;
-                    if let Some(pos) = manifest.abilities.iter().position(|r| r.id == id) {
-                        manifest.abilities[pos] = ability;
-                    } else {
-                        manifest.abilities.push(ability);
-                    }
+                Ok(ability) => {
+                    upsert_by_slug(&mut manifest.abilities, ability);
                     true
                 }
                 Err(_) => match serde_json::from_value::<AbilityPromptDocument>(data.clone()) {
                     Ok(ability) => {
                         let prompt_config = ability.prompt_config;
                         let mut next_ability: nenjo::manifest::AbilityManifest =
-                            ability_from_document(id, ability.ability, prompt_config.clone());
+                            ability_from_document(ability.ability, prompt_config.clone());
                         next_ability.prompt_config = prompt_config;
-                        if let Some(pos) = manifest.abilities.iter().position(|r| r.id == id) {
-                            manifest.abilities[pos] = next_ability;
-                        } else {
-                            manifest.abilities.push(next_ability);
-                        }
+                        upsert_by_slug(&mut manifest.abilities, next_ability);
                         true
                     }
                     Err(_) => match serde_json::from_value::<AbilityDocument>(data.clone()) {
                         Ok(ability) => {
+                            let slug = nenjo::Slug::derive(&ability.summary.name);
                             let prompt_config = manifest
                                 .abilities
                                 .iter()
-                                .find(|r| r.id == id)
+                                .find(|r| r.manifest_slug() == slug)
                                 .map(|r| r.prompt_config.clone())
                                 .unwrap_or_default();
-                            let ability = ability_from_document(id, ability, prompt_config);
-                            if let Some(pos) = manifest.abilities.iter().position(|r| r.id == id) {
-                                manifest.abilities[pos] = ability;
-                            } else {
-                                manifest.abilities.push(ability);
-                            }
+                            let ability = ability_from_document(ability, prompt_config);
+                            upsert_by_slug(&mut manifest.abilities, ability);
                             true
                         }
                         Err(e) => {
-                            warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                            warn!(%rt, error = %e, "Failed to deserialize inline payload, will fetch");
                             false
                         }
                     },
@@ -266,82 +212,72 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         }
         ResourceType::ContextBlock => {
             match serde_json::from_value::<nenjo::manifest::ContextBlockManifest>(data.clone()) {
-                Ok(mut block) => {
-                    block.id = id;
-                    if let Some(pos) = manifest.context_blocks.iter().position(|r| r.id == id) {
-                        manifest.context_blocks[pos] = block;
-                    } else {
-                        manifest.context_blocks.push(block);
-                    }
+                Ok(block) => {
+                    upsert_by_slug(&mut manifest.context_blocks, block);
                     true
                 }
                 Err(_) => match serde_json::from_value::<ContextBlockContentDocument>(data.clone())
                 {
                     Ok(block) => {
                         let block = nenjo::manifest::ContextBlockManifest {
-                            id,
                             name: block.context_block.summary.name,
                             path: block.context_block.summary.path,
                             description: block.context_block.summary.description,
                             template: block.template,
                         };
-                        if let Some(pos) = manifest.context_blocks.iter().position(|r| r.id == id) {
-                            manifest.context_blocks[pos] = block;
-                        } else {
-                            manifest.context_blocks.push(block);
-                        }
+                        upsert_by_slug(&mut manifest.context_blocks, block);
                         true
                     }
                     Err(_) => match serde_json::from_value::<ContextBlockDocument>(data.clone()) {
                         Ok(block) => {
+                            let slug = nenjo::manifest::context_block_slug(
+                                &block.summary.path,
+                                &block.summary.name,
+                            );
                             let existing_template = manifest
                                 .context_blocks
                                 .iter()
-                                .find(|r| r.id == id)
+                                .find(|r| r.manifest_slug() == slug)
                                 .map(|r| r.template.clone())
                                 .unwrap_or_default();
                             let block = nenjo::manifest::ContextBlockManifest {
-                                id,
                                 name: block.summary.name,
                                 path: block.summary.path,
                                 description: block.summary.description,
                                 template: existing_template,
                             };
-                            if let Some(pos) =
-                                manifest.context_blocks.iter().position(|r| r.id == id)
-                            {
-                                manifest.context_blocks[pos] = block;
-                            } else {
-                                manifest.context_blocks.push(block);
-                            }
+                            upsert_by_slug(&mut manifest.context_blocks, block);
                             true
                         }
                         Err(e) => {
-                            warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                            warn!(%rt, error = %e, "Failed to deserialize inline payload, will fetch");
                             false
                         }
                     },
                 },
             }
         }
-        ResourceType::McpServer => inline_upsert!(mcp_servers, nenjo::manifest::McpServerManifest),
+        ResourceType::McpServer => {
+            canonical_upsert!(mcp_servers, nenjo::manifest::McpServerManifest)
+        }
         ResourceType::Domain => {
             match serde_json::from_value::<nenjo::manifest::DomainManifest>(data.clone()) {
-                Ok(mut domain) => {
-                    domain.id = id;
-                    if let Some(pos) = manifest.domains.iter().position(|r| r.id == id) {
-                        manifest.domains[pos] = domain;
-                    } else {
-                        manifest.domains.push(domain);
-                    }
+                Ok(domain) => {
+                    upsert_by_slug(&mut manifest.domains, domain);
                     true
                 }
                 Err(_) => match serde_json::from_value::<DomainPromptDocument>(data.clone()) {
                     Ok(domain) => {
-                        let existing_manifest =
-                            manifest.domains.iter().find(|r| r.id == id).cloned();
+                        let slug = nenjo::manifest::domain_slug(
+                            &domain.domain.summary.path,
+                            &domain.domain.summary.name,
+                        );
+                        let existing_manifest = manifest
+                            .domains
+                            .iter()
+                            .find(|r| r.manifest_slug() == slug)
+                            .cloned();
                         let domain = nenjo::manifest::DomainManifest {
-                            id,
                             name: domain.domain.summary.name,
                             path: domain.domain.summary.path,
                             description: domain.domain.summary.description,
@@ -364,19 +300,21 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                 .unwrap_or_default(),
                             prompt_config: domain.prompt_config,
                         };
-                        if let Some(pos) = manifest.domains.iter().position(|r| r.id == id) {
-                            manifest.domains[pos] = domain;
-                        } else {
-                            manifest.domains.push(domain);
-                        }
+                        upsert_by_slug(&mut manifest.domains, domain);
                         true
                     }
                     Err(_) => match serde_json::from_value::<DomainDocument>(data.clone()) {
                         Ok(domain) => {
-                            let existing_manifest =
-                                manifest.domains.iter().find(|r| r.id == id).cloned();
+                            let slug = nenjo::manifest::domain_slug(
+                                &domain.summary.path,
+                                &domain.summary.name,
+                            );
+                            let existing_manifest = manifest
+                                .domains
+                                .iter()
+                                .find(|r| r.manifest_slug() == slug)
+                                .cloned();
                             let domain = nenjo::manifest::DomainManifest {
-                                id,
                                 name: domain.summary.name,
                                 path: domain.summary.path,
                                 description: domain.summary.description,
@@ -393,15 +331,11 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
                                     .map(|domain| domain.prompt_config.clone())
                                     .unwrap_or_default(),
                             };
-                            if let Some(pos) = manifest.domains.iter().position(|r| r.id == id) {
-                                manifest.domains[pos] = domain;
-                            } else {
-                                manifest.domains.push(domain);
-                            }
+                            upsert_by_slug(&mut manifest.domains, domain);
                             true
                         }
                         Err(e) => {
-                            warn!(%rt, %id, error = %e, "Failed to deserialize inline payload, will fetch");
+                            warn!(%rt, error = %e, "Failed to deserialize inline payload, will fetch");
                             false
                         }
                     },
@@ -413,24 +347,17 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
 }
 
 fn agent_with_prompt_document(
-    id: Uuid,
     agent: AgentPromptDocument,
     fallback_prompt: Option<PromptConfig>,
 ) -> nenjo::manifest::AgentManifest {
-    agent_from_document(
-        id,
-        agent.agent,
-        fallback_prompt.unwrap_or(agent.prompt_config),
-    )
+    agent_from_document(agent.agent, fallback_prompt.unwrap_or(agent.prompt_config))
 }
 
 pub(super) fn agent_from_document(
-    id: Uuid,
     agent: AgentDocument,
     prompt_config: PromptConfig,
 ) -> nenjo::manifest::AgentManifest {
     nenjo::manifest::AgentManifest {
-        id,
         name: agent.summary.name,
         slug: agent.summary.slug,
         description: agent.summary.description,
@@ -448,12 +375,10 @@ pub(super) fn agent_from_document(
 }
 
 pub(super) fn ability_from_document(
-    id: Uuid,
     ability: AbilityDocument,
     prompt_config: nenjo::types::AbilityPromptConfig,
 ) -> nenjo::manifest::AbilityManifest {
     nenjo::manifest::AbilityManifest {
-        id,
         name: ability.summary.name,
         path: if ability.summary.path.is_empty() {
             None
@@ -472,9 +397,8 @@ pub(super) fn ability_from_document(
     }
 }
 
-fn project_from_document(id: Uuid, project: ProjectDocument) -> nenjo::manifest::ProjectManifest {
+fn project_from_document(project: ProjectDocument) -> nenjo::manifest::ProjectManifest {
     nenjo::manifest::ProjectManifest {
-        id,
         name: project.summary.name,
         slug: project.summary.slug,
         description: project.summary.description,
@@ -482,9 +406,8 @@ fn project_from_document(id: Uuid, project: ProjectDocument) -> nenjo::manifest:
     }
 }
 
-fn council_from_document(id: Uuid, council: CouncilDocument) -> nenjo::manifest::CouncilManifest {
+fn council_from_document(council: CouncilDocument) -> nenjo::manifest::CouncilManifest {
     nenjo::manifest::CouncilManifest {
-        id,
         name: council.summary.name,
         delegation_strategy: council.summary.delegation_strategy,
         leader_agent: council.summary.leader_agent,
@@ -499,24 +422,31 @@ fn council_from_document(id: Uuid, council: CouncilDocument) -> nenjo::manifest:
     }
 }
 
-fn upsert_agent(manifest: &mut Manifest, id: Uuid, mut agent: nenjo::manifest::AgentManifest) {
-    agent.id = id;
-    if let Some(pos) = manifest.agents.iter().position(|r| r.id == id) {
-        manifest.agents[pos] = agent;
+pub(super) fn upsert_by_slug<T>(items: &mut Vec<T>, item: T)
+where
+    T: HasManifestSlug,
+{
+    let slug = item.manifest_slug();
+    if let Some(pos) = items
+        .iter()
+        .position(|existing| existing.manifest_slug() == slug)
+    {
+        items[pos] = item;
     } else {
-        manifest.agents.push(agent);
+        items.push(item);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo::Slug;
+    use uuid::Uuid;
 
-    fn agent_manifest(id: Uuid, developer_prompt: &str) -> nenjo::manifest::AgentManifest {
+    fn agent_manifest(_id: Uuid, developer_prompt: &str) -> nenjo::manifest::AgentManifest {
         nenjo::manifest::AgentManifest {
-            id,
             name: "agent".into(),
-            slug: None,
+            slug: Slug::derive("test-agent"),
             description: None,
             prompt_config: PromptConfig {
                 developer_prompt: developer_prompt.into(),
@@ -546,7 +476,6 @@ mod tests {
         assert!(apply_inline_upsert(
             &mut manifest,
             ResourceType::Agent,
-            id,
             &payload
         ));
 
@@ -560,6 +489,7 @@ mod tests {
         let payload = serde_json::json!({
             "id": id,
             "name": "agent",
+            "slug": "agent",
             "description": null,
             "color": null,
             "model": null,
@@ -574,12 +504,11 @@ mod tests {
         assert!(apply_inline_upsert(
             &mut manifest,
             ResourceType::Agent,
-            id,
             &payload
         ));
 
         assert_eq!(manifest.agents.len(), 1);
-        assert_eq!(manifest.agents[0].id, id);
+        assert_eq!(manifest.agents[0].slug, Slug::derive("agent"));
         assert_eq!(manifest.agents[0].prompt_config.developer_prompt, "");
     }
 
@@ -593,6 +522,7 @@ mod tests {
         let payload = serde_json::json!({
             "id": id,
             "name": "renamed",
+            "slug": "test-agent",
             "description": null,
             "color": null,
             "model": null,
@@ -607,7 +537,6 @@ mod tests {
         assert!(apply_inline_upsert(
             &mut manifest,
             ResourceType::Agent,
-            id,
             &payload
         ));
 

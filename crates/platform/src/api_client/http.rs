@@ -296,9 +296,9 @@ impl ApiClient {
 
     pub async fn fetch_agent_prompt_config(
         &self,
-        id: Uuid,
+        resource: &Slug,
     ) -> Result<Option<AgentPromptConfigResponse>> {
-        let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, id);
+        let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, resource);
         let resp = self.get(&url).await?;
 
         match resp.status() {

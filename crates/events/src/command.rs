@@ -289,6 +289,8 @@ pub enum Command {
     ManifestChanged {
         #[serde(default = "default_manifest_changed_schema")]
         schema: String,
+        #[serde(default, skip_serializing_if = "Uuid::is_nil")]
+        resource_id: Uuid,
         resource_type: ResourceType,
         resource: String,
         action: ResourceAction,
@@ -500,6 +502,7 @@ mod tests {
         assert_eq!(
             Command::ManifestChanged {
                 schema: "manifest.changed.v1".into(),
+                resource_id: Uuid::nil(),
                 resource_type: ResourceType::Agent,
                 resource: "demo_agent".into(),
                 action: ResourceAction::Updated,

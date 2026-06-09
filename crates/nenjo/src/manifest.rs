@@ -9,8 +9,6 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use uuid::Uuid;
-
 use crate::Slug;
 
 pub mod local;
@@ -92,22 +90,40 @@ impl Manifest {
         }
     }
 
-    /// Remove a single resource from this manifest by type and ID.
-    pub fn delete_resource(&mut self, kind: ManifestResourceKind, id: Uuid) {
+    /// Remove a single resource from this manifest by type and slug.
+    pub fn delete_resource(&mut self, kind: ManifestResourceKind, slug: &Slug) {
         match kind {
-            ManifestResourceKind::Agent => self.agents.retain(|item| item.id != id),
-            ManifestResourceKind::Model => self.models.retain(|item| item.id != id),
-            ManifestResourceKind::Routine => self.routines.retain(|item| item.id != id),
-            ManifestResourceKind::Project => self.projects.retain(|item| item.id != id),
-            ManifestResourceKind::Council => self.councils.retain(|item| item.id != id),
-            ManifestResourceKind::Domain => self.domains.retain(|item| item.id != id),
-            ManifestResourceKind::McpServer => self.mcp_servers.retain(|item| item.id != id),
-            ManifestResourceKind::Ability => self.abilities.retain(|item| item.id != id),
-            ManifestResourceKind::ContextBlock => self.context_blocks.retain(|item| item.id != id),
-            ManifestResourceKind::Skill => self.skills.retain(|item| item.id != id),
-            ManifestResourceKind::Command => self.commands.retain(|item| item.id != id),
-            ManifestResourceKind::Hook => self.hooks.retain(|item| item.id != id),
-            ManifestResourceKind::ScriptTool => self.script_tools.retain(|item| item.id != id),
+            ManifestResourceKind::Agent => self.agents.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Model => self.models.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Routine => {
+                self.routines.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::Project => {
+                self.projects.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::Council => {
+                self.councils.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::Domain => {
+                self.domains.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::McpServer => self
+                .mcp_servers
+                .retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Ability => {
+                self.abilities.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::ContextBlock => self
+                .context_blocks
+                .retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Skill => self.skills.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Command => {
+                self.commands.retain(|item| item.manifest_slug() != *slug)
+            }
+            ManifestResourceKind::Hook => self.hooks.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::ScriptTool => self
+                .script_tools
+                .retain(|item| item.manifest_slug() != *slug),
         }
     }
 }
@@ -168,7 +184,7 @@ fn preserve_command_runtime_paths(existing: &CommandManifest, incoming: &mut Com
     }
 }
 
-pub(crate) trait HasManifestSlug {
+pub trait HasManifestSlug {
     fn manifest_slug(&self) -> Slug;
 }
 
@@ -179,7 +195,6 @@ pub(crate) trait HasManifestSlug {
 /// An external MCP server (stdio or HTTP transport) providing tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerManifest {
-    pub id: Uuid,
     pub name: String,
     pub display_name: String,
     pub description: Option<String>,
@@ -210,7 +225,6 @@ impl HasManifestSlug for McpServerManifest {
 /// A Claude-style local skill installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -263,7 +277,6 @@ impl HasManifestSlug for SkillManifest {
 /// A user-facing slash command installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandManifest {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub command: String,
@@ -308,7 +321,6 @@ impl HasManifestSlug for CommandManifest {
 /// A dormant runtime hook installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookManifest {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -355,7 +367,6 @@ impl HasManifestSlug for HookManifest {
 /// A native Nenjo typed script execution tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptToolManifest {
-    pub id: Uuid,
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -410,7 +421,6 @@ impl HasManifestSlug for ScriptToolManifest {
 /// A project — the top-level organizational unit for agents, routines, and documents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectManifest {
-    pub id: Uuid,
     pub name: String,
     pub slug: Slug,
     pub description: Option<String>,
@@ -426,10 +436,8 @@ impl HasManifestSlug for ProjectManifest {
 /// A routine — a DAG of steps (agent, lambda, gate, council) with edges defining control flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineManifest {
-    pub id: Uuid,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
+    pub slug: Slug,
     pub description: Option<String>,
     pub trigger: RoutineTrigger,
     pub metadata: RoutineMetadata,
@@ -438,16 +446,14 @@ pub struct RoutineManifest {
 }
 
 impl RoutineManifest {
-    pub fn slug(&self) -> Slug {
-        self.slug
-            .clone()
-            .unwrap_or_else(|| Slug::derive(&self.name))
+    pub fn slug(&self) -> &Slug {
+        &self.slug
     }
 }
 
 impl HasManifestSlug for RoutineManifest {
     fn manifest_slug(&self) -> Slug {
-        self.slug()
+        self.slug().clone()
     }
 }
 
@@ -472,8 +478,6 @@ pub struct RoutineMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct RoutineStepManifest {
-    #[builder(default = "Uuid::new_v4()")]
-    pub id: Uuid,
     pub slug: Slug,
     pub routine: Slug,
     pub name: String,
@@ -523,7 +527,6 @@ impl std::fmt::Display for RoutineStepType {
 /// A directed edge between two routine steps with an optional condition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineEdgeManifest {
-    pub id: Uuid,
     pub routine: Slug,
     pub source_step: Slug,
     pub target_step: Slug,
@@ -563,10 +566,10 @@ impl RoutineEdgeCondition {
 /// An LLM model configuration (provider, model name, temperature).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelManifest {
-    /// Stable manifest ID for this model configuration.
-    pub id: Uuid,
     /// Human-readable model configuration name.
     pub name: String,
+    /// Stable manifest slug.
+    pub slug: Slug,
     pub description: Option<String>,
     /// Provider-specific model identifier, for example `openai/gpt-4.1`.
     pub model: String,
@@ -580,7 +583,7 @@ pub struct ModelManifest {
 
 impl HasManifestSlug for ModelManifest {
     fn manifest_slug(&self) -> Slug {
-        model_manifest_slug(&self.model_provider, &self.model)
+        self.slug.clone()
     }
 }
 
@@ -679,12 +682,8 @@ impl MemoryProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AgentManifest {
-    #[builder(default = "Uuid::new_v4()")]
-    pub id: Uuid,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub slug: Option<Slug>,
+    pub slug: Slug,
     #[builder(default, setter(strip_option))]
     pub description: Option<String>,
     pub prompt_config: PromptConfig,
@@ -724,7 +723,7 @@ impl AgentManifest {
 
     /// Return the canonical selector slug for this agent.
     pub fn slug(&self) -> Slug {
-        self.manifest_slug()
+        self.slug.clone()
     }
 }
 
@@ -756,15 +755,12 @@ impl AgentManifestBuilder {
 
 impl HasManifestSlug for AgentManifest {
     fn manifest_slug(&self) -> Slug {
-        self.slug
-            .clone()
-            .unwrap_or_else(|| Slug::derive(&self.name))
+        self.slug.clone()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentHeartbeatManifest {
-    pub id: Uuid,
     pub agent: Slug,
     pub interval: String,
     pub is_active: bool,
@@ -807,9 +803,6 @@ pub struct AbilityPromptConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AbilityManifest {
-    /// Stable UUID for this ability resource.
-    #[builder(default = "Uuid::new_v4()")]
-    pub id: Uuid,
     /// Stable slug used by agents to assign and invoke this ability.
     pub name: String,
     /// Optional folder path used only for local manifest tree organization.
@@ -878,7 +871,6 @@ impl AbilityManifestBuilder {
 /// Lightweight ability metadata — kept in memory for lazy loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbilityMeta {
-    pub id: Uuid,
     pub name: String,
     pub path: Option<String>,
     pub description: Option<String>,
@@ -888,7 +880,6 @@ pub struct AbilityMeta {
 impl From<&AbilityManifest> for AbilityMeta {
     fn from(a: &AbilityManifest) -> Self {
         Self {
-            id: a.id,
             name: a.name.clone(),
             path: a.path.clone(),
             description: a.description.clone(),
@@ -900,7 +891,6 @@ impl From<&AbilityManifest> for AbilityMeta {
 /// Lightweight context block metadata — kept in memory for lazy loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextBlockMeta {
-    pub id: Uuid,
     pub name: String,
     pub path: String,
 }
@@ -908,7 +898,6 @@ pub struct ContextBlockMeta {
 impl From<&ContextBlockManifest> for ContextBlockMeta {
     fn from(b: &ContextBlockManifest) -> Self {
         Self {
-            id: b.id,
             name: b.name.clone(),
             path: b.path.clone(),
         }
@@ -918,7 +907,6 @@ impl From<&ContextBlockManifest> for ContextBlockMeta {
 /// A context block — a MiniJinja template injected into the agent's prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextBlockManifest {
-    pub id: Uuid,
     pub name: String,
     pub path: String,
     pub description: Option<String>,
@@ -941,7 +929,13 @@ pub fn context_block_slug(path: &str, name: &str) -> Slug {
     if path.trim().is_empty() {
         Slug::derive(name)
     } else {
-        Slug::derive(format!("{}/{}", path, name))
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| Slug::derive(part).as_str().to_string())
+            .collect();
+        parts.push(Slug::derive(name).as_str().to_string());
+        Slug::derive(parts.join("-"))
     }
 }
 
@@ -954,7 +948,6 @@ pub struct DomainPromptConfig {
 /// A domain — an activatable execution mode with its own prompt addons and tool config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainManifest {
-    pub id: Uuid,
     pub name: String,
     pub path: String,
     pub description: Option<String>,
@@ -992,7 +985,6 @@ pub fn domain_slug(path: &str, name: &str) -> Slug {
 /// A council — a multi-agent deliberation group with a leader and delegation strategy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouncilManifest {
-    pub id: Uuid,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
     pub leader_agent: Slug,
@@ -1063,21 +1055,21 @@ impl ManifestResource {
         }
     }
 
-    pub fn id(&self) -> Uuid {
+    pub fn slug(&self) -> Slug {
         match self {
-            Self::Agent(item) => item.id,
-            Self::Model(item) => item.id,
-            Self::Routine(item) => item.id,
-            Self::Project(item) => item.id,
-            Self::Council(item) => item.id,
-            Self::Domain(item) => item.id,
-            Self::McpServer(item) => item.id,
-            Self::Ability(item) => item.id,
-            Self::ContextBlock(item) => item.id,
-            Self::Skill(item) => item.id,
-            Self::Command(item) => item.id,
-            Self::Hook(item) => item.id,
-            Self::ScriptTool(item) => item.id,
+            Self::Agent(item) => item.manifest_slug(),
+            Self::Model(item) => item.manifest_slug(),
+            Self::Routine(item) => item.manifest_slug(),
+            Self::Project(item) => item.manifest_slug(),
+            Self::Council(item) => item.manifest_slug(),
+            Self::Domain(item) => item.manifest_slug(),
+            Self::McpServer(item) => item.manifest_slug(),
+            Self::Ability(item) => item.manifest_slug(),
+            Self::ContextBlock(item) => item.manifest_slug(),
+            Self::Skill(item) => item.manifest_slug(),
+            Self::Command(item) => item.manifest_slug(),
+            Self::Hook(item) => item.manifest_slug(),
+            Self::ScriptTool(item) => item.manifest_slug(),
         }
     }
 }
@@ -1117,7 +1109,6 @@ mod tests {
     fn command_merge_preserves_existing_runtime_paths_when_incoming_lacks_them() {
         let mut manifest = Manifest {
             commands: vec![CommandManifest {
-                id: Uuid::nil(),
                 name: "ralph_loop__ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("ralph-loop".to_string()),
@@ -1137,7 +1128,6 @@ mod tests {
 
         manifest.merge(Manifest {
             commands: vec![CommandManifest {
-                id: Uuid::nil(),
                 name: "ralph_loop__ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("ralph-loop".to_string()),

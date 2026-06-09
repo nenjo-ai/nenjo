@@ -825,7 +825,7 @@ struct HookRunOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveHookKey {
-    hook_id: uuid::Uuid,
+    hook_slug: crate::Slug,
     source_kind: String,
     source_name: String,
 }
@@ -833,7 +833,7 @@ struct ActiveHookKey {
 impl ActiveHookKey {
     fn from_active(active: &ActiveHook) -> Self {
         Self {
-            hook_id: active.hook.id,
+            hook_slug: active.hook.slug.clone(),
             source_kind: active.source.kind().to_string(),
             source_name: active.source.name().to_string(),
         }

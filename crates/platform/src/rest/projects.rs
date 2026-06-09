@@ -8,14 +8,6 @@ fn slug_schema(description: &str) -> serde_json::Value {
     })
 }
 
-fn task_id_schema() -> serde_json::Value {
-    json!({
-        "type": "string",
-        "format": "uuid",
-        "description": "The unique id of the target project task."
-    })
-}
-
 fn execution_run_id_schema() -> serde_json::Value {
     json!({
         "type": "string",
@@ -50,13 +42,14 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_project_task".into(),
-            description: "Read one project task by id when you already know which task you want.".into(),
+            description: "Read one project task by project slug and task slug. Use the `slug` returned by list_project_tasks.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": task_id_schema()
+                    "project": slug_schema("The target project slug."),
+                    "task": slug_schema("The target task slug returned by list_project_tasks.")
                 },
-                "required": ["task_id"],
+                "required": ["project", "task"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Read,
@@ -103,7 +96,8 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": task_id_schema(),
+                    "project": slug_schema("The target project slug."),
+                    "task": slug_schema("The target task slug returned by list_project_tasks."),
                     "title": {"type": "string"},
                     "description": {"type": "string"},
                     "acceptance_criteria": {"type": "string"},
@@ -118,34 +112,38 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
                     "routine": slug_schema("Optional routine slug."),
                     "metadata": {"type": "object"}
                 },
-                "required": ["task_id"],
+                "required": ["project", "task"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
         ToolSpec {
             name: "delete_project_task".into(),
-            description: "Delete an existing project task by id when you want it removed entirely.".into(),
+            description: "Delete an existing project task by project slug and task slug when you want it removed entirely.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": task_id_schema()
+                    "project": slug_schema("The target project slug."),
+                    "task": slug_schema("The target task slug returned by list_project_tasks.")
                 },
-                "required": ["task_id"],
+                "required": ["project", "task"],
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
         ToolSpec {
             name: "list_project_execution_runs".into(),
-            description: "List execution runs for a project, with optional filters such as agent, routine, or status. Use this to find a run before reading or controlling it.".into(),
+            description: "List execution runs for a project. Execution runs are project-level batches: one run can execute multiple ready tasks. Use status filters like pending, running, paused, completed, or cancelled to find an existing run before starting another.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "project": slug_schema("The target project slug."),
                     "agent": slug_schema("Optional agent slug filter."),
                     "routine": slug_schema("Optional routine slug filter."),
-                    "status": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "running", "paused", "cancelled", "completed"]
+                    },
                     "limit": {"type": "integer"},
                     "offset": {"type": "integer"}
                 },
@@ -169,11 +167,11 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "start_project_execution".into(),
-            description: "Start a new execution run for a project immediately. Use this to create a fresh run, not to resume an existing paused run.".into(),
+            description: "Create one pending execution run for the project and immediately start it. A single execution run handles all currently ready tasks in that project; do not call this once per task. If a pending, running, or paused run already exists, list or resume that run instead.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "project": slug_schema("The target project slug."),
+                    "project": slug_schema("The target project slug. The run will cover all ready tasks in this project."),
                     "config": {"type": "object"},
                     "model_count": {"type": "integer"},
                     "parallel_count": {"type": "integer"}
@@ -185,7 +183,7 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "pause_project_execution".into(),
-            description: "Pause an existing running execution run by id.".into(),
+            description: "Pause an existing running project execution run by id. Pausing affects the whole run and its remaining tasks, not a single task.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -198,7 +196,7 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "resume_project_execution".into(),
-            description: "Resume an existing paused execution run by id. Use this instead of start_project_execution when the run already exists.".into(),
+            description: "Resume an existing paused project execution run by id. Use this instead of start_project_execution when a paused run already exists for the project.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

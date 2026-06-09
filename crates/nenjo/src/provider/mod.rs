@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use uuid::Uuid;
 
 pub use crate::routines::RoutineRunner;
 pub use builder::ProviderBuilder;
@@ -458,7 +457,6 @@ where
             .first()
             .cloned()
             .unwrap_or_else(|| ProjectManifest {
-                id: Uuid::nil(),
                 name: String::new(),
                 slug: Slug::derive("project"),
                 description: None,

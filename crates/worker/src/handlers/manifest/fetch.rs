@@ -16,13 +16,13 @@ pub(super) async fn apply_upsert(
         ($field:ident, $fetch:ident, $slug:expr) => {{
             match client.$fetch(resource).await? {
                 Some(item) => {
-                    let id = item.id;
-                    if let Some(pos) = manifest.$field.iter().position(|r| r.id == id) {
+                    let item_slug = $slug(&item);
+                    if let Some(pos) = manifest.$field.iter().position(|r| $slug(r) == item_slug) {
                         manifest.$field[pos] = item;
-                        debug!(%rt, %id, "Updated existing resource");
+                        debug!(%rt, %item_slug, "Updated existing resource");
                     } else {
                         manifest.$field.push(item);
-                        debug!(%rt, %id, "Added new resource");
+                        debug!(%rt, %item_slug, "Added new resource");
                     }
                 }
                 None => {
@@ -36,24 +36,27 @@ pub(super) async fn apply_upsert(
     match rt {
         ResourceType::Agent => match client.fetch_agent(resource).await? {
             Some(mut item) => {
-                let id = item.id;
-                if let Some(prompt_response) = client.fetch_agent_prompt_config(id).await? {
+                if let Some(prompt_response) = client.fetch_agent_prompt_config(resource).await? {
                     if let Some(prompt_config) = prompt_response.prompt_config {
                         item.prompt_config = prompt_config;
                     } else if let Some(existing) =
-                        manifest.agents.iter().find(|agent| agent.id == id)
+                        manifest.agents.iter().find(|agent| agent.slug == *resource)
                     {
                         item.prompt_config = existing.prompt_config.clone();
                     }
-                } else if let Some(existing) = manifest.agents.iter().find(|agent| agent.id == id) {
+                } else if let Some(existing) =
+                    manifest.agents.iter().find(|agent| agent.slug == *resource)
+                {
                     item.prompt_config = existing.prompt_config.clone();
                 }
-                if let Some(pos) = manifest.agents.iter().position(|r| r.id == id) {
+                if let Some(pos) = manifest.agents.iter().position(|r| r.slug == item.slug) {
+                    let slug = item.slug.clone();
                     manifest.agents[pos] = item;
-                    debug!(%rt, %id, "Updated existing resource");
+                    debug!(%rt, %slug, "Updated existing resource");
                 } else {
+                    let slug = item.slug.clone();
                     manifest.agents.push(item);
-                    debug!(%rt, %id, "Added new resource");
+                    debug!(%rt, %slug, "Added new resource");
                 }
             }
             None => {
@@ -90,11 +93,13 @@ pub(super) async fn apply_upsert(
         ),
         ResourceType::ContextBlock => match client.fetch_context_block_summary(resource).await? {
             Some(summary) => {
-                let id = summary.id;
+                let block_slug = nenjo::manifest::context_block_slug(&summary.path, &summary.name);
                 let existing_template = manifest
                     .context_blocks
                     .iter()
-                    .find(|block| block.id == id)
+                    .find(|block| {
+                        nenjo::manifest::context_block_slug(&block.path, &block.name) == block_slug
+                    })
                     .map(|block| block.template.clone())
                     .unwrap_or_default();
                 let content = client.fetch_context_block_content(resource).await?;
@@ -104,19 +109,20 @@ pub(super) async fn apply_upsert(
                 };
 
                 let block = nenjo::manifest::ContextBlockManifest {
-                    id: summary.id,
                     name: summary.name,
                     path: summary.path,
                     description: summary.description,
                     template,
                 };
 
-                if let Some(pos) = manifest.context_blocks.iter().position(|r| r.id == id) {
+                if let Some(pos) = manifest.context_blocks.iter().position(|r| {
+                    nenjo::manifest::context_block_slug(&r.path, &r.name) == block_slug
+                }) {
                     manifest.context_blocks[pos] = block;
-                    debug!(%rt, %id, "Updated existing resource");
+                    debug!(%rt, %block_slug, "Updated existing resource");
                 } else {
                     manifest.context_blocks.push(block);
-                    debug!(%rt, %id, "Added new resource");
+                    debug!(%rt, %block_slug, "Added new resource");
                 }
             }
             None => {

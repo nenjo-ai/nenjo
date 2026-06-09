@@ -37,7 +37,7 @@ fn get_api_key() -> Option<String> {
 
 fn make_model() -> ModelManifest {
     ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"),
         name: "openrouter-nemotron".into(),
         description: None,
         model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
@@ -49,7 +49,6 @@ fn make_model() -> ModelManifest {
 
 fn make_project() -> ProjectManifest {
     ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -59,9 +58,8 @@ fn make_project() -> ProjectManifest {
 
 fn make_agent(model: &ModelManifest) -> AgentManifest {
     AgentManifest {
-        id: Uuid::new_v4(),
         name: "routine-agent".into(),
-        slug: None,
+        slug: Slug::derive("routine-agent"),
         description: Some("Executes routine steps".into()),
         prompt_config: PromptConfig {
             system_prompt:
@@ -110,19 +108,17 @@ async fn single_step_routine_with_real_llm() {
     let model = make_model();
     let project = make_project();
     let agent = make_agent(&model);
-    let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _step_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
     let routine_slug = Slug::derive("smoke-routine");
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "smoke-routine".into(),
-        slug: None,
+        slug: routine_slug.clone(),
         description: Some("Single-step routine integration test".into()),
         trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive("respond"),
             routine: routine_slug.clone(),
             name: "respond".into(),

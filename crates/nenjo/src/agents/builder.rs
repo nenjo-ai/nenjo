@@ -260,7 +260,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         let model_provider = provider.create_model_provider(&model_manifest).await?;
         let model = AgentModel {
             model_name: model_manifest.model.clone(),
-            id: model_manifest.id,
+            model_slug: model_manifest.slug.clone(),
             temperature: model_manifest.temperature.unwrap_or(0.7),
             model_provider,
         };

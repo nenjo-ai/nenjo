@@ -13,9 +13,11 @@ use super::payload::{
     InlineDocumentMeta, canonical_resource_payload_data, parse_decrypted_manifest_payload,
 };
 use super::services::{ManifestStore, McpRuntime};
+use nenjo_platform::PlatformResourceKind;
 
 #[derive(Debug, Clone)]
 pub(super) struct ManifestChange {
+    pub resource_id: Uuid,
     pub resource_type: ResourceType,
     pub resource: Slug,
     pub action: ResourceAction,
@@ -87,6 +89,7 @@ where
 {
     let ManifestChange {
         resource_type,
+        resource_id: event_resource_id,
         resource,
         action,
         project,
@@ -94,7 +97,11 @@ where
         encrypted_payload,
     } = change;
 
-    let resource_id = resolve_resource_id(current, resource_type, &resource, payload.as_ref());
+    let resource_id = if event_resource_id.is_nil() {
+        resolve_resource_id(current, resource_type, &resource, payload.as_ref())
+    } else {
+        Some(event_resource_id)
+    };
     let payload_state =
         ManifestPayloadState::from_parts(payload.as_ref(), encrypted_payload.as_ref());
 
@@ -118,6 +125,26 @@ where
         "Manifest resource change details"
     );
 
+    if let Some(kind) = platform_resource_kind(resource_type) {
+        let id_for_sidecar = if action == ResourceAction::Deleted {
+            None
+        } else {
+            resource_id
+        };
+        if let Err(error) = store
+            .update_platform_resource_id(kind, &resource, id_for_sidecar)
+            .await
+        {
+            warn!(
+                %resource_type,
+                %resource,
+                resource_id = ?resource_id,
+                error = %error,
+                "Failed to update platform resource id sidecar"
+            );
+        }
+    }
+
     let mut manifest = current.clone();
     let mut source = ManifestApplySource::Ignored;
     let mut applied_inline = false;
@@ -138,10 +165,9 @@ where
         }
         source = ManifestApplySource::Deleted;
     } else {
-        if let Some(resource_id) = resource_id {
-            if let Some(ref data) = payload
-                && let Some(decrypted) = parse_decrypted_manifest_payload(data)
-            {
+        if let Some(ref data) = payload {
+            if let Some(decrypted) = parse_decrypted_manifest_payload(data) {
+                let resource_id = resource_id.unwrap_or(decrypted.object_id);
                 applied_inline = apply_decrypted_manifest_upsert(
                     &mut manifest,
                     store,
@@ -153,9 +179,8 @@ where
                 if applied_inline {
                     source = ManifestApplySource::DecryptedInline;
                 }
-            } else if let Some(ref data) = payload {
-                applied_inline =
-                    apply_inline_upsert(&mut manifest, resource_type, resource_id, data);
+            } else {
+                applied_inline = apply_inline_upsert(&mut manifest, resource_type, data);
                 if applied_inline {
                     source = ManifestApplySource::Inline;
                 }
@@ -243,6 +268,21 @@ where
 
     debug!(?source, %resource_type, %resource, resource_id = ?resource_id, "Manifest change applied");
     Ok(ManifestChangeResult { manifest })
+}
+
+fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourceKind> {
+    match resource_type {
+        ResourceType::Agent => Some(PlatformResourceKind::Agent),
+        ResourceType::Ability => Some(PlatformResourceKind::Ability),
+        ResourceType::Domain => Some(PlatformResourceKind::Domain),
+        ResourceType::ContextBlock => Some(PlatformResourceKind::ContextBlock),
+        ResourceType::Project => Some(PlatformResourceKind::Project),
+        ResourceType::Routine => Some(PlatformResourceKind::Routine),
+        ResourceType::Model => Some(PlatformResourceKind::Model),
+        ResourceType::Council => Some(PlatformResourceKind::Council),
+        ResourceType::McpServer => Some(PlatformResourceKind::McpServer),
+        ResourceType::Document | ResourceType::KnowledgePack => None,
+    }
 }
 
 struct DocumentSideEffectContext<'a, StoreRt>
@@ -365,48 +405,48 @@ fn resource_id_from_manifest(
         ResourceType::Agent => manifest
             .agents
             .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .find(|item| item.slug == *resource)
+            .map(|item| crate::resource_resolver::stable_resource_id("agent", &item.slug)),
         ResourceType::Model => manifest
             .models
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("model", resource)),
         ResourceType::Routine => manifest
             .routines
             .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .find(|item| item.slug == *resource)
+            .map(|item| crate::resource_resolver::stable_resource_id("routine", &item.slug)),
         ResourceType::Project => manifest
             .projects
             .iter()
             .find(|item| item.slug == *resource)
-            .map(|item| item.id),
+            .map(|item| crate::resource_resolver::stable_resource_id("project", &item.slug)),
         ResourceType::Council => manifest
             .councils
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("council", resource)),
         ResourceType::Ability => manifest
             .abilities
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("ability", resource)),
         ResourceType::ContextBlock => manifest
             .context_blocks
             .iter()
             .find(|item| context_block_slug(&item.path, &item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("context_block", resource)),
         ResourceType::McpServer => manifest
             .mcp_servers
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("mcp_server", resource)),
         ResourceType::Domain => manifest
             .domains
             .iter()
             .find(|item| domain_slug(&item.path, &item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("domain", resource)),
         ResourceType::Document | ResourceType::KnowledgePack => None,
     }
 }

@@ -95,11 +95,10 @@ where
     };
     let step_run_id = Uuid::new_v4();
     let _ = events_tx.send(RoutineEvent::StepStarted {
-        step_id: step.id,
+        step_slug: step.slug.clone(),
         step_run_id,
         step_name: step.name.clone(),
         step_type: "council".to_string(),
-        agent_id: None,
     });
     let started = std::time::Instant::now();
     match execute_council_with_invocation(
@@ -114,7 +113,7 @@ where
     {
         Ok(result) => {
             let _ = events_tx.send(RoutineEvent::StepCompleted {
-                step_id: step.id,
+                step_slug: step.slug.clone(),
                 step_run_id,
                 result: result.clone(),
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -123,7 +122,7 @@ where
         }
         Err(error) => {
             let _ = events_tx.send(RoutineEvent::StepFailed {
-                step_id: step.id,
+                step_slug: step.slug.clone(),
                 step_run_id,
                 error: error.to_string(),
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -339,7 +338,7 @@ where
             &runner,
             task,
             state.input.project.clone(),
-            step.id,
+            step.slug.clone(),
             step_run_id,
             events_tx,
         )
@@ -348,7 +347,7 @@ where
         let mut handle = runner.run_stream(task).await?;
         while let Some(event) = handle.recv().await {
             let _ = events_tx.send(RoutineEvent::AgentEvent {
-                step_id: step.id,
+                step_slug: step.slug.clone(),
                 step_run_id,
                 event,
             });
@@ -531,7 +530,7 @@ where
                 })).collect::<Vec<_>>(),
                 "strategy_data": extra_data,
             }),
-            step_id: step.id,
+            step_slug: step.slug.clone(),
             step_name: step.name.clone(),
             input_tokens: total_input,
             output_tokens: total_output,
@@ -562,7 +561,7 @@ where
             })).collect::<Vec<_>>(),
             "strategy_data": extra_data,
         }),
-        step_id: step.id,
+        step_slug: step.slug.clone(),
         step_name: step.name.clone(),
         input_tokens: total_input,
         output_tokens: total_output,
@@ -619,7 +618,7 @@ where
             passed: true,
             output: output.text,
             data: serde_json::json!({ "strategy": "dynamic" }),
-            step_id: step.id,
+            step_slug: step.slug.clone(),
             step_name: step.name.clone(),
             input_tokens: output.input_tokens,
             output_tokens: output.output_tokens,
@@ -642,7 +641,7 @@ where
         passed: verdict.passed,
         output: step_output,
         data,
-        step_id: step.id,
+        step_slug: step.slug.clone(),
         step_name: step.name.clone(),
         input_tokens: output.input_tokens,
         output_tokens: output.output_tokens,

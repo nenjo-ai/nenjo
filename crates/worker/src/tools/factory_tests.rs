@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use super::*;
+use crate::crypto::WorkerAuthProvider;
+use crate::tools::NativeRuntime;
+use crate::tools::platform_payload::PlatformPayloadEncoder;
+use crate::tools::platform_services::PlatformToolServices;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
@@ -14,13 +19,6 @@ use nenjo_platform::{
     PlatformManifestClient, tools::PlatformNotificationEmitter,
 };
 use tempfile::tempdir;
-use uuid::Uuid;
-
-use super::*;
-use crate::crypto::WorkerAuthProvider;
-use crate::tools::NativeRuntime;
-use crate::tools::platform_payload::PlatformPayloadEncoder;
-use crate::tools::platform_services::PlatformToolServices;
 
 struct TestNotificationSink;
 
@@ -48,6 +46,7 @@ fn test_platform_services(
         PlatformPayloadEncoder::new(auth_provider),
         None,
         config.workspace_dir.clone(),
+        config.config_dir.join("library"),
     )
 }
 
@@ -72,9 +71,8 @@ async fn worker_factory_always_exposes_use_skill_tool() {
     let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "tester".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -134,7 +132,6 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         ..Default::default()
     };
     let server = McpServerManifest {
-        id: Uuid::new_v4(),
         name: "mcp_skill__review_server".to_string(),
         display_name: "mcp-skill:review-server".to_string(),
         description: None,
@@ -155,7 +152,6 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         }),
     };
     let skill = SkillManifest {
-        id: Uuid::new_v4(),
         name: "mcp-skill".to_string(),
         display_name: None,
         aliases: Vec::new(),
@@ -191,9 +187,8 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         registry,
     );
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "tester".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -283,9 +278,8 @@ async fn scoped_backend(
     let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
 
     let visible_agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "visible-agent".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -299,9 +293,8 @@ async fn scoped_backend(
         heartbeat: None,
     };
     let hidden_agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "hidden-agent".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -316,7 +309,6 @@ async fn scoped_backend(
     };
 
     let visible_ability = AbilityManifest {
-        id: Uuid::new_v4(),
         name: "visible-ability".into(),
         path: None,
         description: None,
@@ -332,7 +324,6 @@ async fn scoped_backend(
         metadata: serde_json::Value::Null,
     };
     let hidden_ability = AbilityManifest {
-        id: Uuid::new_v4(),
         name: "hidden-ability".into(),
         path: None,
         description: None,
@@ -349,7 +340,6 @@ async fn scoped_backend(
     };
 
     let visible_domain = DomainManifest {
-        id: Uuid::new_v4(),
         name: "visible-domain".into(),
         path: String::new(),
         description: None,
@@ -361,7 +351,6 @@ async fn scoped_backend(
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
     let hidden_domain = DomainManifest {
-        id: Uuid::new_v4(),
         name: "hidden-domain".into(),
         path: String::new(),
         description: None,
@@ -425,9 +414,8 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "tester".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -554,9 +542,8 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
     let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "tester".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -602,9 +589,8 @@ async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
     let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "tester".into(),
-        slug: Some(Slug::parse("tester").unwrap()),
+        slug: Slug::parse("tester").unwrap(),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,

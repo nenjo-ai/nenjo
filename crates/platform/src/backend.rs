@@ -7,7 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest, RoutineManifest,
+    HasManifestSlug, ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest,
+    RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use nenjo_knowledge::tools::{
@@ -18,28 +19,32 @@ use nenjo_knowledge::tools::{
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
+use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta};
 use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
 use crate::knowledge_backend::{
     ResolvedKnowledgePack, ensure_known_pack_selector, library_pack_selector,
     parse_library_pack_selector, unknown_pack,
 };
-use crate::library_knowledge::LibraryKnowledgePack;
+use crate::library_knowledge::{
+    LibraryKnowledgePack, LibraryKnowledgePackManifest, library_doc_relative_path,
+    upsert_library_knowledge_entry, write_library_document_content,
+    write_library_knowledge_manifest,
+};
 use crate::manifest_contract::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
+use crate::resource_ids::{PlatformResourceIdStore, PlatformResourceKind};
 
 fn string_to_manifest_path(path: String) -> Option<String> {
     if path.is_empty() { None } else { Some(path) }
 }
 
 fn local_agent_from_document(
-    id: Uuid,
     agent: AgentDocument,
     prompt_config: nenjo::agents::prompts::PromptConfig,
 ) -> AgentManifest {
     AgentManifest {
-        id,
         name: agent.summary.name,
         slug: agent.summary.slug,
         description: agent.summary.description,
@@ -56,9 +61,8 @@ fn local_agent_from_document(
     }
 }
 
-fn local_council_from_document(id: Uuid, council: &CouncilDocument) -> CouncilManifest {
+fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {
-        id,
         name: council.summary.name.clone(),
         leader_agent: council.summary.leader_agent.clone(),
         members: council
@@ -73,65 +77,35 @@ fn local_council_from_document(id: Uuid, council: &CouncilDocument) -> CouncilMa
     }
 }
 
-fn local_routine_from_document(
-    id: Uuid,
-    routine: &RoutineDocument,
-    existing: Option<&RoutineManifest>,
-) -> RoutineManifest {
+fn local_routine_from_document(routine: &RoutineDocument) -> RoutineManifest {
     RoutineManifest {
-        id,
         name: routine.summary.name.clone(),
-        slug: Some(routine.summary.slug.clone()),
+        slug: routine.summary.slug.clone(),
         description: routine.summary.description.clone(),
         trigger: routine.summary.trigger,
         steps: routine
             .steps
             .iter()
-            .map(|step| {
-                let step_id = existing
-                    .and_then(|existing| {
-                        existing
-                            .steps
-                            .iter()
-                            .find(|existing_step| existing_step.slug == step.slug)
-                    })
-                    .map(|step| step.id)
-                    .unwrap_or_else(Uuid::new_v4);
-                nenjo::manifest::RoutineStepManifest {
-                    id: step_id,
-                    slug: step.slug.clone(),
-                    routine: step.routine.clone(),
-                    name: step.name.clone(),
-                    step_type: step.step_type,
-                    council: step.council.clone(),
-                    agent: step.agent.clone(),
-                    config: step.config.clone(),
-                    order_index: step.order_index,
-                }
+            .map(|step| nenjo::manifest::RoutineStepManifest {
+                slug: step.slug.clone(),
+                routine: step.routine.clone(),
+                name: step.name.clone(),
+                step_type: step.step_type,
+                council: step.council.clone(),
+                agent: step.agent.clone(),
+                config: step.config.clone(),
+                order_index: step.order_index,
             })
             .collect(),
         edges: routine
             .edges
             .iter()
-            .map(|edge| {
-                let edge_id = existing
-                    .and_then(|existing| {
-                        existing.edges.iter().find(|existing_edge| {
-                            existing_edge.source_step == edge.source_step
-                                && existing_edge.target_step == edge.target_step
-                                && existing_edge.condition == edge.condition
-                        })
-                    })
-                    .map(|edge| edge.id)
-                    .unwrap_or_else(Uuid::new_v4);
-                nenjo::manifest::RoutineEdgeManifest {
-                    id: edge_id,
-                    routine: edge.routine.clone(),
-                    source_step: edge.source_step.clone(),
-                    target_step: edge.target_step.clone(),
-                    condition: edge.condition,
-                    metadata: edge.metadata.clone(),
-                }
+            .map(|edge| nenjo::manifest::RoutineEdgeManifest {
+                routine: edge.routine.clone(),
+                source_step: edge.source_step.clone(),
+                target_step: edge.target_step.clone(),
+                condition: edge.condition,
+                metadata: edge.metadata.clone(),
             })
             .collect(),
         metadata: routine.metadata.clone(),
@@ -186,8 +160,10 @@ pub struct PlatformManifestBackend<L, E> {
     sensitive_payload_encoder: E,
     access_policy: Option<ManifestAccessPolicy>,
     workspace_dir: Option<PathBuf>,
+    library_dir: Option<PathBuf>,
     cached_org_id: Option<Uuid>,
     current_library_slug: Option<String>,
+    resource_ids: Option<Arc<PlatformResourceIdStore>>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -203,8 +179,10 @@ impl<L, E> PlatformManifestBackend<L, E> {
             sensitive_payload_encoder,
             access_policy: None,
             workspace_dir: None,
+            library_dir: None,
             cached_org_id: None,
             current_library_slug: None,
+            resource_ids: None,
         }
     }
 
@@ -220,6 +198,12 @@ impl<L, E> PlatformManifestBackend<L, E> {
         self
     }
 
+    /// Attach the local library cache root used for local-first knowledge reads.
+    pub fn with_library_dir(mut self, library_dir: PathBuf) -> Self {
+        self.library_dir = Some(library_dir);
+        self
+    }
+
     /// Attach the org id cached from worker bootstrap metadata.
     pub fn with_cached_org_id(mut self, org_id: Option<Uuid>) -> Self {
         self.cached_org_id = org_id.filter(|id| !id.is_nil());
@@ -229,6 +213,12 @@ impl<L, E> PlatformManifestBackend<L, E> {
     /// Attach the default library slug used to resolve the `workspace` library pack alias.
     pub fn with_current_library_slug(mut self, pack_slug: Option<String>) -> Self {
         self.current_library_slug = pack_slug.filter(|slug| !slug.trim().is_empty());
+        self
+    }
+
+    /// Attach the platform-private resource id sidecar used for encrypted write metadata.
+    pub fn with_resource_id_store(mut self, resource_ids: Arc<PlatformResourceIdStore>) -> Self {
+        self.resource_ids = Some(resource_ids);
         self
     }
 
@@ -267,6 +257,59 @@ where
             .as_ref()
             .map(|policy| policy.allows_domain(domain))
             .unwrap_or(true)
+    }
+
+    fn platform_object_id(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Uuid> {
+        let store = self.resource_ids.as_ref().ok_or_else(|| {
+            anyhow!(
+                "missing platform resource id store for {} {}; refresh manifest",
+                kind.as_str(),
+                slug
+            )
+        })?;
+        store.get(kind, slug)?.ok_or_else(|| {
+            anyhow!(
+                "missing platform object id for {} {}; refresh manifest",
+                kind.as_str(),
+                slug
+            )
+        })
+    }
+
+    fn record_platform_object_id(
+        &self,
+        kind: PlatformResourceKind,
+        slug: &Slug,
+        id: Uuid,
+    ) -> Result<()> {
+        if let Some(store) = self.resource_ids.as_ref() {
+            store.upsert(kind, slug, id)?;
+        }
+        Ok(())
+    }
+
+    fn move_platform_object_id(
+        &self,
+        kind: PlatformResourceKind,
+        old_slug: &Slug,
+        new_slug: &Slug,
+    ) -> Result<()> {
+        if let Some(store) = self.resource_ids.as_ref() {
+            if let Some(id) = store.get(kind, old_slug)? {
+                store.upsert(kind, new_slug, id)?;
+                if old_slug != new_slug {
+                    store.remove(kind, old_slug)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_platform_object_id(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<()> {
+        if let Some(store) = self.resource_ids.as_ref() {
+            store.remove(kind, slug)?;
+        }
+        Ok(())
     }
 
     async fn local_manifest_org_id(&self) -> Result<Uuid> {
@@ -332,7 +375,6 @@ where
         };
 
         let hydrated = AbilityManifest {
-            id: Uuid::new_v4(),
             name: remote.summary.name,
             path: string_to_manifest_path(remote.summary.path),
             description: remote.summary.description,
@@ -420,14 +462,81 @@ where
             .ok_or_else(|| anyhow!("knowledge tools require a configured workspace_dir"))
     }
 
+    fn library_root(&self) -> Result<PathBuf> {
+        if let Some(library_dir) = &self.library_dir {
+            return Ok(library_dir.clone());
+        }
+        Ok(self.workspace_dir()?.join("library"))
+    }
+
     async fn workspace_library_dir(&self, pack_slug: &str) -> Result<PathBuf> {
-        Ok(self.workspace_dir()?.join("library").join(pack_slug))
+        Ok(self.library_root()?.join(pack_slug))
     }
 
     async fn library_knowledge_pack(&self, pack_slug: &str) -> Result<LibraryKnowledgePack> {
         let pack_dir = self.workspace_library_dir(pack_slug).await?;
         LibraryKnowledgePack::load(&pack_dir)
             .ok_or_else(|| anyhow!("knowledge pack '{pack_slug}' is not cached locally"))
+    }
+
+    fn cache_knowledge_pack(&self, pack: &KnowledgePackDocument) -> Result<()> {
+        let pack_slug = pack.slug.as_str();
+        let pack_dir = self.library_root()?.join(pack_slug);
+        if LibraryKnowledgePack::load(&pack_dir).is_none() {
+            write_library_knowledge_manifest(
+                &pack_dir,
+                &LibraryKnowledgePackManifest::library_pack(pack_slug),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn cache_knowledge_doc(
+        &self,
+        doc: &KnowledgeDocSummary,
+        content: Option<&str>,
+        related: &[KnowledgeDocRelatedDocument],
+    ) -> Result<()> {
+        let pack_slug = doc.pack.as_str();
+        let pack_dir = self.library_root()?.join(pack_slug);
+        let metadata = DocumentSyncMeta {
+            id: None,
+            pack_id: None,
+            pack_slug: pack_slug.to_string(),
+            slug: doc.doc.as_str().to_string(),
+            filename: doc.filename.clone(),
+            path: doc.path.clone(),
+            title: doc.title.clone(),
+            kind: doc.kind.clone(),
+            summary: doc.summary.clone(),
+            tags: doc.tags.clone(),
+            content_type: doc.content_type.clone(),
+            updated_at: doc.updated_at.clone(),
+        };
+        let edges = related
+            .iter()
+            .map(|edge| DocumentSyncEdge {
+                id: Uuid::new_v4(),
+                pack_id: None,
+                source_doc: doc.doc.clone(),
+                source_item_id: None,
+                target_doc: edge.target_doc.clone(),
+                target_item_id: None,
+                edge_type: edge.edge_type.clone(),
+                note: edge.note.clone(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect::<Vec<_>>();
+        upsert_library_knowledge_entry(&pack_dir, pack_slug, &metadata, &edges)?;
+        if let Some(content) = content {
+            write_library_document_content(
+                &pack_dir,
+                &library_doc_relative_path(&metadata),
+                content,
+            )?;
+        }
+        Ok(())
     }
 
     async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
@@ -451,8 +560,7 @@ where
 {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
         let mut packs = Vec::new();
-        if self.workspace_dir.is_some() {
-            let library_dir = self.workspace_dir()?.join("library");
+        if let Ok(library_dir) = self.library_root() {
             if let Ok(entries) = std::fs::read_dir(library_dir) {
                 for entry in entries.flatten() {
                     let Ok(file_type) = entry.file_type() else {
@@ -602,10 +710,15 @@ where
             .create_agent_document(&create, Some(agent_id))
             .await?;
 
-        let local_agent = local_agent_from_document(agent_id, created.clone(), Default::default());
+        let local_agent = local_agent_from_document(created.clone(), Default::default());
         self.local_store
             .upsert_resource(&ManifestResource::Agent(local_agent))
             .await?;
+        self.record_platform_object_id(
+            PlatformResourceKind::Agent,
+            &created.summary.slug,
+            agent_id,
+        )?;
 
         Ok(AgentMutationResult { agent: created })
     }
@@ -624,11 +737,16 @@ where
             .await?;
 
         let mut local_agent =
-            local_agent_from_document(existing.id, updated.clone(), existing.prompt_config.clone());
+            local_agent_from_document(updated.clone(), existing.prompt_config.clone());
         local_agent.heartbeat = existing.heartbeat.clone();
         self.local_store
             .upsert_resource(&ManifestResource::Agent(local_agent))
             .await?;
+        self.move_platform_object_id(
+            PlatformResourceKind::Agent,
+            &params.agent,
+            &updated.summary.slug,
+        )?;
 
         Ok(AgentMutationResult { agent: updated })
     }
@@ -652,11 +770,13 @@ where
         }
         let prompt_patch = agent.prompt_config.clone();
         let prompt_payload = serde_json::to_value(&prompt_patch)?;
+        let agent_object_id =
+            self.platform_object_id(PlatformResourceKind::Agent, &params.agent)?;
         let encrypted_payload = self
             .sensitive_payload_encoder
             .encode_payload(
                 self.local_manifest_org_id().await?,
-                agent.id,
+                agent_object_id,
                 SensitiveContentKind::AgentPrompt.encrypted_object_type(),
                 &prompt_payload,
             )
@@ -689,8 +809,9 @@ where
             .delete_agent_document(&params.agent)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Agent, existing.id)
+            .delete_resource(ManifestResourceKind::Agent, &existing.manifest_slug())
             .await?;
+        self.remove_platform_object_id(PlatformResourceKind::Agent, &existing.manifest_slug())?;
         Ok(DeleteResult { deleted: true })
     }
 }
@@ -758,7 +879,6 @@ where
             .create_ability_document(&params.data, Some(ability_id), encrypted_payload)
             .await?;
         let local_ability = AbilityManifest {
-            id: ability_id,
             name: created.summary.name.clone(),
             path: string_to_manifest_path(created.summary.path.clone()),
             description: created.summary.description.clone(),
@@ -774,6 +894,8 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
             .await?;
+        let created_slug = Slug::derive(&created.summary.name);
+        self.record_platform_object_id(PlatformResourceKind::Ability, &created_slug, ability_id)?;
         Ok(AbilityMutationResult { ability: created })
     }
 
@@ -795,7 +917,6 @@ where
             .update_ability_document(&params.ability, &params.data)
             .await?;
         let local_ability = AbilityManifest {
-            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: string_to_manifest_path(updated.summary.path.clone()),
             description: updated.summary.description.clone(),
@@ -811,6 +932,12 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
             .await?;
+        let updated_slug = Slug::derive(&updated.summary.name);
+        self.move_platform_object_id(
+            PlatformResourceKind::Ability,
+            &params.ability,
+            &updated_slug,
+        )?;
         Ok(AbilityMutationResult { ability: updated })
     }
 
@@ -826,7 +953,8 @@ where
             ));
         }
         let prompt_config = params.prompt_config;
-        let ability_id = existing.id;
+        let ability_object_id =
+            self.platform_object_id(PlatformResourceKind::Ability, &params.ability)?;
         let updated = self
             .platform_client
             .update_ability_prompt_document(
@@ -835,7 +963,7 @@ where
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        ability_id,
+                        ability_object_id,
                         SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
                         &serde_json::json!(prompt_config.clone()),
                     )
@@ -843,7 +971,6 @@ where
             )
             .await?;
         let local_ability = AbilityManifest {
-            id: existing.id,
             name: existing.name,
             path: existing.path,
             description: existing.description,
@@ -876,8 +1003,9 @@ where
             .delete_ability_document(&params.ability)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Ability, existing.id)
+            .delete_resource(ManifestResourceKind::Ability, &existing.manifest_slug())
             .await?;
+        self.remove_platform_object_id(PlatformResourceKind::Ability, &existing.manifest_slug())?;
         Ok(DeleteResult { deleted: true })
     }
 }
@@ -945,7 +1073,6 @@ where
             .create_domain_document(&params.data, Some(domain_id), encrypted_payload)
             .await?;
         let local_domain = DomainManifest {
-            id: domain_id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
             description: created.summary.description.clone(),
@@ -959,6 +1086,11 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Domain(local_domain))
             .await?;
+        self.record_platform_object_id(
+            PlatformResourceKind::Domain,
+            &created.summary.slug,
+            domain_id,
+        )?;
         Ok(DomainMutationResult { domain: created })
     }
 
@@ -978,7 +1110,6 @@ where
             .update_domain_document(&params.domain, &params.data)
             .await?;
         let local_domain = DomainManifest {
-            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
             description: updated.summary.description.clone(),
@@ -992,6 +1123,11 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Domain(local_domain))
             .await?;
+        self.move_platform_object_id(
+            PlatformResourceKind::Domain,
+            &params.domain,
+            &updated.summary.slug,
+        )?;
         Ok(DomainMutationResult { domain: updated })
     }
 
@@ -1011,6 +1147,8 @@ where
         {
             return Err(anyhow!("requested domain scopes exceed caller permissions"));
         }
+        let domain_object_id =
+            self.platform_object_id(PlatformResourceKind::Domain, &params.domain)?;
         let updated = self
             .platform_client
             .update_domain_manifest_document(
@@ -1019,7 +1157,7 @@ where
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        existing.id,
+                        domain_object_id,
                         SensitiveContentKind::DomainPrompt.encrypted_object_type(),
                         &serde_json::json!(params.prompt_config.clone()),
                     )
@@ -1027,7 +1165,6 @@ where
             )
             .await?;
         let local_domain = DomainManifest {
-            id: existing.id,
             name: existing.name.clone(),
             path: existing.path.clone(),
             description: existing.description.clone(),
@@ -1058,8 +1195,9 @@ where
             .delete_domain_document(&params.domain)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Domain, existing.id)
+            .delete_resource(ManifestResourceKind::Domain, &existing.manifest_slug())
             .await?;
+        self.remove_platform_object_id(PlatformResourceKind::Domain, &existing.manifest_slug())?;
         Ok(DeleteResult { deleted: true })
     }
 }
@@ -1095,7 +1233,6 @@ where
             .create_project_document(&params.data, Some(project_id))
             .await?;
         let local_project = ProjectManifest {
-            id: project_id,
             name: created.summary.name.clone(),
             slug: created.summary.slug.clone(),
             description: created.summary.description.clone(),
@@ -1131,7 +1268,6 @@ where
             .update_project_document(&params.project, &merged)
             .await?;
         let local_project = ProjectManifest {
-            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             slug: updated.summary.slug.clone(),
             description: updated.summary.description.clone(),
@@ -1149,7 +1285,7 @@ where
             .delete_project_document(&params.project)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Project, existing.id)
+            .delete_resource(ManifestResourceKind::Project, &existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1169,6 +1305,13 @@ where
             .platform_client
             .create_knowledge_pack(&params.data)
             .await?;
+        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack) {
+            tracing::warn!(
+                pack = %knowledge_pack.slug,
+                error = %error,
+                "Failed to cache created knowledge pack locally"
+            );
+        }
         Ok(KnowledgePackMutationResult { knowledge_pack })
     }
 
@@ -1180,6 +1323,13 @@ where
             .platform_client
             .update_knowledge_pack(&params.pack, &params.data)
             .await?;
+        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack) {
+            tracing::warn!(
+                pack = %knowledge_pack.slug,
+                error = %error,
+                "Failed to cache updated knowledge pack locally"
+            );
+        }
         Ok(KnowledgePackMutationResult { knowledge_pack })
     }
 
@@ -1204,6 +1354,16 @@ where
             .await?;
         self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.doc, &data.related)
             .await?;
+        if let Err(error) =
+            self.cache_knowledge_doc(&knowledge_doc, Some(&data.content), &data.related)
+        {
+            tracing::warn!(
+                pack = %data.pack,
+                doc = %knowledge_doc.doc,
+                error = %error,
+                "Failed to cache created knowledge document locally"
+            );
+        }
         Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
@@ -1253,6 +1413,19 @@ where
                 .await?;
         }
 
+        if let Some(related) = params.data.related.as_deref() {
+            if let Err(error) =
+                self.cache_knowledge_doc(&knowledge_doc, params.data.content.as_deref(), related)
+            {
+                tracing::warn!(
+                    pack = %params.pack,
+                    doc = %knowledge_doc.doc,
+                    error = %error,
+                    "Failed to cache updated knowledge document locally"
+                );
+            }
+        }
+
         Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
@@ -1294,7 +1467,7 @@ where
             .platform_client
             .create_routine_document(&params.data, Some(routine_id))
             .await?;
-        let local_routine = local_routine_from_document(routine_id, &created, None);
+        let local_routine = local_routine_from_document(&created);
         self.local_store
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
@@ -1307,12 +1480,12 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let existing = self.cached_routine(&params.slug).await?;
+        let _ = self.cached_routine(&params.slug).await?;
         let updated = self
             .platform_client
             .update_routine_document(&params.slug, &params.data)
             .await?;
-        let local_routine = local_routine_from_document(existing.id, &updated, Some(&existing));
+        let local_routine = local_routine_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
@@ -1325,7 +1498,7 @@ where
             .delete_routine_document(&params.slug)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Routine, existing.id)
+            .delete_resource(ManifestResourceKind::Routine, &existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1361,8 +1534,11 @@ where
             .create_model_document(&params.data)
             .await?;
         let local_model = ModelManifest {
-            id: Uuid::new_v4(),
             name: created.summary.name.clone(),
+            slug: nenjo::manifest::model_manifest_slug(
+                &created.summary.model_provider,
+                &created.summary.model,
+            ),
             description: created.summary.description.clone(),
             model: created.summary.model.clone(),
             model_provider: created.summary.model_provider.clone(),
@@ -1398,8 +1574,11 @@ where
             .update_model_document(&params.model, &merged)
             .await?;
         let local_model = ModelManifest {
-            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
+            slug: nenjo::manifest::model_manifest_slug(
+                &updated.summary.model_provider,
+                &updated.summary.model,
+            ),
             description: updated.summary.description.clone(),
             model: updated.summary.model.clone(),
             model_provider: updated.summary.model_provider.clone(),
@@ -1418,7 +1597,7 @@ where
             .delete_model_document(&params.model)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Model, existing.id)
+            .delete_resource(ManifestResourceKind::Model, &existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1468,7 +1647,7 @@ where
         };
         let mut created = self.platform_client.create_council_document(&body).await?;
         created.summary.leader_agent = leader_agent;
-        let local_council = local_council_from_document(Uuid::new_v4(), &created);
+        let local_council = local_council_from_document(&created);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1491,7 +1670,7 @@ where
             .update_council_document(&params.council, &merged)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(existing.id, &updated);
+        let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1513,7 +1692,7 @@ where
             .add_council_member_document(&params.council, &member)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(existing.id, &updated);
+        let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1533,7 +1712,7 @@ where
             .update_council_member_document(&params.council, &params.agent, &params.data)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(existing.id, &updated);
+        let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1550,7 +1729,7 @@ where
             .remove_council_member_document(&params.council, &params.agent)
             .await?;
         updated.summary.leader_agent = existing.leader_agent;
-        let local_council = local_council_from_document(existing.id, &updated);
+        let local_council = local_council_from_document(&updated);
         self.local_store
             .upsert_resource(&ManifestResource::Council(local_council))
             .await?;
@@ -1563,7 +1742,7 @@ where
             .delete_council_document(&params.council)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Council, existing.id)
+            .delete_resource(ManifestResourceKind::Council, &existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1625,7 +1804,6 @@ where
             .create_context_block_document(&params.data, Some(context_block_id), encrypted_payload)
             .await?;
         let local_context_block = ContextBlockManifest {
-            id: context_block_id,
             name: created.summary.name.clone(),
             path: created.summary.path.clone(),
             description: created.summary.description.clone(),
@@ -1634,6 +1812,13 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::ContextBlock(local_context_block))
             .await?;
+        let created_slug =
+            nenjo::manifest::context_block_slug(&created.summary.path, &created.summary.name);
+        self.record_platform_object_id(
+            PlatformResourceKind::ContextBlock,
+            &created_slug,
+            context_block_id,
+        )?;
         Ok(ContextBlockMutationResult {
             context_block: created,
         })
@@ -1649,7 +1834,6 @@ where
             .update_context_block_document(&params.context_block, &params.data)
             .await?;
         let local_context_block = ContextBlockManifest {
-            id: Uuid::new_v4(),
             name: updated.summary.name.clone(),
             path: updated.summary.path.clone(),
             description: updated.summary.description.clone(),
@@ -1658,6 +1842,13 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::ContextBlock(local_context_block))
             .await?;
+        let updated_slug =
+            nenjo::manifest::context_block_slug(&updated.summary.path, &updated.summary.name);
+        self.move_platform_object_id(
+            PlatformResourceKind::ContextBlock,
+            &params.context_block,
+            &updated_slug,
+        )?;
         Ok(ContextBlockMutationResult {
             context_block: updated,
         })
@@ -1669,6 +1860,8 @@ where
     ) -> Result<ContextBlockContentMutationResult> {
         let existing = self.cached_context_block(&params.context_block).await?;
         let template = params.template.unwrap_or_else(|| existing.template.clone());
+        let context_block_object_id =
+            self.platform_object_id(PlatformResourceKind::ContextBlock, &params.context_block)?;
         let updated = self
             .platform_client
             .update_context_block_content_document(
@@ -1677,7 +1870,7 @@ where
                 self.sensitive_payload_encoder
                     .encode_payload(
                         self.local_manifest_org_id().await?,
-                        existing.id,
+                        context_block_object_id,
                         SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
                         &serde_json::json!(template.clone()),
                     )
@@ -1685,7 +1878,6 @@ where
             )
             .await?;
         let local_context_block = ContextBlockManifest {
-            id: existing.id,
             name: existing.name.clone(),
             path: existing.path.clone(),
             description: existing.description.clone(),
@@ -1705,8 +1897,15 @@ where
             .delete_context_block_document(&params.context_block)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::ContextBlock, existing.id)
+            .delete_resource(
+                ManifestResourceKind::ContextBlock,
+                &existing.manifest_slug(),
+            )
             .await?;
+        self.remove_platform_object_id(
+            PlatformResourceKind::ContextBlock,
+            &existing.manifest_slug(),
+        )?;
         Ok(DeleteResult { deleted: true })
     }
 }
@@ -1750,7 +1949,6 @@ mod tests {
         let store = Arc::new(LocalManifestStore::new(manifests_dir));
         store
             .upsert_resource(&ManifestResource::Project(ProjectManifest {
-                id: project_id,
                 name: "Graph Eval".to_string(),
                 slug: Slug::derive(pack_slug),
                 description: None,

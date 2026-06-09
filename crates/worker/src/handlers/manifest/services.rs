@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::Slug;
 use nenjo_events::ResourceType;
+use nenjo_platform::PlatformResourceKind;
 use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
 use uuid::Uuid;
 
@@ -51,6 +52,16 @@ pub trait ManifestStore: Send + Sync {
         _resource: &Slug,
         _resource_id: Option<Uuid>,
         _payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist or remove platform-private resource id metadata for encrypted write paths.
+    async fn update_platform_resource_id(
+        &self,
+        _kind: PlatformResourceKind,
+        _resource: &Slug,
+        _resource_id: Option<Uuid>,
     ) -> Result<()> {
         Ok(())
     }
@@ -167,6 +178,17 @@ where
 
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest> {
         (**self).full_refresh(client).await
+    }
+
+    async fn update_platform_resource_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource: &Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        (**self)
+            .update_platform_resource_id(kind, resource, resource_id)
+            .await
     }
 
     async fn sync_document_metadata(

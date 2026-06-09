@@ -118,10 +118,9 @@ where
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
     let manifest = harness.provider().manifest_snapshot().clone();
-    let routine = manifest
-        .routines
-        .iter()
-        .find(|routine| routine.id == routine_id)?;
+    let routine = manifest.routines.iter().find(|routine| {
+        crate::resource_resolver::stable_resource_id("routine", &routine.slug) == routine_id
+    })?;
     let mut agent_names: BTreeSet<String> = BTreeSet::new();
 
     for step in &routine.steps {
@@ -337,7 +336,9 @@ where
             .manifest_snapshot()
             .routines
             .iter()
-            .find(|routine| routine.id == routine_id)
+            .find(|routine| {
+                crate::resource_resolver::stable_resource_id("routine", &routine.slug) == routine_id
+            })
             .map(|routine| routine.name.clone())
             .unwrap_or_else(|| routine_id.to_string());
 
@@ -404,7 +405,7 @@ where
                         Ok(mut handle) => {
                             let mut current_cycle_id: Option<Uuid> = None;
                             let mut current_cycle: Option<u32> = None;
-                            let mut current_agent_id: Option<Uuid> = None;
+                            let current_agent_id: Option<Uuid> = None;
                             let mut cycle_completed = false;
                             let mut schedule_cancelled = false;
 
@@ -413,10 +414,6 @@ where
                                     event = handle.recv() => {
                                         match event {
                                             Some(event) => {
-                                                if let nenjo::RoutineEvent::StepStarted { agent_id, .. } = &event {
-                                                    current_agent_id = *agent_id;
-                                                }
-
                                                 let mut response_execution_id =
                                                     current_cycle_id.unwrap_or(routine_id);
                                                 let response_event = match &event {
@@ -700,7 +697,9 @@ where
             .manifest_snapshot()
             .routines
             .iter()
-            .find(|routine| routine.id == routine_id)
+            .find(|routine| {
+                crate::resource_resolver::stable_resource_id("routine", &routine.slug) == routine_id
+            })
             .map(|routine| routine.name.clone())
             .unwrap_or_else(|| routine_id.to_string());
 

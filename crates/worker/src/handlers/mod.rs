@@ -474,6 +474,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
         Command::ManifestChanged {
             schema: _,
+            resource_id,
             resource_type,
             resource,
             action,
@@ -485,6 +486,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             .handle_manifest_changed(
                 &ctx.manifest_context(),
                 ManifestChangedCommand {
+                    resource_id,
                     resource_type,
                     resource: nenjo::Slug::parse(resource)?,
                     action,

@@ -3,7 +3,6 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::input::{RoutineRun, RoutineRunKind};
 use crate::manifest::RoutineManifest;
@@ -54,9 +53,9 @@ impl<P> RoutineRunner<P> {
         &self.routine.name
     }
 
-    /// The routine's ID.
-    pub fn id(&self) -> Uuid {
-        self.routine.id
+    /// The routine's slug.
+    pub fn slug(&self) -> &crate::Slug {
+        &self.routine.slug
     }
 
     /// The session binding applied to runs from this runner, if configured.
@@ -68,7 +67,7 @@ impl<P> RoutineRunner<P> {
 impl<P> std::fmt::Debug for RoutineRunner<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RoutineRunner")
-            .field("routine_id", &self.routine.id)
+            .field("routine_slug", &self.routine.slug)
             .field("routine_name", &self.routine.name)
             .finish()
     }

@@ -12,15 +12,11 @@ pub(super) fn apply_delete(
     resource_id: Option<Uuid>,
 ) {
     match rt {
-        ResourceType::Agent => manifest
-            .agents
-            .retain(|r| r.slug.clone().unwrap_or_else(|| Slug::derive(&r.name)) != *resource),
+        ResourceType::Agent => manifest.agents.retain(|r| r.slug != *resource),
         ResourceType::Model => manifest
             .models
             .retain(|r| Slug::derive(&r.name) != *resource),
-        ResourceType::Routine => manifest
-            .routines
-            .retain(|r| r.slug.clone().unwrap_or_else(|| Slug::derive(&r.name)) != *resource),
+        ResourceType::Routine => manifest.routines.retain(|r| r.slug != *resource),
         ResourceType::Project => manifest.projects.retain(|r| r.slug != *resource),
         ResourceType::Council => manifest
             .councils

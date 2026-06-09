@@ -59,7 +59,7 @@ async fn test_provider()
 async fn chat_test_provider()
 -> Provider<TestModelFactory, NoopToolFactory, nenjo::provider::builder::NoMemory> {
     let model = nenjo::manifest::ModelManifest {
-        id: Uuid::new_v4(),
+        slug: nenjo::manifest::model_manifest_slug("mock", "mock"),
         name: "mock".into(),
         description: None,
         model: "mock".into(),
@@ -68,9 +68,8 @@ async fn chat_test_provider()
         base_url: None,
     };
     let agent = nenjo::manifest::AgentManifest {
-        id: Uuid::new_v4(),
         name: "system".into(),
-        slug: None,
+        slug: nenjo::Slug::derive("system"),
         description: None,
         prompt_config: nenjo::manifest::PromptConfig::default(),
         color: None,

@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::Slug;
 use crate::manifest::DomainManifest;
 pub use crate::manifest::{
     AbilityPromptConfig, DomainManifest as DomainSessionManifest, DomainPromptConfig,
@@ -33,8 +34,8 @@ pub struct DelegationContext {
     pub current_depth: u32,
     /// Maximum allowed nesting depth for delegation.
     pub max_depth: u32,
-    /// Agent IDs already visited in this delegation chain.
-    pub ancestor_agent_ids: HashSet<Uuid>,
+    /// Agent slugs already visited in this delegation chain.
+    pub ancestor_agent_slugs: HashSet<Slug>,
 }
 
 impl DelegationContext {
@@ -43,28 +44,28 @@ impl DelegationContext {
         Self {
             current_depth: 0,
             max_depth,
-            ancestor_agent_ids: HashSet::new(),
+            ancestor_agent_slugs: HashSet::new(),
         }
     }
 
     /// Create a child context for a delegated agent. Returns `None` if max depth reached.
-    pub fn child(&self, parent_id: Uuid) -> Option<Self> {
+    pub fn child(&self, parent_slug: &Slug) -> Option<Self> {
         let next_depth = self.current_depth + 1;
         if next_depth >= self.max_depth {
             return None;
         }
-        let mut ancestors = self.ancestor_agent_ids.clone();
-        ancestors.insert(parent_id);
+        let mut ancestors = self.ancestor_agent_slugs.clone();
+        ancestors.insert(parent_slug.clone());
         Some(Self {
             current_depth: next_depth,
             max_depth: self.max_depth,
-            ancestor_agent_ids: ancestors,
+            ancestor_agent_slugs: ancestors,
         })
     }
 
     /// Check if delegating to the target would create a cycle.
-    pub fn would_cycle(&self, target_id: Uuid) -> bool {
-        self.ancestor_agent_ids.contains(&target_id)
+    pub fn would_cycle(&self, target_slug: &Slug) -> bool {
+        self.ancestor_agent_slugs.contains(target_slug)
     }
 }
 
@@ -73,8 +74,8 @@ impl DelegationContext {
 pub struct ActiveDomain {
     /// Unique ID for the active domain session.
     pub session_id: Uuid,
-    /// ID of the domain manifest being used for this session.
-    pub domain_id: Uuid,
+    /// Slug of the domain manifest being used for this session.
+    pub domain_slug: Slug,
     /// Human-readable domain name.
     pub domain_name: String,
     /// Domain manifest applied to the active session.
@@ -118,35 +119,35 @@ mod tests {
         let ctx = DelegationContext::new(3);
         assert_eq!(ctx.current_depth, 0);
         assert_eq!(ctx.max_depth, 3);
-        assert!(ctx.ancestor_agent_ids.is_empty());
+        assert!(ctx.ancestor_agent_slugs.is_empty());
     }
 
     #[test]
     fn delegation_context_child_increments_depth() {
         let ctx = DelegationContext::new(3);
-        let parent_id = Uuid::new_v4();
-        let child = ctx.child(parent_id).unwrap();
+        let parent_slug = crate::Slug::derive("parent");
+        let child = ctx.child(&parent_slug).unwrap();
         assert_eq!(child.current_depth, 1);
-        assert!(child.ancestor_agent_ids.contains(&parent_id));
+        assert!(child.ancestor_agent_slugs.contains(&parent_slug));
     }
 
     #[test]
     fn delegation_context_max_depth_blocks() {
         let ctx = DelegationContext::new(2);
-        let id1 = Uuid::new_v4();
-        let child = ctx.child(id1).unwrap();
+        let slug1 = crate::Slug::derive("agent_1");
+        let child = ctx.child(&slug1).unwrap();
         assert_eq!(child.current_depth, 1);
         // depth 1 + 1 = 2 >= max_depth 2, so child returns None
-        let id2 = Uuid::new_v4();
-        assert!(child.child(id2).is_none());
+        let slug2 = crate::Slug::derive("agent_2");
+        assert!(child.child(&slug2).is_none());
     }
 
     #[test]
     fn delegation_context_cycle_detection() {
         let ctx = DelegationContext::new(5);
-        let id1 = Uuid::new_v4();
-        let child = ctx.child(id1).unwrap();
-        assert!(child.would_cycle(id1));
-        assert!(!child.would_cycle(Uuid::new_v4()));
+        let slug1 = crate::Slug::derive("agent_1");
+        let child = ctx.child(&slug1).unwrap();
+        assert!(child.would_cycle(&slug1));
+        assert!(!child.would_cycle(&crate::Slug::derive("agent_2")));
     }
 }

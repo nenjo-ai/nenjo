@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::manifest::HasManifestSlug;
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, warn};
@@ -13,7 +14,9 @@ use crate::handlers::manifest::payload::{
 use crate::handlers::manifest::services::ManifestStore;
 use nenjo_platform::SensitiveContentKind;
 
-use super::plain::{ability_from_document, agent_from_document, apply_inline_upsert};
+use super::plain::{
+    ability_from_document, agent_from_document, apply_inline_upsert, upsert_by_slug,
+};
 
 fn decrypted_string_payload(value: &serde_json::Value) -> Option<String> {
     match value {
@@ -76,7 +79,7 @@ where
                 }
             };
 
-            let mut next_agent = if let Some(agent_payload) = decrypted.inline_payload {
+            let next_agent = if let Some(agent_payload) = decrypted.inline_payload {
                 let (agent_payload, canonical) = canonical_inline_payload_data(agent_payload);
                 match serde_json::from_value::<nenjo::manifest::AgentManifest>(
                     agent_payload.as_ref().clone(),
@@ -93,7 +96,7 @@ where
                         match serde_json::from_value::<AgentDocument>(
                             agent_payload.as_ref().clone(),
                         ) {
-                            Ok(agent) => agent_from_document(id, agent, prompt_config),
+                            Ok(agent) => agent_from_document(agent, prompt_config),
                             Err(error) => {
                                 warn!(%rt, %id, error = %error, "Failed to deserialize inline agent payload for prompt merge");
                                 return false;
@@ -101,21 +104,12 @@ where
                         }
                     }
                 }
-            } else if let Some(existing) = manifest.agents.iter().find(|agent| agent.id == id) {
-                let mut agent = existing.clone();
-                agent.prompt_config = prompt_config;
-                agent
             } else {
                 warn!(%rt, %id, "Encrypted prompt payload received without inline or cached agent state");
                 return false;
             };
-            next_agent.id = id;
 
-            if let Some(pos) = manifest.agents.iter().position(|agent| agent.id == id) {
-                manifest.agents[pos] = next_agent;
-            } else {
-                manifest.agents.push(next_agent);
-            }
+            upsert_by_slug(&mut manifest.agents, next_agent);
 
             true
         }
@@ -130,7 +124,7 @@ where
                 }
             };
 
-            let mut next_ability = if let Some(ability_payload) = decrypted.inline_payload {
+            let next_ability = if let Some(ability_payload) = decrypted.inline_payload {
                 let (ability_payload, canonical) = canonical_inline_payload_data(ability_payload);
                 match serde_json::from_value::<nenjo::manifest::AbilityManifest>(
                     ability_payload.as_ref().clone(),
@@ -146,34 +140,19 @@ where
                     Err(_) => match serde_json::from_value::<AbilityDocument>(
                         ability_payload.as_ref().clone(),
                     ) {
-                        Ok(ability) => ability_from_document(id, ability, prompt_config.clone()),
+                        Ok(ability) => ability_from_document(ability, prompt_config.clone()),
                         Err(error) => {
                             warn!(%rt, %id, error = %error, "Failed to deserialize inline ability payload for prompt merge");
                             return false;
                         }
                     },
                 }
-            } else if let Some(existing) =
-                manifest.abilities.iter().find(|ability| ability.id == id)
-            {
-                let mut ability = existing.clone();
-                ability.prompt_config = prompt_config.clone();
-                ability
             } else {
                 warn!(%rt, %id, "Encrypted ability prompt received without inline or cached ability state");
                 return false;
             };
-            next_ability.id = id;
 
-            if let Some(pos) = manifest
-                .abilities
-                .iter()
-                .position(|ability| ability.id == id)
-            {
-                manifest.abilities[pos] = next_ability;
-            } else {
-                manifest.abilities.push(next_ability);
-            }
+            upsert_by_slug(&mut manifest.abilities, next_ability);
 
             true
         }
@@ -205,13 +184,16 @@ where
                         domain_payload.as_ref().clone(),
                     ) {
                         Ok(domain) => {
+                            let slug = nenjo::manifest::domain_slug(
+                                &domain.summary.path,
+                                &domain.summary.name,
+                            );
                             let existing_manifest = manifest
                                 .domains
                                 .iter()
-                                .find(|domain_entry| domain_entry.id == id)
+                                .find(|domain_entry| domain_entry.manifest_slug() == slug)
                                 .cloned();
                             nenjo::manifest::DomainManifest {
-                                id,
                                 name: domain.summary.name,
                                 path: domain.summary.path,
                                 description: domain.summary.description,
@@ -241,20 +223,12 @@ where
                         }
                     },
                 }
-            } else if let Some(existing) = manifest.domains.iter().find(|domain| domain.id == id) {
-                let mut domain = existing.clone();
-                domain.prompt_config = prompt_config.clone();
-                domain
             } else {
                 warn!(%rt, %id, "Encrypted domain prompt received without inline or cached domain state");
                 return false;
             };
 
-            if let Some(pos) = manifest.domains.iter().position(|domain| domain.id == id) {
-                manifest.domains[pos] = next_domain;
-            } else {
-                manifest.domains.push(next_domain);
-            }
+            upsert_by_slug(&mut manifest.domains, next_domain);
 
             true
         }
@@ -284,7 +258,6 @@ where
                         block_payload.as_ref().clone(),
                     ) {
                         Ok(block) => nenjo::manifest::ContextBlockManifest {
-                            id,
                             name: block.summary.name,
                             path: block.summary.path,
                             description: block.summary.description,
@@ -296,26 +269,12 @@ where
                         }
                     },
                 }
-            } else if let Some(existing) =
-                manifest.context_blocks.iter().find(|block| block.id == id)
-            {
-                let mut block = existing.clone();
-                block.template = template;
-                block
             } else {
                 warn!(%rt, %id, "Encrypted context block content received without inline or cached context block state");
                 return false;
             };
 
-            if let Some(pos) = manifest
-                .context_blocks
-                .iter()
-                .position(|block| block.id == id)
-            {
-                manifest.context_blocks[pos] = next_block;
-            } else {
-                manifest.context_blocks.push(next_block);
-            }
+            upsert_by_slug(&mut manifest.context_blocks, next_block);
 
             true
         }
@@ -407,7 +366,7 @@ fn apply_decrypted_project_settings(
         return false;
     };
 
-    apply_inline_upsert(manifest, rt, id, &project_payload)
+    apply_inline_upsert(manifest, rt, &project_payload)
 }
 
 fn merge_project_settings_payload(
@@ -510,7 +469,7 @@ mod tests {
         );
 
         assert_eq!(manifest.abilities.len(), 1);
-        assert_eq!(manifest.abilities[0].id, id);
+        assert_eq!(manifest.abilities[0].name, "ability");
         assert_eq!(
             manifest.abilities[0].prompt_config.developer_prompt,
             "Use the decrypted prompt."

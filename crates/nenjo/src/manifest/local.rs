@@ -4,14 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tracing::warn;
-use uuid::Uuid;
 
 use super::store::{ManifestReader, ManifestWriter};
 use super::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    Manifest, ManifestLoader, ManifestResource, ManifestResourceKind, McpServerManifest,
-    ModelManifest, ProjectManifest, RoutineManifest,
+    HasManifestSlug, Manifest, ManifestLoader, ManifestResource, ManifestResourceKind,
+    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
 };
+use crate::Slug;
 
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,6 +49,55 @@ impl LocalManifestStore {
         walk_json_files(&dir, &mut items);
         items
     }
+
+    fn persist_resource_kind(&self, manifest: &Manifest, kind: ManifestResourceKind) -> Result<()> {
+        std::fs::create_dir_all(&self.root).with_context(|| {
+            format!(
+                "Failed to create manifest directory: {}",
+                self.root.display()
+            )
+        })?;
+
+        match kind {
+            ManifestResourceKind::Project => {
+                atomic_write_json(&self.root, "projects.json", &manifest.projects)
+            }
+            ManifestResourceKind::Routine => {
+                atomic_write_json(&self.root, "routines.json", &manifest.routines)
+            }
+            ManifestResourceKind::Model => {
+                atomic_write_json(&self.root, "models.json", &manifest.models)
+            }
+            ManifestResourceKind::Agent => {
+                atomic_write_json(&self.root, "agents.json", &manifest.agents)
+            }
+            ManifestResourceKind::Council => {
+                atomic_write_json(&self.root, "councils.json", &manifest.councils)
+            }
+            ManifestResourceKind::Domain => {
+                sync_tree(&self.root.join("domains"), &manifest.domains)
+            }
+            ManifestResourceKind::McpServer => {
+                atomic_write_json(&self.root, "mcp_servers.json", &manifest.mcp_servers)
+            }
+            ManifestResourceKind::Ability => {
+                sync_tree(&self.root.join("abilities"), &manifest.abilities)
+            }
+            ManifestResourceKind::ContextBlock => {
+                sync_tree(&self.root.join("context_blocks"), &manifest.context_blocks)
+            }
+            ManifestResourceKind::Skill => Ok(()),
+            ManifestResourceKind::Command => {
+                atomic_write_json(&self.root, "commands.json", &manifest.commands)
+            }
+            ManifestResourceKind::Hook => {
+                atomic_write_json(&self.root, "hooks.json", &manifest.hooks)
+            }
+            ManifestResourceKind::ScriptTool => {
+                atomic_write_json(&self.root, "script_tools.json", &manifest.script_tools)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -75,48 +124,48 @@ impl ManifestReader for LocalManifestStore {
         Ok(self.load_manifest().await?.agents)
     }
 
-    async fn get_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
+    async fn get_agent(&self, slug: &Slug) -> Result<Option<AgentManifest>> {
         Ok(self
             .list_agents()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelManifest>> {
         Ok(self.load_manifest().await?.models)
     }
 
-    async fn get_model(&self, id: Uuid) -> Result<Option<ModelManifest>> {
+    async fn get_model(&self, slug: &Slug) -> Result<Option<ModelManifest>> {
         Ok(self
             .list_models()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_routines(&self) -> Result<Vec<RoutineManifest>> {
         Ok(self.load_manifest().await?.routines)
     }
 
-    async fn get_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
+    async fn get_routine(&self, slug: &Slug) -> Result<Option<RoutineManifest>> {
         Ok(self
             .list_routines()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_projects(&self) -> Result<Vec<ProjectManifest>> {
         Ok(self.load_manifest().await?.projects)
     }
 
-    async fn get_project(&self, id: Uuid) -> Result<Option<ProjectManifest>> {
+    async fn get_project(&self, slug: &Slug) -> Result<Option<ProjectManifest>> {
         Ok(self
             .list_projects()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectManifest>> {
@@ -131,60 +180,60 @@ impl ManifestReader for LocalManifestStore {
         Ok(self.load_manifest().await?.councils)
     }
 
-    async fn get_council(&self, id: Uuid) -> Result<Option<CouncilManifest>> {
+    async fn get_council(&self, slug: &Slug) -> Result<Option<CouncilManifest>> {
         Ok(self
             .list_councils()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_domains(&self) -> Result<Vec<DomainManifest>> {
         Ok(self.load_manifest().await?.domains)
     }
 
-    async fn get_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
+    async fn get_domain(&self, slug: &Slug) -> Result<Option<DomainManifest>> {
         Ok(self
             .list_domains()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServerManifest>> {
         Ok(self.load_manifest().await?.mcp_servers)
     }
 
-    async fn get_mcp_server(&self, id: Uuid) -> Result<Option<McpServerManifest>> {
+    async fn get_mcp_server(&self, slug: &Slug) -> Result<Option<McpServerManifest>> {
         Ok(self
             .list_mcp_servers()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_abilities(&self) -> Result<Vec<AbilityManifest>> {
         Ok(self.load_manifest().await?.abilities)
     }
 
-    async fn get_ability(&self, id: Uuid) -> Result<Option<AbilityManifest>> {
+    async fn get_ability(&self, slug: &Slug) -> Result<Option<AbilityManifest>> {
         Ok(self
             .list_abilities()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 
     async fn list_context_blocks(&self) -> Result<Vec<ContextBlockManifest>> {
         Ok(self.load_manifest().await?.context_blocks)
     }
 
-    async fn get_context_block(&self, id: Uuid) -> Result<Option<ContextBlockManifest>> {
+    async fn get_context_block(&self, slug: &Slug) -> Result<Option<ContextBlockManifest>> {
         Ok(self
             .list_context_blocks()
             .await?
             .into_iter()
-            .find(|item| item.id == id))
+            .find(|item| item.manifest_slug() == *slug))
     }
 }
 
@@ -215,15 +264,16 @@ impl ManifestWriter for LocalManifestStore {
 
     async fn upsert_resource(&self, resource: &ManifestResource) -> Result<ManifestResource> {
         let mut manifest = self.load_manifest().await?;
+        let kind = resource.kind();
         manifest.upsert_resource(resource.clone());
-        self.replace_manifest(&manifest).await?;
+        self.persist_resource_kind(&manifest, kind)?;
         Ok(resource.clone())
     }
 
-    async fn delete_resource(&self, kind: ManifestResourceKind, id: Uuid) -> Result<()> {
+    async fn delete_resource(&self, kind: ManifestResourceKind, slug: &Slug) -> Result<()> {
         let mut manifest = self.load_manifest().await?;
-        manifest.delete_resource(kind, id);
-        self.replace_manifest(&manifest).await
+        manifest.delete_resource(kind, slug);
+        self.persist_resource_kind(&manifest, kind)
     }
 }
 
@@ -395,8 +445,8 @@ mod tests {
 
     fn sample_manifest() -> Manifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
             name: "test-model".into(),
+            slug: Slug::derive("test-model"),
             description: None,
             model: "gpt-4o".into(),
             model_provider: "openai".into(),
@@ -405,9 +455,8 @@ mod tests {
         };
 
         let agent = AgentManifest {
-            id: Uuid::new_v4(),
             name: "coder".into(),
-            slug: None,
+            slug: Slug::derive("agent"),
             description: None,
             prompt_config: PromptConfig::default(),
             color: Some("blue".into()),
@@ -425,7 +474,6 @@ mod tests {
         };
 
         let ability = AbilityManifest {
-            id: Uuid::new_v4(),
             name: "research".into(),
             path: Some("team/core".into()),
             description: None,
@@ -471,8 +519,8 @@ mod tests {
         store.replace_manifest(&manifest).await.unwrap();
 
         let mut agent = manifest.agents[0].clone();
-        agent.id = Uuid::new_v4();
         agent.name = "reviewer".into();
+        agent.slug = Slug::derive("reviewer");
         store
             .upsert_resource(&ManifestResource::Agent(agent.clone()))
             .await
@@ -483,7 +531,6 @@ mod tests {
         assert!(loaded.agents.iter().any(|item| item.name == "reviewer"));
 
         let mut replacement = agent.clone();
-        replacement.id = Uuid::new_v4();
         replacement.description = Some("Updated reviewer".into());
         store
             .upsert_resource(&ManifestResource::Agent(replacement.clone()))
@@ -496,14 +543,14 @@ mod tests {
             loaded
                 .agents
                 .iter()
-                .any(|item| item.id == replacement.id && item.name == "reviewer")
+                .any(|item| item.slug == replacement.slug && item.name == "reviewer")
         );
 
         store
-            .delete_resource(ManifestResourceKind::Agent, replacement.id)
+            .delete_resource(ManifestResourceKind::Agent, &replacement.slug)
             .await
             .unwrap();
 
-        assert!(store.get_agent(replacement.id).await.unwrap().is_none());
+        assert!(store.get_agent(&replacement.slug).await.unwrap().is_none());
     }
 }

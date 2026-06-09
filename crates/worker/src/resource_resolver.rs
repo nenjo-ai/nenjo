@@ -15,8 +15,8 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .agents
             .iter()
-            .find(|agent| agent.id == id)
-            .map(|agent| Slug::derive(&agent.name))
+            .find(|agent| stable_resource_id("agent", &agent.slug) == id)
+            .map(|agent| agent.slug.clone())
             .ok_or_else(|| anyhow!("agent not found: {id}"))
     }
 
@@ -24,8 +24,8 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .agents
             .iter()
-            .find(|agent| Slug::derive(&agent.name) == *slug)
-            .map(|agent| agent.id)
+            .any(|agent| agent.slug == *slug)
+            .then(|| stable_resource_id("agent", slug))
             .ok_or_else(|| anyhow!("agent not found: {slug}"))
     }
 
@@ -33,8 +33,8 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .routines
             .iter()
-            .find(|routine| routine.id == id)
-            .map(|routine| Slug::derive(&routine.name))
+            .find(|routine| stable_resource_id("routine", &routine.slug) == id)
+            .map(|routine| routine.slug.clone())
             .ok_or_else(|| anyhow!("routine not found: {id}"))
     }
 
@@ -42,8 +42,8 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .routines
             .iter()
-            .find(|routine| Slug::derive(&routine.name) == *slug)
-            .map(|routine| routine.id)
+            .any(|routine| routine.slug == *slug)
+            .then(|| stable_resource_id("routine", slug))
             .ok_or_else(|| anyhow!("routine not found: {slug}"))
     }
 
@@ -54,7 +54,7 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .projects
             .iter()
-            .find(|project| project.id == id)
+            .find(|project| stable_resource_id("project", &project.slug) == id)
             .map(|project| Some(project.slug.clone()))
             .ok_or_else(|| anyhow!("project not found: {id}"))
     }
@@ -63,8 +63,15 @@ impl<'a> PlatformResourceResolver<'a> {
         self.manifest
             .projects
             .iter()
-            .find(|project| project.slug == *slug)
-            .map(|project| project.id)
+            .any(|project| project.slug == *slug)
+            .then(|| stable_resource_id("project", slug))
             .ok_or_else(|| anyhow!("project not found: {slug}"))
     }
+}
+
+pub fn stable_resource_id(kind: &str, slug: &Slug) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("nenjo://resource/{kind}/{}", slug.as_str()).as_bytes(),
+    )
 }
