@@ -30,7 +30,7 @@ use crate::library_knowledge::{
     upsert_library_knowledge_entry, write_library_document_content,
     write_library_knowledge_manifest,
 };
-use crate::manifest_contract::SensitiveContentKind;
+use crate::manifest_kinds::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;

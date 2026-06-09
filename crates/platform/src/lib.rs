@@ -16,12 +16,14 @@ pub mod backend;
 /// Thin HTTP client for the platform manifest API.
 pub mod client;
 mod knowledge_backend;
-/// Canonical wire types and conversions for library knowledge documents.
+/// Back-compat re-export shim for knowledge wire types.
 pub mod knowledge_contract;
 pub mod library_knowledge;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
 /// Shared manifest resource and encrypted-content classification.
+pub mod manifest_kinds;
+/// Canonical wire record types for manifest resources.
 pub mod manifest_contract;
 /// Manifest MCP contract types, params, results, and dispatch helpers.
 pub mod manifest_mcp;
@@ -42,12 +44,15 @@ pub mod types;
 pub use api_client::{ApiClient, ApiClientError, NoopPayloadCodec, PayloadCodec};
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
-pub use knowledge_contract::{
-    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, ParsedKnowledgeDocument,
-    parse_document_payload, wrap_document_record,
-};
+
 pub use local::LocalManifestMcpBackend;
-pub use manifest_contract::{ContentScope, ManifestKind, SensitiveContentKind};
+pub use manifest_kinds::{ContentScope, ManifestKind, SensitiveContentKind};
+pub use manifest_contract::{
+    ContextBlockContentRecord, ContextBlockRecord, KnowledgeDocumentEdgeRecord,
+    KnowledgeDocumentRecord, ParsedKnowledgeDocument, PlatformRecord, parse_doc_edge_type,
+    parse_doc_kind, parse_document_payload, parse_resource_payload, to_agent_manifest,
+    wrap_document_record, wrap_resource_record,
+};
 pub use manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityCreateDocument, AbilityCreateParams,
     AbilityDeleteParams, AbilityDocument, AbilityGetResult, AbilityManifestBackend,
