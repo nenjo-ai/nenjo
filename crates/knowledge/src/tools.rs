@@ -399,8 +399,8 @@ pub struct KnowledgeFilterArgs {
 pub struct KnowledgeDocMetadataResult {
     /// Canonical pack selector to pass as the `pack` argument to knowledge tools.
     pub pack: String,
-    /// Stable document identifier within the pack.
-    pub id: String,
+    /// Stable document slug to pass as `slug` to update/delete library document tools.
+    pub slug: String,
     /// Agent-visible selector used for lookup and traversal.
     pub selector: String,
     /// Human-readable title.
@@ -485,7 +485,7 @@ pub fn knowledge_document_metadata(
 ) -> KnowledgeDocMetadataResult {
     KnowledgeDocMetadataResult {
         pack: pack.into(),
-        id: doc.id.clone(),
+        slug: doc.id.clone(),
         selector: doc.selector.clone(),
         title: doc.title.clone(),
         summary: doc.summary.clone(),
@@ -850,13 +850,13 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_knowledge_doc".into(),
-            description: "Read one full document body from a knowledge pack by path.".into(),
+            description: "Read one full document body from a knowledge pack by path, selector, or document slug. The returned document.slug is the stable slug to use with update_knowledge_doc, delete_knowledge_doc, or related.target_doc.".into(),
             parameters: knowledge_lookup_schema(),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "search_knowledge".into(),
-            description: "Search a knowledge pack and return candidate document metadata without loading document bodies.".into(),
+            description: "Search a knowledge pack and return candidate document metadata without loading document bodies. Each result includes document.slug, the stable slug to use with update_knowledge_doc, delete_knowledge_doc, or related.target_doc.".into(),
             parameters: knowledge_filter_schema(
                 Some(json!({
                     "query": {
@@ -1215,6 +1215,9 @@ mod tests {
         let value = serde_json::to_value(result).unwrap();
 
         assert_eq!(value["document"]["selector"], "library://test/root.md");
+        assert_eq!(value["document"]["slug"], "root");
+        assert!(value["document"].get("id").is_none());
+        assert!(value["document"].get("doc").is_none());
         assert_eq!(value["document"]["related"][0]["type"], "depends_on");
         assert_eq!(
             value["document"]["related"][0]["target"],
@@ -1226,6 +1229,7 @@ mod tests {
             value["edges"][0]["target"]["selector"],
             "library://test/leaf.md"
         );
+        assert_eq!(value["edges"][0]["target"]["slug"], "leaf");
         assert_eq!(value["edges"][0]["target"]["kind"], "routing_guide");
         assert!(value["edges"][0]["target"].get("source_path").is_none());
         assert!(value["edges"][0].get("note").is_none());
@@ -1243,6 +1247,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(value[0]["document"]["selector"], "library://test/leaf.md");
+        assert_eq!(value[0]["document"]["slug"], "leaf");
+        assert!(value[0]["document"].get("id").is_none());
+        assert!(value[0]["document"].get("doc").is_none());
         assert_eq!(value[0]["document"]["related"][0]["type"], "references");
         assert_eq!(
             value[0]["document"]["related"][0]["target"],
@@ -1276,6 +1283,9 @@ mod tests {
 
         assert_eq!(value["document"]["pack"], "lib:test");
         assert_eq!(value["document"]["selector"], "library://test/leaf.md");
+        assert_eq!(value["document"]["slug"], "leaf");
+        assert!(value["document"].get("id").is_none());
+        assert!(value["document"].get("doc").is_none());
         assert_eq!(
             value["document"]["related"][0]["target"],
             "library://test/root.md"

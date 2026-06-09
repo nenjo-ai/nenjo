@@ -40,30 +40,9 @@ fn default_knowledge_pack_source_type() -> String {
     "uploaded".to_string()
 }
 
-/// Metadata for a workspace knowledge document, used during knowledge sync.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocSyncMeta {
-    #[serde(default)]
-    pub id: Option<Uuid>,
-    #[serde(default)]
-    pub pack_id: Option<Uuid>,
-    #[serde(default)]
-    pub pack_slug: String,
-    pub slug: String,
-    pub filename: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub content_type: String,
-    pub updated_at: String,
-}
+pub use crate::knowledge_contract::{
+    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, ParsedKnowledgeDocument,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocSyncContent {
@@ -76,27 +55,7 @@ pub struct KnowledgeDocSyncContent {
     pub encrypted_payload: Option<EncryptedPayload>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocSyncEdge {
-    pub id: Uuid,
-    #[serde(default)]
-    pub pack_id: Option<Uuid>,
-    pub source_doc: Slug,
-    #[serde(default)]
-    pub source_item_id: Option<Uuid>,
-    pub target_doc: Slug,
-    #[serde(default)]
-    pub target_item_id: Option<Uuid>,
-    pub edge_type: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-pub type DocumentSyncMeta = KnowledgeDocSyncMeta;
 pub type DocumentSyncContent = KnowledgeDocSyncContent;
-pub type DocumentSyncEdge = KnowledgeDocSyncEdge;
 
 // ---------------------------------------------------------------------------
 // Project detail response (from GET /projects/{id}) -> conversion to Manifest

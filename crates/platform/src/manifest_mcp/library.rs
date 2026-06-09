@@ -1,17 +1,17 @@
 use nenjo::{ToolCategory, ToolSpec};
 use serde_json::json;
 
-fn doc_id_schema() -> serde_json::Value {
+fn doc_slug_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "The stable slug of the target library knowledge document."
+        "description": "The stable slug of the target library knowledge document. Use knowledge_doc.slug returned by create_knowledge_doc or document.slug returned by read/search metadata."
     })
 }
 
 fn pack_id_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "The stable slug of the org-level knowledge pack."
+        "description": "The stable slug of the org-level library knowledge pack, such as user-rust-skills. Do not use selector syntax such as lib:user-rust-skills."
     })
 }
 
@@ -52,18 +52,17 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_knowledge_doc".to_string(),
-            description: "Create a new org-level library knowledge document with optional metadata and outbound graph relationships. Use list_knowledge_packs to choose pack first.".to_string(),
+            description: "Create a new org-level library knowledge document. Provide filename and optional folder path; the platform derives the document slug from path plus filename and returns it as knowledge_doc.slug. If creating multiple related documents, create them first, collect each returned knowledge_doc.slug, then call update_knowledge_doc to assign related edges.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pack", "filename", "content"],
                 "properties": {
                     "pack": pack_id_schema(),
-                    "filename": { "type": "string", "description": "Filename to store under the library pack's docs directory." },
+                    "filename": { "type": "string", "description": "Filesystem-safe filename used for storage, such as ownership-lifetimes.md." },
                     "content": { "type": "string", "description": "Full text content for the new library knowledge document." },
-                    "doc": { "type": ["string", "null"], "description": "Optional stable document slug. Omit to derive one from the title or filename." },
                     "content_type": { "type": ["string", "null"], "description": "Optional MIME type such as text/markdown or application/json." },
-                    "path": { "type": ["string", "null"], "description": "Optional library-relative folder path." },
-                    "title": { "type": ["string", "null"], "description": "Optional display title." },
+                    "path": { "type": ["string", "null"], "description": "Optional library-relative folder path, such as rust/ownership. This is a folder only; do not include the filename." },
+                    "title": { "type": ["string", "null"], "description": "Optional human-readable display title, such as Ownership & Lifetimes." },
                     "kind": { "type": ["string", "null"], "description": "Optional open-ended document kind, such as guide, playbook, policy, or note." },
                     "summary": { "type": ["string", "null"], "description": "Optional concise summary for retrieval." },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional retrieval tags." },
@@ -75,13 +74,13 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "delete_knowledge_doc".to_string(),
-            description: "Delete an existing library knowledge document when you want it removed entirely.".to_string(),
+            description: "Delete an existing library knowledge document. Requires slug, the document slug returned by create_knowledge_doc or discovered from read/search metadata.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["pack", "doc"],
+                "required": ["pack", "slug"],
                 "properties": {
                     "pack": pack_id_schema(),
-                    "doc": doc_id_schema()
+                    "slug": doc_slug_schema()
                 },
                 "additionalProperties": false
             }),
@@ -89,13 +88,13 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_knowledge_doc".to_string(),
-            description: "Update an existing library knowledge document's content, metadata, and optionally replace its outbound graph relationships.".to_string(),
+            description: "Update an existing library knowledge document. Requires slug, the document slug returned by create_knowledge_doc or discovered from read/search metadata. Providing related replaces the document's full outbound relationship list; use this after creating documents and collecting their returned slugs.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["pack", "doc"],
+                "required": ["pack", "slug"],
                 "properties": {
                     "pack": pack_id_schema(),
-                    "doc": doc_id_schema(),
+                    "slug": doc_slug_schema(),
                     "content": { "type": ["string", "null"], "description": "Optional full replacement text content." },
                     "filename": { "type": ["string", "null"], "description": "Optional replacement filename." },
                     "path": { "type": ["string", "null"], "description": "Optional replacement library-relative folder path. Use null to clear." },
@@ -115,12 +114,12 @@ pub fn library_tools() -> Vec<ToolSpec> {
 fn related_schema() -> serde_json::Value {
     json!({
         "type": "array",
-        "description": "Optional full outbound relationship list. On update, providing this replaces existing outbound edges for the document.",
+        "description": "Optional full outbound relationship list. On update, providing this replaces existing outbound edges for the document. Each target_doc must be a document slug returned by create_knowledge_doc or found as document.slug via read/search metadata; create all target documents before assigning relations.",
         "items": {
             "type": "object",
             "required": ["target_doc", "type"],
             "properties": {
-                "target_doc": doc_id_schema(),
+                "target_doc": doc_slug_schema(),
                 "type": {
                     "type": "string",
                     "description": "Relationship type such as references, depends_on, defines, part_of, extends, or related_to."

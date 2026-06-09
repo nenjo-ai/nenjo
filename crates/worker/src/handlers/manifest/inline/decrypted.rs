@@ -282,7 +282,7 @@ where
             let metadata = match decrypted
                 .inline_payload
                 .and_then(nenjo_events::ManifestResourcePayload::<
-                    nenjo_events::KnowledgeDocumentResource,
+                    nenjo_platform::knowledge_contract::KnowledgeDocumentRecord,
                 >::parse)
             {
                 Some(payload) => payload.data,

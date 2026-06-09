@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::api_client::{ApiClient, DocumentSyncEdge, DocumentSyncMeta};
+use crate::api_client::{ApiClient, KnowledgeDocumentRecord};
+
 use crate::handlers::manifest::knowledge::DocumentEdgesSource;
 use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
@@ -26,7 +27,7 @@ use nenjo_platform::library_knowledge::{
 pub fn remove_manifest_document_from_pack_dir(
     pack_dir: &Path,
     doc: &nenjo::Slug,
-    metadata: Option<&DocumentSyncMeta>,
+    metadata: Option<&KnowledgeDocumentRecord>,
 ) -> Result<()> {
     let existing = library_knowledge_doc_relative_path(pack_dir, doc)
         .or_else(|| metadata.map(library_doc_relative_path));
@@ -47,7 +48,7 @@ pub fn remove_manifest_document_from_pack_dir(
 #[derive(Debug)]
 pub struct SyncDiff {
     /// Library items to download (new or updated).
-    pub to_download: Vec<DocumentSyncMeta>,
+    pub to_download: Vec<KnowledgeDocumentRecord>,
     /// Local files to rename when only the filename changed.
     pub to_rename: Vec<FileRename>,
     /// Local library document files to delete (no longer present remotely).
@@ -77,7 +78,7 @@ fn knowledge_doc_slug(doc: &KnowledgeDocManifest) -> Option<nenjo::Slug> {
 /// A library document is considered changed if its `updated_at` timestamp differs.
 pub fn compute_diff(
     manifest: Option<&LibraryKnowledgePackManifest>,
-    remote: &[DocumentSyncMeta],
+    remote: &[KnowledgeDocumentRecord],
 ) -> SyncDiff {
     let local_map: HashMap<nenjo::Slug, &KnowledgeDocManifest> = manifest
         .map(|m| {
@@ -93,12 +94,12 @@ pub fn compute_diff(
         .map(|doc| nenjo::Slug::derive(&doc.slug))
         .collect();
 
-    let to_download: Vec<DocumentSyncMeta> = remote
+    let to_download: Vec<KnowledgeDocumentRecord> = remote
         .iter()
         .filter(|doc| {
             let slug = nenjo::Slug::derive(&doc.slug);
             match local_map.get(&slug) {
-                Some(entry) => entry.updated_at != doc.updated_at,
+                Some(entry) => entry.updated_at != doc.updated_at_rfc3339(),
                 None => true, // new library document
             }
         })
@@ -113,7 +114,7 @@ pub fn compute_diff(
                 .get(&slug)
                 .filter(|entry| {
                     knowledge_doc_relative_path(entry) != library_doc_relative_path(doc)
-                        && entry.updated_at != doc.updated_at
+                        && entry.updated_at != doc.updated_at_rfc3339()
                 })
                 .map(|_| slug)
         })
@@ -263,24 +264,6 @@ pub async fn sync_pack(
         }
     };
 
-    let mut edges_by_doc: HashMap<nenjo::Slug, Vec<DocumentSyncEdge>> = HashMap::new();
-    for doc in &remote_docs {
-        match api.list_knowledge_doc_edges(pack_slug, &doc.slug).await {
-            Ok(edges) => {
-                edges_by_doc.insert(nenjo::Slug::derive(&doc.slug), edges);
-            }
-            Err(e) => {
-                warn!(
-                    pack_slug = %pack_slug,
-                    doc = %doc.slug,
-                    error = %e,
-                    "Failed to list knowledge document edges — continuing with empty edge set"
-                );
-                edges_by_doc.insert(nenjo::Slug::derive(&doc.slug), Vec::new());
-            }
-        }
-    }
-
     let manifest = load_library_knowledge_manifest(pack_dir);
     let diff = compute_diff(manifest.as_ref(), &remote_docs);
 
@@ -359,7 +342,7 @@ pub async fn sync_pack(
         .collect::<Vec<_>>();
     write_library_knowledge_manifest(
         pack_dir,
-        &build_library_knowledge_manifest(pack_slug, &synced_docs, &edges_by_doc),
+        &build_library_knowledge_manifest(pack_slug, &synced_docs),
     )?;
     info!(
         pack_slug = %pack_slug,
@@ -478,14 +461,14 @@ pub async fn sync_document(
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
     state_dir: &Path,
-    metadata: Option<&DocumentSyncMeta>,
+    metadata: Option<&KnowledgeDocumentRecord>,
 ) -> Result<()> {
     let pack_slug = pack_dir
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("default")
         .to_string();
-    let resolved_meta = if let Some(metadata) = metadata.cloned() {
+    let mut resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
         api.list_knowledge_docs(&pack_slug)
@@ -507,12 +490,14 @@ pub async fn sync_document(
         &content,
     )?;
 
-    let edges = api
-        .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
-        .await
-        .unwrap_or_default();
+    if resolved_meta.edges.is_empty() {
+        resolved_meta.edges = api
+            .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
+            .await
+            .unwrap_or_default();
+    }
 
-    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta, &edges)?;
+    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta)?;
     Ok(())
 }
 
@@ -520,7 +505,7 @@ pub async fn sync_document_metadata(
     api: &ApiClient,
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
-    metadata: Option<&DocumentSyncMeta>,
+    metadata: Option<&KnowledgeDocumentRecord>,
     edges: Option<DocumentEdgesSource<'_>>,
 ) -> Result<()> {
     let pack_slug = pack_dir
@@ -528,7 +513,7 @@ pub async fn sync_document_metadata(
         .and_then(|name| name.to_str())
         .unwrap_or("default")
         .to_string();
-    let resolved_meta = if let Some(metadata) = metadata.cloned() {
+    let mut resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
         api.list_knowledge_docs(&pack_slug)
@@ -540,12 +525,17 @@ pub async fn sync_document_metadata(
             })?
     };
 
-    let edges = match edges {
+    resolved_meta.edges = match edges {
         Some(DocumentEdgesSource::Inline(edges)) => edges.to_vec(),
-        Some(DocumentEdgesSource::FetchFromApi) | None => api
-            .list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
-            .await
-            .unwrap_or_default(),
+        Some(DocumentEdgesSource::FetchFromApi) | None => {
+            if !resolved_meta.edges.is_empty() {
+                resolved_meta.edges.clone()
+            } else {
+                api.list_knowledge_doc_edges(&pack_slug, &resolved_meta.slug)
+                    .await
+                    .unwrap_or_default()
+            }
+        }
     };
 
     if let Some(existing) = library_knowledge_doc_relative_path(pack_dir, doc_slug) {
@@ -556,7 +546,7 @@ pub async fn sync_document_metadata(
         )?;
     }
 
-    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta, &edges)?;
+    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta)?;
     Ok(())
 }
 
@@ -594,10 +584,18 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    fn meta(id: u128, filename: &str, updated: &str) -> DocumentSyncMeta {
-        DocumentSyncMeta {
-            id: Some(Uuid::from_u128(id)),
-            pack_id: Some(Uuid::from_u128(7)),
+    fn meta(id: u128, filename: &str, updated: &str) -> KnowledgeDocumentRecord {
+        let updated_at = chrono::DateTime::parse_from_rfc3339(updated)
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .or_else(|_| {
+                chrono::NaiveDate::parse_from_str(updated, "%Y-%m-%d")
+                    .map(|date| date.and_hms_opt(0, 0, 0).unwrap().and_utc())
+            })
+            .unwrap_or_else(|_| chrono::Utc::now());
+        KnowledgeDocumentRecord {
+            id: Uuid::from_u128(id),
+            org_id: Uuid::from_u128(8),
+            pack_id: Uuid::from_u128(7),
             pack_slug: "test".into(),
             slug: format!("doc_{id}"),
             filename: filename.into(),
@@ -607,12 +605,14 @@ mod tests {
             summary: None,
             tags: Vec::new(),
             content_type: "text/markdown".into(),
-            updated_at: updated.into(),
+            created_at: updated_at,
+            updated_at,
+            edges: Vec::new(),
         }
     }
 
-    fn manifest(docs: Vec<DocumentSyncMeta>) -> LibraryKnowledgePackManifest {
-        build_library_knowledge_manifest("test", &docs, &Default::default())
+    fn manifest(docs: Vec<KnowledgeDocumentRecord>) -> LibraryKnowledgePackManifest {
+        build_library_knowledge_manifest("test", &docs)
     }
 
     #[test]
@@ -749,7 +749,7 @@ mod tests {
         doc.title = Some("Random".into());
         doc.summary = Some("Just a test document".into());
 
-        let manifest = build_library_knowledge_manifest("test", &[doc], &Default::default());
+        let manifest = build_library_knowledge_manifest("test", &[doc]);
 
         assert_eq!(manifest.docs.len(), 1);
         assert_eq!(manifest.docs[0].summary, "Just a test document");
@@ -762,20 +762,21 @@ mod tests {
     #[test]
     fn library_doc_metadata_persists_to_knowledge_manifest() {
         let dir = tempdir().unwrap();
-        let mut doc = meta(1, "random.md", "2026-02-22");
+        let updated = "2026-02-22T00:00:00Z";
+        let mut doc = meta(1, "random.md", updated);
         doc.path = Some("domain".into());
         doc.title = Some("Random".into());
         doc.kind = Some("guide".into());
         doc.summary = Some("Just a test document".into());
         doc.tags = vec!["library".into()];
 
-        upsert_library_knowledge_entry(dir.path(), "test", &doc, &[]).unwrap();
+        upsert_library_knowledge_entry(dir.path(), "test", &doc).unwrap();
 
         let knowledge = load_library_knowledge_manifest(dir.path()).unwrap();
         assert_eq!(knowledge.docs.len(), 1);
         assert_eq!(knowledge.docs[0].title, "Random");
         assert_eq!(knowledge.docs[0].summary, "Just a test document");
-        assert_eq!(knowledge.docs[0].updated_at, "2026-02-22");
+        assert_eq!(knowledge.docs[0].updated_at, doc.updated_at_rfc3339());
     }
 
     #[test]

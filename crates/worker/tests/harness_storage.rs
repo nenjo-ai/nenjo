@@ -13,7 +13,7 @@ use serde_json::json;
 use tempfile::tempdir;
 use uuid::Uuid;
 
-use nenjo_worker::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_worker::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_worker::bootstrap::WorkerManifestCache;
 use nenjo_worker::handlers::manifest::ManifestStore;
 use nenjo_worker::sessions::{WorkerSessionRuntime, WorkerSessionStores};
@@ -72,10 +72,12 @@ fn manifest_with_project(_project_id: Uuid, slug: &str) -> Manifest {
     }
 }
 
-fn document_meta(document_id: Uuid) -> DocumentSyncMeta {
-    DocumentSyncMeta {
-        id: Some(document_id),
-        pack_id: Some(Uuid::from_u128(7)),
+fn document_meta(document_id: Uuid) -> KnowledgeDocumentRecord {
+    let now = Utc::now();
+    KnowledgeDocumentRecord {
+        id: document_id,
+        org_id: Uuid::from_u128(9),
+        pack_id: Uuid::from_u128(7),
         pack_slug: "alpha".to_string(),
         slug: "alpha".to_string(),
         filename: "spec.md".to_string(),
@@ -85,7 +87,9 @@ fn document_meta(document_id: Uuid) -> DocumentSyncMeta {
         summary: Some("Project spec".to_string()),
         tags: vec!["planning".to_string()],
         content_type: "text/markdown".to_string(),
-        updated_at: Utc::now().to_rfc3339(),
+        created_at: now,
+        updated_at: now,
+        edges: Vec::new(),
     }
 }
 

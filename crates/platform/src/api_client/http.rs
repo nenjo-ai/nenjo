@@ -339,15 +339,15 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocSyncMeta>> {
+    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocumentRecord>> {
         let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let mut docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                let mut docs: Vec<KnowledgeDocumentRecord> = resp.json().await?;
                 for doc in &mut docs {
-                    if doc.pack_slug.trim().is_empty() {
+                    if doc.pack_slug.is_empty() {
                         doc.pack_slug = pack.to_string();
                     }
                 }
@@ -384,7 +384,7 @@ impl ApiClient {
         &self,
         pack: &str,
         doc: &str,
-    ) -> Result<Vec<KnowledgeDocSyncEdge>> {
+    ) -> Result<Vec<KnowledgeDocumentEdgeRecord>> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/edges",
             self.base_url, pack, doc
@@ -393,7 +393,7 @@ impl ApiClient {
 
         match resp.status() {
             StatusCode::OK => {
-                let edges: Vec<KnowledgeDocSyncEdge> = resp.json().await?;
+                let edges: Vec<KnowledgeDocumentEdgeRecord> = resp.json().await?;
                 debug!(pack = %pack, doc = %doc, count = edges.len(), "Listed knowledge document edges");
                 Ok(edges)
             }

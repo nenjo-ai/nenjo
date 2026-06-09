@@ -199,7 +199,7 @@ pub struct KnowledgeDocCreateParams {
 /// Parameters for `update_knowledge_doc`.
 pub struct KnowledgeDocUpdateParams {
     pub pack: Slug,
-    pub doc: Slug,
+    pub slug: Slug,
     #[serde(flatten)]
     pub data: KnowledgeDocUpdateDocument,
 }
@@ -208,7 +208,7 @@ pub struct KnowledgeDocUpdateParams {
 /// Parameters for `delete_knowledge_doc`.
 pub struct KnowledgeDocDeleteParams {
     pub pack: Slug,
-    pub doc: Slug,
+    pub slug: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
-use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_platform::{
     PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind, SensitiveContentKind,
 };
@@ -828,7 +828,7 @@ impl WorkerManifestCache {
         nenjo::ManifestLoader::load(&loader).await
     }
 
-    fn knowledge_pack_dir(&self, metadata: &DocumentSyncMeta) -> PathBuf {
+    fn knowledge_pack_dir(&self, metadata: &KnowledgeDocumentRecord) -> PathBuf {
         self.library_root().join(metadata.pack_slug.trim())
     }
 
@@ -899,7 +899,7 @@ impl ManifestStore for WorkerManifestCache {
         &self,
         client: &ApiClient,
         doc: &nenjo::Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
         edges: Option<crate::handlers::manifest::DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         let Some(meta) = metadata else {
@@ -914,7 +914,7 @@ impl ManifestStore for WorkerManifestCache {
         &self,
         client: &ApiClient,
         doc: &nenjo::Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         let Some(meta) = metadata else {
             return Ok(());
@@ -927,7 +927,7 @@ impl ManifestStore for WorkerManifestCache {
     async fn remove_document(
         &self,
         doc: &nenjo::Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         if let Some(meta) = metadata {
             let pack_dir = self.knowledge_pack_dir(meta);
