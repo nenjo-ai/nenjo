@@ -2116,6 +2116,7 @@ mod tests {
         String,
         tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
     )> {
+        let org_id = Uuid::new_v4();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let base_url = format!("http://{address}");
@@ -2141,6 +2142,7 @@ mod tests {
                         json!([
                             {
                                 "id": doc_id,
+                                "org_id": org_id,
                                 "pack_id": pack_id,
                                 "slug": "guide",
                                 "filename": "guide.md",
@@ -2150,10 +2152,12 @@ mod tests {
                                 "summary": "Guide",
                                 "tags": ["core"],
                                 "content_type": "text/plain",
+                                "created_at": "2026-05-23T00:00:00Z",
                                 "updated_at": "2026-05-23T00:00:00Z"
                             },
                             {
                                 "id": target_doc_id,
+                                "org_id": org_id,
                                 "pack_id": pack_id,
                                 "slug": "target",
                                 "filename": "target.md",
@@ -2163,6 +2167,7 @@ mod tests {
                                 "summary": "Target",
                                 "tags": [],
                                 "content_type": "text/plain",
+                                "created_at": "2026-05-23T00:00:00Z",
                                 "updated_at": "2026-05-23T00:00:00Z"
                             }
                         ]),
@@ -2171,6 +2176,7 @@ mod tests {
                         "200 OK",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "guide",
                             "filename": "guide.md",
@@ -2180,6 +2186,7 @@ mod tests {
                             "summary": "Updated guide",
                             "tags": ["core"],
                             "content_type": "text/plain",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:00:00Z"
                         }),
                     ),
@@ -2187,6 +2194,7 @@ mod tests {
                         "200 OK",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "guide",
                             "filename": "guide.md",
@@ -2196,6 +2204,7 @@ mod tests {
                             "summary": "Updated guide",
                             "tags": ["core"],
                             "content_type": "text/markdown",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:01:00Z"
                         }),
                     ),
@@ -2234,6 +2243,7 @@ mod tests {
         String,
         tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
     )> {
+        let org_id = Uuid::new_v4();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let base_url = format!("http://{address}");
@@ -2247,6 +2257,7 @@ mod tests {
                         "201 Created",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "ownership-lifetimes-a1b2c3d4",
                             "filename": "ownership-lifetimes.md",
@@ -2256,6 +2267,7 @@ mod tests {
                             "summary": "Ownership and lifetime guidance",
                             "tags": ["rust", "ownership"],
                             "content_type": "text/markdown",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:00:00Z"
                         }),
                     ),
