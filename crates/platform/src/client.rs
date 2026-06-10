@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Client, StatusCode, Url, header, multipart};
 use uuid::Uuid;
 
+use crate::manifest_contract::ContextBlockRecord;
 use crate::manifest_mcp::{
     AbilityCreateDocument, AbilityDocument, AbilityPromptMutationResult, AbilityUpdateDocument,
     AgentCreateDocument, AgentDocument, AgentUpdateDocument, ContextBlockCreateDocument,
@@ -2262,10 +2263,13 @@ impl PlatformManifestClient {
             .context("failed to create context block")?;
 
         match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json()
-                .await
-                .context("failed to decode created context block"),
+            StatusCode::OK | StatusCode::CREATED => {
+                let record: ContextBlockRecord = response
+                    .json()
+                    .await
+                    .context("failed to decode created context block")?;
+                Ok(record.to_document())
+            }
             status => bail!("context block create failed with status {status}"),
         }
     }
@@ -2291,10 +2295,13 @@ impl PlatformManifestClient {
             .with_context(|| format!("failed to update context block {context_block_ref}"))?;
 
         match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode updated context block"),
+            StatusCode::OK => {
+                let record: ContextBlockRecord = response
+                    .json()
+                    .await
+                    .context("failed to decode updated context block")?;
+                Ok(record.to_document())
+            }
             status => bail!("context block update failed with status {status}"),
         }
     }

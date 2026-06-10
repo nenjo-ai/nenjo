@@ -46,6 +46,7 @@ pub struct ContextBlockContentRecord {
 }
 
 impl ContextBlockRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         org_id: Uuid,
         id: Uuid,
