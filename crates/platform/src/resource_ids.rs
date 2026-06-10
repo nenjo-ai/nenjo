@@ -145,8 +145,12 @@ mod tests {
         let old_slug = Slug::parse("old_routine").unwrap();
         let new_slug = Slug::parse("new_routine").unwrap();
 
-        store.upsert(PlatformResourceKind::Routine, &old_slug, id).unwrap();
-        store.upsert(PlatformResourceKind::Routine, &new_slug, id).unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &old_slug, id)
+            .unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &new_slug, id)
+            .unwrap();
 
         assert_eq!(
             store.get(PlatformResourceKind::Routine, &old_slug).unwrap(),
@@ -166,9 +170,15 @@ mod tests {
         let old_slug = Slug::parse("old_routine").unwrap();
         let new_slug = Slug::parse("new_routine").unwrap();
 
-        store.upsert(PlatformResourceKind::Routine, &old_slug, id).unwrap();
-        store.upsert(PlatformResourceKind::Routine, &new_slug, id).unwrap();
-        store.remove_by_id(PlatformResourceKind::Routine, id).unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &old_slug, id)
+            .unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &new_slug, id)
+            .unwrap();
+        store
+            .remove_by_id(PlatformResourceKind::Routine, id)
+            .unwrap();
 
         assert_eq!(
             store.get(PlatformResourceKind::Routine, &old_slug).unwrap(),

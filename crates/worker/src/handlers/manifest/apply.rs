@@ -129,7 +129,9 @@ where
             if let Some(id) = resource_id {
                 store.remove_platform_resource_id_by_id(kind, id).await
             } else {
-                store.update_platform_resource_id(kind, &resource, None).await
+                store
+                    .update_platform_resource_id(kind, &resource, None)
+                    .await
             }
         } else {
             store
