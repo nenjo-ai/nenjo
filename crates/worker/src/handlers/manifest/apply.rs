@@ -125,15 +125,18 @@ where
     );
 
     if let Some(kind) = platform_resource_kind(resource_type) {
-        let id_for_sidecar = if action == ResourceAction::Deleted {
-            None
+        let sidecar_result = if action == ResourceAction::Deleted {
+            if let Some(id) = resource_id {
+                store.remove_platform_resource_id_by_id(kind, id).await
+            } else {
+                store.update_platform_resource_id(kind, &resource, None).await
+            }
         } else {
-            resource_id
+            store
+                .update_platform_resource_id(kind, &resource, resource_id)
+                .await
         };
-        if let Err(error) = store
-            .update_platform_resource_id(kind, &resource, id_for_sidecar)
-            .await
-        {
+        if let Err(error) = sidecar_result {
             warn!(
                 %resource_type,
                 %resource,
