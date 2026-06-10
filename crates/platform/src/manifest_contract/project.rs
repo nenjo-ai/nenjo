@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::ProjectManifest;
+use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -53,4 +54,17 @@ impl PlatformRecord for ProjectRecord {
     fn slug(&self) -> &str {
         &self.slug
     }
+}
+
+/// REST project detail including org-shared settings.
+///
+/// Settings ciphertext belongs in `encrypted_payload` (OCK domain); plaintext settings
+/// remain in `settings` until encrypted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDetailRecord {
+    #[serde(flatten)]
+    pub project: ProjectRecord,
+    pub settings: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<EncryptedPayload>,
 }

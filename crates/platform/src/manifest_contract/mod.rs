@@ -22,6 +22,6 @@ pub use knowledge::{
     wrap_document_record,
 };
 pub use model::ModelRecord;
-pub use project::ProjectRecord;
+pub use project::{ProjectDetailRecord, ProjectRecord};
 pub use routine::{RoutineEdgeRecord, RoutineRecord, RoutineStepRecord};
 pub use wire::{PlatformRecord, data_field_present, parse_resource_payload, wrap_resource_record};
