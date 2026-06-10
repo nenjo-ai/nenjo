@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::types::ActiveAgentHeartbeatState;
-use crate::manifest_contract::ProjectRecord;
+use crate::manifest_contract::ProjectDetailRecord;
 use async_trait::async_trait;
 use nenjo_events::EncryptedPayload;
 use reqwest::{Client, StatusCode, header};
@@ -165,7 +165,7 @@ impl ApiClient {
             .await
     }
 
-    pub async fn fetch_project(&self, resource: &Slug) -> Result<Option<ProjectRecord>> {
+    pub async fn fetch_project(&self, resource: &Slug) -> Result<Option<ProjectDetailRecord>> {
         self.fetch_resource(&format!("/api/v1/projects/{resource}"))
             .await
     }

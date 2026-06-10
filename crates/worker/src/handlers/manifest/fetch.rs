@@ -83,15 +83,9 @@ pub(super) async fn apply_upsert(
             }
         },
         ResourceType::Project => match client.fetch_project(resource).await? {
-            Some(record) => {
-                let slug = Slug::derive(&record.slug);
-                let settings = manifest
-                    .projects
-                    .iter()
-                    .find(|project| project.slug == slug)
-                    .map(|project| project.settings.clone())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let item = record.to_manifest(settings);
+            Some(detail) => {
+                let slug = Slug::derive(&detail.project.slug);
+                let item = detail.project.to_manifest(detail.settings);
                 if let Some(pos) = manifest.projects.iter().position(|r| r.slug == item.slug) {
                     manifest.projects[pos] = item;
                     debug!(%rt, %slug, "Updated existing resource");
