@@ -58,6 +58,13 @@ impl PlatformResourceIdSnapshot {
         }
     }
 
+    pub fn remove_id(&mut self, kind: PlatformResourceKind, id: Uuid) {
+        let Some(entries) = self.entries.get_mut(kind.as_str()) else {
+            return;
+        };
+        entries.retain(|_, existing_id| *existing_id != id);
+    }
+
     pub fn get(&self, kind: PlatformResourceKind, slug: &Slug) -> Option<Uuid> {
         self.entries
             .get(kind.as_str())
@@ -103,6 +110,7 @@ impl PlatformResourceIdStore {
 
     pub fn upsert(&self, kind: PlatformResourceKind, slug: &Slug, id: Uuid) -> Result<()> {
         let mut snapshot = self.load()?;
+        snapshot.remove_id(kind, id);
         snapshot.insert(kind, slug, id);
         self.replace(&snapshot)
     }
@@ -113,7 +121,72 @@ impl PlatformResourceIdStore {
         self.replace(&snapshot)
     }
 
+    pub fn remove_by_id(&self, kind: PlatformResourceKind, id: Uuid) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.remove_id(kind, id);
+        self.replace(&snapshot)
+    }
+
     pub fn get(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Option<Uuid>> {
         Ok(self.load()?.get(kind, slug))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn upsert_replaces_stale_slug_alias_for_same_id() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let id = Uuid::new_v4();
+        let old_slug = Slug::parse("old_routine").unwrap();
+        let new_slug = Slug::parse("new_routine").unwrap();
+
+        store
+            .upsert(PlatformResourceKind::Routine, &old_slug, id)
+            .unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &new_slug, id)
+            .unwrap();
+
+        assert_eq!(
+            store.get(PlatformResourceKind::Routine, &old_slug).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get(PlatformResourceKind::Routine, &new_slug).unwrap(),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn remove_by_id_clears_all_slug_aliases() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let id = Uuid::new_v4();
+        let old_slug = Slug::parse("old_routine").unwrap();
+        let new_slug = Slug::parse("new_routine").unwrap();
+
+        store
+            .upsert(PlatformResourceKind::Routine, &old_slug, id)
+            .unwrap();
+        store
+            .upsert(PlatformResourceKind::Routine, &new_slug, id)
+            .unwrap();
+        store
+            .remove_by_id(PlatformResourceKind::Routine, id)
+            .unwrap();
+
+        assert_eq!(
+            store.get(PlatformResourceKind::Routine, &old_slug).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.get(PlatformResourceKind::Routine, &new_slug).unwrap(),
+            None
+        );
     }
 }

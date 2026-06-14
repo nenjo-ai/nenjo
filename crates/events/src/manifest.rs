@@ -50,8 +50,8 @@ mod tests {
             name: "alpha".into(),
         });
         let value = payload.into_value();
-        let parsed = ManifestResourcePayload::<SampleResource>::parse(&value)
-            .expect("payload should parse");
+        let parsed =
+            ManifestResourcePayload::<SampleResource>::parse(&value).expect("payload should parse");
         assert_eq!(parsed.data.name, "alpha");
     }
 

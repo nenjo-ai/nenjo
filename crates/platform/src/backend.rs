@@ -19,18 +19,18 @@ use nenjo_knowledge::tools::{
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
-use crate::knowledge_contract::KnowledgeDocumentRecord;
 use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
 use crate::knowledge_backend::{
     ResolvedKnowledgePack, ensure_known_pack_selector, library_pack_selector,
     parse_library_pack_selector, unknown_pack,
 };
+use crate::knowledge_contract::KnowledgeDocumentRecord;
 use crate::library_knowledge::{
     LibraryKnowledgePack, LibraryKnowledgePackManifest, library_doc_relative_path,
     upsert_library_knowledge_entry, write_library_document_content,
     write_library_knowledge_manifest,
 };
-use crate::manifest_contract::SensitiveContentKind;
+use crate::manifest_kinds::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
@@ -294,12 +294,12 @@ where
         old_slug: &Slug,
         new_slug: &Slug,
     ) -> Result<()> {
-        if let Some(store) = self.resource_ids.as_ref() {
-            if let Some(id) = store.get(kind, old_slug)? {
-                store.upsert(kind, new_slug, id)?;
-                if old_slug != new_slug {
-                    store.remove(kind, old_slug)?;
-                }
+        if let Some(store) = self.resource_ids.as_ref()
+            && let Some(id) = store.get(kind, old_slug)?
+        {
+            store.upsert(kind, new_slug, id)?;
+            if old_slug != new_slug {
+                store.remove(kind, old_slug)?;
             }
         }
         Ok(())
@@ -519,18 +519,20 @@ where
                 .unwrap_or(now),
             edges: related
                 .iter()
-                .map(|edge| crate::knowledge_contract::KnowledgeDocumentEdgeRecord {
-                    id: Uuid::new_v4(),
-                    org_id: Uuid::nil(),
-                    source_item_id: Uuid::nil(),
-                    source_doc: doc.slug.as_str().to_string(),
-                    target_item_id: Uuid::nil(),
-                    target_doc: edge.target_doc.as_str().to_string(),
-                    edge_type: edge.edge_type.clone(),
-                    note: edge.note.clone(),
-                    created_at: now,
-                    updated_at: now,
-                })
+                .map(
+                    |edge| crate::knowledge_contract::KnowledgeDocumentEdgeRecord {
+                        id: Uuid::new_v4(),
+                        org_id: Uuid::nil(),
+                        source_item_id: Uuid::nil(),
+                        source_doc: doc.slug.as_str().to_string(),
+                        target_item_id: Uuid::nil(),
+                        target_doc: edge.target_doc.as_str().to_string(),
+                        edge_type: edge.edge_type.clone(),
+                        note: edge.note.clone(),
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )
                 .collect(),
         };
         upsert_library_knowledge_entry(&pack_dir, pack_slug, &record)?;
@@ -565,24 +567,24 @@ where
 {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
         let mut packs = Vec::new();
-        if let Ok(library_dir) = self.library_root() {
-            if let Ok(entries) = std::fs::read_dir(library_dir) {
-                for entry in entries.flatten() {
-                    let Ok(file_type) = entry.file_type() else {
-                        continue;
-                    };
-                    if !file_type.is_dir() {
-                        continue;
-                    }
-                    let Some(slug) = entry.file_name().to_str().map(str::to_string) else {
-                        continue;
-                    };
-                    let selector = library_pack_selector(&slug);
-                    let Some(pack) = LibraryKnowledgePack::load(entry.path()) else {
-                        continue;
-                    };
-                    packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
+        if let Ok(library_dir) = self.library_root()
+            && let Ok(entries) = std::fs::read_dir(library_dir)
+        {
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
                 }
+                let Some(slug) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let selector = library_pack_selector(&slug);
+                let Some(pack) = LibraryKnowledgePack::load(entry.path()) else {
+                    continue;
+                };
+                packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
             }
         }
         Ok(packs)
@@ -1423,17 +1425,16 @@ where
                 .await?;
         }
 
-        if let Some(related) = params.data.related.as_deref() {
-            if let Err(error) =
+        if let Some(related) = params.data.related.as_deref()
+            && let Err(error) =
                 self.cache_knowledge_doc(&knowledge_doc, params.data.content.as_deref(), related)
-            {
-                tracing::warn!(
-                    pack = %params.pack,
-                    slug = %knowledge_doc.slug,
-                    error = %error,
-                    "Failed to cache updated knowledge document locally"
-                );
-            }
+        {
+            tracing::warn!(
+                pack = %params.pack,
+                slug = %knowledge_doc.slug,
+                error = %error,
+                "Failed to cache updated knowledge document locally"
+            );
         }
 
         Ok(KnowledgeDocMutationResult { knowledge_doc })
@@ -2116,6 +2117,7 @@ mod tests {
         String,
         tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
     )> {
+        let org_id = Uuid::new_v4();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let base_url = format!("http://{address}");
@@ -2141,6 +2143,7 @@ mod tests {
                         json!([
                             {
                                 "id": doc_id,
+                                "org_id": org_id,
                                 "pack_id": pack_id,
                                 "slug": "guide",
                                 "filename": "guide.md",
@@ -2150,10 +2153,12 @@ mod tests {
                                 "summary": "Guide",
                                 "tags": ["core"],
                                 "content_type": "text/plain",
+                                "created_at": "2026-05-23T00:00:00Z",
                                 "updated_at": "2026-05-23T00:00:00Z"
                             },
                             {
                                 "id": target_doc_id,
+                                "org_id": org_id,
                                 "pack_id": pack_id,
                                 "slug": "target",
                                 "filename": "target.md",
@@ -2163,6 +2168,7 @@ mod tests {
                                 "summary": "Target",
                                 "tags": [],
                                 "content_type": "text/plain",
+                                "created_at": "2026-05-23T00:00:00Z",
                                 "updated_at": "2026-05-23T00:00:00Z"
                             }
                         ]),
@@ -2171,6 +2177,7 @@ mod tests {
                         "200 OK",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "guide",
                             "filename": "guide.md",
@@ -2180,6 +2187,7 @@ mod tests {
                             "summary": "Updated guide",
                             "tags": ["core"],
                             "content_type": "text/plain",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:00:00Z"
                         }),
                     ),
@@ -2187,6 +2195,7 @@ mod tests {
                         "200 OK",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "guide",
                             "filename": "guide.md",
@@ -2196,6 +2205,7 @@ mod tests {
                             "summary": "Updated guide",
                             "tags": ["core"],
                             "content_type": "text/markdown",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:01:00Z"
                         }),
                     ),
@@ -2234,6 +2244,7 @@ mod tests {
         String,
         tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
     )> {
+        let org_id = Uuid::new_v4();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let base_url = format!("http://{address}");
@@ -2247,6 +2258,7 @@ mod tests {
                         "201 Created",
                         json!({
                             "id": doc_id,
+                            "org_id": org_id,
                             "pack_id": pack_id,
                             "slug": "ownership-lifetimes-a1b2c3d4",
                             "filename": "ownership-lifetimes.md",
@@ -2256,6 +2268,7 @@ mod tests {
                             "summary": "Ownership and lifetime guidance",
                             "tags": ["rust", "ownership"],
                             "content_type": "text/markdown",
+                            "created_at": "2026-05-23T00:00:00Z",
                             "updated_at": "2026-05-23T00:00:00Z"
                         }),
                     ),

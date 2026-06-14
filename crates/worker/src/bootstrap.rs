@@ -895,6 +895,14 @@ impl ManifestStore for WorkerManifestCache {
         }
     }
 
+    async fn remove_platform_resource_id_by_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource_id: Uuid,
+    ) -> Result<()> {
+        PlatformResourceIdStore::new(&self.manifests_dir).remove_by_id(kind, resource_id)
+    }
+
     async fn sync_document_metadata(
         &self,
         client: &ApiClient,

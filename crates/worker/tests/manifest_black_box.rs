@@ -2,11 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig, Manifest,
-    McpServerManifest, ModelManifest, ProjectManifest, PromptConfig, RoutineManifest,
-    RoutineMetadata, RoutineTrigger,
+    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
+    RoutineTrigger,
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
@@ -300,6 +301,227 @@ fn domain(_id: Uuid, name: &str, prompt: &str) -> DomainManifest {
     }
 }
 
+const INLINE_TS: &str = "2026-05-10T00:00:00Z";
+
+fn inline_org_id() -> Uuid {
+    Uuid::from_u128(42)
+}
+
+fn inline_created_by() -> Uuid {
+    Uuid::from_u128(43)
+}
+
+fn wrap_inline_payload(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "manifest.resource.v1",
+        "data": data,
+    })
+}
+
+fn agent_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "color": null,
+        "model": null,
+        "domains": [],
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "abilities": [],
+        "prompt_locked": false,
+        "heartbeat": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": PromptConfig {
+            developer_prompt: prompt.into(),
+            ..Default::default()
+        },
+    }))
+}
+
+fn agent_metadata_inline_payload(id: Uuid, slug: &str, name: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": name,
+        "description": null,
+        "color": null,
+        "model": null,
+        "domains": [],
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "abilities": [],
+        "prompt_locked": false,
+        "heartbeat": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn model_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "model": "gpt-test",
+        "model_provider": "test",
+        "temperature": 0.1,
+        "base_url": null,
+        "created_by": inline_created_by(),
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn routine_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "trigger": "task",
+        "metadata": {},
+        "steps": [],
+        "edges": [],
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn project_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn council_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "delegation_strategy": "decompose",
+        "leader_agent": "leader",
+        "members": [],
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn ability_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "activation_condition": "always",
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": AbilityPromptConfig {
+            developer_prompt: prompt.into(),
+        },
+    }))
+}
+
+fn context_block_inline_payload(id: Uuid, slug: &str, template: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "template": template,
+    }))
+}
+
+fn domain_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "command": slug,
+        "platform_scopes": [],
+        "abilities": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": DomainPromptConfig {
+            developer_prompt_addon: Some(prompt.into()),
+        },
+    }))
+}
+
+fn mcp_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::to_value(mcp_server(id, slug)).expect("mcp manifest"))
+}
+
+fn knowledge_document_payload(
+    id: Uuid,
+    pack_id: Uuid,
+    pack_slug: &str,
+    slug: &str,
+) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "pack_id": pack_id,
+        "pack_slug": pack_slug,
+        "slug": slug,
+        "filename": "guide.md",
+        "path": "docs",
+        "title": "Guide",
+        "kind": "markdown",
+        "summary": null,
+        "tags": [],
+        "content_type": "text/markdown",
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "edges": [],
+    }))
+}
+
 #[tokio::test]
 async fn manifest_inline_upserts_each_provider_resource() {
     let id = Uuid::new_v4();
@@ -307,39 +529,24 @@ async fn manifest_inline_upserts_each_provider_resource() {
     let cases = vec![
         (
             ResourceType::Agent,
-            serde_json::to_value(agent(id, "agent", "agent prompt")).unwrap(),
+            agent_inline_payload(id, "agent", "agent prompt"),
         ),
-        (
-            ResourceType::Model,
-            serde_json::to_value(model(id, "model")).unwrap(),
-        ),
-        (
-            ResourceType::Routine,
-            serde_json::to_value(routine(id, "routine")).unwrap(),
-        ),
-        (
-            ResourceType::Project,
-            serde_json::to_value(project(id, "project")).unwrap(),
-        ),
-        (
-            ResourceType::Council,
-            serde_json::to_value(council(id, "council")).unwrap(),
-        ),
+        (ResourceType::Model, model_inline_payload(id, "model")),
+        (ResourceType::Routine, routine_inline_payload(id, "routine")),
+        (ResourceType::Project, project_inline_payload(id, "project")),
+        (ResourceType::Council, council_inline_payload(id, "council")),
         (
             ResourceType::Ability,
-            serde_json::to_value(ability(id, "ability", "ability prompt")).unwrap(),
+            ability_inline_payload(id, "ability", "ability prompt"),
         ),
         (
             ResourceType::ContextBlock,
-            serde_json::to_value(context_block(id, "context", "template")).unwrap(),
+            context_block_inline_payload(id, "context", "template"),
         ),
-        (
-            ResourceType::McpServer,
-            serde_json::to_value(mcp_server(id, "mcp")).unwrap(),
-        ),
+        (ResourceType::McpServer, mcp_inline_payload(id, "mcp")),
         (
             ResourceType::Domain,
-            serde_json::to_value(domain(id, "domain", "domain prompt")).unwrap(),
+            domain_inline_payload(id, "domain", "domain prompt"),
         ),
     ];
 
@@ -451,20 +658,7 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
         ..Default::default()
     })
     .await;
-    let metadata_payload = serde_json::json!({
-        "id": id,
-        "name": "renamed",
-        "slug": "old",
-        "description": null,
-        "color": null,
-        "model": null,
-        "domains": [],
-        "platform_scopes": [],
-        "mcp_servers": [],
-        "abilities": [],
-        "prompt_locked": false,
-        "heartbeat": null
-    });
+    let metadata_payload = agent_metadata_inline_payload(id, "old", "renamed");
 
     env.harness
         .handle_manifest_changed(
@@ -635,25 +829,12 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Updated,
                 project: Some(Slug::derive("project")),
-                payload: Some(serde_json::json!({
-                    "schema": "manifest.resource.v1",
-                    "data": {
-                        "id": document_id,
-                        "pack_id": pack_id,
-                        "pack_slug": "project",
-                        "slug": "guide",
-                        "filename": "guide.md",
-                        "path": "docs",
-                        "title": "Guide",
-                        "kind": "markdown",
-                        "summary": null,
-                        "tags": [],
-                        "content_type": "text/markdown",
-                        "created_at": "2026-05-10T00:00:00Z",
-                        "updated_at": "2026-05-10T00:00:00Z",
-                        "edges": []
-                    }
-                })),
+                payload: Some(knowledge_document_payload(
+                    document_id,
+                    pack_id,
+                    "project",
+                    "guide",
+                )),
                 encrypted_payload: None,
             },
         )
@@ -669,25 +850,12 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Deleted,
                 project: Some(Slug::derive("project")),
-                payload: Some(serde_json::json!({
-                    "schema": "manifest.resource.v1",
-                    "data": {
-                        "id": document_id,
-                        "pack_id": pack_id,
-                        "pack_slug": "project",
-                        "slug": "guide",
-                        "filename": "guide.md",
-                        "path": "docs",
-                        "title": "Guide",
-                        "kind": "markdown",
-                        "summary": null,
-                        "tags": [],
-                        "content_type": "text/markdown",
-                        "created_at": "2026-05-10T00:00:00Z",
-                        "updated_at": "2026-05-10T00:00:00Z",
-                        "edges": []
-                    }
-                })),
+                payload: Some(knowledge_document_payload(
+                    document_id,
+                    pack_id,
+                    "project",
+                    "guide",
+                )),
                 encrypted_payload: None,
             },
         )
@@ -727,7 +895,7 @@ async fn manifest_mcp_changes_reconcile_mcp_runtime() {
                 resource: Slug::derive("mcp"),
                 action: ResourceAction::Created,
                 project: None,
-                payload: Some(serde_json::to_value(mcp_server(id, "mcp")).unwrap()),
+                payload: Some(mcp_inline_payload(id, "mcp")),
                 encrypted_payload: None,
             },
         )

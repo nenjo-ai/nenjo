@@ -35,17 +35,13 @@ pub(super) async fn apply_upsert(
 
     match rt {
         ResourceType::Agent => match client.fetch_agent(resource).await? {
-            Some(mut item) => {
+            Some(record) => {
+                let slug = Slug::derive(&record.slug);
+                let mut item = record.to_manifest(nenjo::manifest::PromptConfig::default());
                 if let Some(prompt_response) = client.fetch_agent_prompt_config(resource).await? {
-                    if let Some(prompt_config) = prompt_response.prompt_config {
-                        item.prompt_config = prompt_config;
-                    } else if let Some(existing) =
-                        manifest.agents.iter().find(|agent| agent.slug == *resource)
-                    {
-                        item.prompt_config = existing.prompt_config.clone();
-                    }
+                    item = prompt_response.to_manifest();
                 } else if let Some(existing) =
-                    manifest.agents.iter().find(|agent| agent.slug == *resource)
+                    manifest.agents.iter().find(|agent| agent.slug == slug)
                 {
                     item.prompt_config = existing.prompt_config.clone();
                 }
@@ -60,9 +56,7 @@ pub(super) async fn apply_upsert(
                 }
             }
             None => {
-                manifest
-                    .agents
-                    .retain(|r| Slug::derive(&r.name) != *resource);
+                manifest.agents.retain(|r| r.slug != *resource);
                 debug!(%rt, %resource, "Resource returned 404, removing");
             }
         },
@@ -71,21 +65,63 @@ pub(super) async fn apply_upsert(
                 nenjo::manifest::model_manifest_slug(&r.model_provider, &r.model)
             })
         }
-        ResourceType::Routine => upsert!(
-            routines,
-            fetch_routine,
-            |r: &nenjo::manifest::RoutineManifest| { Slug::derive(&r.name) }
-        ),
-        ResourceType::Project => upsert!(
-            projects,
-            fetch_project,
-            |r: &nenjo::manifest::ProjectManifest| { r.slug.clone() }
-        ),
-        ResourceType::Council => upsert!(
-            councils,
-            fetch_council,
-            |r: &nenjo::manifest::CouncilManifest| { Slug::derive(&r.name) }
-        ),
+        ResourceType::Routine => match client.fetch_routine(resource).await? {
+            Some(record) => {
+                let item = record.to_manifest();
+                let item_slug = item.slug.clone();
+                if let Some(pos) = manifest.routines.iter().position(|r| r.slug == item_slug) {
+                    manifest.routines[pos] = item;
+                    debug!(%rt, %item_slug, "Updated existing resource");
+                } else {
+                    manifest.routines.push(item);
+                    debug!(%rt, %item_slug, "Added new resource");
+                }
+            }
+            None => {
+                manifest.routines.retain(|r| r.slug != *resource);
+                debug!(%rt, %resource, "Resource returned 404, removing");
+            }
+        },
+        ResourceType::Project => match client.fetch_project(resource).await? {
+            Some(detail) => {
+                let slug = Slug::derive(&detail.project.slug);
+                let item = detail.project.to_manifest(detail.settings);
+                if let Some(pos) = manifest.projects.iter().position(|r| r.slug == item.slug) {
+                    manifest.projects[pos] = item;
+                    debug!(%rt, %slug, "Updated existing resource");
+                } else {
+                    manifest.projects.push(item);
+                    debug!(%rt, %slug, "Added new resource");
+                }
+            }
+            None => {
+                manifest.projects.retain(|r| r.slug != *resource);
+                debug!(%rt, %resource, "Resource returned 404, removing");
+            }
+        },
+        ResourceType::Council => match client.fetch_council(resource).await? {
+            Some(record) => {
+                let item = record.to_manifest();
+                let item_slug = Slug::derive(&record.slug);
+                if let Some(pos) = manifest
+                    .councils
+                    .iter()
+                    .position(|r| Slug::derive(&r.name) == item_slug)
+                {
+                    manifest.councils[pos] = item;
+                    debug!(%rt, %item_slug, "Updated existing resource");
+                } else {
+                    manifest.councils.push(item);
+                    debug!(%rt, %item_slug, "Added new resource");
+                }
+            }
+            None => {
+                manifest
+                    .councils
+                    .retain(|r| Slug::derive(&r.name) != *resource);
+                debug!(%rt, %resource, "Resource returned 404, removing");
+            }
+        },
         ResourceType::Ability => upsert!(
             abilities,
             fetch_ability,
@@ -93,7 +129,7 @@ pub(super) async fn apply_upsert(
         ),
         ResourceType::ContextBlock => match client.fetch_context_block_summary(resource).await? {
             Some(summary) => {
-                let block_slug = nenjo::manifest::context_block_slug(&summary.path, &summary.name);
+                let block_slug = Slug::derive(&summary.slug);
                 let existing_template = manifest
                     .context_blocks
                     .iter()
@@ -108,12 +144,7 @@ pub(super) async fn apply_upsert(
                     None => existing_template,
                 };
 
-                let block = nenjo::manifest::ContextBlockManifest {
-                    name: summary.name,
-                    path: summary.path,
-                    description: summary.description,
-                    template,
-                };
+                let block = summary.to_manifest(template);
 
                 if let Some(pos) = manifest.context_blocks.iter().position(|r| {
                     nenjo::manifest::context_block_slug(&r.path, &r.name) == block_slug

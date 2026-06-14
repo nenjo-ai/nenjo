@@ -9,9 +9,7 @@ use uuid::Uuid;
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::knowledge::{
-    document_edges_source, parse_knowledge_document_payload,
-};
+use super::knowledge::{document_edges_source, parse_knowledge_document_payload};
 use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
 use nenjo_platform::PlatformResourceKind;
@@ -127,15 +125,20 @@ where
     );
 
     if let Some(kind) = platform_resource_kind(resource_type) {
-        let id_for_sidecar = if action == ResourceAction::Deleted {
-            None
+        let sidecar_result = if action == ResourceAction::Deleted {
+            if let Some(id) = resource_id {
+                store.remove_platform_resource_id_by_id(kind, id).await
+            } else {
+                store
+                    .update_platform_resource_id(kind, &resource, None)
+                    .await
+            }
         } else {
-            resource_id
+            store
+                .update_platform_resource_id(kind, &resource, resource_id)
+                .await
         };
-        if let Err(error) = store
-            .update_platform_resource_id(kind, &resource, id_for_sidecar)
-            .await
-        {
+        if let Err(error) = sidecar_result {
             warn!(
                 %resource_type,
                 %resource,
@@ -358,12 +361,7 @@ where
     let needs_content_fetch = encrypted_payload.is_some() && !applied_inline;
     let result = if applied_inline || !needs_content_fetch {
         store
-            .sync_document_metadata(
-                client,
-                resource,
-                Some(&metadata),
-                Some(edges_source),
-            )
+            .sync_document_metadata(client, resource, Some(&metadata), Some(edges_source))
             .await
     } else {
         store.sync_document(client, resource, Some(&metadata)).await

@@ -68,6 +68,15 @@ pub trait ManifestStore: Send + Sync {
         Ok(())
     }
 
+    /// Remove all slug aliases for one platform resource id (e.g. after rename + delete).
+    async fn remove_platform_resource_id_by_id(
+        &self,
+        _kind: PlatformResourceKind,
+        _resource_id: Uuid,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Rebuild the full manifest cache from the platform client.
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest>;
 
@@ -194,6 +203,16 @@ where
             .await
     }
 
+    async fn remove_platform_resource_id_by_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource_id: Uuid,
+    ) -> Result<()> {
+        (**self)
+            .remove_platform_resource_id_by_id(kind, resource_id)
+            .await
+    }
+
     async fn sync_document_metadata(
         &self,
         client: &ApiClient,
@@ -215,7 +234,11 @@ where
         (**self).sync_document(client, doc, metadata).await
     }
 
-    async fn remove_document(&self, doc: &Slug, metadata: Option<&KnowledgeDocumentRecord>) -> Result<()> {
+    async fn remove_document(
+        &self,
+        doc: &Slug,
+        metadata: Option<&KnowledgeDocumentRecord>,
+    ) -> Result<()> {
         (**self).remove_document(doc, metadata).await
     }
 

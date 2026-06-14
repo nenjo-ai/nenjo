@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::knowledge_contract::{parse_doc_edge_type, to_agent_manifest, KnowledgeDocumentRecord};
+use crate::knowledge_contract::{KnowledgeDocumentRecord, parse_doc_edge_type, to_agent_manifest};
 use anyhow::{Context, Result};
 use nenjo::Slug;
 use nenjo_knowledge::{
@@ -198,7 +198,12 @@ pub fn build_library_knowledge_manifest(
 ) -> LibraryKnowledgePackManifest {
     let paths_by_slug: HashMap<Slug, String> = records
         .iter()
-        .map(|record| (Slug::derive(&record.slug), record.library_selector(pack_slug)))
+        .map(|record| {
+            (
+                Slug::derive(&record.slug),
+                record.library_selector(pack_slug),
+            )
+        })
         .collect();
     let mut entries = records
         .iter()
