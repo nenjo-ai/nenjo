@@ -16,6 +16,8 @@ pub mod backend;
 /// Thin HTTP client for the platform manifest API.
 pub mod client;
 mod knowledge_backend;
+/// Canonical wire types and conversions for library knowledge documents.
+pub mod knowledge_contract;
 pub mod library_knowledge;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
@@ -40,6 +42,10 @@ pub mod types;
 pub use api_client::{ApiClient, ApiClientError, NoopPayloadCodec, PayloadCodec};
 pub use backend::{NoopSensitivePayloadEncoder, PlatformManifestBackend, SensitivePayloadEncoder};
 pub use client::PlatformManifestClient;
+pub use knowledge_contract::{
+    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, ParsedKnowledgeDocument,
+    parse_document_payload, wrap_document_record,
+};
 pub use local::LocalManifestMcpBackend;
 pub use manifest_contract::{ContentScope, ManifestKind, SensitiveContentKind};
 pub use manifest_mcp::{

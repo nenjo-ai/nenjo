@@ -534,7 +534,7 @@ pub struct KnowledgePackUpdateDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocSummary {
     pub pack: Slug,
-    pub doc: Slug,
+    pub slug: Slug,
     pub filename: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -565,9 +565,6 @@ pub struct KnowledgeDocCreateDocument {
     pub pack: Slug,
     pub filename: String,
     pub content: String,
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub doc: Option<Slug>,
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,

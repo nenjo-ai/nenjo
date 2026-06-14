@@ -19,7 +19,7 @@ use nenjo_knowledge::tools::{
 use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
-use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta};
+use crate::knowledge_contract::KnowledgeDocumentRecord;
 use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
 use crate::knowledge_backend::{
     ResolvedKnowledgePack, ensure_known_pack_selector, library_pack_selector,
@@ -499,11 +499,13 @@ where
     ) -> Result<()> {
         let pack_slug = doc.pack.as_str();
         let pack_dir = self.library_root()?.join(pack_slug);
-        let metadata = DocumentSyncMeta {
-            id: None,
-            pack_id: None,
+        let now = chrono::Utc::now();
+        let record = KnowledgeDocumentRecord {
+            id: Uuid::new_v4(),
+            org_id: Uuid::nil(),
+            pack_id: Uuid::nil(),
             pack_slug: pack_slug.to_string(),
-            slug: doc.doc.as_str().to_string(),
+            slug: doc.slug.as_str().to_string(),
             filename: doc.filename.clone(),
             path: doc.path.clone(),
             title: doc.title.clone(),
@@ -511,28 +513,31 @@ where
             summary: doc.summary.clone(),
             tags: doc.tags.clone(),
             content_type: doc.content_type.clone(),
-            updated_at: doc.updated_at.clone(),
+            created_at: now,
+            updated_at: chrono::DateTime::parse_from_rfc3339(&doc.updated_at)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .unwrap_or(now),
+            edges: related
+                .iter()
+                .map(|edge| crate::knowledge_contract::KnowledgeDocumentEdgeRecord {
+                    id: Uuid::new_v4(),
+                    org_id: Uuid::nil(),
+                    source_item_id: Uuid::nil(),
+                    source_doc: doc.slug.as_str().to_string(),
+                    target_item_id: Uuid::nil(),
+                    target_doc: edge.target_doc.as_str().to_string(),
+                    edge_type: edge.edge_type.clone(),
+                    note: edge.note.clone(),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .collect(),
         };
-        let edges = related
-            .iter()
-            .map(|edge| DocumentSyncEdge {
-                id: Uuid::new_v4(),
-                pack_id: None,
-                source_doc: doc.doc.clone(),
-                source_item_id: None,
-                target_doc: edge.target_doc.clone(),
-                target_item_id: None,
-                edge_type: edge.edge_type.clone(),
-                note: edge.note.clone(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .collect::<Vec<_>>();
-        upsert_library_knowledge_entry(&pack_dir, pack_slug, &metadata, &edges)?;
+        upsert_library_knowledge_entry(&pack_dir, pack_slug, &record)?;
         if let Some(content) = content {
             write_library_document_content(
                 &pack_dir,
-                &library_doc_relative_path(&metadata),
+                &library_doc_relative_path(&record),
                 content,
             )?;
         }
@@ -1352,14 +1357,14 @@ where
             .platform_client
             .create_knowledge_doc(&data.pack, doc_id, &data, encrypted_payload)
             .await?;
-        self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.doc, &data.related)
+        self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.slug, &data.related)
             .await?;
         if let Err(error) =
             self.cache_knowledge_doc(&knowledge_doc, Some(&data.content), &data.related)
         {
             tracing::warn!(
                 pack = %data.pack,
-                doc = %knowledge_doc.doc,
+                slug = %knowledge_doc.slug,
                 error = %error,
                 "Failed to cache created knowledge document locally"
             );
@@ -1373,7 +1378,7 @@ where
     ) -> Result<KnowledgeDocMutationResult> {
         let doc_id = self
             .platform_client
-            .resolve_knowledge_doc_slug(&params.pack, &params.doc)
+            .resolve_knowledge_doc_slug(&params.pack, &params.slug)
             .await?;
         let mut knowledge_doc = if let Some(content) = params.data.content.as_deref() {
             let encrypted_payload = self
@@ -1386,11 +1391,16 @@ where
                 )
                 .await?;
             self.platform_client
-                .update_knowledge_doc_content(&params.pack, &params.doc, content, encrypted_payload)
+                .update_knowledge_doc_content(
+                    &params.pack,
+                    &params.slug,
+                    content,
+                    encrypted_payload,
+                )
                 .await?
         } else {
             self.platform_client
-                .update_knowledge_doc_metadata(&params.pack, &params.doc, &params.data)
+                .update_knowledge_doc_metadata(&params.pack, &params.slug, &params.data)
                 .await?
         };
 
@@ -1404,12 +1414,12 @@ where
         {
             knowledge_doc = self
                 .platform_client
-                .update_knowledge_doc_metadata(&params.pack, &params.doc, &params.data)
+                .update_knowledge_doc_metadata(&params.pack, &params.slug, &params.data)
                 .await?;
         }
 
         if let Some(related) = params.data.related.as_deref() {
-            self.replace_knowledge_doc_related(&params.pack, &params.doc, related)
+            self.replace_knowledge_doc_related(&params.pack, &params.slug, related)
                 .await?;
         }
 
@@ -1419,7 +1429,7 @@ where
             {
                 tracing::warn!(
                     pack = %params.pack,
-                    doc = %knowledge_doc.doc,
+                    slug = %knowledge_doc.slug,
                     error = %error,
                     "Failed to cache updated knowledge document locally"
                 );
@@ -1431,7 +1441,7 @@ where
 
     async fn delete_knowledge_doc(&self, params: KnowledgeDocDeleteParams) -> Result<DeleteResult> {
         self.platform_client
-            .delete_knowledge_doc(&params.pack, &params.doc)
+            .delete_knowledge_doc(&params.pack, &params.slug)
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -2217,6 +2227,52 @@ mod tests {
         Ok((base_url, handle))
     }
 
+    async fn spawn_knowledge_create_server(
+        pack_id: Uuid,
+        doc_id: Uuid,
+    ) -> Result<(
+        String,
+        tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let base_url = format!("http://{address}");
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await?;
+                let request = read_request(&mut stream).await?;
+                let body = match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/api/v1/knowledge/test-pack/items") => response(
+                        "201 Created",
+                        json!({
+                            "id": doc_id,
+                            "pack_id": pack_id,
+                            "slug": "ownership-lifetimes-a1b2c3d4",
+                            "filename": "ownership-lifetimes.md",
+                            "path": "rust/ownership",
+                            "title": "Ownership & Lifetimes",
+                            "kind": "guide",
+                            "summary": "Ownership and lifetime guidance",
+                            "tags": ["rust", "ownership"],
+                            "content_type": "text/markdown",
+                            "updated_at": "2026-05-23T00:00:00Z"
+                        }),
+                    ),
+                    (
+                        "GET",
+                        "/api/v1/knowledge/test-pack/items/ownership-lifetimes-a1b2c3d4/edges",
+                    ) => response("200 OK", json!([])),
+                    _ => response("404 Not Found", json!({ "error": "not found" })),
+                };
+                stream.write_all(body.as_bytes()).await?;
+                requests.push(request);
+            }
+            Ok(requests)
+        });
+        Ok((base_url, handle))
+    }
+
     #[tokio::test]
     async fn library_knowledge_uses_slug_selector() {
         let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
@@ -2281,6 +2337,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_knowledge_doc_without_doc_returns_generated_slug() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let pack_id = Uuid::new_v4();
+        let doc_id = Uuid::new_v4();
+        let (base_url, server) = spawn_knowledge_create_server(pack_id, doc_id)
+            .await
+            .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, NoopSensitivePayloadEncoder)
+            .with_cached_org_id(Some(Uuid::new_v4()));
+
+        let result = backend
+            .create_knowledge_doc(KnowledgeDocCreateParams {
+                data: KnowledgeDocCreateDocument {
+                    pack: Slug::parse("test-pack").unwrap(),
+                    filename: "ownership-lifetimes.md".into(),
+                    content: "# Ownership & Lifetimes".into(),
+                    content_type: Some("text/markdown".into()),
+                    path: Some("rust/ownership".into()),
+                    title: Some("Ownership & Lifetimes".into()),
+                    kind: Some("guide".into()),
+                    summary: Some("Ownership and lifetime guidance".into()),
+                    tags: vec!["rust".into(), "ownership".into()],
+                    related: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.knowledge_doc.pack.as_str(), "test-pack");
+        assert_eq!(
+            result.knowledge_doc.slug.as_str(),
+            "ownership-lifetimes-a1b2c3d4"
+        );
+        assert_eq!(
+            result.knowledge_doc.title.as_deref(),
+            Some("Ownership & Lifetimes")
+        );
+
+        let requests = server.await.unwrap().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/api/v1/knowledge/test-pack/items".to_string()),
+                (
+                    "GET",
+                    "/api/v1/knowledge/test-pack/items/ownership-lifetimes-a1b2c3d4/edges"
+                        .to_string()
+                )
+            ]
+        );
+        assert!(!requests[0].body.contains("name=\"slug\""));
+    }
+
+    #[tokio::test]
     async fn update_knowledge_doc_with_content_metadata_and_related_calls_all_slug_paths() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
@@ -2297,7 +2412,7 @@ mod tests {
         let result = backend
             .update_knowledge_doc(KnowledgeDocUpdateParams {
                 pack: Slug::parse("test-pack").unwrap(),
-                doc: Slug::parse("guide").unwrap(),
+                slug: Slug::parse("guide").unwrap(),
                 data: KnowledgeDocUpdateDocument {
                     filename: Some("guide.md".into()),
                     content: Some("updated content".into()),
@@ -2317,7 +2432,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.knowledge_doc.pack.as_str(), "test-pack");
-        assert_eq!(result.knowledge_doc.doc.as_str(), "guide");
+        assert_eq!(result.knowledge_doc.slug.as_str(), "guide");
         assert_eq!(result.knowledge_doc.path.as_deref(), Some("docs/guide.md"));
         assert_eq!(result.knowledge_doc.title.as_deref(), Some("Guide"));
         assert_eq!(result.knowledge_doc.tags, vec!["core"]);

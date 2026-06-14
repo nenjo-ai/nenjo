@@ -10,8 +10,7 @@ use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
 use super::knowledge::{
-    document_edges_source, document_sync_edges, document_sync_meta,
-    parse_knowledge_document_payload,
+    document_edges_source, parse_knowledge_document_payload,
 };
 use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
@@ -323,7 +322,7 @@ where
                 Some(payload)
             }?;
             let parsed = parse_knowledge_document_payload(envelope)?;
-            Some(document_sync_meta(&parsed.resource))
+            Some(parsed.record.clone())
         });
         if let Err(error) = store.remove_document(resource, metadata.as_ref()).await {
             warn!(%resource, error = %error, "Failed to update local knowledge manifest");
@@ -347,9 +346,8 @@ where
         return;
     };
 
-    let metadata = document_sync_meta(&parsed.resource);
-    let edges = document_sync_edges(&parsed.resource.edges);
-    let edges_source = document_edges_source(&parsed, &edges);
+    let metadata = parsed.record.clone();
+    let edges_source = document_edges_source(&parsed, &metadata.edges);
 
     if metadata.pack_slug.trim().is_empty() {
         warn!(%resource, "Document change without knowledge pack slug, skipping sync");

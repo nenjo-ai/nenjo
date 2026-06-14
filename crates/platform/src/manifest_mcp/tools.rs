@@ -151,6 +151,63 @@ mod tests {
     }
 
     #[test]
+    fn library_knowledge_doc_tools_describe_slug_workflow() {
+        let tools = all_tools();
+        let create = tools
+            .iter()
+            .find(|tool| tool.name == "create_knowledge_doc")
+            .expect("missing create_knowledge_doc");
+        let update = tools
+            .iter()
+            .find(|tool| tool.name == "update_knowledge_doc")
+            .expect("missing update_knowledge_doc");
+        let delete = tools
+            .iter()
+            .find(|tool| tool.name == "delete_knowledge_doc")
+            .expect("missing delete_knowledge_doc");
+
+        assert_eq!(
+            create.parameters["required"],
+            serde_json::json!(["pack", "filename", "content"])
+        );
+        assert_eq!(
+            update.parameters["required"],
+            serde_json::json!(["pack", "slug"])
+        );
+        assert_eq!(
+            delete.parameters["required"],
+            serde_json::json!(["pack", "slug"])
+        );
+        assert!(
+            create
+                .description
+                .contains("returns it as knowledge_doc.slug"),
+            "create_knowledge_doc must tell agents where to get the generated slug"
+        );
+        assert!(
+            create
+                .description
+                .contains("derives the document slug from path plus filename"),
+            "create_knowledge_doc must describe how the slug is derived"
+        );
+        assert!(create.parameters["properties"].get("slug").is_none());
+        assert!(create.parameters["properties"].get("doc").is_none());
+        assert!(update.parameters["properties"].get("doc").is_none());
+        assert!(delete.parameters["properties"].get("doc").is_none());
+        assert!(
+            update.description.contains("Requires slug"),
+            "update_knowledge_doc must require the returned document slug"
+        );
+        assert!(
+            update.parameters["properties"]["related"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("create all target documents before assigning relations"),
+            "related schema must document the two-phase relation workflow"
+        );
+    }
+
+    #[test]
     fn manifest_tool_registry_matches_expected_name_and_category_snapshot() {
         assert_eq!(
             tool_snapshot(),

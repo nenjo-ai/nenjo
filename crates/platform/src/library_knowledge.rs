@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::api_client::{DocumentSyncEdge, DocumentSyncMeta};
+use crate::knowledge_contract::{parse_doc_edge_type, to_agent_manifest, KnowledgeDocumentRecord};
 use anyhow::{Context, Result};
 use nenjo::Slug;
 use nenjo_knowledge::{
-    KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocFilter, KnowledgeDocKind,
-    KnowledgeDocManifest, KnowledgePack, KnowledgePackManifest,
+    KnowledgeDocEdge, KnowledgeDocFilter, KnowledgeDocManifest, KnowledgePack,
+    KnowledgePackManifest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -124,14 +124,9 @@ impl LibraryKnowledgePackManifest {
         self.docs.iter().find(|doc| doc.id == doc_slug.as_str())
     }
 
-    pub fn upsert_library_doc(
-        &mut self,
-        pack_slug: &str,
-        metadata: &DocumentSyncMeta,
-        edges: &[DocumentSyncEdge],
-    ) {
-        let path = library_doc_path(pack_slug, metadata);
-        let next = library_knowledge_doc(pack_slug, metadata, edges, |target_id| {
+    pub fn upsert_library_doc(&mut self, pack_slug: &str, record: &KnowledgeDocumentRecord) {
+        let path = record.library_selector(pack_slug);
+        let next = library_knowledge_doc(pack_slug, record, |target_id| {
             self.docs
                 .iter()
                 .find(|doc| doc.id == target_id.as_str())
@@ -145,8 +140,8 @@ impl LibraryKnowledgePackManifest {
         for doc in &mut self.docs {
             doc.related.retain(|edge| edge.target != path);
         }
-        for edge in edges {
-            if edge.target_doc == Slug::derive(&metadata.slug)
+        for edge in &record.edges {
+            if edge.target_doc == record.slug
                 && let Some(source) = self
                     .docs
                     .iter_mut()
@@ -199,22 +194,16 @@ pub fn write_library_knowledge_manifest(
 
 pub fn build_library_knowledge_manifest(
     pack_slug: &str,
-    docs: &[DocumentSyncMeta],
-    edges_by_doc: &HashMap<Slug, Vec<DocumentSyncEdge>>,
+    records: &[KnowledgeDocumentRecord],
 ) -> LibraryKnowledgePackManifest {
-    let paths_by_slug: HashMap<Slug, String> = docs
+    let paths_by_slug: HashMap<Slug, String> = records
         .iter()
-        .map(|doc| (Slug::derive(&doc.slug), library_doc_path(pack_slug, doc)))
+        .map(|record| (Slug::derive(&record.slug), record.library_selector(pack_slug)))
         .collect();
-    let mut entries = docs
+    let mut entries = records
         .iter()
-        .map(|doc| {
-            let doc_slug = Slug::derive(&doc.slug);
-            let edges = edges_by_doc
-                .get(&doc_slug)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            library_knowledge_doc(pack_slug, doc, edges, |target_doc| {
+        .map(|record| {
+            library_knowledge_doc(pack_slug, record, |target_doc| {
                 paths_by_slug.get(&target_doc).cloned()
             })
         })
@@ -234,12 +223,11 @@ pub fn build_library_knowledge_manifest(
 pub fn upsert_library_knowledge_entry(
     pack_dir: &Path,
     pack_slug: &str,
-    metadata: &DocumentSyncMeta,
-    edges: &[DocumentSyncEdge],
+    record: &KnowledgeDocumentRecord,
 ) -> Result<()> {
     let mut manifest = load_library_knowledge_manifest(pack_dir)
         .unwrap_or_else(|| LibraryKnowledgePackManifest::library_pack(pack_slug));
-    manifest.upsert_library_doc(pack_slug, metadata, edges);
+    manifest.upsert_library_doc(pack_slug, record);
     write_library_knowledge_manifest(pack_dir, &manifest)
 }
 
@@ -283,19 +271,8 @@ pub fn library_knowledge_doc_relative_path(library_dir: &Path, doc: &Slug) -> Op
         .and_then(|manifest| manifest.doc_by_slug(doc).map(knowledge_doc_relative_path))
 }
 
-pub fn library_doc_relative_path(doc: &DocumentSyncMeta) -> String {
-    let mut path = doc.path.clone().unwrap_or_default();
-    path = path.trim_matches('/').to_string();
-    if path.is_empty() {
-        doc.filename.clone()
-    } else {
-        format!("{path}/{}", doc.filename)
-    }
-}
-
-fn library_doc_path(pack_slug: &str, doc: &DocumentSyncMeta) -> String {
-    let relative = library_doc_relative_path(doc);
-    format!("library://{pack_slug}/{relative}")
+pub fn library_doc_relative_path(record: &KnowledgeDocumentRecord) -> String {
+    record.library_doc_relative_path()
 }
 
 fn knowledge_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
@@ -308,52 +285,10 @@ fn knowledge_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
 
 fn library_knowledge_doc(
     pack_slug: &str,
-    doc: &DocumentSyncMeta,
-    edges: &[DocumentSyncEdge],
+    record: &KnowledgeDocumentRecord,
     resolve_target: impl Fn(Slug) -> Option<String>,
 ) -> KnowledgeDocManifest {
-    let relative_path = library_doc_relative_path(doc);
-    KnowledgeDocManifest {
-        id: doc.slug.clone(),
-        selector: library_doc_path(pack_slug, doc),
-        source_path: format!("docs/{relative_path}"),
-        title: doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
-        summary: doc
-            .summary
-            .clone()
-            .unwrap_or_else(|| format!("Knowledge document {relative_path}")),
-        kind: parse_doc_kind(doc.kind.as_deref()),
-        tags: doc.tags.clone(),
-        related: edges
-            .iter()
-            .filter(|edge| edge.source_doc == Slug::derive(&doc.slug))
-            .filter_map(|edge| {
-                resolve_target(edge.target_doc.clone()).map(|target| KnowledgeDocEdge {
-                    edge_type: parse_doc_edge_type(&edge.edge_type),
-                    target,
-                    description: edge.note.clone(),
-                })
-            })
-            .collect(),
-        updated_at: doc.updated_at.clone(),
-    }
-}
-
-fn parse_doc_kind(value: Option<&str>) -> KnowledgeDocKind {
-    KnowledgeDocKind::new(value.unwrap_or("reference"))
-}
-
-fn parse_doc_edge_type(value: &str) -> KnowledgeDocEdgeType {
-    match value.trim() {
-        "part_of" => KnowledgeDocEdgeType::PartOf,
-        "defines" => KnowledgeDocEdgeType::Defines,
-        "governs" => KnowledgeDocEdgeType::Governs,
-        "classifies" => KnowledgeDocEdgeType::Classifies,
-        "depends_on" => KnowledgeDocEdgeType::DependsOn,
-        "extends" => KnowledgeDocEdgeType::Extends,
-        "related_to" => KnowledgeDocEdgeType::RelatedTo,
-        _ => KnowledgeDocEdgeType::References,
-    }
+    to_agent_manifest(pack_slug, record, resolve_target)
 }
 
 impl KnowledgePack for LibraryKnowledgePack {
@@ -485,6 +420,7 @@ fn safe_relative_path(path: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use nenjo_knowledge::KnowledgeDocKind;
     use uuid::Uuid;
 
@@ -507,6 +443,27 @@ mod tests {
                 related: Vec::new(),
                 updated_at: String::new(),
             }],
+        }
+    }
+
+    fn sample_record() -> KnowledgeDocumentRecord {
+        let now = Utc::now();
+        KnowledgeDocumentRecord {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            pack_id: Uuid::new_v4(),
+            pack_slug: "product".into(),
+            slug: "overview".into(),
+            filename: "overview.md".into(),
+            path: Some("docs".into()),
+            title: Some("Overview".into()),
+            kind: Some("guide".into()),
+            summary: Some("Product overview".into()),
+            tags: Vec::new(),
+            content_type: "text/markdown".into(),
+            created_at: now,
+            updated_at: now,
+            edges: Vec::new(),
         }
     }
 
@@ -582,25 +539,7 @@ mod tests {
 
     #[test]
     fn library_knowledge_manifests_use_library_paths() {
-        let item_id = Uuid::new_v4();
-        let manifest = build_library_knowledge_manifest(
-            "product",
-            &[DocumentSyncMeta {
-                id: Some(item_id),
-                pack_id: Some(Uuid::new_v4()),
-                pack_slug: "product".into(),
-                slug: "overview".into(),
-                filename: "overview.md".into(),
-                path: Some("docs".into()),
-                title: Some("Overview".into()),
-                kind: Some("guide".into()),
-                summary: Some("Product overview".into()),
-                tags: Vec::new(),
-                content_type: "text/markdown".into(),
-                updated_at: String::new(),
-            }],
-            &HashMap::new(),
-        );
+        let manifest = build_library_knowledge_manifest("product", &[sample_record()]);
 
         assert_eq!(manifest.root_uri, "library://product/");
         assert_eq!(

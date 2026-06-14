@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nenjo::Slug;
 use nenjo_events::ResourceType;
 use nenjo_platform::PlatformResourceKind;
-use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use uuid::Uuid;
 
 use super::knowledge::DocumentEdgesSource;
@@ -76,7 +76,7 @@ pub trait ManifestStore: Send + Sync {
         &self,
         _client: &ApiClient,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
         _edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         Ok(())
@@ -87,7 +87,7 @@ pub trait ManifestStore: Send + Sync {
         &self,
         _client: &ApiClient,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         Ok(())
     }
@@ -96,7 +96,7 @@ pub trait ManifestStore: Send + Sync {
     async fn remove_document(
         &self,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         Ok(())
     }
@@ -198,7 +198,7 @@ where
         &self,
         client: &ApiClient,
         doc: &Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
         edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         (**self)
@@ -210,12 +210,12 @@ where
         &self,
         client: &ApiClient,
         doc: &Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         (**self).sync_document(client, doc, metadata).await
     }
 
-    async fn remove_document(&self, doc: &Slug, metadata: Option<&DocumentSyncMeta>) -> Result<()> {
+    async fn remove_document(&self, doc: &Slug, metadata: Option<&KnowledgeDocumentRecord>) -> Result<()> {
         (**self).remove_document(doc, metadata).await
     }
 

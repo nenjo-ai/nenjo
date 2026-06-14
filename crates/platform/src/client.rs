@@ -411,25 +411,8 @@ pub struct ProjectDocumentMetadata {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct KnowledgeDocMetadataResponse {
-    pub id: Uuid,
-    pub pack_id: Uuid,
-    pub slug: Slug,
-    pub filename: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub content_type: String,
-    pub updated_at: String,
-}
+pub use crate::knowledge_contract::KnowledgeDocumentRecord as KnowledgeDocMetadataResponse;
+use crate::knowledge_contract::KnowledgeDocumentRecord;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 /// Directed relationship between two library knowledge documents.
@@ -1221,9 +1204,6 @@ impl PlatformManifestClient {
             .context("failed to encode library knowledge document mime type")?;
         let mut form = multipart::Form::new().part("file", file_part);
         form = form.text("item_id", doc_id.to_string());
-        if let Some(doc) = item.doc.as_ref() {
-            form = form.text("slug", doc.to_string());
-        }
         if let Some(path) = item.path.as_deref() {
             form = form.text("path", path.to_string());
         }
@@ -1273,6 +1253,9 @@ impl PlatformManifestClient {
                     .context("failed to decode created library knowledge document")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
+            StatusCode::CONFLICT => bail!(
+                "library knowledge document create conflicted in pack {pack}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc"
+            ),
             status => bail!("library knowledge document create failed with status {status}"),
         }
     }
@@ -2527,7 +2510,7 @@ impl PlatformManifestClient {
         self.list_knowledge_doc_metadata(pack)
             .await?
             .into_iter()
-            .find(|candidate| candidate.slug == *doc)
+            .find(|candidate| Slug::derive(&candidate.slug) == *doc)
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("knowledge document not found in pack {pack}: {doc}"))
     }
@@ -2535,11 +2518,12 @@ impl PlatformManifestClient {
 
 fn knowledge_doc_summary(
     pack: &Slug,
-    document: KnowledgeDocMetadataResponse,
+    document: KnowledgeDocumentRecord,
 ) -> KnowledgeDocSummary {
+    let updated_at = document.updated_at_rfc3339();
     KnowledgeDocSummary {
         pack: pack.clone(),
-        doc: document.slug,
+        slug: Slug::derive(&document.slug),
         filename: document.filename,
         path: document.path,
         title: document.title,
@@ -2547,7 +2531,7 @@ fn knowledge_doc_summary(
         summary: document.summary,
         tags: document.tags,
         content_type: document.content_type,
-        updated_at: document.updated_at,
+        updated_at,
     }
 }
 

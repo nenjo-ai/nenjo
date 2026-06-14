@@ -59,7 +59,7 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
         _edges: Option<nenjo_worker::handlers::manifest::DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         self.metadata_syncs.lock().unwrap().push(doc.to_string());
@@ -70,7 +70,7 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
     ) -> Result<()> {
         self.content_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -79,7 +79,7 @@ impl ManifestStore for RecordingManifestStore {
     async fn remove_document(
         &self,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
     ) -> Result<()> {
         self.removals.lock().unwrap().push(doc.to_string());
         Ok(())
