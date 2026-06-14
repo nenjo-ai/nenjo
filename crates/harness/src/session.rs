@@ -599,6 +599,9 @@ pub fn transcript_payloads_from_turn_event(
     event: &nenjo::TurnEvent,
 ) -> Vec<SessionTranscriptEventPayload> {
     match event {
+        nenjo::TurnEvent::ModelRequestStarted { .. }
+        | nenjo::TurnEvent::AssistantTextDelta { .. }
+        | nenjo::TurnEvent::ModelRequestCompleted { .. } => Vec::new(),
         nenjo::TurnEvent::AbilityStarted {
             ability_tool_name,
             ability_name,
@@ -610,6 +613,7 @@ pub fn transcript_payloads_from_turn_event(
             task_input: preview(task_input),
         }],
         nenjo::TurnEvent::ToolCallStart {
+            batch_id: _,
             parent_tool_name,
             calls,
         } => vec![SessionTranscriptEventPayload::ToolCalls {
@@ -637,6 +641,7 @@ pub fn transcript_payloads_from_turn_event(
             ability_name,
             success,
             final_output,
+            ..
         } => vec![SessionTranscriptEventPayload::AbilityCompleted {
             ability_tool_name: ability_tool_name.clone(),
             ability_name: ability_name.clone(),
@@ -655,7 +660,9 @@ pub fn transcript_payloads_from_turn_event(
         | nenjo::TurnEvent::HookStarted { .. }
         | nenjo::TurnEvent::HookCompleted { .. }
         | nenjo::TurnEvent::SubAgentEvent { .. }
-        | nenjo::TurnEvent::SubAgentTranscript { .. } => Vec::new(),
+        | nenjo::TurnEvent::SubAgentTranscript { .. }
+        | nenjo::TurnEvent::AsyncOperationEvent { .. }
+        | nenjo::TurnEvent::AsyncOperationTranscript { .. } => Vec::new(),
         nenjo::TurnEvent::MessageCompacted { .. }
         | nenjo::TurnEvent::Paused
         | nenjo::TurnEvent::Resumed => Vec::new(),
@@ -667,7 +674,11 @@ pub fn trace_events_from_turn_event(
     event: &nenjo::TurnEvent,
 ) -> Vec<TraceEvent> {
     match event {
+        nenjo::TurnEvent::ModelRequestStarted { .. }
+        | nenjo::TurnEvent::AssistantTextDelta { .. }
+        | nenjo::TurnEvent::ModelRequestCompleted { .. } => Vec::new(),
         nenjo::TurnEvent::AbilityStarted {
+            call_id,
             ability_tool_name,
             ability_name,
             task_input,
@@ -678,7 +689,10 @@ pub fn trace_events_from_turn_event(
             Some(ability_tool_name.clone()),
             None,
             Some(preview(task_input)),
-            serde_json::json!({ "caller_history_snapshot": caller_history }),
+            serde_json::json!({
+                "call_id": call_id,
+                "caller_history_snapshot": caller_history,
+            }),
             TraceEventFields {
                 ability_name: Some(ability_name.clone()),
                 task_input: Some(task_input.clone()),
@@ -686,6 +700,7 @@ pub fn trace_events_from_turn_event(
             },
         )],
         nenjo::TurnEvent::ToolCallStart {
+            batch_id,
             parent_tool_name,
             calls,
         } => calls
@@ -698,6 +713,7 @@ pub fn trace_events_from_turn_event(
                     None,
                     Some(preview(&call.tool_args)),
                     serde_json::json!({
+                        "batch_id": batch_id,
                         "tool_call_id": call.tool_call_id,
                         "text_preview": call.text_preview,
                     }),
@@ -710,6 +726,7 @@ pub fn trace_events_from_turn_event(
             })
             .collect(),
         nenjo::TurnEvent::ToolCallEnd {
+            batch_id,
             parent_tool_name,
             tool_call_id,
             tool_name,
@@ -722,6 +739,7 @@ pub fn trace_events_from_turn_event(
             Some(result.success),
             Some(preview(&result.output)),
             serde_json::json!({
+                "batch_id": batch_id,
                 "tool_call_id": tool_call_id,
             }),
             TraceEventFields {
@@ -732,6 +750,7 @@ pub fn trace_events_from_turn_event(
             },
         )],
         nenjo::TurnEvent::AbilityCompleted {
+            call_id,
             ability_tool_name,
             ability_name,
             success,
@@ -742,7 +761,7 @@ pub fn trace_events_from_turn_event(
             Some(ability_tool_name.clone()),
             Some(*success),
             Some(preview(final_output)),
-            serde_json::Value::Null,
+            serde_json::json!({ "call_id": call_id }),
             TraceEventFields {
                 ability_name: Some(ability_name.clone()),
                 final_output: Some(final_output.clone()),
@@ -790,6 +809,61 @@ pub fn trace_events_from_turn_event(
             }),
             TraceEventFields {
                 target_agent_name: Some(agent_name.clone()),
+                final_output: Some(event.summary().to_string()),
+                ..TraceEventFields::default()
+            },
+        )],
+        nenjo::TurnEvent::AsyncOperationEvent {
+            operation_id,
+            kind,
+            label,
+            parent_operation_id,
+            parent_tool_name,
+            status,
+            signal,
+            summary,
+            payload,
+            model_visible,
+        } => vec![trace_event(
+            context,
+            TracePhase::AsyncOperationEvent,
+            parent_tool_name.clone(),
+            None,
+            summary.as_deref().map(preview),
+            serde_json::json!({
+                "operation_id": operation_id,
+                "kind": kind,
+                "label": label,
+                "parent_operation_id": parent_operation_id,
+                "status": status,
+                "signal": signal,
+                "payload": payload,
+                "model_visible": model_visible,
+            }),
+            TraceEventFields {
+                parent_tool_name: parent_tool_name.clone(),
+                final_output: summary.clone(),
+                ..TraceEventFields::default()
+            },
+        )],
+        nenjo::TurnEvent::AsyncOperationTranscript {
+            operation_id,
+            kind,
+            label,
+            event,
+        } => vec![trace_event(
+            context,
+            TracePhase::AsyncOperationTranscript,
+            event.tool_name().map(ToOwned::to_owned),
+            event.success(),
+            Some(preview(event.summary())),
+            serde_json::json!({
+                "operation_id": operation_id,
+                "kind": kind,
+                "label": label,
+                "event_kind": event.kind(),
+            }),
+            TraceEventFields {
                 final_output: Some(event.summary().to_string()),
                 ..TraceEventFields::default()
             },
@@ -947,6 +1021,7 @@ mod tests {
         let ability = trace_events_from_turn_event(
             &context,
             &nenjo::TurnEvent::AbilityStarted {
+                call_id: "ability-call-1".to_string(),
                 ability_tool_name: "ability.review".to_string(),
                 ability_name: "Review".to_string(),
                 task_input: "inspect this".to_string(),
@@ -999,6 +1074,7 @@ mod tests {
         let tool = trace_events_from_turn_event(
             &context,
             &nenjo::TurnEvent::ToolCallStart {
+                batch_id: "batch-1".to_string(),
                 parent_tool_name: Some("ability.review".to_string()),
                 calls: vec![nenjo::agents::ToolCall {
                     tool_call_id: Some("call-1".to_string()),

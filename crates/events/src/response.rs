@@ -320,12 +320,83 @@ impl std::fmt::Display for Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
 pub enum StreamEvent {
-    /// One or more tool invocations.
-    ToolCalls {
-        tool_calls: Vec<ToolCall>,
-        agent_name: String,
+    /// A chat/execution run started.
+    RunStarted {
+        run_id: String,
+        session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_tool_name: Option<String>,
+        parent_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+    },
+
+    /// A chat/execution run completed.
+    RunCompleted { run_id: String, session_id: String },
+
+    /// A chat/execution run failed.
+    RunFailed {
+        run_id: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// A chat/execution run was cancelled.
+    RunCancelled { run_id: String, session_id: String },
+
+    /// A model provider request started.
+    ModelRequestStarted {
+        run_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+
+    /// Assistant prose delta from the model provider.
+    AssistantTextDelta {
+        run_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// A model provider request completed.
+    ModelRequestCompleted {
+        run_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+    },
+
+    /// A single tool invocation started.
+    ToolCallStarted {
+        run_id: String,
+        batch_id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// Incremental output from a tool invocation.
+    ToolOutputDelta {
+        run_id: String,
+        call_id: String,
+        stream: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,47 +404,13 @@ pub enum StreamEvent {
     },
 
     /// A single tool invocation completed.
-    ToolCompleted {
-        tool_name: String,
+    ToolCallCompleted {
+        run_id: String,
+        batch_id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
         success: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_tool_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_payload: Option<EncryptedPayload>,
-    },
-
-    /// An ability was activated for an agent.
-    AbilityActivated {
-        agent: String,
-        ability: String,
-        ability_tool_name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_payload: Option<EncryptedPayload>,
-    },
-
-    /// An ability finished executing.
-    AbilityCompleted {
-        agent: String,
-        ability: String,
-        ability_tool_name: String,
-        success: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_payload: Option<EncryptedPayload>,
-    },
-
-    /// A hook referenced by the active command or skill was activated.
-    HookActivated {
-        agent: String,
-        hook: String,
-        hook_event: String,
-        hook_type: String,
-        source: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,37 +445,32 @@ pub enum StreamEvent {
         encrypted_payload: Option<EncryptedPayload>,
     },
 
-    /// A sub-agent lifecycle or signal event.
-    SubAgentEvent {
-        agent: String,
-        slug: String,
-        sub_agent: String,
+    /// Canonical lifecycle or signal event for a long-running async operation.
+    AsyncOperationEvent {
+        operation_id: String,
         kind: String,
-        summary: String,
+        label: String,
+        status: String,
+        signal: String,
         model_visible: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<serde_json::Value>,
+        parent_operation_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_payload: Option<EncryptedPayload>,
-    },
-
-    /// A delegation to another agent was started.
-    DelegationStarted {
-        agent: String,
-        target_agent: String,
-        delegate_tool_name: String,
+        parent_tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
     },
 
-    /// A delegation to another agent finished.
-    DelegationCompleted {
-        agent: String,
-        target_agent: String,
-        delegate_tool_name: String,
-        success: bool,
+    /// Canonical transcript event for a long-running async operation.
+    AsyncOperationTranscript {
+        operation_id: String,
+        kind: String,
+        label: String,
+        event: AsyncOperationTranscriptEvent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,43 +535,74 @@ pub enum StreamEvent {
 impl std::fmt::Display for StreamEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ToolCalls {
-                tool_calls,
-                agent_name,
+            Self::RunStarted {
+                run_id, session_id, ..
+            } => write!(f, "run_started(run={run_id}, session={session_id})"),
+            Self::RunCompleted { run_id, .. } => write!(f, "run_completed(run={run_id})"),
+            Self::RunFailed { run_id, .. } => write!(f, "run_failed(run={run_id})"),
+            Self::RunCancelled { run_id, .. } => write!(f, "run_cancelled(run={run_id})"),
+            Self::ModelRequestStarted {
+                run_id,
+                request_id,
+                model,
                 ..
             } => write!(
                 f,
-                "tool_calls([{}], agent={agent_name})",
-                tool_calls
-                    .iter()
-                    .map(|call| call.tool_name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "model_request_started(run={run_id}, request={request_id}, model={})",
+                model.as_deref().unwrap_or("-")
             ),
-            Self::ToolCompleted {
-                tool_name, success, ..
-            } => write!(f, "tool_completed({tool_name}, success={success})"),
-            Self::AbilityActivated { agent, ability, .. } => {
-                write!(f, "ability_activated({ability}, agent={agent})")
+            Self::AssistantTextDelta {
+                run_id,
+                request_id,
+                payload,
+                encrypted_payload,
+            } => write!(
+                f,
+                "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
+                payload.is_some(),
+                encrypted_payload.is_some()
+            ),
+            Self::ModelRequestCompleted {
+                run_id, request_id, ..
+            } => {
+                write!(
+                    f,
+                    "model_request_completed(run={run_id}, request={request_id})"
+                )
             }
-            Self::AbilityCompleted {
-                agent,
-                ability,
+            Self::ToolCallStarted {
+                run_id,
+                batch_id,
+                call_id,
+                tool_name,
+                ..
+            } => write!(
+                f,
+                "tool_call_started(run={run_id}, batch={batch_id}, call={call_id}, tool={tool_name})"
+            ),
+            Self::ToolOutputDelta {
+                run_id,
+                call_id,
+                stream,
+                payload,
+                encrypted_payload,
+            } => write!(
+                f,
+                "tool_output_delta(run={run_id}, call={call_id}, stream={stream}, payload={}, encrypted={})",
+                payload.is_some(),
+                encrypted_payload.is_some()
+            ),
+            Self::ToolCallCompleted {
+                run_id,
+                batch_id,
+                call_id,
+                parent_call_id,
                 success,
                 ..
             } => write!(
                 f,
-                "ability_completed({ability}, agent={agent}, success={success})"
-            ),
-            Self::HookActivated {
-                agent,
-                hook,
-                hook_event,
-                source,
-                ..
-            } => write!(
-                f,
-                "hook_activated({hook}, event={hook_event}, source={source}, agent={agent})"
+                "tool_call_completed(run={run_id}, batch={batch_id}, call={call_id}, parent={}, success={success})",
+                parent_call_id.as_deref().unwrap_or("-")
             ),
             Self::HookStarted {
                 agent,
@@ -563,22 +626,25 @@ impl std::fmt::Display for StreamEvent {
                 f,
                 "hook_completed({hook}, event={hook_event}, source={source}, agent={agent}, success={success}, blocked={blocked})"
             ),
-            Self::SubAgentEvent {
-                agent, slug, kind, ..
-            } => write!(f, "sub_agent_event({kind}, slug={slug}, agent={agent})"),
-            Self::DelegationStarted {
-                agent,
-                target_agent,
-                ..
-            } => write!(f, "delegation_started({target_agent}, agent={agent})"),
-            Self::DelegationCompleted {
-                agent,
-                target_agent,
-                success,
+            Self::AsyncOperationEvent {
+                operation_id,
+                kind,
+                signal,
+                status,
                 ..
             } => write!(
                 f,
-                "delegation_completed({target_agent}, agent={agent}, success={success})"
+                "async_operation_event({signal}, id={operation_id}, kind={kind}, status={status})"
+            ),
+            Self::AsyncOperationTranscript {
+                operation_id,
+                kind,
+                event,
+                ..
+            } => write!(
+                f,
+                "async_operation_transcript(id={operation_id}, kind={kind}, event={})",
+                event.kind
             ),
             Self::Error { message, .. } => write!(f, "error({message})"),
             Self::Done {
@@ -613,9 +679,13 @@ impl std::fmt::Display for StreamEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub tool_name: String,
-    pub tool_args: String,
+pub struct AsyncOperationTranscriptEvent {
+    pub kind: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -694,84 +764,6 @@ impl Response {
 mod tests {
     use super::*;
     use crate::{Command, EncryptedPayload, Envelope};
-
-    #[test]
-    fn stream_event_tool_calls_roundtrip() {
-        let event = StreamEvent::ToolCalls {
-            tool_calls: vec![ToolCall {
-                tool_name: "shell".into(),
-                tool_args: r#"{"cmd":"ls"}"#.into(),
-            }],
-            agent_name: "coder".into(),
-            parent_tool_name: Some("ability/test.builder".into()),
-            payload: None,
-            encrypted_payload: Some(EncryptedPayload {
-                account_id: Uuid::nil(),
-                encryption_scope: None,
-                object_id: Uuid::new_v4(),
-                object_type: "tool_call_preview".into(),
-                algorithm: "aes-256-gcm".into(),
-                key_version: 1,
-                nonce: "bm9uY2U=".into(),
-                ciphertext: "Y2lwaGVydGV4dA==".into(),
-            }),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            StreamEvent::ToolCalls {
-                tool_calls,
-                agent_name,
-                parent_tool_name,
-                encrypted_payload,
-                ..
-            } => {
-                assert_eq!(tool_calls.len(), 1);
-                assert_eq!(tool_calls[0].tool_name, "shell");
-                assert_eq!(agent_name, "coder");
-                assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
-                assert!(encrypted_payload.is_some());
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn stream_event_tool_completed_roundtrip() {
-        let event = StreamEvent::ToolCompleted {
-            tool_name: "shell".into(),
-            success: false,
-            parent_tool_name: Some("ability/test.builder".into()),
-            payload: None,
-            encrypted_payload: Some(EncryptedPayload {
-                account_id: Uuid::nil(),
-                encryption_scope: None,
-                object_id: Uuid::new_v4(),
-                object_type: "tool_error_preview".into(),
-                algorithm: "aes-256-gcm".into(),
-                key_version: 1,
-                nonce: "bm9uY2U=".into(),
-                ciphertext: "Y2lwaGVydGV4dA==".into(),
-            }),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: StreamEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            StreamEvent::ToolCompleted {
-                tool_name,
-                success,
-                parent_tool_name,
-                encrypted_payload,
-                ..
-            } => {
-                assert_eq!(tool_name, "shell");
-                assert!(!success);
-                assert_eq!(parent_tool_name.as_deref(), Some("ability/test.builder"));
-                assert!(encrypted_payload.is_some());
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
 
     #[test]
     fn command_chat_message_roundtrip() {

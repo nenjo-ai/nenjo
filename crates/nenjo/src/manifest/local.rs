@@ -50,7 +50,11 @@ impl LocalManifestStore {
         items
     }
 
-    fn persist_resource_kind(&self, manifest: &Manifest, kind: ManifestResourceKind) -> Result<()> {
+    pub fn persist_resource_kind(
+        &self,
+        manifest: &Manifest,
+        kind: ManifestResourceKind,
+    ) -> Result<()> {
         std::fs::create_dir_all(&self.root).with_context(|| {
             format!(
                 "Failed to create manifest directory: {}",

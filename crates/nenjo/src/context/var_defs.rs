@@ -196,7 +196,7 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                 },
                 TemplateVarDef {
                     name: "routine.step.type",
-                    description: "Type of the current step (agent, gate, council, lambda, terminal, cron)",
+                    description: "Type of the current step (agent, gate, council, terminal, cron)",
                     group: "Routine",
                 },
                 TemplateVarDef {

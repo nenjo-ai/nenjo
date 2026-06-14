@@ -3,7 +3,7 @@ use nenjo::{ToolCategory, ToolSpec};
 fn ability_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "The target ability slug."
+        "description": "Existing ability slug. Use `name` from list_abilities or get_ability. For configure_ability, omit `ability` to create a new ability."
     })
 }
 
@@ -11,58 +11,57 @@ fn slug_list_schema(description: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "description": description,
-        "items": {
-            "type": "string"
-        }
+        "items": { "type": "string" }
     })
 }
 
-fn ability_create_schema() -> serde_json::Value {
+fn prompt_config_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "prompt_config"],
-        "properties": {
-            "name": { "type": "string", "description": "The stable slug identifier for this ability." },
-            "path": { "type": "string", "description": "Folder path for this ability. Omit for the root folder." },
-            "description": { "type": ["string", "null"], "description": "Optional description of what the ability does." },
-            "activation_condition": { "type": "string", "description": "Condition text that tells the agent when this ability should be invoked." },
-            "prompt_config": {
-                "type": "object",
-                "required": ["developer_prompt"],
-                "properties": {
-                    "developer_prompt": { "type": "string", "description": "Developer prompt executed when this ability is invoked." }
-                },
-                "additionalProperties": false
-            },
-            "mcp_servers": slug_list_schema("MCP server slugs available while this ability runs."),
-        },
-        "additionalProperties": false
-    })
-}
-
-fn ability_update_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Partial patch for an existing ability. Omit fields you do not want to change.",
-        "properties": {
-            "name": { "type": "string", "description": "Update the stable slug identifier." },
-            "description": { "type": ["string", "null"], "description": "Update or clear the description." },
-            "activation_condition": { "type": "string", "description": "Replace the activation condition text." },
-            "mcp_servers": slug_list_schema("Full replacement MCP server slug assignment list for this ability. Use this field only when the user explicitly asks to change MCP assignments."),
-        },
-        "additionalProperties": false
-    })
-}
-
-fn ability_prompt_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["developer_prompt"],
+        "description": "Ability prompt configuration. Omit to leave unchanged on update.",
         "properties": {
             "developer_prompt": {
                 "type": "string",
-                "description": "Developer prompt executed when this ability is invoked."
+                "description": "Developer prompt applied while the ability sub-execution runs."
             }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn configure_metadata_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Ability metadata patch. Required on create because metadata.name is required when ability is omitted. On update, omitted fields are unchanged.",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Ability runtime/display name. Required when creating a new ability."
+            },
+            "path": {
+                "type": "string",
+                "description": "Folder path for this ability. Omit to leave unchanged."
+            },
+            "description": {
+                "type": ["string", "null"],
+                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+            },
+            "activation_condition": {
+                "type": "string",
+                "description": "Condition text that tells an agent when this ability should be invoked."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn configure_assignments_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Full replacement assignment lists. Omit a field to leave that assignment type unchanged; pass an empty array to clear it.",
+        "properties": {
+            "mcp_servers": slug_list_schema("Full replacement list of MCP server slugs available while this ability runs."),
+            "script_tools": slug_list_schema("Full replacement list of native script tool slugs available while this ability runs.")
         },
         "additionalProperties": false
     })
@@ -73,90 +72,71 @@ pub fn ability_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_abilities".to_string(),
-            description: "List abilities so you can find an ability name before reading, updating, or deleting one."
+            description: "List visible abilities as prompt-free summaries. Use a returned `name` as the `ability` value in get_ability or configure_ability. This does not include prompt_config; call get_ability for the full ability document."
                 .to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_ability".to_string(),
-            description: "Get one ability's name, path, description, activation_condition, platform_scopes, and mcp_servers by ability slug."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["ability"],
-                "properties": { "ability": ability_ref_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "get_ability_prompt".to_string(),
-            description: "Get one ability's prompt_config by ability slug.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["ability"],
-                "properties": { "ability": ability_ref_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "create_ability".to_string(),
-            description: "Create one ability using the provided top-level fields and prompt_config.developer_prompt that will run when the ability is invoked."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["name", "prompt_config"],
-                "properties": ability_create_schema()["properties"].clone(),
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_ability".to_string(),
-            description: "Update one ability by ability slug. For normal metadata edits, send only the requested metadata fields such as name or description. Use update_ability_prompt for prompt_config changes."
+            description: "Get one ability's full AbilityDocument by slug, including prompt_config, activation_condition, platform_scopes, and tool assignments."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["ability"],
                 "properties": {
-                    "ability": ability_ref_schema(),
-                    "name": ability_update_schema()["properties"]["name"].clone(),
-                    "description": ability_update_schema()["properties"]["description"].clone(),
-                    "activation_condition": ability_update_schema()["properties"]["activation_condition"].clone(),
-                    "mcp_servers": ability_update_schema()["properties"]["mcp_servers"].clone()
+                    "ability": ability_ref_schema()
                 },
                 "additionalProperties": false
             }),
-            category: ToolCategory::Write,
+            category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "update_ability_prompt".to_string(),
-            description: "Update one ability's prompt_config by ability slug using prompt_config.developer_prompt."
+            name: "configure_ability".to_string(),
+            description: "Create or update one ability in a single backend-owned sequence. Omit `ability` to create; include `ability` to update by slug. On create, metadata.name and prompt_config.developer_prompt are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `ability: AbilityDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["ability", "prompt_config"],
                 "properties": {
                     "ability": ability_ref_schema(),
-                    "prompt_config": ability_prompt_schema()
+                    "metadata": configure_metadata_schema(),
+                    "prompt_config": prompt_config_schema(),
+                    "assignments": configure_assignments_schema()
                 },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "delete_ability".to_string(),
-            description: "Delete one ability by ability slug when you want it removed from the manifest."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["ability"],
-                "properties": { "ability": ability_ref_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_ability_exposes_assignment_replacements() {
+        let tools = ability_tools();
+        let configure_ability = tools
+            .iter()
+            .find(|tool| tool.name == "configure_ability")
+            .expect("configure_ability tool should exist");
+
+        assert_eq!(
+            configure_ability.parameters["properties"]["assignments"]["properties"]["mcp_servers"]
+                ["description"],
+            serde_json::json!(
+                "Full replacement list of MCP server slugs available while this ability runs."
+            )
+        );
+        assert!(
+            configure_ability
+                .description
+                .contains("assignment arrays are full replacements")
+        );
+    }
 }

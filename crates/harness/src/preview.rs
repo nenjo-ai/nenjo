@@ -1,7 +1,7 @@
 //! Shared preview helpers for harness-facing stream, trace, and task outputs.
 
 /// Default truncation length for user-visible previews.
-pub const PREVIEW_MAX_CHARS: usize = 1000;
+pub const PREVIEW_MAX_CHARS: usize = 10_000;
 
 /// Shorter truncation used for debug log summaries.
 pub const DEBUG_PREVIEW_MAX_CHARS: usize = 80;

@@ -102,8 +102,8 @@ impl DomainPromptRecord {
         self.domain.to_manifest(self.resolved_prompt_config())
     }
 
-    pub fn to_document(&self) -> crate::manifest_mcp::DomainPromptDocument {
-        crate::manifest_mcp::DomainPromptDocument::from(self.to_manifest())
+    pub fn to_document(&self) -> crate::manifest_mcp::DomainDocument {
+        crate::manifest_mcp::DomainDocument::from(self.to_manifest())
     }
 }
 

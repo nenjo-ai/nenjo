@@ -10,7 +10,7 @@ use nenjo::manifest::{
     PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
     RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
-use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig, model_manifest_slug};
+use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 
 /// Canonical prompt-free agent document used by manifest list/get/update/delete operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,11 +23,13 @@ pub struct AgentSummary {
     pub model: Option<Slug>,
 }
 
-/// Canonical prompt-free agent document used by manifest get/update/delete operations.
+/// Canonical agent document used by manifest get operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDocument {
     #[serde(flatten)]
     pub summary: AgentSummary,
+    #[serde(default)]
+    pub prompt_config: PromptConfig,
     #[serde(default)]
     pub domains: Vec<Slug>,
     #[serde(default)]
@@ -44,18 +46,9 @@ pub struct AgentDocument {
     pub heartbeat: Option<AgentHeartbeatManifest>,
 }
 
-/// Full local agent state including prompt configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentPromptDocument {
-    #[serde(flatten)]
-    pub agent: AgentDocument,
-    #[serde(default)]
-    pub prompt_config: PromptConfig,
-}
-
-/// Agent fields that can be updated without using the prompt route.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentUpdateDocument {
+/// Metadata patch for `configure_agent`.
+pub struct AgentConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,12 +61,34 @@ pub struct AgentUpdateDocument {
         skip_serializing_if = "Option::is_none"
     )]
     pub model: Option<Option<Slug>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Full replacement assignment lists for `configure_agent`.
+pub struct AgentConfigureAssignments {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abilities: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domains: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_tools: Option<Vec<Slug>>,
+    pub mcp_servers: Option<Vec<Slug>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring an agent in one backend-owned sequence.
+pub struct AgentConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub agent: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AgentConfigureMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_config: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<AgentConfigureAssignments>,
 }
 
 fn deserialize_optional_slug_field<'de, D>(
@@ -95,6 +110,7 @@ impl From<AgentManifest> for AgentDocument {
                 color: agent.color,
                 model: agent.model,
             },
+            prompt_config: agent.prompt_config,
             domains: agent.domains,
             platform_scopes: agent.platform_scopes,
             mcp_servers: agent.mcp_servers,
@@ -104,42 +120,6 @@ impl From<AgentManifest> for AgentDocument {
             heartbeat: agent.heartbeat,
         }
     }
-}
-
-impl From<AgentManifest> for AgentPromptDocument {
-    fn from(agent: AgentManifest) -> Self {
-        let prompt_config = agent.prompt_config.clone();
-        Self {
-            agent: AgentDocument::from(agent),
-            prompt_config,
-        }
-    }
-}
-
-impl From<AgentDocument> for AgentUpdateDocument {
-    fn from(agent: AgentDocument) -> Self {
-        Self {
-            name: Some(agent.summary.name),
-            description: Some(agent.summary.description),
-            color: Some(agent.summary.color),
-            model: None,
-            abilities: None,
-            domains: None,
-            script_tools: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating an agent.
-pub struct AgentCreateDocument {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<Slug>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,11 +132,13 @@ pub struct AbilitySummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Ability document returned by metadata routes.
+/// Canonical ability document returned by get/configure operations.
 pub struct AbilityDocument {
     #[serde(flatten)]
     pub summary: AbilitySummary,
     pub activation_condition: String,
+    #[serde(default)]
+    pub prompt_config: AbilityPromptConfig,
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
@@ -165,54 +147,43 @@ pub struct AbilityDocument {
     pub script_tools: Vec<Slug>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Ability document including prompt configuration.
-pub struct AbilityPromptDocument {
-    #[serde(flatten)]
-    pub ability: AbilityDocument,
-    pub prompt_config: AbilityPromptConfig,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating an ability.
-pub struct AbilityCreateDocument {
-    pub name: String,
-    #[serde(default)]
-    pub path: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub activation_condition: String,
-    pub prompt_config: AbilityPromptConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_tools: Option<Vec<Slug>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Partial update body for an ability.
-pub struct AbilityUpdateDocument {
+/// Metadata patch for `configure_ability`.
+pub struct AbilityConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_condition: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Full replacement assignment lists for `configure_ability`.
+pub struct AbilityConfigureAssignments {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_tools: Option<Vec<Slug>>,
 }
 
-impl AbilityUpdateDocument {
-    /// Return whether the update contains no effective field changes.
-    pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.description.is_none()
-            && self.activation_condition.is_none()
-            && self.mcp_servers.is_none()
-            && self.script_tools.is_none()
-    }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring an ability in one backend-owned sequence.
+pub struct AbilityConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub ability: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AbilityConfigureMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_config: Option<AbilityPromptConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<AbilityConfigureAssignments>,
 }
 
 impl From<AbilityManifest> for AbilityDocument {
@@ -224,19 +195,10 @@ impl From<AbilityManifest> for AbilityDocument {
                 description: ability.description,
             },
             activation_condition: ability.activation_condition,
+            prompt_config: ability.prompt_config,
             platform_scopes: ability.platform_scopes,
             mcp_servers: ability.mcp_servers,
             script_tools: ability.script_tools,
-        }
-    }
-}
-
-impl From<AbilityManifest> for AbilityPromptDocument {
-    fn from(ability: AbilityManifest) -> Self {
-        let prompt_config = ability.prompt_config.clone();
-        Self {
-            ability: AbilityDocument::from(ability),
-            prompt_config,
         }
     }
 }
@@ -252,11 +214,13 @@ pub struct DomainSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Domain document returned by metadata routes.
+/// Canonical domain document returned by get/configure operations.
 pub struct DomainDocument {
     #[serde(flatten)]
     pub summary: DomainSummary,
     pub command: String,
+    #[serde(default)]
+    pub prompt_config: DomainPromptConfig,
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
@@ -267,12 +231,45 @@ pub struct DomainDocument {
     pub script_tools: Vec<Slug>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Prompt-bearing domain document.
-pub struct DomainPromptDocument {
-    #[serde(flatten)]
-    pub domain: DomainDocument,
-    pub prompt_config: DomainPromptConfig,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Metadata patch for `configure_domain`.
+pub struct DomainConfigureMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Full replacement assignment lists for `configure_domain`.
+pub struct DomainConfigureAssignments {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abilities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_tools: Option<Vec<Slug>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring a domain in one backend-owned sequence.
+pub struct DomainConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub domain: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<DomainConfigureMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_config: Option<DomainPromptConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<DomainConfigureAssignments>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,86 +284,38 @@ pub struct ContextBlockSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Context block document returned by metadata routes.
+/// Canonical context block document returned by get/configure operations.
 pub struct ContextBlockDocument {
     #[serde(flatten)]
     pub summary: ContextBlockSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Context block document including template content.
-pub struct ContextBlockContentDocument {
-    #[serde(flatten)]
-    pub context_block: ContextBlockDocument,
-    pub template: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating a context block.
-pub struct ContextBlockCreateDocument {
-    pub name: String,
     #[serde(default)]
-    pub path: String,
-    pub description: Option<String>,
     pub template: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Partial update body for context block metadata or content.
-pub struct ContextBlockUpdateDocument {
+/// Metadata patch for `configure_context_block`.
+pub struct ContextBlockConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring a context block in one backend-owned sequence.
+pub struct ContextBlockConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub context_block: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ContextBlockConfigureMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating a domain.
-pub struct DomainCreateDocument {
-    pub name: String,
-    #[serde(default)]
-    pub path: String,
-    pub description: Option<String>,
-    pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_tools: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_config: Option<DomainPromptConfig>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Partial update body for a domain document.
-pub struct DomainUpdateDocument {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing)]
-    pub script_tools: Option<Vec<Slug>>,
-}
-
-impl DomainUpdateDocument {
-    /// Return whether the update contains no effective field changes.
-    pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.description.is_none()
-            && self.command.is_none()
-            && self.abilities.is_none()
-            && self.mcp_servers.is_none()
-            && self.script_tools.is_none()
-    }
+    pub encrypted_payload: Option<serde_json::Value>,
 }
 
 impl From<DomainManifest> for DomainDocument {
@@ -380,6 +329,7 @@ impl From<DomainManifest> for DomainDocument {
                 description: domain.description,
             },
             command: domain.command,
+            prompt_config: domain.prompt_config,
             platform_scopes: domain.platform_scopes,
             abilities: domain.abilities,
             mcp_servers: domain.mcp_servers,
@@ -387,19 +337,6 @@ impl From<DomainManifest> for DomainDocument {
         }
     }
 }
-
-impl From<DomainManifest> for DomainPromptDocument {
-    fn from(domain: DomainManifest) -> Self {
-        let prompt_config = domain.prompt_config.clone();
-        Self {
-            domain: DomainDocument::from(domain),
-            prompt_config,
-        }
-    }
-}
-
-/// Alias used by the current contract for a domain prompt document.
-pub type DomainManifestDocument = DomainPromptDocument;
 
 impl From<ContextBlockManifest> for ContextBlockDocument {
     fn from(context_block: ContextBlockManifest) -> Self {
@@ -409,6 +346,7 @@ impl From<ContextBlockManifest> for ContextBlockDocument {
             context_block_selector(&context_block.path, &context_block.name)
         );
         Self {
+            template: context_block.template,
             summary: ContextBlockSummary {
                 name: context_block.name,
                 slug,
@@ -430,16 +368,6 @@ fn context_block_selector(path: &str, name: &str) -> String {
             .collect::<Vec<_>>()
             .join(".");
         format!("{path}.{name}")
-    }
-}
-
-impl From<ContextBlockManifest> for ContextBlockContentDocument {
-    fn from(context_block: ContextBlockManifest) -> Self {
-        let template = context_block.template.clone();
-        Self {
-            context_block: ContextBlockDocument::from(context_block),
-            template,
-        }
     }
 }
 
@@ -729,42 +657,37 @@ pub struct RoutineEdgeInput {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for creating a routine.
-pub struct RoutineCreateDocument {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<RoutineTrigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<RoutineMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph: Option<RoutineGraphInput>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Partial update body for a routine.
-pub struct RoutineUpdateDocument {
+/// Metadata patch for `configure_routine`.
+pub struct RoutineConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Option<uuid::Uuid>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<RoutineTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<RoutineMetadata>,
+    pub is_active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph: Option<RoutineGraphInput>,
+    pub max_retries: Option<i32>,
 }
 
-impl RoutineUpdateDocument {
-    /// Return whether the update contains no effective field changes.
-    pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.description.is_none()
-            && self.trigger.is_none()
-            && self.metadata.is_none()
-            && self.graph.is_none()
-    }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring a routine in one backend-owned sequence.
+pub struct RoutineConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<RoutineConfigureMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<RoutineGraphInput>,
 }
 
 impl RoutineDocument {
@@ -903,10 +826,9 @@ pub struct ModelUpdateDocument {
 
 impl From<ModelManifest> for ModelDocument {
     fn from(model: ModelManifest) -> Self {
-        let slug = model_manifest_slug(&model.model_provider, &model.model);
         Self {
             summary: ModelSummary {
-                slug,
+                slug: model.slug,
                 name: model.name,
                 description: model.description,
                 model: model.model,
@@ -1014,46 +936,5 @@ impl From<CouncilManifest> for CouncilDocument {
                 })
                 .collect(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn executable_resource_update_documents_do_not_serialize_platform_scopes() {
-        let agent = serde_json::to_value(AgentUpdateDocument {
-            name: Some("agent".into()),
-            description: None,
-            color: None,
-            model: None,
-            abilities: None,
-            domains: None,
-            script_tools: None,
-        })
-        .unwrap();
-        assert!(agent.get("platform_scopes").is_none());
-
-        let ability = serde_json::to_value(AbilityUpdateDocument {
-            name: None,
-            description: None,
-            activation_condition: None,
-            mcp_servers: None,
-            script_tools: None,
-        })
-        .unwrap();
-        assert!(ability.get("platform_scopes").is_none());
-
-        let domain = serde_json::to_value(DomainUpdateDocument {
-            name: None,
-            description: None,
-            command: None,
-            abilities: None,
-            mcp_servers: None,
-            script_tools: None,
-        })
-        .unwrap();
-        assert!(domain.get("platform_scopes").is_none());
     }
 }

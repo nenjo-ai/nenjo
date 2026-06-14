@@ -31,6 +31,10 @@ pub struct AgentRecord {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
     #[serde(default)]
     pub domains: Vec<String>,
     #[serde(default)]
@@ -52,6 +56,10 @@ pub struct AgentRecord {
     #[serde(default)]
     pub metadata: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_config: Option<PromptConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<EncryptedPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -62,13 +70,13 @@ pub struct AgentRecord {
 pub struct AgentPromptRecord {
     #[serde(flatten)]
     pub agent: AgentRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_config: Option<PromptConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<EncryptedPayload>,
 }
 
 impl AgentRecord {
+    pub fn resolved_prompt_config(&self) -> PromptConfig {
+        self.prompt_config.clone().unwrap_or_default()
+    }
+
     pub fn to_manifest(&self, prompt_config: PromptConfig) -> AgentManifest {
         AgentManifest {
             name: self.name.clone(),
@@ -100,22 +108,22 @@ impl AgentRecord {
     }
 
     pub fn to_document(&self) -> crate::manifest_mcp::AgentDocument {
-        let manifest = self.to_manifest(PromptConfig::default());
+        let manifest = self.to_manifest(self.resolved_prompt_config());
         crate::manifest_mcp::AgentDocument::from(manifest)
     }
 }
 
 impl AgentPromptRecord {
     pub fn resolved_prompt_config(&self) -> PromptConfig {
-        self.prompt_config.clone().unwrap_or_default()
+        self.agent.resolved_prompt_config()
     }
 
     pub fn to_manifest(&self) -> AgentManifest {
         self.agent.to_manifest(self.resolved_prompt_config())
     }
 
-    pub fn to_document(&self) -> crate::manifest_mcp::AgentPromptDocument {
-        crate::manifest_mcp::AgentPromptDocument::from(self.to_manifest())
+    pub fn to_document(&self) -> crate::manifest_mcp::AgentDocument {
+        crate::manifest_mcp::AgentDocument::from(self.to_manifest())
     }
 }
 

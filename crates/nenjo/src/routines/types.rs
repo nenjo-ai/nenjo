@@ -61,6 +61,7 @@ impl Default for StepResult {
 ///     .with_execution_run_id(run_id)
 ///     .with_tags(vec!["auth".into(), "security".into()]);
 /// ```
+#[derive(Clone)]
 pub struct RoutineInput {
     pub project: Option<Slug>,
     pub title: String,
@@ -262,8 +263,10 @@ impl RoutineInput {
 // ---------------------------------------------------------------------------
 
 /// Internal execution state, accumulated as steps run.
+#[derive(Clone)]
 pub(crate) struct RoutineState {
     pub step_results: HashMap<Slug, StepResult>,
+    pub completed_steps: Vec<Slug>,
     pub initial_input: String,
     pub input: RoutineInput,
     pub routine_name: Option<String>,
@@ -280,6 +283,7 @@ impl RoutineState {
         let initial_input = input.description.clone();
         Self {
             step_results: HashMap::new(),
+            completed_steps: Vec::new(),
             initial_input,
             input,
             routine_name: None,
@@ -290,6 +294,18 @@ impl RoutineState {
             step_metadata: None,
             metrics: RoutineMetrics::new(),
         }
+    }
+
+    pub(crate) fn record_step_result(&mut self, step_slug: Slug, result: StepResult) {
+        self.completed_steps.push(step_slug.clone());
+        self.step_results.insert(step_slug, result);
+    }
+
+    pub(crate) fn last_step_result(&self) -> Option<&StepResult> {
+        self.completed_steps
+            .iter()
+            .rev()
+            .find_map(|slug| self.step_results.get(slug))
     }
 }
 
@@ -309,7 +325,6 @@ pub enum StepType {
     Agent,
     Council,
     Gate,
-    Lambda,
     Terminal,
     TerminalFail,
 }
@@ -319,53 +334,10 @@ impl StepType {
         match s.to_lowercase().as_str() {
             "council" => Self::Council,
             "gate" => Self::Gate,
-            "lambda" => Self::Lambda,
             "terminal" => Self::Terminal,
             "terminal_fail" => Self::TerminalFail,
             _ => Self::Agent,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// LambdaStepConfig
-// ---------------------------------------------------------------------------
-
-/// Configuration for a lambda-type routine step.
-pub struct LambdaStepConfig {
-    pub lambda_id: Uuid,
-    pub interpreter: Option<String>,
-    pub timeout: Duration,
-}
-
-impl LambdaStepConfig {
-    pub fn from_config(config: &serde_json::Value, lambda_id: Option<Uuid>) -> Result<Self> {
-        let lambda_id = lambda_id
-            .or_else(|| {
-                config
-                    .get("lambda_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-            })
-            .ok_or_else(|| anyhow::anyhow!("Lambda step requires a lambda_id"))?;
-
-        let interpreter = config
-            .get("interpreter_override")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let timeout = config
-            .get("timeout")
-            .and_then(|v| v.as_str())
-            .map(parse_duration)
-            .transpose()?
-            .unwrap_or(Duration::from_secs(300));
-
-        Ok(Self {
-            lambda_id,
-            interpreter,
-            timeout,
-        })
     }
 }
 
@@ -492,7 +464,7 @@ impl StepMetrics {
 }
 
 /// Accumulator for all step metrics within a routine execution.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RoutineMetrics {
     steps: HashMap<Slug, StepMetrics>,
 }
@@ -567,7 +539,6 @@ mod tests {
         assert_eq!(StepType::from_str_value("agent"), StepType::Agent);
         assert_eq!(StepType::from_str_value("council"), StepType::Council);
         assert_eq!(StepType::from_str_value("gate"), StepType::Gate);
-        assert_eq!(StepType::from_str_value("lambda"), StepType::Lambda);
         assert_eq!(StepType::from_str_value("terminal"), StepType::Terminal);
         assert_eq!(
             StepType::from_str_value("terminal_fail"),

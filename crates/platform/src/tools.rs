@@ -19,27 +19,12 @@ use crate::{
     rest::{notifications::notification_tools, projects::project_rest_tools},
 };
 
-const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent", "get_agent_prompt"];
-const AGENT_WRITE_TOOLS: &[&str] = &[
-    "create_agent",
-    "update_agent",
-    "update_agent_prompt",
-    "delete_agent",
-];
-const ABILITY_READ_TOOLS: &[&str] = &["list_abilities", "get_ability", "get_ability_prompt"];
-const ABILITY_WRITE_TOOLS: &[&str] = &[
-    "create_ability",
-    "update_ability",
-    "update_ability_prompt",
-    "delete_ability",
-];
-const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain", "get_domain_prompt"];
-const DOMAIN_WRITE_TOOLS: &[&str] = &[
-    "create_domain",
-    "update_domain",
-    "update_domain_prompt",
-    "delete_domain",
-];
+const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent"];
+const AGENT_WRITE_TOOLS: &[&str] = &["configure_agent"];
+const ABILITY_READ_TOOLS: &[&str] = &["list_abilities", "get_ability"];
+const ABILITY_WRITE_TOOLS: &[&str] = &["configure_ability"];
+const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain"];
+const DOMAIN_WRITE_TOOLS: &[&str] = &["configure_domain"];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
 const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_tasks",
@@ -65,7 +50,7 @@ const PROJECT_REST_WRITE_TOOLS: &[&str] = &[
     "resume_project_execution",
 ];
 const ROUTINE_READ_TOOLS: &[&str] = &["list_routines", "get_routine"];
-const ROUTINE_WRITE_TOOLS: &[&str] = &["create_routine", "update_routine", "delete_routine"];
+const ROUTINE_WRITE_TOOLS: &[&str] = &["configure_routine"];
 const MODEL_READ_TOOLS: &[&str] = &["list_models", "get_model"];
 const MODEL_WRITE_TOOLS: &[&str] = &["create_model", "update_model", "delete_model"];
 const COUNCIL_READ_TOOLS: &[&str] = &["list_councils", "get_council"];
@@ -76,17 +61,8 @@ const COUNCIL_WRITE_TOOLS: &[&str] = &[
     "remove_council_member",
     "delete_council",
 ];
-const CONTEXT_BLOCK_READ_TOOLS: &[&str] = &[
-    "list_context_blocks",
-    "get_context_block",
-    "get_context_block_content",
-];
-const CONTEXT_BLOCK_WRITE_TOOLS: &[&str] = &[
-    "create_context_block",
-    "update_context_block",
-    "update_context_block_content",
-    "delete_context_block",
-];
+const CONTEXT_BLOCK_READ_TOOLS: &[&str] = &["list_context_blocks", "get_context_block"];
+const CONTEXT_BLOCK_WRITE_TOOLS: &[&str] = &["configure_context_block"];
 const NOTIFICATION_READ_TOOLS: &[&str] = &["list_notification_sessions", "list_notifications"];
 const NOTIFICATION_WRITE_TOOLS: &[&str] = &["send_notification"];
 const NOTIFICATION_OBJECT_TYPE: &str = "push.notification";
@@ -308,12 +284,14 @@ where
 struct TaskContentPayload {
     description: Option<String>,
     acceptance_criteria: Option<String>,
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CurrentTaskState {
     description: Option<String>,
     acceptance_criteria: Option<String>,
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,10 +370,33 @@ where
         task_id: Uuid,
         payload: &TaskContentPayload,
     ) -> Result<Option<serde_json::Value>> {
-        if payload.description.is_none() && payload.acceptance_criteria.is_none() {
+        if payload.description.is_none()
+            && payload.acceptance_criteria.is_none()
+            && payload.metadata.is_none()
+        {
             return Ok(None);
         }
         self.encode_task_payload(task_id, payload).await.map(Some)
+    }
+
+    fn plaintext_task_metadata(task: &serde_json::Value) -> Option<serde_json::Value> {
+        task.get("metadata")
+            .filter(|value| !value.is_null())
+            .cloned()
+    }
+
+    fn plaintext_task_state(task: &serde_json::Value) -> TaskContentPayload {
+        TaskContentPayload {
+            description: task
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            acceptance_criteria: task
+                .get("acceptance_criteria")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            metadata: Self::plaintext_task_metadata(task),
+        }
     }
 
     async fn resolve_project_task_id(&self, project: &Slug, task: &Slug) -> Result<Uuid> {
@@ -451,16 +452,7 @@ where
                 .context("failed to decode task encrypted content");
         }
 
-        Ok(TaskContentPayload {
-            description: task
-                .get("description")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            acceptance_criteria: task
-                .get("acceptance_criteria")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        })
+        Ok(Self::plaintext_task_state(task))
     }
 
     async fn task_document(&self, task: serde_json::Value) -> Result<ProjectTaskDocument> {
@@ -500,10 +492,6 @@ where
             .and_then(|value| value.as_array())
             .map(|values| string_array(values))
             .unwrap_or_default();
-        let metadata = task
-            .get("metadata")
-            .filter(|value| !value.is_null())
-            .cloned();
 
         Ok(ProjectTaskDocument {
             slug,
@@ -520,7 +508,7 @@ where
                 .get("order_index")
                 .and_then(|value| value.as_i64())
                 .unwrap_or_default(),
-            metadata,
+            metadata: content.metadata,
             assigned_agent: task
                 .get("assigned_agent")
                 .and_then(|value| value.as_str())
@@ -566,6 +554,7 @@ where
         let payload = TaskContentPayload {
             description: args.description.clone(),
             acceptance_criteria: args.acceptance_criteria.clone(),
+            metadata: args.metadata.clone(),
         };
         let encrypted_payload = self.maybe_encode_task_payload(task_id, &payload).await?;
 
@@ -576,7 +565,6 @@ where
             "status": args.status,
             "priority": args.priority,
             "type": args.task_type,
-            "metadata": args.metadata,
             "tags": args.tags,
             "required_tags": args.required_tags,
             "complexity": args.complexity,
@@ -619,9 +607,6 @@ where
         if let Some(task_type) = args.task_type.as_ref() {
             body.insert("type".into(), json!(task_type));
         }
-        if let Some(metadata) = args.metadata.as_ref() {
-            body.insert("metadata".into(), metadata.clone());
-        }
         if let Some(tags) = args.tags.as_ref() {
             body.insert("tags".into(), json!(tags));
         }
@@ -645,8 +630,9 @@ where
             body.insert("title".into(), json!(title));
         }
 
-        let needs_encrypted_payload =
-            args.description.is_some() || args.acceptance_criteria.is_some();
+        let needs_encrypted_payload = args.description.is_some()
+            || args.acceptance_criteria.is_some()
+            || args.metadata.is_some();
 
         if needs_encrypted_payload {
             let current_state = if args.description.is_some() && args.acceptance_criteria.is_some()
@@ -680,6 +666,7 @@ where
                     .acceptance_criteria
                     .clone()
                     .or(current_state.acceptance_criteria),
+                metadata: args.metadata.clone().or(current_state.metadata),
             };
             body.insert(
                 "encrypted_payload".into(),
@@ -1381,6 +1368,51 @@ impl Tool for ManifestContractTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use nenjo::manifest::local::LocalManifestStore;
+    use tempfile::tempdir;
+
+    #[derive(Clone, Default)]
+    struct RecordingPayloadEncoder {
+        last_payload: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl SensitivePayloadEncoder for RecordingPayloadEncoder {
+        async fn encode_payload(
+            &self,
+            account_id: Uuid,
+            object_id: Uuid,
+            object_type: &str,
+            payload: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>> {
+            *self.last_payload.lock().unwrap() = Some(payload.clone());
+            Ok(Some(json!({
+                "account_id": account_id,
+                "encryption_scope": "org",
+                "object_id": object_id,
+                "object_type": object_type,
+                "algorithm": "AES-256-GCM",
+                "key_version": 1,
+                "nonce": "nonce",
+                "ciphertext": "encrypted-test-payload"
+            })))
+        }
+    }
+
+    fn project_tools_backend(
+        encoder: RecordingPayloadEncoder,
+    ) -> PlatformProjectToolsBackend<LocalManifestStore, RecordingPayloadEncoder> {
+        let temp = tempdir().unwrap();
+        PlatformProjectToolsBackend {
+            client: Arc::new(PlatformManifestClient::new("http://localhost", "test").unwrap()),
+            manifest_store: Arc::new(LocalManifestStore::new(temp.path().join("manifests"))),
+            payload_encoder: encoder,
+            cached_org_id: Some(Uuid::new_v4()),
+        }
+    }
 
     #[test]
     fn create_project_tasks_args_accept_bulk_and_single_task_shapes() {
@@ -1447,5 +1479,85 @@ mod tests {
         assert!(error.contains("invalid list_project_tasks args"));
         assert!(error.contains("Received:"));
         assert!(error.contains("project_id"));
+    }
+
+    #[tokio::test]
+    async fn create_project_task_body_encrypts_metadata_without_plaintext_body() {
+        let encoder = RecordingPayloadEncoder::default();
+        let backend = project_tools_backend(encoder.clone());
+
+        let body = backend
+            .create_task_body(
+                &Slug::derive("demo-project"),
+                None,
+                None,
+                &CreateProjectTaskItemArgs {
+                    title: "Private task".to_string(),
+                    description: None,
+                    acceptance_criteria: None,
+                    status: None,
+                    priority: None,
+                    task_type: None,
+                    complexity: None,
+                    tags: None,
+                    required_tags: None,
+                    order_index: None,
+                    agent: None,
+                    routine: None,
+                    metadata: Some(json!({ "context": "Sensitive metadata" })),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("encrypted_payload").is_some());
+        assert!(!body.to_string().contains("Sensitive metadata"));
+        assert_eq!(
+            encoder.last_payload.lock().unwrap().as_ref().unwrap()["metadata"]["context"],
+            "Sensitive metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_project_task_body_encrypts_metadata_without_plaintext_body() {
+        let encoder = RecordingPayloadEncoder::default();
+        let backend = project_tools_backend(encoder.clone());
+
+        let body = backend
+            .update_task_body(
+                &UpdateProjectTaskArgs {
+                    project: Slug::derive("demo-project"),
+                    task: Slug::derive("private-task"),
+                    title: None,
+                    description: Some("Sensitive description".to_string()),
+                    acceptance_criteria: Some("Sensitive criteria".to_string()),
+                    status: None,
+                    priority: None,
+                    task_type: None,
+                    complexity: None,
+                    tags: None,
+                    required_tags: None,
+                    order_index: None,
+                    agent: None,
+                    routine: None,
+                    metadata: Some(json!({ "context": "Sensitive metadata" })),
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("encrypted_payload").is_some());
+        let body_text = body.to_string();
+        assert!(!body_text.contains("Sensitive metadata"));
+        assert!(!body_text.contains("Sensitive description"));
+        assert!(!body_text.contains("Sensitive criteria"));
+        let payload = encoder.last_payload.lock().unwrap();
+        let payload = payload.as_ref().unwrap();
+        assert_eq!(payload["metadata"]["context"], "Sensitive metadata");
+        assert_eq!(payload["description"], "Sensitive description");
+        assert_eq!(payload["acceptance_criteria"], "Sensitive criteria");
     }
 }

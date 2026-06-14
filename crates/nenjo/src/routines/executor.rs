@@ -1,6 +1,10 @@
-//! DAG executor — walks routine steps following conditional edges.
+//! Harness-side routine graph executor.
+//!
+//! The platform scheduler only dispatches routine runs to the harness. This
+//! module owns runtime step execution, parallel entry waves, fan-out/fan-in
+//! scheduling, gate retry loops, and event emission for a single routine run.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
@@ -15,8 +19,9 @@ use crate::manifest::{
     RoutineStepType,
 };
 use crate::provider::ProviderRuntime;
+use crate::routines::graph::validate_routine_manifest;
 use crate::routines::types::StepResult;
-use crate::routines::{apply_session_binding_memory_scope, gate};
+use crate::routines::{apply_session_binding_memory_scope, gate, routing};
 
 use super::RoutineEvent;
 use super::types::RoutineState;
@@ -78,10 +83,12 @@ where
     execute_routine_once(provider, routine, state, events_tx, cancel).await
 }
 
-/// Execute a routine once (the core DAG walk).
+/// Execute a routine once inside the harness runtime.
 ///
-/// Finds the entry step, executes it, follows the first matching outgoing edge,
-/// and repeats until a terminal node or no matching edge is found.
+/// Multiple entry steps run in the same ready wave. A downstream step with
+/// multiple activated incoming edges is scheduled only after all upstream steps
+/// have completed successfully. Platform scheduling/dispatch does not happen
+/// here.
 pub(crate) async fn execute_routine_once<P>(
     provider: &P,
     routine: &RoutineManifest,
@@ -98,31 +105,36 @@ where
     if steps.is_empty() {
         anyhow::bail!("Routine '{}' has no steps", routine.name);
     }
+    validate_routine_manifest(routine)
+        .map_err(|error| anyhow::anyhow!("Routine graph is invalid: {error}"))?;
 
-    // Find entry step
-    let entry_steps = &routine.metadata.entry_steps;
-
-    let entry_step = if !entry_steps.is_empty() {
-        steps
-            .iter()
-            .find(|s| entry_steps.contains(&s.slug))
-            .with_context(|| "Entry step slug from metadata not found in steps")?
-    } else {
-        // Fallback: find step with no incoming edges
-        let targets: HashSet<_> = edges.iter().map(|e| e.target_step.clone()).collect();
-        steps
-            .iter()
-            .find(|s| !targets.contains(&s.slug))
-            .or_else(|| steps.iter().min_by_key(|s| s.order_index))
-            .context("Could not determine entry step")?
-    };
-
-    let mut current_step = entry_step.clone();
     let mut last_result = StepResult::default();
     let mut edge_traversals: HashMap<String, u32> = HashMap::new();
-    let max_iterations = steps.len() * 100;
+    let steps_by_slug: HashMap<_, _> = steps
+        .iter()
+        .map(|step| (step.slug.clone(), step.clone()))
+        .collect();
+    let mut outgoing_by_source: HashMap<_, Vec<_>> = HashMap::new();
+    let mut incoming_by_target: HashMap<_, Vec<_>> = HashMap::new();
+    for edge in edges {
+        outgoing_by_source
+            .entry(edge.source_step.clone())
+            .or_insert_with(Vec::new)
+            .push(edge.clone());
+        incoming_by_target
+            .entry(edge.target_step.clone())
+            .or_insert_with(Vec::new)
+            .push(edge.clone());
+    }
 
-    for iteration in 0..max_iterations {
+    let mut ready: VecDeque<_> = routine.metadata.entry_steps.iter().cloned().collect();
+    let mut scheduled: HashSet<_> = HashSet::new();
+    let mut completed: HashSet<_> = HashSet::new();
+    let mut traversed_edges: HashSet<String> = HashSet::new();
+    let mut terminal_results = Vec::new();
+    let max_waves = steps.len() * 100;
+
+    for wave in 0..max_waves {
         if cancel.is_cancelled() {
             last_result = StepResult {
                 passed: false,
@@ -132,208 +144,138 @@ where
             break;
         }
 
-        debug!(
-            iteration,
-            step = %current_step.name,
-            step_type = %current_step.step_type,
-            "Executing routine step"
-        );
-
-        let step_run_id = Uuid::new_v4();
-        state.current_step_name = Some(current_step.name.clone());
-        state.current_step_type = Some(current_step.step_type.to_string());
-        state.step_instructions = current_step
-            .config
-            .get("instructions")
-            .or_else(|| current_step.config.get("description"))
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string());
-        // Parse step metadata — expect a JSON value. If the raw config value
-        // is not valid JSON (e.g. a bare string without quotes), serialize it
-        // as-is and log a warning so the user can fix their routine config.
-        state.step_metadata = current_step.config.get("metadata").map(|v| {
-            if v.is_object() || v.is_array() || v.is_string() {
-                serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
-            } else {
-                warn!(
-                    step = %current_step.name,
-                    raw = %v,
-                    "Step metadata is not a valid JSON object/array/string — using raw value"
-                );
-                v.to_string()
+        let mut batch = Vec::new();
+        while let Some(step_slug) = ready.pop_front() {
+            if scheduled.contains(&step_slug) {
+                continue;
             }
-        });
+            let step = steps_by_slug
+                .get(&step_slug)
+                .with_context(|| format!("Ready step {step_slug} not found"))?
+                .clone();
+            let route_edges = outgoing_by_source
+                .get(&step.slug)
+                .cloned()
+                .unwrap_or_default();
+            scheduled.insert(step_slug);
+            batch.push((step, route_edges));
+        }
 
-        // Emit step started
-        let _ = events_tx.send(RoutineEvent::StepStarted {
-            step_slug: current_step.slug.clone(),
-            step_run_id,
-            step_name: current_step.name.clone(),
-            step_type: current_step.step_type.to_string(),
-        });
+        if batch.is_empty() {
+            break;
+        }
 
-        // Execute the step
-        let step_start = std::time::Instant::now();
-        let result = execute_step(provider, &current_step, step_run_id, state, events_tx).await;
-        let duration_ms = step_start.elapsed().as_millis() as u64;
+        debug!(wave, steps = batch.len(), "Executing routine step wave");
 
-        match result {
-            Ok(step_result) => {
-                // Record metrics
-                state.metrics.record_step(
-                    &current_step.slug,
-                    step_result.input_tokens,
-                    step_result.output_tokens,
+        let mut tasks = tokio::task::JoinSet::new();
+        for (step, route_edges) in batch {
+            let provider = provider.clone();
+            let events_tx = events_tx.clone();
+            let mut step_state = state.clone();
+            let routine_steps = steps.to_vec();
+            tasks.spawn(async move {
+                execute_scheduled_step(
+                    &provider,
+                    step,
+                    &route_edges,
+                    &routine_steps,
+                    &mut step_state,
+                    &events_tx,
+                )
+                .await
+            });
+        }
+
+        let mut stop_after_wave = false;
+        while let Some(joined) = tasks.join_next().await {
+            let execution = joined??;
+            let step = execution.step;
+            let step_result = execution.result;
+
+            state.metrics.record_step(
+                &step.slug,
+                step_result.input_tokens,
+                step_result.output_tokens,
+            );
+
+            if !step_result.passed
+                && matches!(
+                    step.step_type,
+                    RoutineStepType::Gate | RoutineStepType::Council
+                )
+            {
+                let feedback = step_result
+                    .data
+                    .get("reasoning")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| step_result.output.clone());
+                state.gate_feedback = Some(feedback);
+            }
+
+            state.record_step_result(step.slug.clone(), step_result.clone());
+            completed.insert(step.slug.clone());
+            scheduled.remove(&step.slug);
+            last_result = step_result.clone();
+
+            if matches!(
+                step.step_type,
+                RoutineStepType::Terminal | RoutineStepType::TerminalFail
+            ) {
+                terminal_results.push(step_result);
+                continue;
+            }
+
+            if step.step_type == RoutineStepType::Agent && !last_result.passed {
+                debug!(
+                    step = %step.name,
+                    "Agent step returned fail verdict, terminating routine"
                 );
+                stop_after_wave = true;
+                continue;
+            }
 
-                let _ = events_tx.send(RoutineEvent::StepCompleted {
-                    step_slug: current_step.slug.clone(),
-                    step_run_id,
-                    result: step_result.clone(),
-                    duration_ms,
-                });
+            let outgoing = outgoing_by_source
+                .get(&step.slug)
+                .cloned()
+                .unwrap_or_default();
+            let activated = activated_edges(&step, &outgoing, last_result.passed)?;
 
-                // Store gate feedback if this step failed (for on_fail edges).
-                // For structured-evaluation steps, prefer the structured reasoning from the
-                // pass_verdict tool over the raw LLM output.
-                if !step_result.passed
-                    && matches!(
-                        current_step.step_type,
-                        RoutineStepType::Gate | RoutineStepType::Council
-                    )
+            for edge in activated {
+                if let Some(result) = exhausted_failure_for_edge(&step, edge, &mut edge_traversals)
                 {
-                    let feedback = step_result
-                        .data
-                        .get("reasoning")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| step_result.output.clone());
-                    state.gate_feedback = Some(feedback);
+                    last_result = result;
+                    stop_after_wave = true;
+                    continue;
                 }
 
-                state
-                    .step_results
-                    .insert(current_step.slug.clone(), step_result.clone());
-                last_result = step_result;
-            }
-            Err(e) => {
-                let error_msg = format!("{e:#}");
-                warn!(step = %current_step.name, error = %error_msg, "Step failed");
+                traversed_edges.insert(edge_key(edge));
+                let target_slug = edge.target_step.clone();
 
-                let _ = events_tx.send(RoutineEvent::StepFailed {
-                    step_slug: current_step.slug.clone(),
-                    step_run_id,
-                    error: error_msg.clone(),
-                    duration_ms,
-                });
-
-                last_result = StepResult {
-                    passed: false,
-                    output: error_msg,
-                    step_slug: current_step.slug.clone(),
-                    step_name: current_step.name.clone(),
-                    ..Default::default()
-                };
-                state
-                    .step_results
-                    .insert(current_step.slug.clone(), last_result.clone());
-            }
-        }
-
-        if cancel.is_cancelled() {
-            last_result = StepResult {
-                passed: false,
-                output: "Cancelled".to_string(),
-                step_slug: current_step.slug.clone(),
-                step_name: current_step.name.clone(),
-                ..Default::default()
-            };
-            break;
-        }
-
-        // Check for terminal steps
-        if matches!(
-            current_step.step_type,
-            RoutineStepType::Terminal | RoutineStepType::TerminalFail
-        ) {
-            break;
-        }
-
-        // Agent-step fail verdicts are terminal for the routine.
-        if current_step.step_type == RoutineStepType::Agent && !last_result.passed {
-            debug!(
-                step = %current_step.name,
-                "Agent step returned fail verdict, terminating routine"
-            );
-            break;
-        }
-
-        // Follow the first matching edge
-        let outgoing: Vec<_> = edges
-            .iter()
-            .filter(|e| e.source_step == current_step.slug)
-            .collect();
-
-        if current_step.step_type == RoutineStepType::Gate
-            && outgoing
-                .iter()
-                .any(|edge| edge.condition == RoutineEdgeCondition::Always)
-        {
-            bail!(
-                "Gate step '{}' must route with on_pass/on_fail edges, not always",
-                current_step.name
-            );
-        }
-
-        let next_edge = choose_next_edge(&outgoing, last_result.passed);
-
-        match next_edge {
-            Some(edge) => {
-                let traversal_count = edge_traversals.entry(edge_key(edge)).or_default();
-                if let Some(max_attempts) = edge_max_attempts(&current_step, edge)
-                    && *traversal_count >= max_attempts
-                {
-                    if let Some(exhausted_step_slug) = edge_on_exhausted_step(edge) {
-                        current_step = steps
-                            .iter()
-                            .find(|s| s.slug == exhausted_step_slug)
-                            .with_context(|| {
-                                format!(
-                                    "Edge exhausted target step {exhausted_step_slug} not found"
-                                )
-                            })?
-                            .clone();
-                    } else {
-                        last_result = StepResult {
-                            passed: false,
-                            output: format!(
-                                "Routine edge {} exhausted after {} attempts",
-                                edge_key(edge),
-                                max_attempts
-                            ),
-                            step_slug: current_step.slug.clone(),
-                            step_name: current_step.name.clone(),
-                            ..Default::default()
-                        };
-                        break;
-                    }
-                } else {
-                    *traversal_count += 1;
-                    current_step = steps
-                        .iter()
-                        .find(|s| s.slug == edge.target_step)
-                        .with_context(|| {
-                            format!("Edge target step {} not found", edge.target_step)
-                        })?
-                        .clone();
+                if scheduled.contains(&target_slug) {
+                    continue;
+                }
+                if target_is_ready(
+                    &target_slug,
+                    &incoming_by_target,
+                    &completed,
+                    &traversed_edges,
+                    state,
+                    &steps_by_slug,
+                ) {
+                    ready.push_back(target_slug);
                 }
             }
-            None => {
-                debug!(step = %current_step.name, "No matching outgoing edge, routine complete");
-                break;
-            }
         }
+
+        if stop_after_wave || !terminal_results.is_empty() {
+            break;
+        }
+    }
+
+    if let Some(result) = terminal_results.last() {
+        last_result = result.clone();
     }
 
     let _ = events_tx.send(RoutineEvent::Done {
@@ -342,6 +284,205 @@ where
     });
 
     Ok(last_result)
+}
+
+struct StepExecution {
+    step: RoutineStepManifest,
+    result: StepResult,
+}
+
+async fn execute_scheduled_step<P>(
+    provider: &P,
+    step: RoutineStepManifest,
+    route_edges: &[RoutineEdgeManifest],
+    routine_steps: &[RoutineStepManifest],
+    state: &mut RoutineState,
+    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+) -> Result<StepExecution>
+where
+    P: ProviderRuntime,
+{
+    debug!(
+        step = %step.name,
+        step_type = %step.step_type,
+        "Executing routine step"
+    );
+
+    let step_run_id = Uuid::new_v4();
+    prepare_step_state(state, &step);
+
+    let _ = events_tx.send(RoutineEvent::StepStarted {
+        step_slug: step.slug.clone(),
+        step_run_id,
+        step_name: step.name.clone(),
+        step_type: step.step_type.to_string(),
+    });
+
+    let step_start = std::time::Instant::now();
+    let result = execute_step(
+        provider,
+        &step,
+        route_edges,
+        routine_steps,
+        step_run_id,
+        state,
+        events_tx,
+    )
+    .await;
+    let duration_ms = step_start.elapsed().as_millis() as u64;
+
+    let result = match result {
+        Ok(step_result) => {
+            let _ = events_tx.send(RoutineEvent::StepCompleted {
+                step_slug: step.slug.clone(),
+                step_run_id,
+                result: step_result.clone(),
+                duration_ms,
+            });
+            step_result
+        }
+        Err(e) => {
+            let error_msg = format!("{e:#}");
+            warn!(step = %step.name, error = %error_msg, "Step failed");
+
+            let _ = events_tx.send(RoutineEvent::StepFailed {
+                step_slug: step.slug.clone(),
+                step_run_id,
+                error: error_msg.clone(),
+                duration_ms,
+            });
+
+            StepResult {
+                passed: false,
+                output: error_msg,
+                step_slug: step.slug.clone(),
+                step_name: step.name.clone(),
+                ..Default::default()
+            }
+        }
+    };
+
+    Ok(StepExecution { step, result })
+}
+
+fn prepare_step_state(state: &mut RoutineState, step: &RoutineStepManifest) {
+    state.current_step_name = Some(step.name.clone());
+    state.current_step_type = Some(step.step_type.to_string());
+    state.step_instructions = step
+        .config
+        .get("instructions")
+        .or_else(|| step.config.get("description"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    state.step_metadata = step.config.get("metadata").map(|v| {
+        if v.is_object() || v.is_array() || v.is_string() {
+            serde_json::to_string(v).unwrap_or_else(|_| v.to_string())
+        } else {
+            warn!(
+                step = %step.name,
+                raw = %v,
+                "Step metadata is not a valid JSON object/array/string -- using raw value"
+            );
+            v.to_string()
+        }
+    });
+}
+
+fn activated_edges<'a>(
+    step: &RoutineStepManifest,
+    outgoing: &'a [RoutineEdgeManifest],
+    passed: bool,
+) -> Result<Vec<&'a RoutineEdgeManifest>> {
+    if step.step_type == RoutineStepType::Gate
+        && outgoing
+            .iter()
+            .any(|edge| edge.condition == RoutineEdgeCondition::Always)
+    {
+        bail!(
+            "Gate step '{}' must route with on_pass/on_fail edges, not always",
+            step.name
+        );
+    }
+
+    if step.step_type == RoutineStepType::Agent && !passed {
+        return Ok(Vec::new());
+    }
+
+    Ok(outgoing
+        .iter()
+        .filter(|edge| edge_matches_result(edge, passed))
+        .collect())
+}
+
+fn edge_matches_result(edge: &RoutineEdgeManifest, passed: bool) -> bool {
+    match edge.condition {
+        RoutineEdgeCondition::Always => true,
+        RoutineEdgeCondition::OnPass => passed,
+        RoutineEdgeCondition::OnFail => !passed,
+    }
+}
+
+fn exhausted_failure_for_edge(
+    step: &RoutineStepManifest,
+    edge: &RoutineEdgeManifest,
+    edge_traversals: &mut HashMap<String, u32>,
+) -> Option<StepResult> {
+    let key = edge_key(edge);
+    let traversal_count = edge_traversals.entry(edge_key(edge)).or_default();
+    if let Some(max_attempts) = edge_max_attempts(step, edge)
+        && *traversal_count >= max_attempts
+    {
+        return Some(StepResult {
+            passed: false,
+            output: format!("Routine edge {key} exhausted after {max_attempts} attempts"),
+            data: serde_json::json!({
+                "reason": "retry_exhausted",
+                "edge": key,
+                "max_attempts": max_attempts,
+            }),
+            step_slug: step.slug.clone(),
+            step_name: step.name.clone(),
+            ..Default::default()
+        });
+    }
+
+    *traversal_count += 1;
+    None
+}
+
+fn target_is_ready(
+    target_slug: &crate::Slug,
+    incoming_by_target: &HashMap<crate::Slug, Vec<RoutineEdgeManifest>>,
+    completed: &HashSet<crate::Slug>,
+    traversed_edges: &HashSet<String>,
+    state: &RoutineState,
+    steps_by_slug: &HashMap<crate::Slug, RoutineStepManifest>,
+) -> bool {
+    let Some(incoming) = incoming_by_target.get(target_slug) else {
+        return true;
+    };
+
+    for edge in incoming {
+        let Some(source_result) = state.step_results.get(&edge.source_step) else {
+            return false;
+        };
+        if !completed.contains(&edge.source_step) {
+            return false;
+        }
+        let source_step = steps_by_slug
+            .get(&edge.source_step)
+            .expect("validated graph should contain incoming source");
+        if source_step.step_type == RoutineStepType::Agent && !source_result.passed {
+            return false;
+        }
+        if edge_matches_result(edge, source_result.passed)
+            && !traversed_edges.contains(&edge_key(edge))
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn edge_max_attempts(
@@ -370,39 +511,12 @@ fn edge_key(edge: &RoutineEdgeManifest) -> String {
     format!("{}:{}:{}", edge.source_step, condition, edge.target_step)
 }
 
-fn edge_on_exhausted_step(edge: &RoutineEdgeManifest) -> Option<crate::Slug> {
-    edge.metadata
-        .get("on_exhausted_step")
-        .and_then(|value| value.as_str())
-        .map(crate::Slug::derive)
-}
-
-fn choose_next_edge<'a>(
-    outgoing: &'a [&'a RoutineEdgeManifest],
-    passed: bool,
-) -> Option<&'a RoutineEdgeManifest> {
-    let preferred = if passed {
-        RoutineEdgeCondition::OnPass
-    } else {
-        RoutineEdgeCondition::OnFail
-    };
-
-    outgoing
-        .iter()
-        .copied()
-        .find(|edge| edge.condition == preferred)
-        .or_else(|| {
-            outgoing
-                .iter()
-                .copied()
-                .find(|edge| edge.condition == RoutineEdgeCondition::Always)
-        })
-}
-
 /// Execute a single step based on its type.
 async fn execute_step<P>(
     provider: &P,
     step: &RoutineStepManifest,
+    route_edges: &[RoutineEdgeManifest],
+    routine_steps: &[RoutineStepManifest],
     step_run_id: Uuid,
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -412,7 +526,16 @@ where
 {
     match step.step_type {
         RoutineStepType::Agent => {
-            execute_agent_step(provider, step, step_run_id, state, events_tx).await
+            execute_agent_step(
+                provider,
+                step,
+                route_edges,
+                routine_steps,
+                step_run_id,
+                state,
+                events_tx,
+            )
+            .await
         }
         RoutineStepType::Gate => {
             execute_gate_step(provider, step, step_run_id, state, events_tx).await
@@ -421,20 +544,12 @@ where
             super::council::execute_council(provider, step, step_run_id, state, events_tx).await
         }
         RoutineStepType::Terminal => {
-            // Terminal step: return the most recent step result
-            let last = state
-                .step_results
-                .values()
-                .last()
-                .cloned()
-                .unwrap_or_default();
-            Ok(StepResult {
-                passed: true,
-                output: last.output,
-                step_slug: step.slug.clone(),
-                step_name: step.name.clone(),
-                ..Default::default()
-            })
+            // Terminal step: return the most recently completed step result.
+            let mut last = state.last_step_result().cloned().unwrap_or_default();
+            last.passed = true;
+            last.step_slug = step.slug.clone();
+            last.step_name = step.name.clone();
+            Ok(StepResult { ..last })
         }
         RoutineStepType::TerminalFail => {
             let reason = step
@@ -461,6 +576,8 @@ where
 async fn execute_agent_step<P>(
     provider: &P,
     step: &RoutineStepManifest,
+    route_edges: &[RoutineEdgeManifest],
+    routine_steps: &[RoutineStepManifest],
     step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
@@ -488,9 +605,9 @@ where
 
     builder = scope_tools_to_work_dir(builder, state);
 
-    let runner = super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
-        .build()
-        .await?;
+    let builder = super::with_routine_step_max_turns(builder, step)
+        .with_tool(routing::route_next_steps_tool(route_edges, routine_steps));
+    let runner = builder.build().await?;
 
     // Build the task description from template context
     let task_description = build_task_description(step, state);
@@ -498,7 +615,7 @@ where
     debug!(is_cron = state.input.is_cron_trigger, step = %step.name, "Building task for agent step");
     let task = attach_location(AgentRun::task(build_task(state, task_description)?), state);
 
-    let output = gate::execute_with_pass_verdict(
+    let output = routing::execute_with_route_next_steps(
         &runner,
         task,
         state.input.project.clone(),
@@ -508,17 +625,19 @@ where
     )
     .await?;
 
-    let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
+    let decision = routing::resolve_route_next_steps(&output.messages)?;
+    let step_output = routing::route_next_steps_display_output(&decision, &output.text);
     let data = serde_json::json!({
-        "verdict": if verdict.passed { "pass" } else { "fail" },
-        "reasoning": verdict.reasoning,
-        "output": verdict.output,
+        "verdict": if decision.passed { "pass" } else { "fail" },
+        "reasoning": decision.reasoning,
+        "output": decision.output,
+        "route_next_steps": decision.next_steps,
+        "route_next_steps_arguments": decision.arguments,
     });
 
     Ok(StepResult {
         task_id: output.task_id.or(state.input.task_id),
-        passed: verdict.passed,
+        passed: decision.passed,
         output: step_output,
         data,
         step_slug: step.slug.clone(),
@@ -561,12 +680,7 @@ where
         .build()
         .await?;
 
-    let previous_result = state
-        .step_results
-        .values()
-        .last()
-        .cloned()
-        .unwrap_or_default();
+    let previous_result = state.last_step_result().cloned().unwrap_or_default();
 
     let task = attach_location(
         AgentRun {
@@ -660,7 +774,7 @@ fn build_task_description(_step: &RoutineStepManifest, state: &RoutineState) -> 
     }
 
     // Append previous step context
-    if let Some(last) = state.step_results.values().last()
+    if let Some(last) = state.last_step_result()
         && !last.output.is_empty()
     {
         let preview = if last.output.len() > 2000 {

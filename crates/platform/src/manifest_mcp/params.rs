@@ -2,16 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-
 use super::types::{
-    AbilityCreateDocument, AbilityUpdateDocument, AgentCreateDocument, AgentUpdateDocument,
-    ContextBlockCreateDocument, ContextBlockUpdateDocument, CouncilCreateDocument,
-    CouncilCreateMemberDocument, CouncilMemberUpdateDocument, CouncilUpdateDocument,
-    DomainCreateDocument, DomainUpdateDocument, KnowledgeDocCreateDocument,
+    AbilityConfigureDocument, AgentConfigureDocument, ContextBlockConfigureDocument,
+    CouncilCreateDocument, CouncilCreateMemberDocument, CouncilMemberUpdateDocument,
+    CouncilUpdateDocument, DomainConfigureDocument, KnowledgeDocCreateDocument,
     KnowledgeDocUpdateDocument, KnowledgePackCreateDocument, KnowledgePackUpdateDocument,
     ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument, ProjectUpdateDocument,
-    RoutineCreateDocument, RoutineUpdateDocument,
+    RoutineConfigureDocument,
 };
 use nenjo::Slug;
 
@@ -22,42 +19,10 @@ pub struct AgentsGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_agent_prompt`.
-pub struct AgentPromptGetParams {
-    /// Target agent slug.
-    pub agent: Slug,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_agent`.
-pub struct AgentCreateParams {
+/// Parameters for `configure_agent`.
+pub struct AgentConfigureParams {
     #[serde(flatten)]
-    pub data: AgentCreateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_agent`.
-pub struct AgentUpdateParams {
-    /// Target agent slug.
-    pub agent: Slug,
-    #[serde(flatten)]
-    pub data: AgentUpdateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_agent_prompt`.
-pub struct AgentPromptUpdateParams {
-    /// Target agent slug.
-    pub agent: Slug,
-    /// Partial prompt configuration patch for this agent.
-    #[serde(default)]
-    pub prompt_config: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_agent`.
-pub struct AgentDeleteParams {
-    pub agent: Slug,
+    pub data: AgentConfigureDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,37 +32,10 @@ pub struct AbilitiesGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_ability_prompt`.
-pub struct AbilityPromptGetParams {
-    pub ability: Slug,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_ability`.
-pub struct AbilityCreateParams {
+/// Parameters for `configure_ability`.
+pub struct AbilityConfigureParams {
     #[serde(flatten)]
-    pub data: AbilityCreateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_ability`.
-pub struct AbilityUpdateParams {
-    pub ability: Slug,
-    #[serde(flatten)]
-    pub data: AbilityUpdateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_ability_prompt`.
-pub struct AbilityPromptUpdateParams {
-    pub ability: Slug,
-    pub prompt_config: AbilityPromptConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_ability`.
-pub struct AbilityDeleteParams {
-    pub ability: Slug,
+    pub data: AbilityConfigureDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,43 +45,10 @@ pub struct DomainsGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_domain_prompt`.
-pub struct DomainPromptGetParams {
-    pub domain: Slug,
-}
-
-/// Alias used by the current contract for domain prompt retrieval.
-pub type DomainManifestGetParams = DomainPromptGetParams;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_domain`.
-pub struct DomainCreateParams {
+/// Parameters for `configure_domain`.
+pub struct DomainConfigureParams {
     #[serde(flatten)]
-    pub data: DomainCreateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_domain`.
-pub struct DomainUpdateParams {
-    pub domain: Slug,
-    #[serde(flatten)]
-    pub data: DomainUpdateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_domain_prompt`.
-pub struct DomainPromptUpdateParams {
-    pub domain: Slug,
-    pub prompt_config: DomainPromptConfig,
-}
-
-/// Alias used by the current contract for domain prompt updates.
-pub type DomainManifestUpdateParams = DomainPromptUpdateParams;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_domain`.
-pub struct DomainDeleteParams {
-    pub domain: Slug,
+    pub data: DomainConfigureDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,18 +132,10 @@ pub struct RoutinesGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_routine`.
-pub struct RoutineCreateParams {
+/// Parameters for `configure_routine`.
+pub struct RoutineConfigureParams {
     #[serde(flatten)]
-    pub data: RoutineCreateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_routine`.
-pub struct RoutineUpdateParams {
-    pub slug: Slug,
-    #[serde(flatten)]
-    pub data: RoutineUpdateDocument,
+    pub data: RoutineConfigureDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,36 +229,8 @@ pub struct ContextBlocksGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `get_context_block_content`.
-pub struct ContextBlockContentGetParams {
-    pub context_block: Slug,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `create_context_block`.
-pub struct ContextBlockCreateParams {
+/// Parameters for `configure_context_block`.
+pub struct ContextBlockConfigureParams {
     #[serde(flatten)]
-    pub data: ContextBlockCreateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_context_block`.
-pub struct ContextBlockUpdateParams {
-    pub context_block: Slug,
-    #[serde(flatten)]
-    pub data: ContextBlockUpdateDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `update_context_block_content`.
-pub struct ContextBlockContentUpdateParams {
-    pub context_block: Slug,
-    #[serde(default)]
-    pub template: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Parameters for `delete_context_block`.
-pub struct ContextBlockDeleteParams {
-    pub context_block: Slug,
+    pub data: ContextBlockConfigureDocument,
 }

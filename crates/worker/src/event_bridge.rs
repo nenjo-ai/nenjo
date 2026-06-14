@@ -1,12 +1,12 @@
 //! Event bridging — converts runtime events to NATS response types.
 
 use nenjo::manifest::Manifest;
-use nenjo_events::{Response, StepAgent, StreamEvent, ToolCall};
+use nenjo_events::{AsyncOperationTranscriptEvent, Response, StepAgent, StreamEvent};
 use serde::Serialize;
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use nenjo_harness::preview::{summarize_preview, truncate_preview};
+use nenjo_harness::preview::{PREVIEW_MAX_CHARS, summarize_preview, truncate_preview};
 
 // ---------------------------------------------------------------------------
 // Typed step-event data payloads
@@ -39,67 +39,98 @@ pub struct CronCycleCompletedData {
     pub passed: bool,
 }
 
-/// Convert a TurnEvent to a StreamEvent for the frontend.
-pub fn turn_event_to_stream_event(
+/// Convert a TurnEvent to StreamEvents for the frontend.
+pub fn turn_event_to_stream_events(
     event: &nenjo::TurnEvent,
     agent_name: &str,
-) -> Option<StreamEvent> {
-    let stream_event = match event {
-        nenjo::TurnEvent::AbilityStarted {
-            ability_tool_name,
-            ability_name,
-            task_input,
-            ..
-        } => Some(StreamEvent::AbilityActivated {
-            agent: agent_name.to_string(),
-            ability: ability_name.clone(),
-            ability_tool_name: ability_tool_name.clone(),
-            payload: Some(serde_json::json!({
-                "task_preview": task_input,
-            })),
-            encrypted_payload: None,
-        }),
+    run_id: &str,
+    session_id: Uuid,
+) -> Vec<StreamEvent> {
+    let stream_events = match event {
+        nenjo::TurnEvent::ModelRequestStarted {
+            request_id,
+            parent_call_id,
+            provider,
+            model,
+        } => vec![StreamEvent::ModelRequestStarted {
+            run_id: run_id.to_string(),
+            request_id: request_id.clone(),
+            parent_call_id: parent_call_id.clone(),
+            provider: provider.clone(),
+            model: Some(model.clone()),
+        }],
+        nenjo::TurnEvent::AssistantTextDelta { request_id, delta } => {
+            vec![StreamEvent::AssistantTextDelta {
+                run_id: run_id.to_string(),
+                request_id: request_id.clone(),
+                payload: Some(serde_json::json!({
+                    "delta": delta,
+                })),
+                encrypted_payload: None,
+            }]
+        }
+        nenjo::TurnEvent::ModelRequestCompleted {
+            request_id,
+            parent_call_id,
+        } => {
+            vec![StreamEvent::ModelRequestCompleted {
+                run_id: run_id.to_string(),
+                request_id: request_id.clone(),
+                parent_call_id: parent_call_id.clone(),
+            }]
+        }
+        nenjo::TurnEvent::AbilityStarted { .. } => Vec::new(),
         nenjo::TurnEvent::ToolCallStart {
+            batch_id,
             parent_tool_name,
             calls,
-        } => Some(StreamEvent::ToolCalls {
-            tool_calls: calls
-                .iter()
-                .map(|call| ToolCall {
-                    tool_name: call.tool_name.clone(),
-                    tool_args: call.tool_args.clone(),
-                })
-                .collect(),
-            agent_name: agent_name.to_string(),
-            parent_tool_name: parent_tool_name.clone(),
-            payload: Some(serde_json::json!({
-                "text_preview": calls.first().and_then(|c| c.text_preview.clone()),
-            })),
-            encrypted_payload: None,
-        }),
+        } => calls
+            .iter()
+            .map(|call| StreamEvent::ToolCallStarted {
+                run_id: run_id.to_string(),
+                batch_id: batch_id.clone(),
+                call_id: call
+                    .tool_call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}", call.tool_name, call.tool_args.len())),
+                parent_call_id: parent_tool_name.clone(),
+                tool_name: call.tool_name.clone(),
+                payload: Some(serde_json::json!({
+                    "tool_args": call.tool_args,
+                    "text_preview": call.text_preview,
+                })),
+                encrypted_payload: None,
+            })
+            .collect(),
         nenjo::TurnEvent::ToolCallEnd {
+            batch_id,
             parent_tool_name,
+            tool_call_id,
             tool_name,
             tool_args,
             result,
             ..
-        } => Some(StreamEvent::ToolCompleted {
-            tool_name: tool_name.clone(),
+        } => vec![StreamEvent::ToolCallCompleted {
+            run_id: run_id.to_string(),
+            batch_id: batch_id.clone(),
+            call_id: tool_call_id
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", tool_name, tool_args.len())),
+            parent_call_id: parent_tool_name.clone(),
             success: result.success,
-            parent_tool_name: parent_tool_name.clone(),
             payload: Some(serde_json::json!({
                 "tool_args": tool_args,
-                "output_preview": summarize_preview(&result.output),
+                "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
                 "error_preview": result.error.as_deref().and_then(summarize_preview),
             })),
             encrypted_payload: None,
-        }),
+        }],
         nenjo::TurnEvent::HookStarted {
             hook,
             hook_event,
             hook_type,
             source,
-        } => Some(StreamEvent::HookStarted {
+        } => vec![StreamEvent::HookStarted {
             agent: agent_name.to_string(),
             hook: hook.clone(),
             hook_event: hook_event.clone(),
@@ -107,21 +138,8 @@ pub fn turn_event_to_stream_event(
             source: source.clone(),
             payload: None,
             encrypted_payload: None,
-        }),
-        nenjo::TurnEvent::HookActivated {
-            hook,
-            hook_event,
-            hook_type,
-            source,
-        } => Some(StreamEvent::HookActivated {
-            agent: agent_name.to_string(),
-            hook: hook.clone(),
-            hook_event: hook_event.clone(),
-            hook_type: hook_type.clone(),
-            source: source.clone(),
-            payload: None,
-            encrypted_payload: None,
-        }),
+        }],
+        nenjo::TurnEvent::HookActivated { .. } => Vec::new(),
         nenjo::TurnEvent::HookCompleted {
             hook,
             hook_event,
@@ -133,7 +151,7 @@ pub fn turn_event_to_stream_event(
             output,
             error,
             reason,
-        } => Some(StreamEvent::HookCompleted {
+        } => vec![StreamEvent::HookCompleted {
             agent: agent_name.to_string(),
             hook: hook.clone(),
             hook_event: hook_event.clone(),
@@ -148,53 +166,88 @@ pub fn turn_event_to_stream_event(
                 "reason": reason,
             })),
             encrypted_payload: None,
-        }),
-        nenjo::TurnEvent::AbilityCompleted {
-            ability_tool_name,
-            ability_name,
-            success,
-            final_output,
-        } => Some(StreamEvent::AbilityCompleted {
-            agent: agent_name.to_string(),
-            ability: ability_name.clone(),
-            ability_tool_name: ability_tool_name.clone(),
-            success: *success,
-            payload: Some(serde_json::json!({
-                "result_preview": final_output,
-            })),
+        }],
+        nenjo::TurnEvent::AbilityCompleted { .. } => Vec::new(),
+        nenjo::TurnEvent::SubAgentEvent { .. } => Vec::new(),
+        nenjo::TurnEvent::SubAgentTranscript { .. } => Vec::new(),
+        nenjo::TurnEvent::AsyncOperationEvent {
+            operation_id,
+            kind,
+            label,
+            parent_operation_id,
+            parent_tool_name,
+            status,
+            signal,
+            summary,
+            payload,
+            model_visible,
+        } => vec![StreamEvent::AsyncOperationEvent {
+            operation_id: operation_id.clone(),
+            kind: kind.clone(),
+            label: label.clone(),
+            status: status.clone(),
+            signal: signal.clone(),
+            model_visible: *model_visible,
+            parent_operation_id: parent_operation_id.clone(),
+            parent_tool_name: parent_tool_name.clone(),
+            summary: summary.clone(),
+            payload: payload.clone(),
             encrypted_payload: None,
-        }),
-        nenjo::TurnEvent::SubAgentEvent { .. } => None,
-        nenjo::TurnEvent::SubAgentTranscript { .. } => None,
+        }],
+        nenjo::TurnEvent::AsyncOperationTranscript {
+            operation_id,
+            kind,
+            label,
+            event,
+        } => vec![StreamEvent::AsyncOperationTranscript {
+            operation_id: operation_id.clone(),
+            kind: kind.clone(),
+            label: label.clone(),
+            event: AsyncOperationTranscriptEvent {
+                kind: event.kind().to_string(),
+                summary: event.summary().to_string(),
+                tool: event.tool_name().map(ToOwned::to_owned),
+                success: event.success(),
+            },
+            payload: None,
+            encrypted_payload: None,
+        }],
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
             messages_after,
-        } => Some(StreamEvent::MessageCompacted {
+        } => vec![StreamEvent::MessageCompacted {
             messages_before: *messages_before,
             messages_after: *messages_after,
-        }),
-        nenjo::TurnEvent::TranscriptMessage { .. } => None,
-        nenjo::TurnEvent::Paused => Some(StreamEvent::Paused),
-        nenjo::TurnEvent::Resumed => Some(StreamEvent::Resumed),
-        nenjo::TurnEvent::Done { output } => Some(StreamEvent::Done {
-            payload: Some(serde_json::Value::String(output.text.clone())),
-            encrypted_payload: None,
-            total_input_tokens: output.input_tokens,
-            total_output_tokens: output.output_tokens,
-            project: None,
-            agent: None,
-            session_id: None,
-        }),
+        }],
+        nenjo::TurnEvent::TranscriptMessage { .. } => Vec::new(),
+        nenjo::TurnEvent::Paused => vec![StreamEvent::Paused],
+        nenjo::TurnEvent::Resumed => vec![StreamEvent::Resumed],
+        nenjo::TurnEvent::Done { output } => vec![
+            StreamEvent::RunCompleted {
+                run_id: run_id.to_string(),
+                session_id: session_id.to_string(),
+            },
+            StreamEvent::Done {
+                payload: Some(serde_json::Value::String(output.text.clone())),
+                encrypted_payload: None,
+                total_input_tokens: output.input_tokens,
+                total_output_tokens: output.output_tokens,
+                project: None,
+                agent: None,
+                session_id: None,
+            },
+        ],
     };
 
-    if let Some(ref stream_event) = stream_event {
+    for stream_event in &stream_events {
         trace!(
             turn_event = %summarize_turn_event(event),
             stream_event = %summarize_stream_event(stream_event),
             agent = agent_name,
             "Bridged turn event to pre-codec stream event"
         );
-    } else {
+    }
+    if stream_events.is_empty() {
         debug!(
             turn_event = %summarize_turn_event(event),
             agent = agent_name,
@@ -202,27 +255,50 @@ pub fn turn_event_to_stream_event(
         );
     }
 
-    stream_event
+    stream_events
 }
 
 pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
     match event {
+        nenjo::TurnEvent::ModelRequestStarted {
+            request_id,
+            parent_call_id,
+            model,
+            ..
+        } => format!(
+            "model_request_started(request={request_id}, parent={}, model={model})",
+            parent_call_id.as_deref().unwrap_or("-")
+        ),
+        nenjo::TurnEvent::AssistantTextDelta { request_id, delta } => {
+            format!(
+                "assistant_text_delta(request={request_id}, len={})",
+                delta.len()
+            )
+        }
+        nenjo::TurnEvent::ModelRequestCompleted {
+            request_id,
+            parent_call_id,
+        } => format!(
+            "model_request_completed(request={request_id}, parent={})",
+            parent_call_id.as_deref().unwrap_or("-")
+        ),
         nenjo::TurnEvent::AbilityStarted {
+            call_id,
             ability_tool_name,
             ability_name,
             task_input,
             caller_history,
         } => format!(
-            "ability_started(tool={ability_tool_name}, ability={ability_name}, task_preview={:?}, task_len={}, caller_messages={})",
-            truncate_preview(task_input, 80),
+            "ability_started(call={call_id}, tool={ability_tool_name}, ability={ability_name}, task_len={}, caller_messages={})",
             task_input.len(),
             caller_history.len()
         ),
         nenjo::TurnEvent::ToolCallStart {
+            batch_id,
             parent_tool_name,
             calls,
         } => format!(
-            "tool_call_start(parent={}, tools=[{}], count={})",
+            "tool_call_start(batch={batch_id}, parent={}, tools=[{}], count={})",
             parent_tool_name.as_deref().unwrap_or("-"),
             calls
                 .iter()
@@ -232,13 +308,14 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             calls.len()
         ),
         nenjo::TurnEvent::ToolCallEnd {
+            batch_id,
             parent_tool_name,
             tool_name,
             tool_args,
             result,
             ..
         } => format!(
-            "tool_call_end(parent={}, tool={tool_name}, args_len={}, success={}, output_len={}, error={})",
+            "tool_call_end(batch={batch_id}, parent={}, tool={tool_name}, args_len={}, success={}, output_len={}, error={})",
             parent_tool_name.as_deref().unwrap_or("-"),
             tool_args.len(),
             result.success,
@@ -250,12 +327,13 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 .unwrap_or_else(|| "-".to_string())
         ),
         nenjo::TurnEvent::AbilityCompleted {
+            call_id,
             ability_tool_name,
             ability_name,
             success,
             final_output,
         } => format!(
-            "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
+            "ability_completed(call={call_id}, tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
         nenjo::TurnEvent::HookStarted {
@@ -272,7 +350,7 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             hook_type,
             source,
         } => format!(
-            "hook_activated(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+            "hook_signal(hook={hook}, event={hook_event}, type={hook_type}, source={source})"
         ),
         nenjo::TurnEvent::HookCompleted {
             hook,
@@ -308,6 +386,25 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             event.kind(),
             event.summary().len()
         ),
+        nenjo::TurnEvent::AsyncOperationEvent {
+            operation_id,
+            kind,
+            status,
+            signal,
+            ..
+        } => format!(
+            "async_operation_event(id={operation_id}, kind={kind}, signal={signal}, status={status})"
+        ),
+        nenjo::TurnEvent::AsyncOperationTranscript {
+            operation_id,
+            kind,
+            event,
+            ..
+        } => format!(
+            "async_operation_transcript(id={operation_id}, kind={kind}, event={}, summary_len={})",
+            event.kind(),
+            event.summary().len()
+        ),
         nenjo::TurnEvent::MessageCompacted {
             messages_before,
             messages_after,
@@ -332,50 +429,66 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
 
 pub fn summarize_stream_event(event: &StreamEvent) -> String {
     match event {
-        StreamEvent::ToolCalls {
-            tool_calls,
-            agent_name,
-            parent_tool_name,
+        StreamEvent::RunStarted {
+            run_id, session_id, ..
+        } => format!("run_started(run={run_id}, session={session_id})"),
+        StreamEvent::RunCompleted { run_id, .. } => format!("run_completed(run={run_id})"),
+        StreamEvent::RunFailed { run_id, .. } => format!("run_failed(run={run_id})"),
+        StreamEvent::RunCancelled { run_id, .. } => format!("run_cancelled(run={run_id})"),
+        StreamEvent::ModelRequestStarted {
+            run_id,
+            request_id,
+            model,
             ..
         } => format!(
-            "tool_calls(count={}, agent={agent_name}, parent={}, tools=[{}])",
-            tool_calls.len(),
-            parent_tool_name.as_deref().unwrap_or("-"),
-            tool_calls
-                .iter()
-                .map(|call| call.tool_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "model_request_started(run={run_id}, request={request_id}, model={})",
+            model.as_deref().unwrap_or("-")
         ),
-        StreamEvent::ToolCompleted {
-            tool_name, success, ..
-        } => format!("tool_completed(tool={tool_name}, success={success})"),
-        StreamEvent::AbilityActivated {
-            agent,
-            ability,
-            ability_tool_name,
-            ..
+        StreamEvent::AssistantTextDelta {
+            run_id,
+            request_id,
+            payload,
+            encrypted_payload,
+        } => format!(
+            "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
+            payload.is_some(),
+            encrypted_payload.is_some()
+        ),
+        StreamEvent::ModelRequestCompleted {
+            run_id, request_id, ..
         } => {
-            format!("ability_activated(agent={agent}, ability={ability}, tool={ability_tool_name})")
+            format!("model_request_completed(run={run_id}, request={request_id})")
         }
-        StreamEvent::AbilityCompleted {
-            agent,
-            ability,
-            ability_tool_name,
+        StreamEvent::ToolCallStarted {
+            run_id,
+            batch_id,
+            call_id,
+            tool_name,
+            ..
+        } => format!(
+            "tool_call_started(run={run_id}, batch={batch_id}, call={call_id}, tool={tool_name})"
+        ),
+        StreamEvent::ToolOutputDelta {
+            run_id,
+            call_id,
+            stream,
+            payload,
+            encrypted_payload,
+        } => format!(
+            "tool_output_delta(run={run_id}, call={call_id}, stream={stream}, payload={}, encrypted={})",
+            payload.is_some(),
+            encrypted_payload.is_some()
+        ),
+        StreamEvent::ToolCallCompleted {
+            run_id,
+            batch_id,
+            call_id,
+            parent_call_id,
             success,
             ..
         } => format!(
-            "ability_completed(agent={agent}, ability={ability}, tool={ability_tool_name}, success={success})"
-        ),
-        StreamEvent::HookActivated {
-            agent,
-            hook,
-            hook_event,
-            hook_type,
-            source,
-            ..
-        } => format!(
-            "hook_activated(agent={agent}, hook={hook}, event={hook_event}, type={hook_type}, source={source})"
+            "tool_call_completed(run={run_id}, batch={batch_id}, call={call_id}, parent={}, success={success})",
+            parent_call_id.as_deref().unwrap_or("-")
         ),
         StreamEvent::HookStarted {
             agent,
@@ -399,31 +512,23 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
         } => format!(
             "hook_completed(agent={agent}, hook={hook}, event={hook_event}, type={hook_type}, source={source}, success={success}, blocked={blocked})"
         ),
-        StreamEvent::SubAgentEvent {
-            agent,
-            slug,
-            sub_agent,
+        StreamEvent::AsyncOperationEvent {
+            operation_id,
             kind,
+            signal,
+            status,
             ..
         } => format!(
-            "sub_agent_event(agent={agent}, slug={slug}, sub_agent={sub_agent}, kind={kind})"
+            "async_operation_event(id={operation_id}, kind={kind}, signal={signal}, status={status})"
         ),
-        StreamEvent::DelegationStarted {
-            agent,
-            target_agent,
-            delegate_tool_name,
+        StreamEvent::AsyncOperationTranscript {
+            operation_id,
+            kind,
+            event,
             ..
         } => format!(
-            "delegation_started(agent={agent}, target={target_agent}, tool={delegate_tool_name})"
-        ),
-        StreamEvent::DelegationCompleted {
-            agent,
-            target_agent,
-            delegate_tool_name,
-            success,
-            ..
-        } => format!(
-            "delegation_completed(agent={agent}, target={target_agent}, tool={delegate_tool_name}, success={success})"
+            "async_operation_transcript(id={operation_id}, kind={kind}, event={})",
+            event.kind
         ),
         StreamEvent::Error { message, .. } => {
             format!(
@@ -548,6 +653,7 @@ pub fn turn_event_to_task_step_response(
 
     match event {
         nenjo::TurnEvent::ToolCallStart {
+            batch_id,
             parent_tool_name,
             calls,
         } => Some(Response::TaskStepEvent {
@@ -564,7 +670,15 @@ pub fn turn_event_to_task_step_response(
                 context.routine_step.clone(),
                 serde_json::Map::from_iter([
                     (
+                        "batch_id".to_string(),
+                        serde_json::Value::String(batch_id.clone()),
+                    ),
+                    (
                         "parent_tool_name".to_string(),
+                        serde_json::to_value(parent_tool_name).unwrap_or_default(),
+                    ),
+                    (
+                        "parent_call_id".to_string(),
                         serde_json::to_value(parent_tool_name).unwrap_or_default(),
                     ),
                     (
@@ -608,6 +722,7 @@ pub fn turn_event_to_task_step_response(
             agent,
         }),
         nenjo::TurnEvent::ToolCallEnd {
+            batch_id,
             parent_tool_name,
             tool_call_id,
             tool_name,
@@ -629,7 +744,15 @@ pub fn turn_event_to_task_step_response(
                 context.routine_step.clone(),
                 serde_json::Map::from_iter([
                     (
+                        "batch_id".to_string(),
+                        serde_json::Value::String(batch_id.clone()),
+                    ),
+                    (
                         "parent_tool_name".to_string(),
+                        serde_json::to_value(parent_tool_name).unwrap_or_default(),
+                    ),
+                    (
+                        "parent_call_id".to_string(),
                         serde_json::to_value(parent_tool_name).unwrap_or_default(),
                     ),
                     (
@@ -662,6 +785,7 @@ pub fn turn_event_to_task_step_response(
             agent,
         }),
         nenjo::TurnEvent::AbilityStarted {
+            call_id,
             ability_name,
             task_input,
             ..
@@ -672,11 +796,13 @@ pub fn turn_event_to_task_step_response(
             step_name: ability_name.clone(),
             step_type: "ability".to_string(),
             duration_ms: None,
-            data: context
-                .routine_step
-                .clone()
-                .map(|step| task_data(Some(step), serde_json::Map::new()))
-                .unwrap_or(serde_json::Value::Null),
+            data: task_data(
+                context.routine_step.clone(),
+                serde_json::Map::from_iter([(
+                    "call_id".to_string(),
+                    serde_json::Value::String(call_id.clone()),
+                )]),
+            ),
             payload: Some(serde_json::json!({
                 "task_preview": task_input,
             })),
@@ -684,6 +810,7 @@ pub fn turn_event_to_task_step_response(
             agent,
         }),
         nenjo::TurnEvent::AbilityCompleted {
+            call_id,
             ability_name,
             success,
             final_output,
@@ -701,10 +828,13 @@ pub fn turn_event_to_task_step_response(
             duration_ms: None,
             data: task_data(
                 context.routine_step.clone(),
-                serde_json::Map::from_iter([(
-                    "success".to_string(),
-                    serde_json::Value::Bool(*success),
-                )]),
+                serde_json::Map::from_iter([
+                    ("success".to_string(), serde_json::Value::Bool(*success)),
+                    (
+                        "call_id".to_string(),
+                        serde_json::Value::String(call_id.clone()),
+                    ),
+                ]),
             ),
             payload: Some(serde_json::json!({
                 "output_preview": final_output,
@@ -713,9 +843,48 @@ pub fn turn_event_to_task_step_response(
             agent,
         }),
         nenjo::TurnEvent::SubAgentEvent { .. } => None,
+        nenjo::TurnEvent::AsyncOperationEvent {
+            operation_id,
+            kind,
+            label,
+            status,
+            signal,
+            summary,
+            ..
+        } => Some(Response::TaskStepEvent {
+            execution_run_id,
+            task_id,
+            event_type: format!("async_operation_{signal}"),
+            step_name: label.clone(),
+            step_type: kind.clone(),
+            duration_ms: None,
+            data: task_data(
+                context.routine_step.clone(),
+                serde_json::Map::from_iter([
+                    (
+                        "operation_id".to_string(),
+                        serde_json::Value::String(operation_id.clone()),
+                    ),
+                    (
+                        "status".to_string(),
+                        serde_json::Value::String(status.clone()),
+                    ),
+                    (
+                        "summary".to_string(),
+                        serde_json::to_value(summary).unwrap_or_default(),
+                    ),
+                ]),
+            ),
+            payload: None,
+            encrypted_payload: None,
+            agent,
+        }),
         nenjo::TurnEvent::HookActivated { .. }
         | nenjo::TurnEvent::HookStarted { .. }
-        | nenjo::TurnEvent::HookCompleted { .. } => None,
+        | nenjo::TurnEvent::HookCompleted { .. }
+        | nenjo::TurnEvent::ModelRequestStarted { .. }
+        | nenjo::TurnEvent::AssistantTextDelta { .. }
+        | nenjo::TurnEvent::ModelRequestCompleted { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => Some(Response::TaskStepEvent {
             execution_run_id,
             task_id,
@@ -735,6 +904,7 @@ pub fn turn_event_to_task_step_response(
         }),
         nenjo::TurnEvent::Done { .. } => None,
         nenjo::TurnEvent::SubAgentTranscript { .. } => None,
+        nenjo::TurnEvent::AsyncOperationTranscript { .. } => None,
         nenjo::TurnEvent::TranscriptMessage { .. } => None,
         nenjo::TurnEvent::MessageCompacted { .. } => None,
         nenjo::TurnEvent::Paused | nenjo::TurnEvent::Resumed => None,
@@ -946,7 +1116,7 @@ mod tests {
             model_visible: false,
         };
 
-        assert!(turn_event_to_stream_event(&event, "leader").is_none());
+        assert!(turn_event_to_stream_events(&event, "leader", "run-1", Uuid::new_v4()).is_empty());
     }
 
     #[test]
@@ -973,6 +1143,53 @@ mod tests {
         );
 
         assert!(response.is_none());
+    }
+
+    #[test]
+    fn stream_tool_output_preview_keeps_json_body() {
+        let output = serde_json::json!({
+            "models": [
+                { "id": "model-a", "name": "Model A" },
+                { "id": "model-b", "name": "Model B" }
+            ]
+        })
+        .to_string();
+
+        let events = turn_event_to_stream_events(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "list_models".to_string(),
+                tool_args: "{}".to_string(),
+                result: nenjo::ToolResult {
+                    success: true,
+                    output: output.clone(),
+                    error: None,
+                },
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        match events.as_slice() {
+            [
+                StreamEvent::ToolCallCompleted {
+                    batch_id, payload, ..
+                },
+            ] => {
+                assert_eq!(batch_id, "batch-1");
+                assert_eq!(
+                    payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("output_preview"))
+                        .and_then(serde_json::Value::as_str),
+                    Some(output.as_str()),
+                );
+            }
+            other => panic!("unexpected stream events: {other:?}"),
+        }
     }
 
     #[test]
@@ -1071,6 +1288,7 @@ mod tests {
         let step_slug = "review".to_string();
         let step_run_id = Uuid::new_v4();
         let event = nenjo::TurnEvent::AbilityStarted {
+            call_id: "ability-call-1".to_string(),
             ability_tool_name: "ability.review".to_string(),
             ability_name: "Review".to_string(),
             task_input: "inspect".to_string(),
@@ -1116,7 +1334,11 @@ mod tests {
             other => panic!("unexpected routine response: {other:?}"),
         }
         match direct {
-            Response::TaskStepEvent { data, .. } => assert!(data.is_null()),
+            Response::TaskStepEvent { data, .. } => {
+                assert_eq!(data["call_id"], "ability-call-1");
+                assert!(data.get("step_slug").is_none());
+                assert!(data.get("step_run_id").is_none());
+            }
             other => panic!("unexpected direct response: {other:?}"),
         }
     }
@@ -1126,6 +1348,7 @@ mod tests {
         let output = "x".repeat(600);
         let response = turn_event_to_task_step_response(
             &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
                 parent_tool_name: None,
                 tool_call_id: Some("call-1".to_string()),
                 tool_name: "tool".to_string(),

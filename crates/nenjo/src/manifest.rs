@@ -492,7 +492,7 @@ impl KnowledgePackSource {
     }
 }
 
-/// A routine — a DAG of steps (agent, lambda, gate, council) with edges defining control flow.
+/// A routine — a DAG of steps (agent, gate, council, terminal) with edges defining control flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineManifest {
     pub name: String,

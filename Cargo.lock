@@ -2117,6 +2117,7 @@ version = "0.14.0"
 dependencies = [
  "anyhow",
  "flate2",
+ "nenjo",
  "nenjo-packages",
  "rayon",
  "reqwest",

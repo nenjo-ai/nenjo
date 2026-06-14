@@ -107,8 +107,8 @@ impl AbilityPromptRecord {
         self.ability.to_manifest(self.resolved_prompt_config())
     }
 
-    pub fn to_document(&self) -> crate::manifest_mcp::AbilityPromptDocument {
-        crate::manifest_mcp::AbilityPromptDocument::from(self.to_manifest())
+    pub fn to_document(&self) -> crate::manifest_mcp::AbilityDocument {
+        crate::manifest_mcp::AbilityDocument::from(self.to_manifest())
     }
 }
 

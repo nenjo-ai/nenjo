@@ -3,8 +3,8 @@ use nenjo::Slug;
 use nenjo::manifest::{HasManifestSlug, context_block_slug};
 use nenjo_events::ResourceType;
 use nenjo_platform::manifest_contract::{
-    AbilityPromptRecord, AgentPromptRecord, ContextBlockContentRecord, CouncilRecord,
-    DomainPromptRecord, ModelRecord, ProjectRecord, RoutineRecord,
+    AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, CouncilRecord, DomainPromptRecord,
+    ModelRecord, ProjectRecord, RoutineRecord,
 };
 use tracing::{debug, warn};
 
@@ -33,14 +33,14 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
 }
 
 fn apply_agent_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_json::Value) -> bool {
-    let Some(record) = parse_inline_record::<AgentPromptRecord>(data) else {
+    let Some(record) = parse_inline_record::<AgentRecord>(data) else {
         warn!(%rt, "Failed to deserialize inline payload, will fetch");
         return false;
     };
 
-    let slug = Slug::derive(&record.agent.slug);
+    let slug = Slug::derive(&record.slug);
     let item = if record.prompt_config.is_some() {
-        record.to_manifest()
+        record.to_manifest(record.resolved_prompt_config())
     } else {
         let existing_prompt = manifest
             .agents
@@ -48,7 +48,7 @@ fn apply_agent_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_js
             .find(|agent| agent.slug == slug)
             .map(|agent| agent.prompt_config.clone())
             .unwrap_or_default();
-        record.agent.to_manifest(existing_prompt)
+        record.to_manifest(existing_prompt)
     };
 
     upsert_by_slug(&mut manifest.agents, item);

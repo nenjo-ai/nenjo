@@ -11,6 +11,7 @@ readme = "README.md"
 [dependencies]
 anyhow = { workspace = true }
 flate2 = { workspace = true }
+nenjo = { workspace = true }
 nenjo-packages = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }

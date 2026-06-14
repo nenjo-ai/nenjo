@@ -1,71 +1,68 @@
 use nenjo::{ToolCategory, ToolSpec};
 
+fn domain_ref_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "Existing domain slug. Use `slug` from list_domains or get_domain. For configure_domain, omit `domain` to create a new domain."
+    })
+}
+
 fn string_list_schema(description: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "description": description,
-        "items": {
-            "type": "string"
-        }
+        "items": { "type": "string" }
     })
 }
 
-fn domain_slug_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "description": "The slug of the target domain."
-    })
-}
-
-fn domain_create_schema() -> serde_json::Value {
+fn prompt_config_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "command"],
-        "properties": {
-            "name": { "type": "string", "description": "Stable runtime name for this domain." },
-            "path": { "type": "string", "description": "Folder path for this domain. Omit for the root folder." },
-            "description": { "type": ["string", "null"], "description": "Optional domain description." },
-            "command": { "type": "string", "description": "The slash/hash-style command used to activate this domain, such as `#creator`." },
-            "abilities": string_list_schema("Ability names activated by this domain."),
-            "mcp_servers": string_list_schema("MCP server slugs activated by this domain."),
-            "prompt_config": {
-                "type": ["object", "null"],
-                "description": "Optional domain prompt configuration.",
-                "required": ["developer_prompt_addon"],
-                "properties": {
-                    "developer_prompt_addon": { "type": ["string", "null"], "description": "Optional domain developer prompt addon text." }
-                },
-                "additionalProperties": false
-            }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn domain_update_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Partial patch for an existing domain. Omit fields you do not want to change.",
-        "properties": {
-            "name": { "type": "string", "description": "Replace the runtime name." },
-            "description": { "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." },
-            "command": { "type": "string", "description": "Replace the activation command for this domain." },
-            "abilities": string_list_schema("Full replacement list of ability names activated by this domain."),
-            "mcp_servers": string_list_schema("Full replacement list of MCP server slugs activated by this domain.")
-        },
-        "additionalProperties": false
-    })
-}
-
-fn domain_prompt_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["developer_prompt_addon"],
+        "description": "Domain prompt configuration. Omit to leave unchanged on update.",
         "properties": {
             "developer_prompt_addon": {
                 "type": ["string", "null"],
-                "description": "Domain developer prompt addon text."
+                "description": "Developer prompt addon applied while the domain is active. Set null to clear."
             }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn configure_metadata_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Domain metadata patch. Required on create because metadata.name and metadata.command are required when domain is omitted. On update, omitted fields are unchanged.",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Domain runtime/display name. Required when creating a new domain."
+            },
+            "path": {
+                "type": "string",
+                "description": "Folder path for this domain. Omit to leave unchanged."
+            },
+            "description": {
+                "type": ["string", "null"],
+                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+            },
+            "command": {
+                "type": "string",
+                "description": "Slash/hash-style command used to activate this domain, such as `#creator`. Required when creating a new domain."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn configure_assignments_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Full replacement assignment lists. Omit a field to leave that assignment type unchanged; pass an empty array to clear it.",
+        "properties": {
+            "abilities": string_list_schema("Full replacement list of ability names/slugs activated by this domain."),
+            "mcp_servers": string_list_schema("Full replacement list of MCP server slugs activated by this domain."),
+            "script_tools": string_list_schema("Full replacement list of native script tool slugs activated by this domain.")
         },
         "additionalProperties": false
     })
@@ -76,92 +73,70 @@ pub fn domain_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_domains".to_string(),
-            description: "List domains so you can find a domain slug before reading, updating, or deleting one."
+            description: "List visible domains as prompt-free summaries. Use a returned `slug` as the `domain` value in get_domain or configure_domain. This does not include prompt_config; call get_domain for the full domain document."
                 .to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "get_domain".to_string(),
-            description: "Get one domain's name, path, description, command, platform_scopes, abilities, and mcp_servers by slug."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["domain"],
-                "properties": { "domain": domain_slug_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "get_domain_prompt".to_string(),
-            description: "Get one domain's prompt_config by slug."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["domain"],
-                "properties": { "domain": domain_slug_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "create_domain".to_string(),
-            description: "Create one domain with top-level name, path, description, command, abilities, mcp_servers, and optional prompt_config. Domain platform scopes are managed outside this MCP tool."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["name", "command"],
-                "properties": domain_create_schema()["properties"].clone(),
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_domain".to_string(),
-            description: "Update one domain's name, description, command, abilities, or mcp_servers by slug; use update_domain_prompt to change prompt_config. Domain platform scopes are managed outside this MCP tool."
+            description: "Get one domain's full DomainDocument by slug, including prompt_config, command, platform_scopes, abilities, and tool assignments."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["domain"],
                 "properties": {
-                    "domain": domain_slug_schema(),
-                    "name": domain_update_schema()["properties"]["name"].clone(),
-                    "description": domain_update_schema()["properties"]["description"].clone(),
-                    "command": domain_update_schema()["properties"]["command"].clone(),
-                    "abilities": domain_update_schema()["properties"]["abilities"].clone(),
-                    "mcp_servers": domain_update_schema()["properties"]["mcp_servers"].clone()
+                    "domain": domain_ref_schema()
                 },
                 "additionalProperties": false
             }),
-            category: ToolCategory::Write,
+            category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "update_domain_prompt".to_string(),
-            description: "Update one domain's prompt_config by slug using prompt_config.developer_prompt_addon."
+            name: "configure_domain".to_string(),
+            description: "Create or update one domain in a single backend-owned sequence. Omit `domain` to create; include `domain` to update by slug. On create, metadata.name and metadata.command are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `domain: DomainDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["domain", "prompt_config"],
                 "properties": {
-                    "domain": domain_slug_schema(),
-                    "prompt_config": domain_prompt_schema()
+                    "domain": domain_ref_schema(),
+                    "metadata": configure_metadata_schema(),
+                    "prompt_config": prompt_config_schema(),
+                    "assignments": configure_assignments_schema()
                 },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "delete_domain".to_string(),
-            description: "Delete one domain by slug when you want it removed from the manifest."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["domain"],
-                "properties": { "domain": domain_slug_schema() },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_domain_exposes_assignment_replacements() {
+        let tools = domain_tools();
+        let configure_domain = tools
+            .iter()
+            .find(|tool| tool.name == "configure_domain")
+            .expect("configure_domain tool should exist");
+
+        assert_eq!(
+            configure_domain.parameters["properties"]["assignments"]["properties"]["abilities"]["description"],
+            serde_json::json!(
+                "Full replacement list of ability names/slugs activated by this domain."
+            )
+        );
+        assert!(
+            configure_domain
+                .description
+                .contains("assignment arrays are full replacements")
+        );
+    }
 }

@@ -15,39 +15,29 @@ use nenjo::{
 };
 
 use crate::manifest_mcp::{
-    AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
-    AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
-    AbilityPromptGetParams, AbilityPromptGetResult, AbilityPromptMutationResult,
-    AbilityPromptUpdateParams, AbilitySummary, AbilityUpdateParams, AgentCreateParams,
-    AgentDeleteParams, AgentDocument, AgentGetResult, AgentManifestBackend, AgentMutationResult,
-    AgentPromptGetParams, AgentPromptGetResult, AgentPromptMutationResult, AgentPromptUpdateParams,
-    AgentSummary, AgentsGetParams, AgentsListResult, ContextBlockContentDocument,
-    ContextBlockContentGetParams, ContextBlockContentGetResult, ContextBlockContentMutationResult,
-    ContextBlockContentUpdateParams, ContextBlockDeleteParams, ContextBlockDocument,
-    ContextBlockGetResult, ContextBlockManifestBackend, ContextBlockMutationResult,
-    ContextBlockUpdateParams, ContextBlocksGetParams, ContextBlocksListResult,
-    CouncilAddMemberParams, CouncilDeleteParams, CouncilDocument, CouncilGetResult,
-    CouncilManifestBackend, CouncilMutationResult, CouncilRemoveMemberParams,
+    AbilitiesGetParams, AbilitiesListResult, AbilityConfigureParams, AbilityConfigureResult,
+    AbilityDocument, AbilityGetResult, AbilityManifestBackend, AbilitySummary,
+    AgentConfigureParams, AgentConfigureResult, AgentDocument, AgentGetResult,
+    AgentManifestBackend, AgentSummary, AgentsGetParams, AgentsListResult,
+    ContextBlockConfigureParams, ContextBlockConfigureResult, ContextBlockDocument,
+    ContextBlockGetResult, ContextBlockManifestBackend, ContextBlocksGetParams,
+    ContextBlocksListResult, CouncilAddMemberParams, CouncilDeleteParams, CouncilDocument,
+    CouncilGetResult, CouncilManifestBackend, CouncilMutationResult, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, CouncilsListResult,
-    DeleteResult, DomainDeleteParams, DomainDocument, DomainGetResult, DomainManifestBackend,
-    DomainManifestDocument, DomainManifestGetParams, DomainManifestGetResult,
-    DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
-    DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocCreateParams,
-    KnowledgeDocDeleteParams, KnowledgeDocMutationResult, KnowledgeDocUpdateParams,
-    KnowledgePackCreateParams, KnowledgePackMutationResult, KnowledgePackUpdateParams,
-    LibraryManifestBackend, ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend,
-    ModelMutationResult, ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectDeleteParams,
-    ProjectDocument, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
-    ProjectSummary, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    DeleteResult, DomainConfigureParams, DomainConfigureResult, DomainDocument, DomainGetResult,
+    DomainManifestBackend, DomainSummary, DomainsGetParams, DomainsListResult,
+    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocMutationResult,
+    KnowledgeDocUpdateParams, KnowledgePackCreateParams, KnowledgePackMutationResult,
+    KnowledgePackUpdateParams, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
+    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
+    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
+    ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
+    ProjectsGetParams, ProjectsListResult, RoutineConfigureParams, RoutineConfigureResult,
     RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
-    RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams, RoutinesGetParams,
-    RoutinesListResult,
+    RoutineManifestBackend, RoutinesGetParams, RoutinesListResult,
 };
 use crate::prompt_merge::merge_prompt_config;
-use crate::{
-    AbilityCreateParams, AgentUpdateParams, ContextBlockCreateParams, CouncilCreateParams,
-    DomainCreateParams, ModelCreateParams, ProjectCreateParams, RoutineCreateParams,
-};
+use crate::{CouncilCreateParams, ModelCreateParams, ProjectCreateParams};
 
 fn graph_input_to_manifest_parts(
     routine: Slug,
@@ -138,7 +128,7 @@ where
         .list_models()
         .await?
         .into_iter()
-        .find(|item| Slug::derive(&item.name) == *model)
+        .find(|item| item.manifest_slug() == *model || Slug::derive(&item.name) == *model)
         .ok_or_else(|| anyhow!("model not found: {model}"))
 }
 
@@ -233,93 +223,78 @@ where
         })
     }
 
-    async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult> {
-        let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
-        Ok(AgentPromptGetResult {
-            agent: agent.into(),
-        })
-    }
-
-    async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
-        let name = params.data.name;
-        let agent = AgentManifest {
-            slug: Slug::derive(&name),
-            name,
-            description: params.data.description,
-            prompt_config: PromptConfig::default(),
-            color: params.data.color,
-            model: params.data.model,
-            domains: Vec::new(),
-            platform_scopes: Vec::new(),
-            mcp_servers: Vec::new(),
-            script_tools: Vec::new(),
-            abilities: Vec::new(),
-            prompt_locked: false,
-            heartbeat: None,
+    async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult> {
+        let mut agent = match params.data.agent.as_ref() {
+            Some(agent) => local_agent_by_slug(self.reader.as_ref(), agent).await?,
+            None => {
+                let name = params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref())
+                    .ok_or_else(|| anyhow!("metadata.name is required when creating an agent"))?
+                    .clone();
+                AgentManifest {
+                    slug: Slug::derive(&name),
+                    name,
+                    description: None,
+                    prompt_config: PromptConfig::default(),
+                    color: None,
+                    model: None,
+                    domains: Vec::new(),
+                    platform_scopes: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    script_tools: Vec::new(),
+                    abilities: Vec::new(),
+                    prompt_locked: false,
+                    heartbeat: None,
+                }
+            }
         };
+
+        if let Some(metadata) = params.data.metadata {
+            if let Some(name) = metadata.name {
+                agent.slug = Slug::derive(&name);
+                agent.name = name;
+            }
+            if let Some(description) = metadata.description {
+                agent.description = description;
+            }
+            if let Some(color) = metadata.color {
+                agent.color = color;
+            }
+            if let Some(model) = metadata.model {
+                agent.model = model;
+            }
+        }
+
+        if let Some(prompt_patch) = params.data.prompt_config {
+            if agent.prompt_locked {
+                return Err(anyhow!("agent prompt is locked: {}", agent.slug));
+            }
+            agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
+        }
+
+        if let Some(assignments) = params.data.assignments {
+            if let Some(abilities) = assignments.abilities {
+                agent.abilities = abilities;
+            }
+            if let Some(domains) = assignments.domains {
+                agent.domains = domains;
+            }
+            if let Some(mcp_servers) = assignments.mcp_servers {
+                agent.mcp_servers = mcp_servers;
+            }
+        }
+
         self.writer
             .upsert_resource(&ManifestResource::Agent(agent.clone()))
             .await?;
-        Ok(AgentMutationResult {
+
+        Ok(AgentConfigureResult {
             agent: AgentDocument::from(agent),
+            warnings: Vec::new(),
         })
-    }
-
-    async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult> {
-        let existing = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
-        let mut agent: AgentManifest = existing.clone();
-        if let Some(name) = params.data.name {
-            agent.name = name;
-        }
-        if let Some(description) = params.data.description {
-            agent.description = description;
-        }
-        if let Some(color) = params.data.color {
-            agent.color = color;
-        }
-        if let Some(model) = params.data.model {
-            agent.model = model;
-        }
-        if let Some(abilities) = params.data.abilities {
-            agent.abilities = abilities;
-        }
-        if let Some(domains) = params.data.domains {
-            agent.domains = domains;
-        }
-        if let Some(script_tools) = params.data.script_tools {
-            agent.script_tools = script_tools;
-        }
-        let resource = ManifestResource::Agent(agent.clone());
-        self.writer.upsert_resource(&resource).await?;
-        Ok(AgentMutationResult {
-            agent: AgentDocument::from(agent),
-        })
-    }
-
-    async fn update_agent_prompt(
-        &self,
-        params: AgentPromptUpdateParams,
-    ) -> Result<AgentPromptMutationResult> {
-        let mut agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
-        if agent.prompt_locked {
-            return Err(anyhow!("agent prompt is locked: {}", params.agent));
-        }
-        if let Some(prompt_patch) = params.prompt_config {
-            agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
-        }
-        let prompt_config = agent.prompt_config.clone();
-        self.writer
-            .upsert_resource(&ManifestResource::Agent(agent))
-            .await?;
-        Ok(AgentPromptMutationResult { prompt_config })
-    }
-
-    async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
-        let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
-        self.writer
-            .delete_resource(ManifestResourceKind::Agent, &agent.manifest_slug())
-            .await?;
-        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -347,92 +322,76 @@ where
         })
     }
 
-    async fn get_ability_prompt(
+    async fn configure_ability(
         &self,
-        params: AbilityPromptGetParams,
-    ) -> Result<AbilityPromptGetResult> {
-        let ability = self.resolve_ability(&params.ability).await?;
-        Ok(AbilityPromptGetResult {
-            ability: AbilityPromptDocument::from(ability),
-        })
-    }
-
-    async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
-        let ability = AbilityManifest {
-            name: params.data.name,
-            path: if params.data.path.is_empty() {
-                None
-            } else {
-                Some(params.data.path)
-            },
-            description: params.data.description,
-            activation_condition: params.data.activation_condition,
-            prompt_config: params.data.prompt_config,
-            platform_scopes: Vec::new(),
-            mcp_servers: params.data.mcp_servers.unwrap_or_default(),
-            script_tools: params.data.script_tools.unwrap_or_default(),
-            source_type: "native".to_string(),
-            read_only: false,
-            metadata: serde_json::json!({}),
+        params: AbilityConfigureParams,
+    ) -> Result<AbilityConfigureResult> {
+        let mut ability = match params.data.ability.as_ref() {
+            Some(ability) => self.resolve_ability(ability).await?,
+            None => {
+                let name = params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref())
+                    .ok_or_else(|| anyhow!("metadata.name is required when creating an ability"))?
+                    .clone();
+                let prompt_config =
+                    params.data.prompt_config.clone().ok_or_else(|| {
+                        anyhow!("prompt_config is required when creating an ability")
+                    })?;
+                AbilityManifest {
+                    name,
+                    path: None,
+                    description: None,
+                    activation_condition: String::new(),
+                    prompt_config,
+                    platform_scopes: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    script_tools: Vec::new(),
+                    source_type: "native".to_string(),
+                    read_only: false,
+                    metadata: serde_json::json!({}),
+                }
+            }
         };
+
+        if let Some(metadata) = params.data.metadata {
+            if let Some(name) = metadata.name {
+                ability.name = name;
+            }
+            if let Some(path) = metadata.path {
+                ability.path = if path.is_empty() { None } else { Some(path) };
+            }
+            if let Some(description) = metadata.description {
+                ability.description = description;
+            }
+            if let Some(activation_condition) = metadata.activation_condition {
+                ability.activation_condition = activation_condition;
+            }
+        }
+
+        if let Some(prompt_config) = params.data.prompt_config {
+            ability.prompt_config = prompt_config;
+        }
+
+        if let Some(assignments) = params.data.assignments {
+            if let Some(mcp_servers) = assignments.mcp_servers {
+                ability.mcp_servers = mcp_servers;
+            }
+            if let Some(script_tools) = assignments.script_tools {
+                ability.script_tools = script_tools;
+            }
+        }
+
         self.writer
             .upsert_resource(&ManifestResource::Ability(ability.clone()))
             .await?;
-        Ok(AbilityMutationResult {
+
+        Ok(AbilityConfigureResult {
             ability: AbilityDocument::from(ability),
+            warnings: Vec::new(),
         })
-    }
-
-    async fn update_ability(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult> {
-        if params.data.is_empty() {
-            return Err(anyhow!(
-                "ability update requires at least one field in data"
-            ));
-        }
-        let existing = self.resolve_ability(&params.ability).await?;
-        let mut ability = existing.clone();
-        if let Some(name) = params.data.name {
-            ability.name = name;
-        }
-        if let Some(description) = params.data.description {
-            ability.description = description;
-        }
-        if let Some(activation_condition) = params.data.activation_condition {
-            ability.activation_condition = activation_condition;
-        }
-        if let Some(mcp_servers) = params.data.mcp_servers {
-            ability.mcp_servers = mcp_servers;
-        }
-        if let Some(script_tools) = params.data.script_tools {
-            ability.script_tools = script_tools;
-        }
-        self.writer
-            .upsert_resource(&ManifestResource::Ability(ability.clone()))
-            .await?;
-        Ok(AbilityMutationResult {
-            ability: AbilityDocument::from(ability),
-        })
-    }
-
-    async fn update_ability_prompt(
-        &self,
-        params: AbilityPromptUpdateParams,
-    ) -> Result<AbilityPromptMutationResult> {
-        let mut ability = self.resolve_ability(&params.ability).await?;
-        ability.prompt_config = params.prompt_config;
-        let prompt_config = ability.prompt_config.clone();
-        self.writer
-            .upsert_resource(&ManifestResource::Ability(ability))
-            .await?;
-        Ok(AbilityPromptMutationResult { prompt_config })
-    }
-
-    async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
-        let ability = self.resolve_ability(&params.ability).await?;
-        self.writer
-            .delete_resource(ManifestResourceKind::Ability, &ability.manifest_slug())
-            .await?;
-        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -460,87 +419,81 @@ where
         })
     }
 
-    async fn get_domain_prompt(
+    async fn configure_domain(
         &self,
-        params: DomainManifestGetParams,
-    ) -> Result<DomainManifestGetResult> {
-        let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
-        Ok(DomainManifestGetResult {
-            domain: DomainManifestDocument::from(domain),
-        })
-    }
-
-    async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
-        let domain = DomainManifest {
-            name: params.data.name,
-            path: params.data.path,
-            description: params.data.description,
-            command: params.data.command,
-            platform_scopes: Vec::new(),
-            abilities: params.data.abilities.unwrap_or_default(),
-            mcp_servers: params.data.mcp_servers.unwrap_or_default(),
-            script_tools: params.data.script_tools.unwrap_or_default(),
-            prompt_config: params.data.prompt_config.unwrap_or_default(),
+        params: DomainConfigureParams,
+    ) -> Result<DomainConfigureResult> {
+        let mut domain = match params.data.domain.as_ref() {
+            Some(domain) => local_domain_by_slug(self.reader.as_ref(), domain).await?,
+            None => {
+                let metadata = params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("metadata is required when creating a domain"))?;
+                let name = metadata
+                    .name
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("metadata.name is required when creating a domain"))?
+                    .clone();
+                let command = metadata
+                    .command
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("metadata.command is required when creating a domain"))?
+                    .clone();
+                DomainManifest {
+                    name,
+                    path: String::new(),
+                    description: None,
+                    command,
+                    platform_scopes: Vec::new(),
+                    abilities: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    script_tools: Vec::new(),
+                    prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
+                }
+            }
         };
+
+        if let Some(metadata) = params.data.metadata {
+            if let Some(name) = metadata.name {
+                domain.name = name;
+            }
+            if let Some(path) = metadata.path {
+                domain.path = path;
+            }
+            if let Some(description) = metadata.description {
+                domain.description = description;
+            }
+            if let Some(command) = metadata.command {
+                domain.command = command;
+            }
+        }
+
+        if let Some(prompt_config) = params.data.prompt_config {
+            domain.prompt_config = prompt_config;
+        }
+
+        if let Some(assignments) = params.data.assignments {
+            if let Some(abilities) = assignments.abilities {
+                domain.abilities = abilities;
+            }
+            if let Some(mcp_servers) = assignments.mcp_servers {
+                domain.mcp_servers = mcp_servers;
+            }
+            if let Some(script_tools) = assignments.script_tools {
+                domain.script_tools = script_tools;
+            }
+        }
+
         self.writer
             .upsert_resource(&ManifestResource::Domain(domain.clone()))
             .await?;
-        Ok(DomainMutationResult {
+
+        Ok(DomainConfigureResult {
             domain: DomainDocument::from(domain),
+            warnings: Vec::new(),
         })
-    }
-
-    async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult> {
-        let existing = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
-        if params.data.is_empty() {
-            return Err(anyhow!("domain update requires at least one field"));
-        }
-        let mut domain = existing.clone();
-        if let Some(name) = params.data.name {
-            domain.name = name;
-        }
-        if let Some(description) = params.data.description {
-            domain.description = description;
-        }
-        if let Some(command) = params.data.command {
-            domain.command = command;
-        }
-        if let Some(abilities) = params.data.abilities {
-            domain.abilities = abilities;
-        }
-        if let Some(mcp_servers) = params.data.mcp_servers {
-            domain.mcp_servers = mcp_servers;
-        }
-        if let Some(script_tools) = params.data.script_tools {
-            domain.script_tools = script_tools;
-        }
-        self.writer
-            .upsert_resource(&ManifestResource::Domain(domain.clone()))
-            .await?;
-        Ok(DomainMutationResult {
-            domain: DomainDocument::from(domain),
-        })
-    }
-
-    async fn update_domain_prompt(
-        &self,
-        params: DomainManifestUpdateParams,
-    ) -> Result<DomainManifestMutationResult> {
-        let mut domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
-        domain.prompt_config = params.prompt_config;
-        let prompt_config = domain.prompt_config.clone();
-        self.writer
-            .upsert_resource(&ManifestResource::Domain(domain))
-            .await?;
-        Ok(DomainManifestMutationResult { prompt_config })
-    }
-
-    async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
-        let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
-        self.writer
-            .delete_resource(ManifestResourceKind::Domain, &domain.manifest_slug())
-            .await?;
-        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -701,55 +654,51 @@ where
         })
     }
 
-    async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
-        let routine_slug = Slug::derive(&params.data.name);
-        let (steps, edges, metadata) = graph_input_to_manifest_parts(
-            routine_slug.clone(),
-            params.data.metadata.unwrap_or_default(),
-            params.data.graph,
-        );
-        let routine = RoutineManifest {
-            name: params.data.name,
-            slug: routine_slug,
-            description: params.data.description,
-            trigger: params.data.trigger.unwrap_or(RoutineTrigger::Task),
-            metadata,
-            steps,
-            edges,
+    async fn configure_routine(
+        &self,
+        params: RoutineConfigureParams,
+    ) -> Result<RoutineConfigureResult> {
+        let mut routine = if let Some(routine_slug) = params.data.routine.as_ref() {
+            local_routine_by_slug(self.reader.as_ref(), routine_slug).await?
+        } else {
+            let name = params
+                .data
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| anyhow!("metadata.name is required when creating a routine"))?;
+            RoutineManifest {
+                slug: Slug::derive(&name),
+                name,
+                description: None,
+                trigger: RoutineTrigger::Task,
+                metadata: RoutineMetadata::default(),
+                steps: Vec::new(),
+                edges: Vec::new(),
+            }
         };
-        self.writer
-            .upsert_resource(&ManifestResource::Routine(routine.clone()))
-            .await?;
-        Ok(RoutineMutationResult {
-            routine: RoutineDocument::from(routine),
-        })
-    }
 
-    async fn update_routine(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult> {
-        if params.data.is_empty() {
-            return Err(anyhow!(
-                "routine update requires at least one field in data"
-            ));
-        }
-        let existing = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
-        let mut routine = existing.clone();
-        if let Some(name) = params.data.name {
-            routine.slug = Slug::derive(&name);
-            routine.name = name;
-        }
-        if let Some(description) = params.data.description {
-            routine.description = description;
-        }
-        if let Some(trigger) = params.data.trigger {
-            routine.trigger = trigger;
-        }
         if let Some(metadata) = params.data.metadata {
-            routine.metadata = metadata;
+            if let Some(name) = metadata.name {
+                routine.slug = Slug::derive(&name);
+                routine.name = name;
+            }
+            if let Some(description) = metadata.description {
+                routine.description = description;
+            }
+            if let Some(trigger) = metadata.trigger {
+                routine.trigger = trigger;
+            }
+        }
+        if let Some(runtime_metadata) = params.data.runtime_metadata {
+            routine.metadata = serde_json::from_value(runtime_metadata)
+                .map_err(|err| anyhow!("invalid routine runtime_metadata: {err}"))?;
         }
         if let Some(graph) = params.data.graph {
             let (steps, edges, metadata) = graph_input_to_manifest_parts(
                 routine.slug().clone(),
-                routine.metadata.clone(),
+                routine.metadata,
                 Some(graph),
             );
             routine.steps = steps;
@@ -759,8 +708,9 @@ where
         self.writer
             .upsert_resource(&ManifestResource::Routine(routine.clone()))
             .await?;
-        Ok(RoutineMutationResult {
+        Ok(RoutineConfigureResult {
             routine: RoutineDocument::from(routine),
+            warnings: Vec::new(),
         })
     }
 
@@ -1034,82 +984,59 @@ where
         })
     }
 
-    async fn get_context_block_content(
+    async fn configure_context_block(
         &self,
-        params: ContextBlockContentGetParams,
-    ) -> Result<ContextBlockContentGetResult> {
-        let context_block =
-            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
-        Ok(ContextBlockContentGetResult {
-            context_block: ContextBlockContentDocument::from(context_block),
-        })
-    }
-
-    async fn create_context_block(
-        &self,
-        params: ContextBlockCreateParams,
-    ) -> Result<ContextBlockMutationResult> {
-        let context_block = ContextBlockManifest {
-            name: params.data.name,
-            path: params.data.path,
-            description: params.data.description,
-            template: params.data.template,
+        params: ContextBlockConfigureParams,
+    ) -> Result<ContextBlockConfigureResult> {
+        let mut context_block = match params.data.context_block.as_ref() {
+            Some(context_block) => {
+                local_context_block_by_slug(self.reader.as_ref(), context_block).await?
+            }
+            None => {
+                let name = params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref())
+                    .ok_or_else(|| {
+                        anyhow!("metadata.name is required when creating a context block")
+                    })?
+                    .clone();
+                let template =
+                    params.data.template.clone().ok_or_else(|| {
+                        anyhow!("template is required when creating a context block")
+                    })?;
+                ContextBlockManifest {
+                    name,
+                    path: String::new(),
+                    description: None,
+                    template,
+                }
+            }
         };
-        self.writer
-            .upsert_resource(&ManifestResource::ContextBlock(context_block.clone()))
-            .await?;
-        Ok(ContextBlockMutationResult {
-            context_block: ContextBlockDocument::from(context_block),
-        })
-    }
 
-    async fn update_context_block(
-        &self,
-        params: ContextBlockUpdateParams,
-    ) -> Result<ContextBlockMutationResult> {
-        let existing =
-            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
-        let mut context_block = existing.clone();
-        if let Some(name) = params.data.name {
-            context_block.name = name;
+        if let Some(metadata) = params.data.metadata {
+            if let Some(name) = metadata.name {
+                context_block.name = name;
+            }
+            if let Some(path) = metadata.path {
+                context_block.path = path;
+            }
+            if let Some(description) = metadata.description {
+                context_block.description = description;
+            }
         }
-        if let Some(description) = params.data.description {
-            context_block.description = description;
-        }
-        self.writer
-            .upsert_resource(&ManifestResource::ContextBlock(context_block.clone()))
-            .await?;
-        Ok(ContextBlockMutationResult {
-            context_block: ContextBlockDocument::from(context_block),
-        })
-    }
-
-    async fn update_context_block_content(
-        &self,
-        params: ContextBlockContentUpdateParams,
-    ) -> Result<ContextBlockContentMutationResult> {
-        let mut context_block =
-            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
-        if let Some(template) = params.template {
+        if let Some(template) = params.data.template {
             context_block.template = template;
         }
-        let template = context_block.template.clone();
-        self.writer
-            .upsert_resource(&ManifestResource::ContextBlock(context_block))
-            .await?;
-        Ok(ContextBlockContentMutationResult { template })
-    }
 
-    async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult> {
-        let context_block =
-            local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         self.writer
-            .delete_resource(
-                ManifestResourceKind::ContextBlock,
-                &context_block.manifest_slug(),
-            )
+            .upsert_resource(&ManifestResource::ContextBlock(context_block.clone()))
             .await?;
-        Ok(DeleteResult { deleted: true })
+        Ok(ContextBlockConfigureResult {
+            context_block: ContextBlockDocument::from(context_block),
+            warnings: Vec::new(),
+        })
     }
 }
 
@@ -1124,7 +1051,7 @@ mod tests {
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest,
         CouncilMemberManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
         PromptConfig, PromptTemplates, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
-        RoutineMetadata, RoutineStepManifest, RoutineStepType,
+        RoutineStepManifest, RoutineStepType,
     };
     use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 
@@ -1169,7 +1096,7 @@ mod tests {
 
         let alt_model = ModelManifest {
             slug: Slug::derive("reasoner"),
-            name: "reasoner".into(),
+            name: "Reasoning Model".into(),
             description: Some("Reasoning model".into()),
             model: "gpt-5".into(),
             model_provider: "openai".into(),
@@ -1343,7 +1270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_agent_is_prompt_free() {
+    async fn list_agent_is_prompt_free_and_get_agent_includes_prompt() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let list = backend.list_agents().await.unwrap();
@@ -1364,7 +1291,10 @@ mod tests {
         let value = serde_json::to_value(result).unwrap();
 
         assert_eq!(value["agent"]["name"], agent.name);
-        assert!(value["agent"].get("prompt_config").is_none());
+        assert_eq!(
+            value["agent"]["prompt_config"]["system_prompt"],
+            "You are a coding agent."
+        );
     }
 
     #[tokio::test]
@@ -1406,38 +1336,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_agent_prompt_returns_prompt_config() {
+    async fn configure_agent_merges_metadata_patch() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .get_agent_prompt(AgentPromptGetParams {
-                agent: Slug::derive(&agent.name),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.agent.agent.summary.name, agent.name);
-        assert_eq!(
-            result.agent.prompt_config.system_prompt,
-            "You are a coding agent."
-        );
-    }
-
-    #[tokio::test]
-    async fn update_agent_merges_partial_patch() {
-        let TestContext { backend, agent, .. } = backend().await;
-
-        let result = backend
-            .update_agent(AgentUpdateParams {
-                agent: Slug::derive(&agent.name),
-                data: crate::AgentUpdateDocument {
-                    name: Some("reviewer".into()),
-                    description: None,
-                    color: None,
-                    model: None,
-                    abilities: None,
-                    domains: None,
-                    script_tools: None,
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: Some(crate::AgentConfigureMetadata {
+                        name: Some("reviewer".into()),
+                        description: None,
+                        color: None,
+                        model: None,
+                    }),
+                    prompt_config: None,
+                    assignments: None,
+                    ..Default::default()
                 },
             })
             .await
@@ -1450,20 +1364,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_agent_can_clear_nullable_fields() {
+    async fn configure_agent_can_clear_nullable_fields() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .update_agent(AgentUpdateParams {
-                agent: Slug::derive(&agent.name),
-                data: crate::AgentUpdateDocument {
-                    name: None,
-                    description: Some(None),
-                    color: Some(None),
-                    model: Some(None),
-                    abilities: None,
-                    domains: None,
-                    script_tools: None,
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: Some(crate::AgentConfigureMetadata {
+                        name: None,
+                        description: Some(None),
+                        color: Some(None),
+                        model: Some(None),
+                    }),
+                    prompt_config: None,
+                    assignments: None,
+                    ..Default::default()
                 },
             })
             .await
@@ -1476,42 +1392,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_agent_prompt_merges_nested_patch() {
+    async fn configure_agent_can_replace_mcp_server_assignments() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
-            .update_agent_prompt(AgentPromptUpdateParams {
-                agent: Slug::derive(&agent.name),
-                prompt_config: Some(serde_json::json!({
-                    "developer_prompt": "Prefer minimal diffs.",
-                    "templates": {
-                        "chat": "New chat template"
-                    }
-                })),
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: None,
+                    prompt_config: None,
+                    assignments: Some(crate::AgentConfigureAssignments {
+                        abilities: None,
+                        domains: None,
+                        mcp_servers: Some(vec![Slug::derive("review-server")]),
+                    }),
+                    ..Default::default()
+                },
             })
             .await
             .unwrap();
 
         assert_eq!(
-            result.prompt_config.system_prompt,
-            "You are a coding agent."
-        );
-        assert_eq!(
-            result.prompt_config.developer_prompt,
-            "Prefer minimal diffs."
-        );
-        assert_eq!(
-            result.prompt_config.templates.chat_task,
-            "New chat template"
-        );
-        assert_eq!(
-            result.prompt_config.templates.task_execution,
-            "Execute task"
+            result.agent.mcp_servers,
+            vec![Slug::derive("review-server")]
         );
     }
 
     #[tokio::test]
-    async fn update_agent_prompt_rejects_locked_agent() {
+    async fn configure_agent_updates_prompt_and_assignments() {
+        let TestContext { backend, agent, .. } = backend().await;
+
+        let result = backend
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: Some(crate::AgentConfigureMetadata {
+                        name: Some("builder".into()),
+                        description: Some(Some("builds agents".into())),
+                        color: None,
+                        model: None,
+                    }),
+                    prompt_config: Some(serde_json::json!({
+                        "developer_prompt": "Build agent specs carefully."
+                    })),
+                    assignments: Some(crate::AgentConfigureAssignments {
+                        abilities: Some(vec!["design_agent".into()]),
+                        domains: Some(vec![Slug::derive("creator")]),
+                        mcp_servers: Some(vec![Slug::derive("review-server")]),
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.agent.summary.slug, Slug::derive("builder"));
+        assert_eq!(
+            result.agent.summary.description.as_deref(),
+            Some("builds agents")
+        );
+        assert_eq!(
+            result.agent.prompt_config.developer_prompt,
+            "Build agent specs carefully."
+        );
+        assert_eq!(result.agent.abilities, vec!["design_agent"]);
+        assert_eq!(result.agent.domains, vec![Slug::derive("creator")]);
+        assert_eq!(
+            result.agent.mcp_servers,
+            vec![Slug::derive("review-server")]
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_agent_prompt_merges_nested_patch() {
+        let TestContext { backend, agent, .. } = backend().await;
+
+        let result = backend
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: None,
+                    prompt_config: Some(serde_json::json!({
+                        "developer_prompt": "Prefer minimal diffs.",
+                        "templates": {
+                            "chat": "New chat template"
+                        }
+                    })),
+                    assignments: None,
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let prompt_config = result.agent.prompt_config;
+        assert_eq!(prompt_config.system_prompt, "You are a coding agent.");
+        assert_eq!(prompt_config.developer_prompt, "Prefer minimal diffs.");
+        assert_eq!(prompt_config.templates.chat_task, "New chat template");
+        assert_eq!(prompt_config.templates.task_execution, "Execute task");
+    }
+
+    #[tokio::test]
+    async fn configure_agent_prompt_rejects_locked_agent() {
         let dir = tempdir().unwrap();
         let root = dir.keep();
         let store = Arc::new(LocalManifestStore::new(root));
@@ -1525,11 +1507,16 @@ mod tests {
         let backend = LocalManifestMcpBackend::new(store.clone(), store);
 
         let error = backend
-            .update_agent_prompt(AgentPromptUpdateParams {
-                agent: Slug::derive(&agent.name),
-                prompt_config: Some(serde_json::json!({
-                    "developer_prompt": "This should fail."
-                })),
+            .configure_agent(AgentConfigureParams {
+                data: crate::AgentConfigureDocument {
+                    agent: Some(Slug::derive(&agent.name)),
+                    metadata: None,
+                    prompt_config: Some(serde_json::json!({
+                        "developer_prompt": "This should fail."
+                    })),
+                    assignments: None,
+                    ..Default::default()
+                },
             })
             .await
             .unwrap_err();
@@ -1538,27 +1525,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_accepts_patch_style_updates() {
+    async fn contract_dispatch_configures_agent() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_agent",
+            "configure_agent",
             serde_json::json!({
                 "agent": Slug::derive(&agent.name),
-                "name": "planner"
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result["agent"]["name"], serde_json::json!("planner"));
-
-        let prompt_result = ManifestMcpContract::dispatch(
-            &backend,
-            "update_agent_prompt",
-            serde_json::json!({
-                "agent": "planner",
+                "metadata": {
+                    "name": "planner"
+                },
                 "prompt_config": {
                     "templates": {
                         "chat": "Planner chat"
@@ -1569,45 +1546,25 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(result["agent"]["name"], serde_json::json!("planner"));
         assert_eq!(
-            prompt_result["prompt_config"]["templates"]["chat"],
+            result["agent"]["prompt_config"]["templates"]["chat"],
             serde_json::json!("Planner chat")
         );
-        assert_eq!(
-            prompt_result["prompt_config"]["system_prompt"],
-            serde_json::json!("You are a coding agent.")
-        );
     }
 
     #[tokio::test]
-    async fn contract_dispatch_supports_create_agent() {
-        let TestContext { backend, .. } = backend().await;
-
-        let result = ManifestMcpContract::dispatch(
-            &backend,
-            "create_agent",
-            serde_json::json!({
-                "name": "writer",
-                "description": "Writes manifests."
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result["agent"]["name"], serde_json::json!("writer"));
-        assert_eq!(result["agent"]["platform_scopes"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn contract_dispatch_does_not_update_agent_platform_scopes() {
+    async fn configure_agent_ignores_platform_scopes() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_agent",
+            "configure_agent",
             serde_json::json!({
                 "agent": Slug::derive(&agent.name),
-                "name": "writer",
+                "metadata": {
+                    "name": "writer"
+                },
                 "platform_scopes": ["agents:write"]
             }),
         )
@@ -1619,6 +1576,27 @@ mod tests {
             result["agent"]["platform_scopes"],
             serde_json::json!(["agents:read"])
         );
+    }
+
+    #[tokio::test]
+    async fn configure_agent_supports_create() {
+        let TestContext { backend, .. } = backend().await;
+
+        let result = ManifestMcpContract::dispatch(
+            &backend,
+            "configure_agent",
+            serde_json::json!({
+                "metadata": {
+                    "name": "writer",
+                    "description": "Writes manifests."
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["agent"]["name"], serde_json::json!("writer"));
+        assert_eq!(result["agent"]["platform_scopes"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -1642,18 +1620,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_ability_prompt_returns_prompt_content() {
+    async fn get_ability_returns_prompt_content() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let get = backend
-            .get_ability_prompt(AbilityPromptGetParams {
+            .get_ability(AbilitiesGetParams {
                 ability: Slug::derive(&ability.name),
             })
             .await
             .unwrap();
-        assert_eq!(get.ability.ability.summary.name, "review_helper");
+        assert_eq!(get.ability.summary.name, "review_helper");
         assert_eq!(
             get.ability.prompt_config.developer_prompt,
             "Review the proposed change"
@@ -1661,20 +1639,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_ability_merges_partial_patch() {
+    async fn configure_ability_merges_partial_patch() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let result = backend
-            .update_ability(AbilityUpdateParams {
-                ability: Slug::derive(&ability.name),
-                data: crate::AbilityUpdateDocument {
-                    name: None,
-                    description: None,
-                    activation_condition: Some("when reviewing code".into()),
-                    mcp_servers: None,
-                    script_tools: None,
+            .configure_ability(AbilityConfigureParams {
+                data: crate::AbilityConfigureDocument {
+                    ability: Some(Slug::derive(&ability.name)),
+                    metadata: Some(crate::AbilityConfigureMetadata {
+                        activation_condition: Some("when reviewing code".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 },
             })
             .await
@@ -1690,17 +1668,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_does_not_update_ability_platform_scopes() {
+    async fn contract_dispatch_does_not_modify_ability_platform_scopes() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_ability",
+            "configure_ability",
             serde_json::json!({
                 "ability": ability.name,
-                "description": "Updated",
+                "metadata": {
+                    "description": "Updated"
+                },
                 "platform_scopes": ["projects:write"]
             }),
         )
@@ -1718,22 +1698,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_ability_prompt_replaces_prompt() {
+    async fn configure_ability_replaces_prompt() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
         let result = backend
-            .update_ability_prompt(AbilityPromptUpdateParams {
-                ability: Slug::derive(&ability.name),
-                prompt_config: AbilityPromptConfig {
-                    developer_prompt: "New review prompt".into(),
+            .configure_ability(AbilityConfigureParams {
+                data: crate::AbilityConfigureDocument {
+                    ability: Some(Slug::derive(&ability.name)),
+                    prompt_config: Some(AbilityPromptConfig {
+                        developer_prompt: "New review prompt".into(),
+                    }),
+                    ..Default::default()
                 },
             })
             .await
             .unwrap();
 
-        assert_eq!(result.prompt_config.developer_prompt, "New review prompt");
+        assert_eq!(
+            result.ability.prompt_config.developer_prompt,
+            "New review prompt"
+        );
     }
 
     #[tokio::test]
@@ -1757,18 +1743,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_domain_manifest_returns_manifest_content() {
+    async fn get_domain_returns_prompt_content() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let get = backend
-            .get_domain_prompt(DomainManifestGetParams {
+            .get_domain(DomainsGetParams {
                 domain: domain.slug(),
             })
             .await
             .unwrap();
-        assert_eq!(get.domain.domain.summary.name, "creator");
+        assert_eq!(get.domain.summary.name, "creator");
         assert_eq!(
             get.domain.prompt_config.developer_prompt_addon,
             Some("Creator mode".to_string())
@@ -1776,21 +1762,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_domain_merges_partial_patch() {
+    async fn configure_domain_merges_partial_patch() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let result = backend
-            .update_domain(DomainUpdateParams {
-                domain: domain.slug(),
-                data: crate::DomainUpdateDocument {
-                    name: None,
-                    description: Some(None),
-                    command: None,
-                    abilities: None,
-                    mcp_servers: None,
-                    script_tools: None,
+            .configure_domain(DomainConfigureParams {
+                data: crate::DomainConfigureDocument {
+                    domain: Some(domain.slug()),
+                    metadata: Some(crate::DomainConfigureMetadata {
+                        description: Some(None),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 },
             })
             .await
@@ -1802,17 +1787,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_does_not_update_domain_platform_scopes() {
+    async fn contract_dispatch_does_not_modify_domain_platform_scopes() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_domain",
+            "configure_domain",
             serde_json::json!({
                 "domain": domain.slug(),
-                "description": "Updated",
+                "metadata": {
+                    "description": "Updated"
+                },
                 "platform_scopes": ["agents:write"]
             }),
         )
@@ -1827,29 +1814,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_domain_manifest_replaces_manifest() {
+    async fn configure_domain_replaces_prompt() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
         let result = backend
-            .update_domain_prompt(DomainManifestUpdateParams {
-                domain: domain.slug(),
-                prompt_config: DomainPromptConfig {
-                    developer_prompt_addon: Some("Builder mode".into()),
+            .configure_domain(DomainConfigureParams {
+                data: crate::DomainConfigureDocument {
+                    domain: Some(domain.slug()),
+                    prompt_config: Some(DomainPromptConfig {
+                        developer_prompt_addon: Some("Builder mode".into()),
+                    }),
+                    ..Default::default()
                 },
             })
             .await
             .unwrap();
 
         assert_eq!(
-            result.prompt_config.developer_prompt_addon,
+            result.domain.prompt_config.developer_prompt_addon,
             Some("Builder mode".to_string())
         );
     }
 
     #[tokio::test]
-    async fn contract_dispatch_supports_ability_and_domain_patch_ops() {
+    async fn contract_dispatch_supports_ability_and_domain_configure_ops() {
         let TestContext {
             backend,
             ability,
@@ -1859,10 +1849,12 @@ mod tests {
 
         let ability_result = ManifestMcpContract::dispatch(
             &backend,
-            "update_ability",
+            "configure_ability",
             serde_json::json!({
                 "ability": ability.name,
-                "description": "Improved review helper"
+                "metadata": {
+                    "description": "Improved review helper"
+                }
             }),
         )
         .await
@@ -1874,7 +1866,7 @@ mod tests {
 
         let ability_prompt_result = ManifestMcpContract::dispatch(
             &backend,
-            "update_ability_prompt",
+            "configure_ability",
             serde_json::json!({
                 "ability": ability.name,
                 "prompt_config": {
@@ -1885,16 +1877,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            ability_prompt_result["prompt_config"]["developer_prompt"],
+            ability_prompt_result["ability"]["prompt_config"]["developer_prompt"],
             serde_json::json!("Upgraded prompt")
         );
 
         let domain_result = ManifestMcpContract::dispatch(
             &backend,
-            "update_domain",
+            "configure_domain",
             serde_json::json!({
                 "domain": domain.slug(),
-                "description": "Updated creator domain"
+                "metadata": {
+                    "description": "Updated creator domain"
+                }
             }),
         )
         .await
@@ -1904,9 +1898,9 @@ mod tests {
             serde_json::json!("Updated creator domain")
         );
 
-        let domain_manifest_result = ManifestMcpContract::dispatch(
+        let domain_prompt_result = ManifestMcpContract::dispatch(
             &backend,
-            "update_domain_prompt",
+            "configure_domain",
             serde_json::json!({
                 "domain": domain.slug(),
                 "prompt_config": {
@@ -1917,7 +1911,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            domain_manifest_result["prompt_config"]["developer_prompt_addon"],
+            domain_prompt_result["domain"]["prompt_config"]["developer_prompt_addon"],
             serde_json::json!("Build mode")
         );
     }
@@ -2055,20 +2049,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_routine_merges_partial_patch() {
+    async fn configure_routine_merges_partial_patch() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
         let result = backend
-            .update_routine(RoutineUpdateParams {
-                slug: Slug::derive(&routine.name),
-                data: crate::RoutineUpdateDocument {
-                    name: Some("nightly-release".into()),
-                    description: None,
-                    trigger: None,
-                    metadata: None,
+            .configure_routine(RoutineConfigureParams {
+                data: crate::RoutineConfigureDocument {
+                    routine: Some(Slug::derive(&routine.name)),
+                    metadata: Some(crate::RoutineConfigureMetadata {
+                        name: Some("nightly-release".into()),
+                        description: None,
+                        project_id: None,
+                        trigger: None,
+                        is_active: None,
+                        max_retries: None,
+                    }),
+                    runtime_metadata: None,
+                    encrypted_payload: None,
                     graph: None,
+                    id: None,
                 },
             })
             .await
@@ -2092,20 +2093,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_routine_can_clear_description() {
+    async fn configure_routine_can_clear_description() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
         let result = backend
-            .update_routine(RoutineUpdateParams {
-                slug: Slug::derive(&routine.name),
-                data: crate::RoutineUpdateDocument {
-                    name: None,
-                    description: Some(None),
-                    trigger: None,
-                    metadata: None,
+            .configure_routine(RoutineConfigureParams {
+                data: crate::RoutineConfigureDocument {
+                    routine: Some(Slug::derive(&routine.name)),
+                    metadata: Some(crate::RoutineConfigureMetadata {
+                        name: None,
+                        description: Some(None),
+                        project_id: None,
+                        trigger: None,
+                        is_active: None,
+                        max_retries: None,
+                    }),
+                    runtime_metadata: None,
+                    encrypted_payload: None,
                     graph: None,
+                    id: None,
                 },
             })
             .await
@@ -2116,17 +2124,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_supports_routine_patch_ops() {
+    async fn contract_dispatch_supports_routine_configure() {
         let TestContext {
             backend, routine, ..
         } = backend().await;
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_routine",
+            "configure_routine",
             serde_json::json!({
-                "slug": Slug::derive(&routine.name),
-                "metadata": {
+                "routine": Slug::derive(&routine.name),
+                "runtime_metadata": {
                     "schedule": "0 6 * * *",
                     "entry_steps": [routine.steps[0].slug]
                 }
@@ -2145,19 +2153,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_routine_and_update_accept_graph_payloads() {
+    async fn configure_routine_accepts_graph_payloads() {
         let TestContext { backend, .. } = backend().await;
 
         let created = backend
-            .create_routine(RoutineCreateParams {
-                data: crate::RoutineCreateDocument {
-                    name: "pipeline".into(),
-                    description: Some("Build workflow".into()),
-                    trigger: Some(RoutineTrigger::Task),
-                    metadata: Some(RoutineMetadata {
-                        schedule: None,
-                        entry_steps: vec![],
+            .configure_routine(RoutineConfigureParams {
+                data: crate::RoutineConfigureDocument {
+                    id: None,
+                    routine: None,
+                    metadata: Some(crate::RoutineConfigureMetadata {
+                        name: Some("pipeline".into()),
+                        description: Some(Some("Build workflow".into())),
+                        project_id: None,
+                        trigger: Some(RoutineTrigger::Task),
+                        is_active: None,
+                        max_retries: None,
                     }),
+                    runtime_metadata: Some(serde_json::json!({})),
+                    encrypted_payload: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![
@@ -2196,13 +2209,13 @@ mod tests {
         assert_eq!(created.routine.edges.len(), 1);
 
         let updated = backend
-            .update_routine(RoutineUpdateParams {
-                slug: created.routine.summary.slug.clone(),
-                data: crate::RoutineUpdateDocument {
-                    name: None,
-                    description: None,
-                    trigger: None,
+            .configure_routine(RoutineConfigureParams {
+                data: crate::RoutineConfigureDocument {
+                    id: None,
+                    routine: Some(created.routine.summary.slug.clone()),
                     metadata: None,
+                    runtime_metadata: None,
+                    encrypted_payload: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![RoutineStepInput {
@@ -2244,17 +2257,18 @@ mod tests {
             .find(|item| item["name"] == serde_json::json!(model.name))
             .cloned()
             .unwrap();
+        assert_eq!(reasoner["slug"], serde_json::json!(model.slug));
         assert!(reasoner.get("temperature").is_none());
         assert!(reasoner.get("tags").is_none());
         assert!(reasoner.get("base_url").is_none());
 
         let get = backend
             .get_model(ModelsGetParams {
-                model: Slug::derive(&model.name),
+                model: model.slug.clone(),
             })
             .await
             .unwrap();
-        assert_eq!(get.model.summary.name, "reasoner");
+        assert_eq!(get.model.summary.name, model.name);
         assert_eq!(get.model.summary.model, "gpt-5");
     }
 
@@ -2264,7 +2278,7 @@ mod tests {
 
         let result = backend
             .update_model(ModelUpdateParams {
-                model: Slug::derive(&model.name),
+                model: model.slug.clone(),
                 data: crate::ModelUpdateDocument {
                     name: Some("reasoner-v2".into()),
                     description: None,
@@ -2295,7 +2309,7 @@ mod tests {
 
         let result = backend
             .update_model(ModelUpdateParams {
-                model: Slug::derive(&model.name),
+                model: model.slug.clone(),
                 data: crate::ModelUpdateDocument {
                     name: None,
                     description: Some(None),
@@ -2308,7 +2322,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.model.summary.name, "reasoner");
+        assert_eq!(result.model.summary.name, "Reasoning Model");
         assert_eq!(result.model.summary.description, None);
         assert_eq!(result.model.base_url, None);
     }
@@ -2498,15 +2512,11 @@ mod tests {
             get.context_block.summary.selector,
             "{{ team.core.repo_summary }}"
         );
-        assert!(
-            serde_json::to_value(&get).unwrap()["context_block"]
-                .get("template")
-                .is_none()
-        );
+        assert_eq!(get.context_block.template, "Repository: {{ repo_name }}");
     }
 
     #[tokio::test]
-    async fn get_context_block_content_returns_template() {
+    async fn get_context_block_returns_template() {
         let TestContext {
             backend,
             context_block,
@@ -2514,7 +2524,7 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .get_context_block_content(ContextBlockContentGetParams {
+            .get_context_block(ContextBlocksGetParams {
                 context_block: context_block.slug(),
             })
             .await
@@ -2524,7 +2534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_context_block_merges_partial_patch() {
+    async fn configure_context_block_merges_partial_patch() {
         let TestContext {
             backend,
             context_block,
@@ -2532,12 +2542,14 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .update_context_block(ContextBlockUpdateParams {
-                context_block: context_block.slug(),
-                data: crate::ContextBlockUpdateDocument {
-                    name: None,
-                    description: None,
-                    template: None,
+            .configure_context_block(ContextBlockConfigureParams {
+                data: crate::ContextBlockConfigureDocument {
+                    context_block: Some(context_block.slug()),
+                    metadata: Some(crate::ContextBlockConfigureMetadata {
+                        description: Some(Some("Updated repository summary.".into())),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
                 },
             })
             .await
@@ -2545,12 +2557,13 @@ mod tests {
 
         assert_eq!(
             result.context_block.summary.description,
-            Some("Summarizes the current repository.".into())
+            Some("Updated repository summary.".into())
         );
+        assert_eq!(result.context_block.template, "Repository: {{ repo_name }}");
     }
 
     #[tokio::test]
-    async fn update_context_block_content_updates_template_only() {
+    async fn configure_context_block_updates_template_only() {
         let TestContext {
             backend,
             context_block,
@@ -2558,17 +2571,20 @@ mod tests {
         } = backend().await;
 
         let result = backend
-            .update_context_block_content(ContextBlockContentUpdateParams {
-                context_block: context_block.slug(),
-                template: Some("Repository: {{ repo_slug }}".into()),
+            .configure_context_block(ContextBlockConfigureParams {
+                data: crate::ContextBlockConfigureDocument {
+                    context_block: Some(context_block.slug()),
+                    template: Some("Repository: {{ repo_slug }}".into()),
+                    ..Default::default()
+                },
             })
             .await
             .unwrap();
 
-        assert_eq!(result.template, "Repository: {{ repo_slug }}");
+        assert_eq!(result.context_block.template, "Repository: {{ repo_slug }}");
 
         let fetched = backend
-            .get_context_block_content(ContextBlockContentGetParams {
+            .get_context_block(ContextBlocksGetParams {
                 context_block: context_block.slug(),
             })
             .await
@@ -2580,7 +2596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_supports_context_block_content_ops() {
+    async fn contract_dispatch_supports_context_block_configure_ops() {
         let TestContext {
             backend,
             context_block,
@@ -2589,7 +2605,7 @@ mod tests {
 
         let result = ManifestMcpContract::dispatch(
             &backend,
-            "update_context_block_content",
+            "configure_context_block",
             serde_json::json!({
                 "context_block": context_block.slug(),
                 "template": "Repository: {{ project_name }}"
@@ -2599,7 +2615,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            result["template"],
+            result["context_block"]["template"],
             serde_json::json!("Repository: {{ project_name }}")
         );
     }

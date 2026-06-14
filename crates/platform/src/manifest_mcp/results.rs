@@ -2,15 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use nenjo::agents::prompts::PromptConfig;
-use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-
 use crate::manifest_contract::KnowledgeDocumentEdgeRecord;
 
 use super::types::{
-    AbilityDocument, AbilityPromptDocument, AbilitySummary, AgentDocument, AgentPromptDocument,
-    AgentSummary, ContextBlockContentDocument, ContextBlockDocument, ContextBlockSummary,
-    CouncilDocument, CouncilSummary, DomainDocument, DomainPromptDocument, DomainSummary,
+    AbilityDocument, AbilitySummary, AgentDocument, AgentSummary, ContextBlockDocument,
+    ContextBlockSummary, CouncilDocument, CouncilSummary, DomainDocument, DomainSummary,
     KnowledgeDocSummary, KnowledgePackDocument, ModelDocument, ModelSummary, ProjectDocument,
     ProjectSummary, RoutineDocument, RoutineSummary,
 };
@@ -28,23 +24,12 @@ pub struct AgentGetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_agent_prompt`.
-pub struct AgentPromptGetResult {
-    pub agent: AgentPromptDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_agent`.
-pub struct AgentMutationResult {
-    /// Canonical agent state after an agent metadata update.
+/// Result for `configure_agent`.
+pub struct AgentConfigureResult {
+    /// Manifest-facing agent document after all requested changes.
     pub agent: AgentDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_agent_prompt`.
-pub struct AgentPromptMutationResult {
-    /// Canonical prompt configuration for the updated agent.
-    pub prompt_config: PromptConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,21 +51,11 @@ pub struct AbilityGetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `create_ability` and `update_ability`.
-pub struct AbilityMutationResult {
+/// Result for `configure_ability`.
+pub struct AbilityConfigureResult {
     pub ability: AbilityDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_ability_prompt`.
-pub struct AbilityPromptGetResult {
-    pub ability: AbilityPromptDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_ability_prompt`.
-pub struct AbilityPromptMutationResult {
-    pub prompt_config: AbilityPromptConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,27 +71,12 @@ pub struct DomainGetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `create_domain` and `update_domain`.
-pub struct DomainMutationResult {
+/// Result for `configure_domain`.
+pub struct DomainConfigureResult {
     pub domain: DomainDocument,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_domain_prompt`.
-pub struct DomainPromptGetResult {
-    pub domain: DomainPromptDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_domain_prompt`.
-pub struct DomainPromptMutationResult {
-    pub prompt_config: DomainPromptConfig,
-}
-
-/// Alias used by the current contract for domain prompt retrieval.
-pub type DomainManifestGetResult = DomainPromptGetResult;
-/// Alias used by the current contract for domain prompt updates.
-pub type DomainManifestMutationResult = DomainPromptMutationResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Result for `list_projects`.
@@ -167,9 +127,11 @@ pub struct RoutineGetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `create_routine` and `update_routine`.
-pub struct RoutineMutationResult {
+/// Result for `configure_routine`.
+pub struct RoutineConfigureResult {
     pub routine: RoutineDocument,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,19 +183,9 @@ pub struct ContextBlockGetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `create_context_block` and `update_context_block`.
-pub struct ContextBlockMutationResult {
+/// Result for `configure_context_block`.
+pub struct ContextBlockConfigureResult {
     pub context_block: ContextBlockDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `get_context_block_content`.
-pub struct ContextBlockContentGetResult {
-    pub context_block: ContextBlockContentDocument,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Result for `update_context_block_content`.
-pub struct ContextBlockContentMutationResult {
-    pub template: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }

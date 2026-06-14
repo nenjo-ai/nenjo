@@ -15,8 +15,8 @@ use uuid::Uuid;
 use super::abilities::{build_ability_tools, is_ability_tool};
 use super::instance::AgentExecutionMode;
 use super::sub_agents::{
-    ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, child_tools,
-    parent_tools,
+    ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
+    child_tools, parent_tools,
 };
 use anyhow::Context;
 use nenjo_models::ModelProvider;
@@ -415,11 +415,14 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 inst.agent_slug().clone(),
                 inst.model_manifest.clone(),
                 inherited_host_tools,
-                SubAgentLimits {
-                    max_depth: inst.runtime.config.max_delegation_depth,
+                SubAgentRuntimeOptions {
+                    limits: SubAgentLimits {
+                        max_depth: inst.runtime.config.max_delegation_depth,
+                    },
+                    delegation_ctx: inst.runtime.sub_agent_ctx.clone(),
+                    async_ops: inst.runtime.async_ops.clone(),
+                    events_tx: Some(events_tx.clone()),
                 },
-                inst.runtime.sub_agent_ctx.clone(),
-                Some(events_tx.clone()),
             );
             inst.runtime.tools.extend(parent_tools(runtime.handle()));
         }

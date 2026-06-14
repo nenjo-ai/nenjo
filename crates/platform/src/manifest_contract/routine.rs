@@ -27,50 +27,79 @@ fn parse_step_type(value: &str) -> RoutineStepType {
 }
 
 /// One routine step embedded in a routine wire record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineStepRecord {
     pub id: Uuid,
+    pub routine_id: Uuid,
     pub slug: String,
     pub routine: String,
     pub name: String,
     pub step_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lambda_id: Option<Uuid>,
     #[serde(default)]
     pub config: serde_json::Value,
+    pub position_x: f64,
+    pub position_y: f64,
     pub order_index: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// One routine edge embedded in a routine wire record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineEdgeRecord {
     pub id: Uuid,
+    pub routine_id: Uuid,
     pub routine: String,
+    pub source_step_id: Uuid,
     pub source_step: String,
+    pub target_step_id: Uuid,
     pub target_step: String,
     pub condition: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Metadata for a routine on REST, events, and worker sync.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineRecord {
     pub id: Uuid,
     pub org_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Uuid>,
     pub slug: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub trigger: String,
+    pub is_active: bool,
+    pub is_default: bool,
+    pub max_retries: i32,
+    pub step_count: i64,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default)]
     pub steps: Vec<RoutineStepRecord>,
     #[serde(default)]
     pub edges: Vec<RoutineEdgeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

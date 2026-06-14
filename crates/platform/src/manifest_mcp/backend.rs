@@ -2,31 +2,24 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::params::{
-    AbilitiesGetParams, AbilityCreateParams, AbilityDeleteParams, AbilityPromptGetParams,
-    AbilityPromptUpdateParams, AbilityUpdateParams, AgentCreateParams, AgentDeleteParams,
-    AgentPromptGetParams, AgentPromptUpdateParams, AgentUpdateParams, AgentsGetParams,
-    ContextBlockContentGetParams, ContextBlockContentUpdateParams, ContextBlockCreateParams,
-    ContextBlockDeleteParams, ContextBlockUpdateParams, ContextBlocksGetParams,
-    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
-    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
-    DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainUpdateParams,
-    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
+    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
+    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
+    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
+    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
     KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
     ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
-    ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams,
-    RoutineUpdateParams, RoutinesGetParams,
+    ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutineDeleteParams,
+    RoutinesGetParams,
 };
 use super::results::{
-    AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
-    AbilityPromptMutationResult, AgentGetResult, AgentMutationResult, AgentPromptGetResult,
-    AgentPromptMutationResult, AgentsListResult, ContextBlockContentGetResult,
-    ContextBlockContentMutationResult, ContextBlockGetResult, ContextBlockMutationResult,
+    AbilitiesListResult, AbilityConfigureResult, AbilityGetResult, AgentConfigureResult,
+    AgentGetResult, AgentsListResult, ContextBlockConfigureResult, ContextBlockGetResult,
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
-    DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
-    DomainMutationResult, DomainsListResult, KnowledgeDocMutationResult,
-    KnowledgePackMutationResult, ModelGetResult, ModelMutationResult, ModelsListResult,
-    ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
-    RoutineMutationResult, RoutinesListResult,
+    DeleteResult, DomainConfigureResult, DomainGetResult, DomainsListResult,
+    KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
+    ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
+    RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
 };
 
 #[async_trait]
@@ -34,21 +27,10 @@ use super::results::{
 pub trait AgentManifestBackend: Send + Sync {
     /// List visible agents.
     async fn list_agents(&self) -> Result<AgentsListResult>;
-    /// Fetch one agent by ID.
+    /// Fetch one agent by slug, including prompt configuration.
     async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult>;
-    /// Fetch one agent's prompt document.
-    async fn get_agent_prompt(&self, params: AgentPromptGetParams) -> Result<AgentPromptGetResult>;
-    /// Create a new agent.
-    async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult>;
-    /// Update agent metadata.
-    async fn update_agent(&self, params: AgentUpdateParams) -> Result<AgentMutationResult>;
-    /// Update an agent prompt document.
-    async fn update_agent_prompt(
-        &self,
-        params: AgentPromptUpdateParams,
-    ) -> Result<AgentPromptMutationResult>;
-    /// Delete an agent.
-    async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult>;
+    /// Create or update an agent in one backend-owned sequence.
+    async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult>;
 }
 
 #[async_trait]
@@ -58,22 +40,11 @@ pub trait AbilityManifestBackend: Send + Sync {
     async fn list_abilities(&self) -> Result<AbilitiesListResult>;
     /// Fetch one ability by ID.
     async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult>;
-    /// Fetch one ability's prompt document.
-    async fn get_ability_prompt(
+    /// Create or update an ability in one backend-owned sequence.
+    async fn configure_ability(
         &self,
-        params: AbilityPromptGetParams,
-    ) -> Result<AbilityPromptGetResult>;
-    /// Create a new ability.
-    async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult>;
-    /// Update an existing ability.
-    async fn update_ability(&self, params: AbilityUpdateParams) -> Result<AbilityMutationResult>;
-    /// Update an ability prompt document.
-    async fn update_ability_prompt(
-        &self,
-        params: AbilityPromptUpdateParams,
-    ) -> Result<AbilityPromptMutationResult>;
-    /// Delete an ability.
-    async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult>;
+        params: AbilityConfigureParams,
+    ) -> Result<AbilityConfigureResult>;
 }
 
 #[async_trait]
@@ -83,22 +54,11 @@ pub trait DomainManifestBackend: Send + Sync {
     async fn list_domains(&self) -> Result<DomainsListResult>;
     /// Fetch one domain by ID.
     async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult>;
-    /// Fetch one domain prompt/manifest document.
-    async fn get_domain_prompt(
+    /// Create or update a domain in one backend-owned sequence.
+    async fn configure_domain(
         &self,
-        params: DomainManifestGetParams,
-    ) -> Result<DomainManifestGetResult>;
-    /// Create a new domain.
-    async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult>;
-    /// Update an existing domain.
-    async fn update_domain(&self, params: DomainUpdateParams) -> Result<DomainMutationResult>;
-    /// Update a domain prompt/manifest document.
-    async fn update_domain_prompt(
-        &self,
-        params: DomainManifestUpdateParams,
-    ) -> Result<DomainManifestMutationResult>;
-    /// Delete a domain.
-    async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult>;
+        params: DomainConfigureParams,
+    ) -> Result<DomainConfigureResult>;
 }
 
 #[async_trait]
@@ -150,10 +110,11 @@ pub trait RoutineManifestBackend: Send + Sync {
     async fn list_routines(&self) -> Result<RoutinesListResult>;
     /// Fetch one routine by ID.
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult>;
-    /// Create a new routine.
-    async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult>;
-    /// Update an existing routine.
-    async fn update_routine(&self, params: RoutineUpdateParams) -> Result<RoutineMutationResult>;
+    /// Create or update a routine in one backend-owned sequence.
+    async fn configure_routine(
+        &self,
+        params: RoutineConfigureParams,
+    ) -> Result<RoutineConfigureResult>;
     /// Delete a routine.
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult>;
 }
@@ -213,28 +174,11 @@ pub trait ContextBlockManifestBackend: Send + Sync {
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult>;
-    /// Fetch one context block's template content.
-    async fn get_context_block_content(
+    /// Create or update a context block in one backend-owned sequence.
+    async fn configure_context_block(
         &self,
-        params: ContextBlockContentGetParams,
-    ) -> Result<ContextBlockContentGetResult>;
-    /// Create a new context block.
-    async fn create_context_block(
-        &self,
-        params: ContextBlockCreateParams,
-    ) -> Result<ContextBlockMutationResult>;
-    /// Update a context block metadata record.
-    async fn update_context_block(
-        &self,
-        params: ContextBlockUpdateParams,
-    ) -> Result<ContextBlockMutationResult>;
-    /// Update a context block template.
-    async fn update_context_block_content(
-        &self,
-        params: ContextBlockContentUpdateParams,
-    ) -> Result<ContextBlockContentMutationResult>;
-    /// Delete a context block.
-    async fn delete_context_block(&self, params: ContextBlockDeleteParams) -> Result<DeleteResult>;
+        params: ContextBlockConfigureParams,
+    ) -> Result<ContextBlockConfigureResult>;
 }
 
 #[async_trait]

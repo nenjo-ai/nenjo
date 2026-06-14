@@ -14,6 +14,7 @@ use nenjo_models::ModelProvider;
 use regex::Regex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
@@ -271,6 +272,16 @@ where
                     tools: tools_ref,
                 };
 
+                let model_request_id = Uuid::new_v4().to_string();
+                emit_event(
+                    events_tx.as_ref(),
+                    TurnEvent::ModelRequestStarted {
+                        request_id: model_request_id.clone(),
+                        parent_call_id: None,
+                        provider: None,
+                        model: model.to_string(),
+                    },
+                );
                 let mut response = model_provider.chat(request, model, temperature).await?;
                 let original_tool_call_count = response.tool_calls.len();
                 if response.tool_calls.len() != original_tool_call_count {
@@ -293,6 +304,24 @@ where
                         Some(stripped)
                     };
                 }
+                if let Some(text) = response.text.as_deref()
+                    && !text.is_empty()
+                {
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::AssistantTextDelta {
+                            request_id: model_request_id.clone(),
+                            delta: text.to_string(),
+                        },
+                    );
+                }
+                emit_event(
+                    events_tx.as_ref(),
+                    TurnEvent::ModelRequestCompleted {
+                        request_id: model_request_id.clone(),
+                        parent_call_id: None,
+                    },
+                );
 
                 // Accumulate token usage
                 total_input_tokens += response.usage.input_tokens;
@@ -391,11 +420,13 @@ where
                         .text
                         .as_deref()
                         .and_then(sanitize_tool_text_preview);
+                    let tool_batch_id = Uuid::new_v4().to_string();
 
                     // Emit a single start event with all tool calls.
                     emit_event(
                         events_tx.as_ref(),
                         TurnEvent::ToolCallStart {
+                            batch_id: tool_batch_id.clone(),
                             parent_tool_name: None,
                             calls: response
                                 .tool_calls
@@ -403,7 +434,7 @@ where
                                 .map(|tc| ToolCall {
                                     tool_call_id: Some(tc.id.clone()),
                                     tool_name: tc.name.clone(),
-                                    tool_args: truncate(&tc.arguments, 120),
+                                    tool_args: tc.arguments.clone(),
                                     text_preview: tool_text_preview.clone(),
                                 })
                                 .collect(),
@@ -455,10 +486,11 @@ where
                         emit_event(
                             events_tx.as_ref(),
                             TurnEvent::ToolCallEnd {
+                                batch_id: tool_batch_id.clone(),
                                 parent_tool_name: None,
                                 tool_call_id: Some(tool_call.id.clone()),
                                 tool_name: tool_call.name.clone(),
-                                tool_args: truncate(&tool_call.arguments, 120),
+                                tool_args: tool_call.arguments.clone(),
                                 result: tool_result.clone(),
                             },
                         );

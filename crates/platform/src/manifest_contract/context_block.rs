@@ -95,6 +95,7 @@ impl ContextBlockRecord {
                 path: self.path.clone(),
                 description: self.description.clone(),
             },
+            template: String::new(),
         }
     }
 }
@@ -113,5 +114,14 @@ impl ContextBlockContentRecord {
     pub fn with_template(mut self, template: Option<String>) -> Self {
         self.template = template;
         self
+    }
+
+    pub fn to_manifest(&self) -> ContextBlockManifest {
+        self.block
+            .to_manifest(self.template.clone().unwrap_or_default())
+    }
+
+    pub fn to_document(&self) -> crate::manifest_mcp::ContextBlockDocument {
+        crate::manifest_mcp::ContextBlockDocument::from(self.to_manifest())
     }
 }

@@ -438,9 +438,12 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
 
     assert!(names.iter().any(|name| name == "list_agents"));
     assert!(names.iter().any(|name| name == "get_agent"));
-    assert!(names.iter().any(|name| name == "get_agent_prompt"));
-    assert!(names.iter().any(|name| name == "create_agent"));
-    assert!(names.iter().any(|name| name == "update_agent"));
+    assert!(names.iter().any(|name| name == "configure_agent"));
+    assert!(!names.iter().any(|name| name == "get_agent_prompt"));
+    assert!(!names.iter().any(|name| name == "create_agent"));
+    assert!(!names.iter().any(|name| name == "update_agent"));
+    assert!(!names.iter().any(|name| name == "update_agent_prompt"));
+    assert!(!names.iter().any(|name| name == "delete_agent"));
     assert!(names.iter().any(|name| name == "list_projects"));
     assert!(names.iter().any(|name| name == "get_project"));
     assert!(names.iter().any(|name| name == "list_project_tasks"));

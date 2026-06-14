@@ -244,8 +244,23 @@ impl ApiClient {
     }
 
     pub async fn fetch_ability(&self, resource: &Slug) -> Result<Option<AbilityManifest>> {
-        self.fetch_resource(&format!("/api/v1/abilities/{resource}"))
-            .await
+        let url = format!("{}/api/v1/abilities/{resource}", self.base_url);
+        let resp = self.get(&url).await?;
+        match resp.status() {
+            StatusCode::OK => {
+                let response = resp.json::<AbilityPromptRecord>().await.map_err(|source| {
+                    ApiClientError::Parse(format!(
+                        "Failed to parse /api/v1/abilities/{resource}: {source}"
+                    ))
+                })?;
+                Ok(self
+                    .decode_ability_prompt(Some(response))
+                    .await?
+                    .map(|record| record.to_manifest()))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(self.api_error(status, resp).await),
+        }
     }
 
     pub async fn fetch_context_block_summary(
@@ -459,7 +474,7 @@ impl ApiClient {
         let Some(mut response) = response else {
             return Ok(None);
         };
-        let Some(payload) = response.encrypted_payload.as_ref() else {
+        let Some(payload) = response.agent.encrypted_payload.as_ref() else {
             return Ok(Some(response));
         };
         let Some(plaintext) = self
@@ -473,10 +488,10 @@ impl ApiClient {
             return Ok(Some(response));
         };
 
-        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+        response.agent.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
             ApiClientError::Parse(format!("Failed to parse decrypted agent prompt: {error}"))
         })?);
-        response.encrypted_payload = None;
+        response.agent.encrypted_payload = None;
         Ok(Some(response))
     }
 
@@ -503,6 +518,34 @@ impl ApiClient {
 
         response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
             ApiClientError::Parse(format!("Failed to parse decrypted domain prompt: {error}"))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_ability_prompt(
+        &self,
+        response: Option<AbilityPromptRecord>,
+    ) -> Result<Option<AbilityPromptRecord>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt ability prompt: {error}"))
+            })?
+        else {
+            return Ok(Some(response));
+        };
+
+        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!("Failed to parse decrypted ability prompt: {error}"))
         })?);
         response.encrypted_payload = None;
         Ok(Some(response))

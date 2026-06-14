@@ -200,85 +200,83 @@ impl SecureEnvelopeCodec {
         event: StreamEvent,
     ) -> Result<Option<StreamEvent>> {
         match event {
-            StreamEvent::ToolCalls {
-                tool_calls,
-                agent_name,
-                parent_tool_name,
+            StreamEvent::RunFailed {
+                run_id,
+                session_id,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::ToolCalls {
-                tool_calls,
-                agent_name,
-                parent_tool_name,
+            } => Ok(Some(StreamEvent::RunFailed {
+                run_id,
+                session_id,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "run_failed_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::AssistantTextDelta {
+                run_id,
+                request_id,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::AssistantTextDelta {
+                run_id,
+                request_id,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "assistant_text_delta", payload)
+                    .await?,
+            })),
+            StreamEvent::ToolCallStarted {
+                run_id,
+                batch_id,
+                call_id,
+                parent_call_id,
+                tool_name,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::ToolCallStarted {
+                run_id,
+                batch_id,
+                call_id,
+                parent_call_id,
+                tool_name,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "tool_call_payload", payload)
                     .await?,
             })),
-            StreamEvent::ToolCompleted {
-                tool_name,
-                success,
-                parent_tool_name,
+            StreamEvent::ToolOutputDelta {
+                run_id,
+                call_id,
+                stream,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::ToolCompleted {
-                tool_name,
+            } => Ok(Some(StreamEvent::ToolOutputDelta {
+                run_id,
+                call_id,
+                stream,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "tool_output_delta", payload)
+                    .await?,
+            })),
+            StreamEvent::ToolCallCompleted {
+                run_id,
+                batch_id,
+                call_id,
+                parent_call_id,
                 success,
-                parent_tool_name,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::ToolCallCompleted {
+                run_id,
+                batch_id,
+                call_id,
+                parent_call_id,
+                success,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "tool_result_payload", payload)
-                    .await?,
-            })),
-            StreamEvent::AbilityActivated {
-                agent,
-                ability,
-                ability_tool_name,
-                payload,
-                ..
-            } => Ok(Some(StreamEvent::AbilityActivated {
-                agent,
-                ability,
-                ability_tool_name,
-                payload: None,
-                encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "ability_task_payload", payload)
-                    .await?,
-            })),
-            StreamEvent::AbilityCompleted {
-                agent,
-                ability,
-                ability_tool_name,
-                success,
-                payload,
-                ..
-            } => Ok(Some(StreamEvent::AbilityCompleted {
-                agent,
-                ability,
-                ability_tool_name,
-                success,
-                payload: None,
-                encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "ability_result_payload", payload)
-                    .await?,
-            })),
-            StreamEvent::HookActivated {
-                agent,
-                hook,
-                hook_event,
-                hook_type,
-                source,
-                payload,
-                ..
-            } => Ok(Some(StreamEvent::HookActivated {
-                agent,
-                hook,
-                hook_event,
-                hook_type,
-                source,
-                payload: None,
-                encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "hook_activation_payload", payload)
                     .await?,
             })),
             StreamEvent::HookStarted {
@@ -323,36 +321,53 @@ impl SecureEnvelopeCodec {
                     .encrypt_user_payload(user_id, ack, "hook_result_payload", payload)
                     .await?,
             })),
-            StreamEvent::DelegationStarted {
-                agent,
-                target_agent,
-                delegate_tool_name,
+            StreamEvent::AsyncOperationEvent {
+                operation_id,
+                kind,
+                label,
+                status,
+                signal,
+                model_visible,
+                parent_operation_id,
+                parent_tool_name,
+                summary,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::DelegationStarted {
-                agent,
-                target_agent,
-                delegate_tool_name,
+            } => Ok(Some(StreamEvent::AsyncOperationEvent {
+                operation_id,
+                kind,
+                label,
+                status,
+                signal,
+                model_visible,
+                parent_operation_id,
+                parent_tool_name,
+                summary,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "delegation_task_payload", payload)
+                    .encrypt_user_payload(user_id, ack, "async_operation_payload", payload)
                     .await?,
             })),
-            StreamEvent::DelegationCompleted {
-                agent,
-                target_agent,
-                delegate_tool_name,
-                success,
+            StreamEvent::AsyncOperationTranscript {
+                operation_id,
+                kind,
+                label,
+                event,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::DelegationCompleted {
-                agent,
-                target_agent,
-                delegate_tool_name,
-                success,
+            } => Ok(Some(StreamEvent::AsyncOperationTranscript {
+                operation_id,
+                kind,
+                label,
+                event,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "delegation_result_payload", payload)
+                    .encrypt_user_payload(
+                        user_id,
+                        ack,
+                        "async_operation_transcript_payload",
+                        payload,
+                    )
                     .await?,
             })),
             StreamEvent::Error {
@@ -857,7 +872,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
-    use nenjo_events::{Command, Response, StreamEvent, ToolCall};
+    use nenjo_events::Command;
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
@@ -1007,59 +1022,6 @@ mod tests {
                 other => panic!("unexpected decoded command payload: {other:?}"),
             },
             other => panic!("unexpected decoded command result: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_call_args_remain_inline_when_response_is_encoded() {
-        let actor_user_id = Uuid::new_v4();
-        let actor_key = ContentKey::from_bytes([7_u8; 32]);
-        let provider = StubKeyProvider {
-            user_keys: Arc::new(RwLock::new(HashMap::new())),
-        };
-        provider
-            .insert_user_key(actor_user_id, actor_key.clone())
-            .await;
-        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
-        let ctx = CodecContext::for_actor(actor_user_id);
-
-        let encoded = codec
-            .encode_response(
-                &ctx,
-                Response::AgentResponse {
-                    session_id: None,
-                    payload: StreamEvent::ToolCalls {
-                        tool_calls: vec![ToolCall {
-                            tool_name: "glob_search".into(),
-                            tool_args: r#"{"pattern":"*.md","path":"."}"#.into(),
-                        }],
-                        agent_name: "coder".into(),
-                        parent_tool_name: None,
-                        payload: Some(serde_json::json!({ "text_preview": "searching" })),
-                        encrypted_payload: None,
-                    },
-                },
-            )
-            .await
-            .expect("encode should succeed")
-            .expect("response should be retained");
-
-        match encoded {
-            Response::AgentResponse {
-                payload:
-                    StreamEvent::ToolCalls {
-                        tool_calls,
-                        payload,
-                        encrypted_payload,
-                        ..
-                    },
-                ..
-            } => {
-                assert_eq!(tool_calls[0].tool_args, r#"{"pattern":"*.md","path":"."}"#);
-                assert!(payload.is_none());
-                assert!(encrypted_payload.is_some());
-            }
-            other => panic!("unexpected encoded response: {other:?}"),
         }
     }
 }

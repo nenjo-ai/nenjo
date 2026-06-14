@@ -69,7 +69,7 @@ fn routine_edge_schema() -> serde_json::Value {
             },
             "metadata": {
                 "type": "object",
-                "description": "Optional edge metadata. For an on_fail retry edge from a gate step, max_attempts and on_exhausted_step_id can be used to bound retries and route after exhaustion.",
+                "description": "Optional edge metadata. For an on_fail retry edge from a gate step, use max_attempts to bound retries; retry exhaustion fails the routine directly.",
                 "additionalProperties": true
             }
         },
@@ -80,12 +80,13 @@ fn routine_edge_schema() -> serde_json::Value {
 fn routine_graph_schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "required": ["steps", "edges"],
+        "required": ["entry_steps", "steps", "edges"],
         "properties": {
             "entry_steps": {
                 "type": "array",
+                "minItems": 1,
                 "items": { "type": "string" },
-                "description": "Ordered set of step slugs that should act as entry points for this graph."
+                "description": "One or more step slugs that act as parallel graph entry points. A step with multiple incoming activated edges is an all-success join."
             },
             "steps": {
                 "type": "array",
@@ -109,10 +110,19 @@ fn routine_metadata_schema(description: &str) -> Value {
             "schedule": {
                 "type": ["string", "null"],
                 "description": "Optional persisted cron schedule expression or interval string."
+            },
+            "timezone": {
+                "type": ["string", "null"],
+                "description": "IANA timezone used when evaluating cron schedules."
+            },
+            "entry_steps": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Persisted graph entry step slugs. Prefer graph.entry_steps when replacing a graph."
             }
         },
         "description": description,
-        "additionalProperties": false
+        "additionalProperties": true
     })
 }
 
@@ -131,76 +141,76 @@ fn routine_graph_field_schema(description: &str) -> Value {
     })
 }
 
-fn routine_common_properties(
-    description_schema: Value,
-    trigger_description: &str,
-    metadata_description: &str,
-    graph_description: &str,
-) -> Map<String, Value> {
-    let mut properties = Map::new();
-    properties.insert("description".into(), description_schema);
-    properties.insert(
-        "trigger".into(),
-        routine_trigger_schema(trigger_description),
-    );
-    properties.insert(
-        "metadata".into(),
-        routine_metadata_schema(metadata_description),
-    );
-    properties.insert(
-        "graph".into(),
-        routine_graph_field_schema(graph_description),
-    );
-    properties
-}
-
-fn routine_create_properties() -> Map<String, Value> {
-    let mut properties = Map::new();
-    properties.insert(
-        "name".into(),
-        json!({ "type": "string", "description": "Routine name." }),
-    );
-    properties.extend(routine_common_properties(
-        json!({ "type": ["string", "null"], "description": "Optional routine description." }),
-        "Routine trigger type. Use `task` for task-driven routines or `cron` for scheduled routines.",
-        "Routine runtime metadata such as cron schedule.",
-        "Optional full workflow graph to create along with the routine.",
-    ));
-    properties
-}
-
-fn routine_update_properties() -> Map<String, Value> {
-    let mut properties = Map::new();
-    properties.insert(
-        "name".into(),
-        json!({ "type": "string", "description": "Replace the routine name. The stored slug will be derived from the new name." }),
-    );
-    properties.extend(routine_common_properties(
-        json!({ "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." }),
-        "Replace the routine trigger type.",
-        "Replace the routine metadata object.",
-        "Optional full replacement workflow graph.",
-    ));
-    properties
-}
-
-fn routine_create_parameters() -> Value {
+fn configure_metadata_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["name"],
-        "properties": routine_create_properties(),
+        "description": "Routine metadata patch. Required on create because metadata.name is required when routine is omitted. On update, omitted fields are unchanged and null description clears the description.",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Routine display name. Required when creating a routine."
+            },
+            "description": {
+                "type": ["string", "null"],
+                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+            },
+            "project_id": {
+                "type": ["string", "null"],
+                "format": "uuid",
+                "description": "Project UUID to associate with the routine. Omit to leave unchanged; set null to clear."
+            },
+            "trigger": routine_trigger_schema("Routine trigger type. Use task for task-driven routines or cron for scheduled routines."),
+            "is_active": {
+                "type": "boolean",
+                "description": "Whether the routine is active. For cron routines this controls schedule enablement."
+            },
+            "max_retries": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Maximum routine retry count."
+            }
+        },
         "additionalProperties": false
     })
 }
 
-fn routine_update_parameters() -> Value {
+fn routine_configure_parameters() -> Value {
     let mut properties = Map::new();
-    properties.insert("slug".into(), routine_ref_schema());
-    properties.extend(routine_update_properties());
+    properties.insert(
+        "id".into(),
+        json!({
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional routine UUID to use when creating a new routine."
+        }),
+    );
+    properties.insert(
+        "routine".into(),
+        json!({
+            "type": "string",
+            "description": "Existing routine slug. Omit to create a new routine."
+        }),
+    );
+    properties.insert("metadata".into(), configure_metadata_schema());
+    properties.insert(
+        "runtime_metadata".into(),
+        routine_metadata_schema("Full replacement runtime metadata, such as cron schedule and timezone. Omit to leave unchanged."),
+    );
+    properties.insert(
+        "graph".into(),
+        routine_graph_field_schema("Full replacement workflow graph. Omit to leave unchanged."),
+    );
+    properties.insert(
+        "encrypted_payload".into(),
+        json!({
+            "type": ["object", "null"],
+            "description": "Optional encrypted routine payload stored by the platform.",
+            "additionalProperties": true
+        }),
+    );
 
     json!({
         "type": "object",
-        "required": ["slug"],
         "properties": properties,
         "additionalProperties": false
     })
@@ -211,7 +221,7 @@ pub fn routine_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_routines".to_string(),
-            description: "List routines so you can find a routine slug before reading, updating, or deleting one."
+            description: "List routines so you can find a routine slug before reading or configuring one."
                 .to_string(),
             parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
             category: ToolCategory::Read,
@@ -229,29 +239,10 @@ pub fn routine_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "create_routine".to_string(),
-            description: "Create one routine with a name, optional description, trigger, metadata, and optionally a full workflow graph. The stable routine slug is derived from the name and returned in the response."
+            name: "configure_routine".to_string(),
+            description: "Create or update one routine in a single backend-owned operation. Omit routine to create; pass routine to update. When graph is present it is a full replacement and must be a JSON object, not a string."
                 .to_string(),
-            parameters: routine_create_parameters(),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_routine".to_string(),
-            description: "Update one routine's name, description, trigger, metadata, and optionally replace its full workflow graph by slug."
-                .to_string(),
-            parameters: routine_update_parameters(),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "delete_routine".to_string(),
-            description: "Delete one routine by slug when you want it removed from the manifest."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "required": ["slug"],
-                "properties": { "slug": routine_ref_schema() },
-                "additionalProperties": false
-            }),
+            parameters: routine_configure_parameters(),
             category: ToolCategory::Write,
         },
     ]

@@ -19,7 +19,9 @@ use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
-use nenjo::manifest::{ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader};
+use nenjo::manifest::{
+    ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader, ManifestResourceKind,
+};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_platform::{
@@ -228,6 +230,8 @@ struct BootstrapAbilityManifest {
     id: Uuid,
     #[serde(flatten)]
     manifest: nenjo::manifest::AbilityManifest,
+    #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +239,8 @@ struct BootstrapDomainManifest {
     id: Uuid,
     #[serde(flatten)]
     manifest: nenjo::manifest::DomainManifest,
+    #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,22 +546,28 @@ async fn hydrate_bootstrap_manifest(
 
     let mut domains = Vec::with_capacity(bootstrap.domains.len());
     for domain in bootstrap.domains {
+        let prompt_config = resolve_bootstrap_domain_prompt_config(&domain, state_dir).await?;
+        let mut manifest = domain.manifest;
+        manifest.prompt_config = prompt_config;
         resource_ids.insert(
             PlatformResourceKind::Domain,
-            &domain.manifest.manifest_slug(),
+            &manifest.manifest_slug(),
             domain.id,
         );
-        domains.push(domain.manifest);
+        domains.push(manifest);
     }
 
     let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
     for ability in bootstrap.abilities {
+        let prompt_config = resolve_bootstrap_ability_prompt_config(&ability, state_dir).await?;
+        let mut manifest = ability.manifest;
+        manifest.prompt_config = prompt_config;
         resource_ids.insert(
             PlatformResourceKind::Ability,
-            &ability.manifest.manifest_slug(),
+            &manifest.manifest_slug(),
             ability.id,
         );
-        abilities.push(ability.manifest);
+        abilities.push(manifest);
     }
 
     let mut context_blocks = Vec::with_capacity(bootstrap.context_blocks.len());
@@ -736,10 +748,10 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
     check_section!("models", Vec<nenjo::manifest::ModelManifest>);
     check_section!("agents", Vec<BootstrapAgentManifest>);
     check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
-    check_section!("domains", Vec<nenjo::manifest::DomainManifest>);
+    check_section!("domains", Vec<BootstrapDomainManifest>);
     check_section!("projects", Vec<nenjo::manifest::ProjectManifest>);
     check_section!("mcp_servers", Vec<nenjo::manifest::McpServerManifest>);
-    check_section!("abilities", Vec<nenjo::manifest::AbilityManifest>);
+    check_section!("abilities", Vec<BootstrapAbilityManifest>);
     check_section!("context_blocks", Vec<BootstrapContextBlockManifest>);
 }
 
@@ -802,9 +814,8 @@ impl WorkerManifestCache {
             ResourceType::Model => {
                 atomic_write_json(manifests_dir, "models.json", &manifest.models)
             }
-            ResourceType::Agent => {
-                atomic_write_json(manifests_dir, "agents.json", &manifest.agents)
-            }
+            ResourceType::Agent => nenjo::LocalManifestStore::new(manifests_dir)
+                .persist_resource_kind(manifest, ManifestResourceKind::Agent),
             ResourceType::Routine => {
                 atomic_write_json(manifests_dir, "routines.json", &manifest.routines)
             }
@@ -1054,11 +1065,11 @@ async fn resolve_bootstrap_prompt_config(
             return Ok(PromptConfig::default());
         };
 
-        if let Some(payload) = response.encrypted_payload.as_ref() {
+        if let Some(payload) = response.agent.encrypted_payload.as_ref() {
             return decrypt_prompt_config_payload(payload, state_dir, agent.id).await;
         }
 
-        return Ok(response.prompt_config.unwrap_or_default());
+        return Ok(response.agent.prompt_config.unwrap_or_default());
     };
 
     decrypt_prompt_config_payload(payload, state_dir, agent.id).await
@@ -1092,6 +1103,92 @@ async fn decrypt_prompt_config_payload(
         format!(
             "Failed to parse decrypted bootstrap prompt config JSON for agent {}",
             agent_id
+        )
+    })
+}
+
+async fn resolve_bootstrap_ability_prompt_config(
+    ability: &BootstrapAbilityManifest,
+    state_dir: &Path,
+) -> Result<nenjo::manifest::AbilityPromptConfig> {
+    let Some(payload) = ability.encrypted_payload.as_ref() else {
+        return Ok(ability.manifest.prompt_config.clone());
+    };
+
+    decrypt_ability_prompt_config_payload(payload, state_dir, ability.id).await
+}
+
+async fn decrypt_ability_prompt_config_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    ability_id: Uuid,
+) -> Result<nenjo::manifest::AbilityPromptConfig> {
+    if payload.object_type != SensitiveContentKind::AbilityPrompt.encrypted_object_type() {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for ability {}",
+            payload.object_type,
+            ability_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap ability prompt decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap ability prompt payload for ability {}",
+                ability_id
+            )
+        })?;
+
+    serde_json::from_str::<nenjo::manifest::AbilityPromptConfig>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap ability prompt config JSON for ability {}",
+            ability_id
+        )
+    })
+}
+
+async fn resolve_bootstrap_domain_prompt_config(
+    domain: &BootstrapDomainManifest,
+    state_dir: &Path,
+) -> Result<nenjo::manifest::DomainPromptConfig> {
+    let Some(payload) = domain.encrypted_payload.as_ref() else {
+        return Ok(domain.manifest.prompt_config.clone());
+    };
+
+    decrypt_domain_prompt_config_payload(payload, state_dir, domain.id).await
+}
+
+async fn decrypt_domain_prompt_config_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    domain_id: Uuid,
+) -> Result<nenjo::manifest::DomainPromptConfig> {
+    if payload.object_type != SensitiveContentKind::DomainPrompt.encrypted_object_type() {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for domain {}",
+            payload.object_type,
+            domain_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap domain prompt decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap domain prompt payload for domain {}",
+                domain_id
+            )
+        })?;
+
+    serde_json::from_str::<nenjo::manifest::DomainPromptConfig>(&plaintext).with_context(|| {
+        format!(
+            "Failed to parse decrypted bootstrap domain prompt config JSON for domain {}",
+            domain_id
         )
     })
 }

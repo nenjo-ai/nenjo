@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Slug;
 use crate::agents::AgentExecutionMode;
+use crate::agents::async_ops::{
+    AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpSignalDigest, StartAsyncOp,
+};
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
 use crate::input::TaskInput;
 use crate::manifest::{AgentManifest, ModelManifest, model_manifest_slug};
@@ -42,6 +45,13 @@ Acceptance criteria and output instructions:
 #[derive(Debug, Clone)]
 pub(crate) struct SubAgentLimits {
     pub(crate) max_depth: u32,
+}
+
+pub(crate) struct SubAgentRuntimeOptions {
+    pub(crate) limits: SubAgentLimits,
+    pub(crate) delegation_ctx: Option<DelegationContext>,
+    pub(crate) async_ops: AsyncOpManager,
+    pub(crate) events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +117,7 @@ pub(crate) struct WaitResult {
     pub(crate) elapsed_seconds: u64,
     pub(crate) woken_by: &'static str,
     pub(crate) updates: Vec<SignalDigest>,
+    pub(crate) operations: Vec<AsyncOpSignalDigest>,
 }
 
 pub(crate) struct SubAgentRuntime<P: ProviderRuntime> {
@@ -119,6 +130,7 @@ struct RuntimeInner<P: ProviderRuntime> {
     parent_model_manifest: ModelManifest,
     inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
+    async_ops: AsyncOpManager,
     runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
     notify: Notify,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -169,12 +181,11 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
         parent_agent_slug: Slug,
         parent_model_manifest: ModelManifest,
         inherited_host_tools: Vec<Arc<dyn Tool>>,
-        limits: SubAgentLimits,
-        delegation_ctx: Option<DelegationContext>,
-        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+        options: SubAgentRuntimeOptions,
     ) -> Self {
-        let delegation_ctx =
-            delegation_ctx.unwrap_or_else(|| DelegationContext::new(limits.max_depth));
+        let delegation_ctx = options
+            .delegation_ctx
+            .unwrap_or_else(|| DelegationContext::new(options.limits.max_depth));
         Self {
             inner: Arc::new(RuntimeInner {
                 provider,
@@ -182,9 +193,10 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
                 parent_model_manifest,
                 inherited_host_tools,
                 delegation_ctx,
+                async_ops: options.async_ops,
                 runs: Mutex::new(HashMap::new()),
                 notify: Notify::new(),
-                events_tx,
+                events_tx: options.events_tx,
             }),
         }
     }
@@ -272,6 +284,23 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             false,
         )
         .await;
+
+        let _ = self
+            .inner
+            .async_ops
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new(slug.to_string()),
+                    kind: AsyncOpKind::SubAgent,
+                    label: request.agent_name.clone(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("spawn_sub_agents".into()),
+                    started_summary: truncate(&request.task.description, 180),
+                    model_visible: false,
+                },
+                self.inner.events_tx.clone(),
+            )
+            .await;
 
         let inner = self.inner.clone();
         let child_handle = ChildRuntimeHandle {
@@ -501,13 +530,20 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
             _ = self.inner.notify.notified() => {}
+            _ = self.inner.async_ops.notified() => {}
         }
         let updates = self.drain_signals().await;
-        let woken_by = classify_wake(&updates);
+        let operations = self
+            .inner
+            .async_ops
+            .drain_signals(Some(AsyncOpKind::Ability))
+            .await;
+        let woken_by = classify_wake(&updates, &operations);
         WaitResult {
             elapsed_seconds: started.elapsed().as_secs(),
             woken_by,
             updates,
+            operations,
         }
     }
 
@@ -559,10 +595,50 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             model_visible: false,
         };
         let mut signals = run.signals.lock().await;
-        push_bounded(&mut signals, signal, SIGNAL_QUEUE_CAP);
+        push_bounded(&mut signals, signal.clone(), SIGNAL_QUEUE_CAP);
         drop(signals);
         if let Some(tx) = &self.inner.events_tx {
             let _ = tx.send(event);
+        }
+        let op_signal = match &signal {
+            SubAgentSignal::Started { task_summary } => AsyncOpSignal::Started {
+                summary: task_summary.clone(),
+            },
+            SubAgentSignal::Progress { summary, details } => AsyncOpSignal::Progress {
+                summary: summary.clone(),
+                details: details.clone(),
+            },
+            SubAgentSignal::NeedsInput { question, context } => AsyncOpSignal::NeedsInput {
+                question: question.clone(),
+                context: context.clone(),
+            },
+            SubAgentSignal::Completed {
+                summary,
+                structured_result,
+                result_format_valid,
+            } => AsyncOpSignal::Completed {
+                summary: summary.clone(),
+                output: Some(serde_json::json!({
+                    "structured_result": structured_result,
+                    "result_format_valid": result_format_valid,
+                })),
+            },
+            SubAgentSignal::Failed { error } => AsyncOpSignal::Failed {
+                error: error.clone(),
+            },
+            SubAgentSignal::Stopped { reason } => AsyncOpSignal::Stopped {
+                reason: reason.clone(),
+            },
+        };
+        if let Some(operation) = self
+            .inner
+            .async_ops
+            .handle(&AsyncOpId::new(run.slug.to_string()))
+            .await
+        {
+            operation
+                .complete(op_signal, self.inner.events_tx.clone())
+                .await;
         }
         if should_wake {
             self.inner.notify.notify_waiters();
@@ -770,11 +846,16 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::ModelRequestStarted { .. }
+        | TurnEvent::AssistantTextDelta { .. }
+        | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookActivated { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookCompleted { .. }
         | TurnEvent::SubAgentEvent { .. }
         | TurnEvent::SubAgentTranscript { .. }
+        | TurnEvent::AsyncOperationEvent { .. }
+        | TurnEvent::AsyncOperationTranscript { .. }
         | TurnEvent::MessageCompacted { .. }
         | TurnEvent::Paused
         | TurnEvent::Resumed
@@ -814,9 +895,15 @@ fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
     }
 }
 
-fn classify_wake(updates: &[SignalDigest]) -> &'static str {
+fn classify_wake(updates: &[SignalDigest], operations: &[AsyncOpSignalDigest]) -> &'static str {
     let has = |kind| {
         updates
+            .iter()
+            .flat_map(|digest| digest.events.iter())
+            .any(|signal| signal.kind() == kind)
+    };
+    let op_has = |kind| {
+        operations
             .iter()
             .flat_map(|digest| digest.events.iter())
             .any(|signal| signal.kind() == kind)
@@ -826,6 +913,12 @@ fn classify_wake(updates: &[SignalDigest]) -> &'static str {
     } else if has("completed") || has("failed") {
         "sub_agent_result"
     } else if has("stopped") {
+        "stopped"
+    } else if op_has("needs_input") {
+        "needs_input"
+    } else if op_has("completed") || op_has("failed") {
+        "operation_result"
+    } else if op_has("stopped") {
         "stopped"
     } else {
         "timeout"

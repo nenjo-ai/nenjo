@@ -59,14 +59,9 @@ mod tests {
         let names: HashSet<_> = all_tools().into_iter().map(|tool| tool.name).collect();
 
         for expected in [
-            "get_agent_prompt",
-            "update_agent_prompt",
-            "get_ability_prompt",
-            "update_ability_prompt",
-            "get_domain_prompt",
-            "update_domain_prompt",
-            "get_context_block_content",
-            "update_context_block_content",
+            "configure_ability",
+            "configure_domain",
+            "configure_context_block",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
@@ -130,12 +125,10 @@ mod tests {
         let tools = all_tools();
 
         for tool_name in [
-            "create_agent",
-            "update_agent",
-            "create_ability",
-            "update_ability",
-            "create_domain",
-            "update_domain",
+            "configure_agent",
+            "configure_ability",
+            "configure_domain",
+            "configure_context_block",
             "create_knowledge_pack",
             "update_knowledge_pack",
         ] {
@@ -237,25 +230,13 @@ mod tests {
             vec![
                 ("list_agents".into(), ToolCategory::Read),
                 ("get_agent".into(), ToolCategory::Read),
-                ("get_agent_prompt".into(), ToolCategory::Read),
-                ("create_agent".into(), ToolCategory::Write),
-                ("update_agent".into(), ToolCategory::Write),
-                ("update_agent_prompt".into(), ToolCategory::Write),
-                ("delete_agent".into(), ToolCategory::Write),
+                ("configure_agent".into(), ToolCategory::Write),
                 ("list_abilities".into(), ToolCategory::Read),
                 ("get_ability".into(), ToolCategory::Read),
-                ("get_ability_prompt".into(), ToolCategory::Read),
-                ("create_ability".into(), ToolCategory::Write),
-                ("update_ability".into(), ToolCategory::Write),
-                ("update_ability_prompt".into(), ToolCategory::Write),
-                ("delete_ability".into(), ToolCategory::Write),
+                ("configure_ability".into(), ToolCategory::Write),
                 ("list_domains".into(), ToolCategory::Read),
                 ("get_domain".into(), ToolCategory::Read),
-                ("get_domain_prompt".into(), ToolCategory::Read),
-                ("create_domain".into(), ToolCategory::Write),
-                ("update_domain".into(), ToolCategory::Write),
-                ("update_domain_prompt".into(), ToolCategory::Write),
-                ("delete_domain".into(), ToolCategory::Write),
+                ("configure_domain".into(), ToolCategory::Write),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),
@@ -268,9 +249,7 @@ mod tests {
                 ("update_knowledge_doc".into(), ToolCategory::Write),
                 ("list_routines".into(), ToolCategory::Read),
                 ("get_routine".into(), ToolCategory::Read),
-                ("create_routine".into(), ToolCategory::Write),
-                ("update_routine".into(), ToolCategory::Write),
-                ("delete_routine".into(), ToolCategory::Write),
+                ("configure_routine".into(), ToolCategory::Write),
                 ("list_models".into(), ToolCategory::Read),
                 ("get_model".into(), ToolCategory::Read),
                 ("create_model".into(), ToolCategory::Write),
@@ -286,11 +265,7 @@ mod tests {
                 ("delete_council".into(), ToolCategory::Write),
                 ("list_context_blocks".into(), ToolCategory::Read),
                 ("get_context_block".into(), ToolCategory::Read),
-                ("get_context_block_content".into(), ToolCategory::Read),
-                ("create_context_block".into(), ToolCategory::Write),
-                ("update_context_block".into(), ToolCategory::Write),
-                ("update_context_block_content".into(), ToolCategory::Write),
-                ("delete_context_block".into(), ToolCategory::Write),
+                ("configure_context_block".into(), ToolCategory::Write),
             ]
         );
     }

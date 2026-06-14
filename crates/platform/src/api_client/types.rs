@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 pub use crate::manifest_contract::{
-    AgentPromptRecord, AgentRecord, ContextBlockContentRecord, ContextBlockRecord, CouncilRecord,
-    DomainPromptRecord, DomainRecord, KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord,
-    KnowledgePackRecord, ParsedKnowledgeDocument, RoutineRecord,
+    AbilityPromptRecord, AgentPromptRecord, AgentRecord, ContextBlockContentRecord,
+    ContextBlockRecord, CouncilRecord, DomainPromptRecord, DomainRecord,
+    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, KnowledgePackRecord,
+    ParsedKnowledgeDocument, RoutineRecord,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

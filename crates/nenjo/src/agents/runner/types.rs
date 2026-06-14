@@ -20,7 +20,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SubAgentTranscriptEvent {
+pub enum AsyncOperationTranscriptEvent {
     Input {
         summary: String,
     },
@@ -39,9 +39,12 @@ pub enum SubAgentTranscriptEvent {
     Error {
         summary: String,
     },
+    OutputChunk {
+        summary: String,
+    },
 }
 
-impl SubAgentTranscriptEvent {
+impl AsyncOperationTranscriptEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Input { .. } => "input",
@@ -49,6 +52,7 @@ impl SubAgentTranscriptEvent {
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::Error { .. } => "error",
+            Self::OutputChunk { .. } => "output_chunk",
         }
     }
 
@@ -58,14 +62,18 @@ impl SubAgentTranscriptEvent {
             | Self::AssistantMessage { summary }
             | Self::ToolCall { summary, .. }
             | Self::ToolResult { summary, .. }
-            | Self::Error { summary } => summary,
+            | Self::Error { summary }
+            | Self::OutputChunk { summary } => summary,
         }
     }
 
     pub fn tool_name(&self) -> Option<&str> {
         match self {
             Self::ToolCall { tool, .. } | Self::ToolResult { tool, .. } => Some(tool),
-            Self::Input { .. } | Self::AssistantMessage { .. } | Self::Error { .. } => None,
+            Self::Input { .. }
+            | Self::AssistantMessage { .. }
+            | Self::Error { .. }
+            | Self::OutputChunk { .. } => None,
         }
     }
 
@@ -75,16 +83,34 @@ impl SubAgentTranscriptEvent {
             Self::Input { .. }
             | Self::AssistantMessage { .. }
             | Self::ToolCall { .. }
-            | Self::Error { .. } => None,
+            | Self::Error { .. }
+            | Self::OutputChunk { .. } => None,
         }
     }
 }
 
+pub type SubAgentTranscriptEvent = AsyncOperationTranscriptEvent;
+
 /// Events yielded by the turn loop during execution.
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
+    /// A model provider request started.
+    ModelRequestStarted {
+        request_id: String,
+        parent_call_id: Option<String>,
+        provider: Option<String>,
+        model: String,
+    },
+    /// Assistant prose was produced by a model request.
+    AssistantTextDelta { request_id: String, delta: String },
+    /// A model provider request completed.
+    ModelRequestCompleted {
+        request_id: String,
+        parent_call_id: Option<String>,
+    },
     /// An ability sub-execution started.
     AbilityStarted {
+        call_id: String,
         ability_tool_name: String,
         ability_name: String,
         task_input: String,
@@ -92,11 +118,13 @@ pub enum TurnEvent {
     },
     /// One or more tool calls are starting.
     ToolCallStart {
+        batch_id: String,
         parent_tool_name: Option<String>,
         calls: Vec<ToolCall>,
     },
     /// A tool call completed with a result.
     ToolCallEnd {
+        batch_id: String,
         parent_tool_name: Option<String>,
         tool_call_id: Option<String>,
         tool_name: String,
@@ -132,6 +160,7 @@ pub enum TurnEvent {
     },
     /// An ability sub-execution finished.
     AbilityCompleted {
+        call_id: String,
         ability_tool_name: String,
         ability_name: String,
         success: bool,
@@ -150,6 +179,26 @@ pub enum TurnEvent {
         slug: String,
         agent_name: String,
         event: SubAgentTranscriptEvent,
+    },
+    /// A canonical async operation lifecycle or signal event.
+    AsyncOperationEvent {
+        operation_id: String,
+        kind: String,
+        label: String,
+        parent_operation_id: Option<String>,
+        parent_tool_name: Option<String>,
+        status: String,
+        signal: String,
+        summary: Option<String>,
+        payload: Option<serde_json::Value>,
+        model_visible: bool,
+    },
+    /// A bounded async operation transcript event.
+    AsyncOperationTranscript {
+        operation_id: String,
+        kind: String,
+        label: String,
+        event: AsyncOperationTranscriptEvent,
     },
     /// Older history was compacted into a summary.
     MessageCompacted {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::async_ops::AsyncOpManager;
 use super::instance::{
     AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
 };
@@ -372,6 +373,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 config: self.agent_config,
                 provider_runtime,
                 sub_agent_ctx: self.child_delegation_ctx,
+                async_ops: AsyncOpManager::new(),
                 execution_mode: self.execution_mode,
                 hook_runtime: self.hook_runtime,
             },
