@@ -3,6 +3,7 @@ mod apply;
 mod delete;
 mod fetch;
 mod inline;
+pub mod knowledge;
 mod payload;
 mod services;
 
@@ -14,6 +15,7 @@ use nenjo_harness::{Harness, HarnessError, ProviderRuntime, Result};
 use uuid::Uuid;
 
 use apply::{ManifestChange, apply_manifest_change};
+pub use knowledge::DocumentEdgesSource;
 pub use services::{ManifestStore, McpRuntime, NoopManifestStore, NoopMcpRuntime};
 
 use crate::api_client::ApiClient;

@@ -900,12 +900,14 @@ impl ManifestStore for WorkerManifestCache {
         client: &ApiClient,
         doc: &nenjo::Slug,
         metadata: Option<&DocumentSyncMeta>,
+        edges: Option<crate::handlers::manifest::DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         let Some(meta) = metadata else {
             return Ok(());
         };
         let pack_dir = self.knowledge_pack_dir(meta);
-        crate::local_documents::sync_document_metadata(client, &pack_dir, doc, metadata).await
+        crate::local_documents::sync_document_metadata(client, &pack_dir, doc, metadata, edges)
+            .await
     }
 
     async fn sync_document(

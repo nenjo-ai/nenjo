@@ -22,28 +22,6 @@ pub(super) fn canonical_resource_payload_data(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct InlineDocumentMeta {
-    pub id: Uuid,
-    #[serde(default)]
-    pub pack_id: Option<Uuid>,
-    #[serde(default)]
-    pub pack_slug: Option<String>,
-    #[serde(default)]
-    pub slug: Option<String>,
-    pub filename: String,
-    pub path: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
 pub(super) struct DecryptedManifestPayload<'a> {
     pub object_type: &'a str,
     pub object_id: Uuid,
