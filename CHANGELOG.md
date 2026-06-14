@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/nenjo-ai/nenjo/compare/v0.14.0...v0.15.0) - 2026-06-14
+
 ### Added
 
 - KnowledgePackLoader for dynamic pack discovery and always-on `list_knowledge_packs` tool
