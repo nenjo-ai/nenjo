@@ -12,14 +12,14 @@ use crate::input::{RoutineRun, RoutineRunKind, TaskInput};
 use crate::manifest::ProjectManifest;
 
 /// Outcome of a routine step execution.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<Uuid>,
     pub passed: bool,
     pub output: String,
     pub data: serde_json::Value,
-    pub step_id: Uuid,
+    pub step_slug: Slug,
     pub step_name: String,
     /// Total input tokens consumed across all LLM calls in this step.
     pub input_tokens: u64,
@@ -30,6 +30,23 @@ pub struct StepResult {
     /// Full conversation messages (excluding system/developer) for chat history
     /// persistence. Only populated for chat tasks.
     pub messages: Vec<nenjo_models::ChatMessage>,
+}
+
+impl Default for StepResult {
+    fn default() -> Self {
+        Self {
+            task_id: None,
+            passed: false,
+            output: String::new(),
+            data: serde_json::Value::Null,
+            step_slug: Slug::derive("unknown_step"),
+            step_name: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_calls: 0,
+            messages: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,13 +263,12 @@ impl RoutineInput {
 
 /// Internal execution state, accumulated as steps run.
 pub(crate) struct RoutineState {
-    pub step_results: HashMap<Uuid, StepResult>,
+    pub step_results: HashMap<Slug, StepResult>,
     pub initial_input: String,
     pub input: RoutineInput,
     pub routine_name: Option<String>,
     pub current_step_name: Option<String>,
     pub current_step_type: Option<String>,
-    pub current_agent_id: Option<Uuid>,
     pub gate_feedback: Option<String>,
     pub step_instructions: Option<String>,
     pub step_metadata: Option<String>,
@@ -269,7 +285,6 @@ impl RoutineState {
             routine_name: None,
             current_step_name: None,
             current_step_type: None,
-            current_agent_id: None,
             gate_feedback: None,
             step_instructions: None,
             step_metadata: None,
@@ -479,7 +494,7 @@ impl StepMetrics {
 /// Accumulator for all step metrics within a routine execution.
 #[derive(Debug, Default)]
 pub struct RoutineMetrics {
-    steps: HashMap<Uuid, StepMetrics>,
+    steps: HashMap<Slug, StepMetrics>,
 }
 
 impl RoutineMetrics {
@@ -487,15 +502,15 @@ impl RoutineMetrics {
         Self::default()
     }
 
-    pub fn record_step(&mut self, step_id: Uuid, input_tokens: u64, output_tokens: u64) {
-        let entry = self.steps.entry(step_id).or_default();
+    pub fn record_step(&mut self, step_slug: &Slug, input_tokens: u64, output_tokens: u64) {
+        let entry = self.steps.entry(step_slug.clone()).or_default();
         entry.execution_count += 1;
         entry.input_tokens += input_tokens;
         entry.output_tokens += output_tokens;
     }
 
-    pub fn get(&self, step_id: &Uuid) -> Option<&StepMetrics> {
-        self.steps.get(step_id)
+    pub fn get(&self, step_slug: &Slug) -> Option<&StepMetrics> {
+        self.steps.get(step_slug)
     }
 
     /// Total input tokens across all steps.
@@ -616,7 +631,6 @@ mod tests {
     #[test]
     fn routine_input_builder() {
         let project = ProjectManifest {
-            id: Uuid::new_v4(),
             name: "Demo Project".to_string(),
             slug: Slug::derive("demo_project"),
             description: Some("Project description".to_string()),
@@ -638,7 +652,6 @@ mod tests {
     #[test]
     fn routine_input_builder_uses_project_context_for_project_data() {
         let project = ProjectManifest {
-            id: Uuid::new_v4(),
             name: "Demo Project".to_string(),
             slug: Slug::derive("demo_project"),
             description: Some("Project description".to_string()),
@@ -672,10 +685,10 @@ mod tests {
     #[test]
     fn metrics_accumulate() {
         let mut metrics = RoutineMetrics::new();
-        let id = Uuid::new_v4();
-        metrics.record_step(id, 100, 50);
-        metrics.record_step(id, 200, 75);
-        let step = metrics.get(&id).unwrap();
+        let slug = Slug::derive("step");
+        metrics.record_step(&slug, 100, 50);
+        metrics.record_step(&slug, 200, 75);
+        let step = metrics.get(&slug).unwrap();
         assert_eq!(step.execution_count, 2);
         assert_eq!(step.total_tokens(), 425);
     }

@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::Slug;
-use crate::manifest::{CommandManifest, HookManifest, SkillManifest};
+use crate::manifest::{CommandManifest, HasManifestSlug, HookManifest, SkillManifest};
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
 const MAX_HOOK_OUTPUT_BYTES: usize = 128 * 1024;
@@ -126,7 +126,7 @@ pub struct ResolvedHookCommand {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedHook {
-    pub id: Uuid,
+    pub slug: Slug,
     pub name: String,
     pub display_name: Option<String>,
     pub event: HookEvent,
@@ -141,7 +141,7 @@ pub struct ResolvedHook {
 impl ResolvedHook {
     pub fn from_manifest(hook: &HookManifest) -> Self {
         Self {
-            id: hook.id,
+            slug: hook.manifest_slug(),
             name: hook.name.clone(),
             display_name: hook.display_name.clone(),
             event: HookEvent::from_name(hook.event.clone()),
@@ -555,7 +555,7 @@ fn active_hooks_from_scopes(scopes: Vec<ActiveHookScope>) -> Vec<ActiveHook> {
 }
 
 fn same_active_hook(left: &ActiveHook, right: &ActiveHook) -> bool {
-    left.hook.id == right.hook.id
+    left.hook.slug == right.hook.slug
         && left.source.kind() == right.source.kind()
         && left.source.name() == right.source.name()
 }
@@ -857,7 +857,6 @@ printf '{"decision":"block","reason":"continue please","systemMessage":"again"}'
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
-            id: Uuid::new_v4(),
             name: "stop-hook".to_string(),
             display_name: None,
             description: None,
@@ -931,7 +930,6 @@ printf '{"decision":"request_next_turn","prompt":"revise before stopping","syste
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
-            id: Uuid::new_v4(),
             name: "stop-hook".to_string(),
             display_name: None,
             description: None,
@@ -1008,7 +1006,6 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
-            id: Uuid::new_v4(),
             name: "prompt-hook".to_string(),
             display_name: None,
             description: None,
@@ -1065,9 +1062,7 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
 
     #[test]
     fn resolves_and_activates_skill_hooks_once() {
-        let hook_id = Uuid::new_v4();
         let hook_manifest = HookManifest {
-            id: hook_id,
             name: "acme__stop_review".to_string(),
             display_name: None,
             description: None,
@@ -1107,8 +1102,8 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
 
         assert_eq!(runtime.matching_hooks(&HookEvent::Stop, None).len(), 1);
         assert_eq!(
-            runtime.matching_hooks(&HookEvent::Stop, None)[0].hook.id,
-            hook_id
+            runtime.matching_hooks(&HookEvent::Stop, None)[0].hook.slug,
+            Slug::derive("acme__stop_review")
         );
     }
 }

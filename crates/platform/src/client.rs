@@ -13,13 +13,13 @@ use crate::manifest_mcp::{
     KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
     KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
     ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
-    ResourceRef, RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
+    RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
 };
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
 use nenjo::manifest::{
-    CouncilDelegationStrategy, RoutineEdgeCondition, RoutineEdgeManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata, RoutineStepType,
+    RoutineTrigger,
 };
 
 /// Thin HTTP client for Nenjo platform manifest endpoints.
@@ -32,8 +32,9 @@ pub struct PlatformManifestClient {
 
 #[derive(Debug, serde::Deserialize)]
 struct RoutineResponseRow {
-    id: Uuid,
     name: String,
+    #[serde(default)]
+    slug: Option<Slug>,
     description: Option<String>,
     trigger: RoutineTrigger,
     #[serde(default)]
@@ -52,7 +53,6 @@ struct RoutineResponseDetail {
 
 #[derive(Debug, serde::Deserialize)]
 struct RoutineResponseStep {
-    id: Uuid,
     slug: Slug,
     name: String,
     step_type: String,
@@ -67,7 +67,6 @@ struct RoutineResponseStep {
 
 #[derive(Debug, serde::Deserialize)]
 struct RoutineResponseEdge {
-    id: Uuid,
     source_step: Slug,
     target_step: Slug,
     condition: String,
@@ -77,6 +76,8 @@ struct RoutineResponseEdge {
 
 #[derive(Debug, serde::Serialize)]
 struct RoutineCreateApiBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Uuid>,
     name: &'a str,
     description: Option<&'a str>,
     trigger: Option<RoutineTrigger>,
@@ -177,10 +178,14 @@ fn default_knowledge_pack_source_type() -> String {
 }
 
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
-    let routine = Slug::derive(&detail.routine.name);
+    let routine = detail
+        .routine
+        .slug
+        .clone()
+        .unwrap_or_else(|| Slug::derive(&detail.routine.name));
     RoutineDocument {
         summary: crate::manifest_mcp::RoutineSummary {
-            id: detail.routine.id,
+            slug: routine.clone(),
             name: detail.routine.name,
             description: detail.routine.description,
             trigger: detail.routine.trigger,
@@ -189,8 +194,7 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
         steps: detail
             .steps
             .into_iter()
-            .map(|step| RoutineStepManifest {
-                id: step.id,
+            .map(|step| crate::manifest_mcp::RoutineStepDocument {
                 slug: step.slug,
                 routine: routine.clone(),
                 name: step.name,
@@ -210,8 +214,7 @@ fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocumen
         edges: detail
             .edges
             .into_iter()
-            .map(|edge| RoutineEdgeManifest {
-                id: edge.id,
+            .map(|edge| crate::manifest_mcp::RoutineEdgeDocument {
                 routine: routine.clone(),
                 source_step: edge.source_step,
                 target_step: edge.target_step,
@@ -292,7 +295,6 @@ fn response_error_preview(body: &str) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct CouncilResponseRow {
-    id: Uuid,
     name: String,
     leader_agent: Slug,
     delegation_strategy: CouncilDelegationStrategy,
@@ -322,7 +324,6 @@ struct CouncilResponseDetail {
 fn council_document_from_detail(detail: CouncilResponseDetail) -> CouncilDocument {
     CouncilDocument {
         summary: crate::manifest_mcp::CouncilSummary {
-            id: detail.council.id,
             name: detail.council.name,
             delegation_strategy: detail.council.delegation_strategy,
             leader_agent: detail.council.leader_agent,
@@ -653,8 +654,13 @@ impl PlatformManifestClient {
     pub async fn create_agent_document(
         &self,
         agent: &AgentCreateDocument,
+        id: Option<Uuid>,
     ) -> Result<AgentDocument> {
-        let body = serde_json::to_value(agent).context("failed to encode agent create payload")?;
+        let mut body =
+            serde_json::to_value(agent).context("failed to encode agent create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         let response = self
             .http
             .post(format!("{}/api/v1/agents", self.base_url))
@@ -753,10 +759,14 @@ impl PlatformManifestClient {
     pub async fn create_ability_document(
         &self,
         ability: &AbilityCreateDocument,
+        id: Option<Uuid>,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<AbilityDocument> {
         let mut body =
             serde_json::to_value(ability).context("failed to encode ability create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         if let Some(encrypted_payload) = encrypted_payload {
             body["encrypted_payload"] = encrypted_payload;
         }
@@ -778,12 +788,9 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Fetch one ability document by ID.
-    pub async fn fetch_ability_document(
-        &self,
-        ability: &ResourceRef,
-    ) -> Result<Option<AbilityDocument>> {
-        let selector = ability.as_path_segment();
+    /// Fetch one ability document by slug.
+    pub async fn fetch_ability_document(&self, ability: &Slug) -> Result<Option<AbilityDocument>> {
+        let selector = ability.as_str();
         let response = self
             .http
             .get(format!("{}/api/v1/abilities/{selector}", self.base_url))
@@ -806,10 +813,10 @@ impl PlatformManifestClient {
     /// Apply a partial metadata update to an ability document.
     pub async fn update_ability_document(
         &self,
-        ability_ref: &ResourceRef,
+        ability_ref: &Slug,
         ability: &AbilityUpdateDocument,
     ) -> Result<AbilityDocument> {
-        let selector = ability_ref.as_path_segment();
+        let selector = ability_ref.as_str();
         let body =
             serde_json::to_value(ability).context("failed to encode ability update patch")?;
         let response = self
@@ -833,11 +840,11 @@ impl PlatformManifestClient {
     /// Update an ability prompt document and return the canonical prompt config when provided.
     pub async fn update_ability_prompt_document(
         &self,
-        ability: &ResourceRef,
+        ability: &Slug,
         prompt_config: &nenjo::manifest::AbilityPromptConfig,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<AbilityPromptMutationResult> {
-        let selector = ability.as_path_segment();
+        let selector = ability.as_str();
         let mut body = serde_json::json!({ "prompt_config": prompt_config });
         if let Some(encrypted_payload) = encrypted_payload {
             body["encrypted_payload"] = encrypted_payload;
@@ -868,9 +875,9 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Delete an ability document by ID.
-    pub async fn delete_ability_document(&self, ability: &ResourceRef) -> Result<()> {
-        let selector = ability.as_path_segment();
+    /// Delete an ability document by slug.
+    pub async fn delete_ability_document(&self, ability: &Slug) -> Result<()> {
+        let selector = ability.as_str();
         let response = self
             .http
             .delete(format!("{}/api/v1/abilities/{selector}", self.base_url))
@@ -889,10 +896,14 @@ impl PlatformManifestClient {
     pub async fn create_domain_document(
         &self,
         domain: &DomainCreateDocument,
+        id: Option<Uuid>,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<DomainDocument> {
         let mut body =
             serde_json::to_value(domain).context("failed to encode domain create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         if let Some(encrypted_payload) = encrypted_payload {
             body["encrypted_payload"] = encrypted_payload;
         }
@@ -1017,9 +1028,13 @@ impl PlatformManifestClient {
     pub async fn create_project_document(
         &self,
         project: &ProjectCreateDocument,
+        id: Option<Uuid>,
     ) -> Result<ProjectDocument> {
-        let body =
+        let mut body =
             serde_json::to_value(project).context("failed to encode project create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         let response = self
             .http
             .post(format!("{}/api/v1/projects", self.base_url))
@@ -1830,8 +1845,10 @@ impl PlatformManifestClient {
     pub(crate) async fn create_routine_document(
         &self,
         routine: &RoutineCreateDocument,
+        id: Option<Uuid>,
     ) -> Result<RoutineDocument> {
         let body = RoutineCreateApiBody {
+            id,
             name: &routine.name,
             description: routine.description.as_deref(),
             trigger: routine.trigger,
@@ -1854,7 +1871,7 @@ impl PlatformManifestClient {
                     .context("failed to decode created routine")?;
                 let created = routine_document_from_detail(detail);
                 if let Some(graph) = routine.graph.as_ref() {
-                    let routine_ref = Slug::derive(&created.summary.name);
+                    let routine_ref = created.summary.slug.clone();
                     self.save_routine_graph_document(
                         &routine_ref,
                         &routine_graph_body(
@@ -1941,10 +1958,17 @@ impl PlatformManifestClient {
 
         match response.status() {
             StatusCode::OK => {
-                let detail: RoutineResponseDetail = response
-                    .json()
+                let response_body = response
+                    .text()
                     .await
-                    .context("failed to decode updated routine graph")?;
+                    .context("failed to read updated routine graph response")?;
+                let detail: RoutineResponseDetail = serde_json::from_str(&response_body)
+                    .with_context(|| {
+                        format!(
+                            "failed to decode updated routine graph: {}",
+                            response_error_preview(&response_body)
+                        )
+                    })?;
                 Ok(routine_document_from_detail(detail))
             }
             status => {
@@ -2234,10 +2258,14 @@ impl PlatformManifestClient {
     pub async fn create_context_block_document(
         &self,
         context_block: &ContextBlockCreateDocument,
+        id: Option<Uuid>,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<ContextBlockDocument> {
         let mut body = serde_json::to_value(context_block)
             .context("failed to encode context block create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         if let Some(encrypted_payload) = encrypted_payload {
             body["encrypted_payload"] = encrypted_payload;
         }
@@ -2525,7 +2553,6 @@ fn knowledge_doc_summary(
 
 fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePackDocument {
     KnowledgePackDocument {
-        id: pack.id,
         slug: pack.slug,
         name: pack.name,
         description: pack.description,

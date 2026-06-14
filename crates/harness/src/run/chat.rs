@@ -80,7 +80,7 @@ struct PreparedChatExecution {
     session_id: Uuid,
     turn_id: Uuid,
     agent: nenjo::Slug,
-    agent_id: Uuid,
+    agent_id: Option<Uuid>,
     agent_name: String,
     project: Option<nenjo::Slug>,
     project_slug: String,
@@ -133,7 +133,7 @@ where
     let agent_manifest = provider
         .find_agent_manifest(&agent)
         .ok_or_else(|| anyhow!("agent not found: {}", agent))?;
-    let agent_id = agent_manifest.id;
+    let agent_id = None;
     let aname = agent_manifest.name.clone();
     let slug = project_slug(project.as_ref());
     let worker_id = "harness".to_string();
@@ -322,7 +322,7 @@ struct PreparedChatInput {
     session_id: Uuid,
     turn_id: Uuid,
     agent: nenjo::Slug,
-    agent_id: Uuid,
+    agent_id: Option<Uuid>,
     agent_name: String,
     project: Option<nenjo::Slug>,
     project_slug: String,
@@ -586,7 +586,7 @@ where
                             let session_event_context = TurnEventContext {
                                 session_id,
                                 turn_id: Some(turn_id),
-                                agent_id: Some(agent_id),
+                                agent_id,
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };

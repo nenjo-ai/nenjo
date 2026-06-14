@@ -434,10 +434,7 @@ fn chat_agent_label(manifest: &Manifest, requested: Option<&str>) -> String {
     manifest
         .agents
         .iter()
-        .find(|agent| {
-            agent.slug.as_ref() == Some(&requested_slug)
-                || Slug::derive(&agent.name) == requested_slug
-        })
+        .find(|agent| agent.slug == requested_slug || Slug::derive(&agent.name) == requested_slug)
         .map(|agent| agent.name.clone())
         .unwrap_or_else(|| requested.to_string())
 }
@@ -927,7 +924,6 @@ mod tests {
         .unwrap();
 
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -947,7 +943,6 @@ mod tests {
             metadata: Value::Null,
         };
         let hook = HookManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop-stop".to_string(),
             display_name: Some("Ralph Loop Stop".to_string()),
             description: None,
@@ -1155,7 +1150,6 @@ mod tests {
         .unwrap();
 
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -1707,7 +1701,6 @@ mod tests {
 
         let mcp_server = skill_mcp_server_manifest(&plugin_dir);
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "mcp-skill".to_string(),
             display_name: Some("mcp-skill".to_string()),
             aliases: Vec::new(),
@@ -2223,7 +2216,7 @@ mod tests {
         script_name: &str,
     ) -> Manifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: model_manifest_slug("test", "mock"),
             name: "test-model".to_string(),
             description: None,
             model: "mock".to_string(),
@@ -2235,9 +2228,8 @@ mod tests {
         Manifest {
             models: vec![model],
             agents: vec![AgentManifest {
-                id: Uuid::new_v4(),
                 name: "Coder".to_string(),
-                slug: Some(Slug::derive("coder")),
+                slug: Slug::derive("coder"),
                 description: None,
                 prompt_config: PromptConfig::default(),
                 color: None,
@@ -2251,14 +2243,12 @@ mod tests {
                 heartbeat: None,
             }],
             projects: vec![ProjectManifest {
-                id: Uuid::new_v4(),
                 name: "Demo Project".to_string(),
                 slug: Slug::derive("demo-project"),
                 description: None,
                 settings: Value::Null,
             }],
             commands: vec![CommandManifest {
-                id: Uuid::new_v4(),
                 name: "ralph-loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("Ralph Loop".to_string()),
@@ -2274,7 +2264,6 @@ mod tests {
                 metadata: Value::Null,
             }],
             hooks: vec![HookManifest {
-                id: Uuid::new_v4(),
                 name: "ralph-loop-stop".to_string(),
                 display_name: Some("Ralph Loop Stop".to_string()),
                 description: None,
@@ -2302,7 +2291,7 @@ mod tests {
 
     fn skill_test_manifest_with_hooks(skill: SkillManifest, hooks: Vec<HookManifest>) -> Manifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: model_manifest_slug("test", "mock"),
             name: "test-model".to_string(),
             description: None,
             model: "mock".to_string(),
@@ -2314,9 +2303,8 @@ mod tests {
         Manifest {
             models: vec![model],
             agents: vec![AgentManifest {
-                id: Uuid::new_v4(),
                 name: "Coder".to_string(),
-                slug: Some(Slug::derive("coder")),
+                slug: Slug::derive("coder"),
                 description: None,
                 prompt_config: PromptConfig::default(),
                 color: None,
@@ -2330,7 +2318,6 @@ mod tests {
                 heartbeat: None,
             }],
             projects: vec![ProjectManifest {
-                id: Uuid::new_v4(),
                 name: "Demo Project".to_string(),
                 slug: Slug::derive("demo-project"),
                 description: None,
@@ -2348,7 +2335,6 @@ mod tests {
         hook_names: Vec<&str>,
     ) -> SkillManifest {
         SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -2391,7 +2377,6 @@ mod tests {
         matcher: &str,
     ) -> HookManifest {
         HookManifest {
-            id: Uuid::new_v4(),
             name: name.to_string(),
             display_name: Some("Ralph Loop Stop".to_string()),
             description: None,
@@ -2413,7 +2398,6 @@ mod tests {
 
     fn skill_mcp_server_manifest(plugin_dir: &Path) -> McpServerManifest {
         McpServerManifest {
-            id: Uuid::new_v4(),
             name: "mcp_skill__review_server".to_string(),
             display_name: "mcp-skill:review-server".to_string(),
             description: Some("Review MCP server".to_string()),

@@ -201,10 +201,7 @@ where
                     client: client.clone(),
                     payload_encoder: payload_encoder.clone(),
                     cached_org_id: self.platform.cached_org_id,
-                    agent: agent
-                        .slug
-                        .clone()
-                        .unwrap_or_else(|| nenjo::Slug::derive(&agent.name)),
+                    agent: agent.slug.clone(),
                     notification_sink,
                 },
             );

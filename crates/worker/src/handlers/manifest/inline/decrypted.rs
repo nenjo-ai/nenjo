@@ -1,4 +1,7 @@
+use std::borrow::Cow;
+
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::manifest::HasManifestSlug;
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, warn};
@@ -6,17 +9,28 @@ use uuid::Uuid;
 
 use crate::handlers::manifest::payload::{
     AbilityDocument, AgentDocument, ContextBlockDocument, DecryptedManifestPayload, DomainDocument,
-    InlineDocumentMeta,
+    InlineDocumentMeta, ManifestResourcePayload, canonical_resource_payload_data,
 };
 use crate::handlers::manifest::services::ManifestStore;
 use nenjo_platform::SensitiveContentKind;
 
-use super::plain::apply_inline_upsert;
+use super::plain::{
+    ability_from_document, agent_from_document, apply_inline_upsert, upsert_by_slug,
+};
 
 fn decrypted_string_payload(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(value) => Some(value.clone()),
         _ => None,
+    }
+}
+
+fn canonical_inline_payload_data(value: &serde_json::Value) -> (Cow<'_, serde_json::Value>, bool) {
+    match serde_json::from_value::<ManifestResourcePayload>(value.clone()) {
+        Ok(envelope) if envelope.schema == "manifest.resource.v1" => {
+            (Cow::Owned(envelope.data), true)
+        }
+        _ => (Cow::Borrowed(value), false),
     }
 }
 
@@ -66,20 +80,23 @@ where
             };
 
             let next_agent = if let Some(agent_payload) = decrypted.inline_payload {
+                let (agent_payload, canonical) = canonical_inline_payload_data(agent_payload);
                 match serde_json::from_value::<nenjo::manifest::AgentManifest>(
-                    agent_payload.clone(),
+                    agent_payload.as_ref().clone(),
                 ) {
                     Ok(mut agent) => {
                         agent.prompt_config = prompt_config;
                         agent
                     }
+                    Err(error) if canonical => {
+                        warn!(%rt, %id, error = %error, "Failed to deserialize canonical inline agent payload for prompt merge");
+                        return false;
+                    }
                     Err(_) => {
-                        match serde_json::from_value::<AgentDocument>(agent_payload.clone()) {
-                            Ok(agent) => {
-                                let mut agent: nenjo::manifest::AgentManifest = agent.into();
-                                agent.prompt_config = prompt_config;
-                                agent
-                            }
+                        match serde_json::from_value::<AgentDocument>(
+                            agent_payload.as_ref().clone(),
+                        ) {
+                            Ok(agent) => agent_from_document(agent, prompt_config),
                             Err(error) => {
                                 warn!(%rt, %id, error = %error, "Failed to deserialize inline agent payload for prompt merge");
                                 return false;
@@ -87,20 +104,12 @@ where
                         }
                     }
                 }
-            } else if let Some(existing) = manifest.agents.iter().find(|agent| agent.id == id) {
-                let mut agent = existing.clone();
-                agent.prompt_config = prompt_config;
-                agent
             } else {
                 warn!(%rt, %id, "Encrypted prompt payload received without inline or cached agent state");
                 return false;
             };
 
-            if let Some(pos) = manifest.agents.iter().position(|agent| agent.id == id) {
-                manifest.agents[pos] = next_agent;
-            } else {
-                manifest.agents.push(next_agent);
-            }
+            upsert_by_slug(&mut manifest.agents, next_agent);
 
             true
         }
@@ -116,37 +125,34 @@ where
             };
 
             let next_ability = if let Some(ability_payload) = decrypted.inline_payload {
-                match serde_json::from_value::<AbilityDocument>(ability_payload.clone()) {
-                    Ok(ability) => {
-                        let mut ability: nenjo::manifest::AbilityManifest = ability.into();
+                let (ability_payload, canonical) = canonical_inline_payload_data(ability_payload);
+                match serde_json::from_value::<nenjo::manifest::AbilityManifest>(
+                    ability_payload.as_ref().clone(),
+                ) {
+                    Ok(mut ability) => {
                         ability.prompt_config = prompt_config.clone();
                         ability
                     }
-                    Err(error) => {
-                        warn!(%rt, %id, error = %error, "Failed to deserialize inline ability payload for prompt merge");
+                    Err(error) if canonical => {
+                        warn!(%rt, %id, error = %error, "Failed to deserialize canonical inline ability payload for prompt merge");
                         return false;
                     }
+                    Err(_) => match serde_json::from_value::<AbilityDocument>(
+                        ability_payload.as_ref().clone(),
+                    ) {
+                        Ok(ability) => ability_from_document(ability, prompt_config.clone()),
+                        Err(error) => {
+                            warn!(%rt, %id, error = %error, "Failed to deserialize inline ability payload for prompt merge");
+                            return false;
+                        }
+                    },
                 }
-            } else if let Some(existing) =
-                manifest.abilities.iter().find(|ability| ability.id == id)
-            {
-                let mut ability = existing.clone();
-                ability.prompt_config = prompt_config.clone();
-                ability
             } else {
                 warn!(%rt, %id, "Encrypted ability prompt received without inline or cached ability state");
                 return false;
             };
 
-            if let Some(pos) = manifest
-                .abilities
-                .iter()
-                .position(|ability| ability.id == id)
-            {
-                manifest.abilities[pos] = next_ability;
-            } else {
-                manifest.abilities.push(next_ability);
-            }
+            upsert_by_slug(&mut manifest.abilities, next_ability);
 
             true
         }
@@ -162,57 +168,67 @@ where
             };
 
             let next_domain = if let Some(domain_payload) = decrypted.inline_payload {
-                match serde_json::from_value::<DomainDocument>(domain_payload.clone()) {
-                    Ok(domain) => {
-                        let existing_manifest = manifest
-                            .domains
-                            .iter()
-                            .find(|domain_entry| domain_entry.id == id)
-                            .cloned();
-                        nenjo::manifest::DomainManifest {
-                            id: domain.summary.id,
-                            name: domain.summary.name,
-                            path: domain.summary.path,
-                            description: domain.summary.description,
-                            command: domain.command,
-                            platform_scopes: existing_manifest
-                                .as_ref()
-                                .map(|domain| domain.platform_scopes.clone())
-                                .unwrap_or_else(|| domain.platform_scopes.clone()),
-                            abilities: existing_manifest
-                                .as_ref()
-                                .map(|domain| domain.abilities.clone())
-                                .unwrap_or_else(|| domain.abilities.clone()),
-                            mcp_servers: existing_manifest
-                                .as_ref()
-                                .map(|domain| domain.mcp_servers.clone())
-                                .unwrap_or(domain.mcp_servers),
-                            script_tools: existing_manifest
-                                .as_ref()
-                                .map(|domain| domain.script_tools.clone())
-                                .unwrap_or_default(),
-                            prompt_config: prompt_config.clone(),
-                        }
+                let (domain_payload, canonical) = canonical_inline_payload_data(domain_payload);
+                match serde_json::from_value::<nenjo::manifest::DomainManifest>(
+                    domain_payload.as_ref().clone(),
+                ) {
+                    Ok(mut domain) => {
+                        domain.prompt_config = prompt_config.clone();
+                        domain
                     }
-                    Err(error) => {
-                        warn!(%rt, %id, error = %error, "Failed to deserialize inline domain payload for prompt merge");
+                    Err(error) if canonical => {
+                        warn!(%rt, %id, error = %error, "Failed to deserialize canonical inline domain payload for prompt merge");
                         return false;
                     }
+                    Err(_) => match serde_json::from_value::<DomainDocument>(
+                        domain_payload.as_ref().clone(),
+                    ) {
+                        Ok(domain) => {
+                            let slug = nenjo::manifest::domain_slug(
+                                &domain.summary.path,
+                                &domain.summary.name,
+                            );
+                            let existing_manifest = manifest
+                                .domains
+                                .iter()
+                                .find(|domain_entry| domain_entry.manifest_slug() == slug)
+                                .cloned();
+                            nenjo::manifest::DomainManifest {
+                                name: domain.summary.name,
+                                path: domain.summary.path,
+                                description: domain.summary.description,
+                                command: domain.command,
+                                platform_scopes: existing_manifest
+                                    .as_ref()
+                                    .map(|domain| domain.platform_scopes.clone())
+                                    .unwrap_or_else(|| domain.platform_scopes.clone()),
+                                abilities: existing_manifest
+                                    .as_ref()
+                                    .map(|domain| domain.abilities.clone())
+                                    .unwrap_or_else(|| domain.abilities.clone()),
+                                mcp_servers: existing_manifest
+                                    .as_ref()
+                                    .map(|domain| domain.mcp_servers.clone())
+                                    .unwrap_or(domain.mcp_servers),
+                                script_tools: existing_manifest
+                                    .as_ref()
+                                    .map(|domain| domain.script_tools.clone())
+                                    .unwrap_or_default(),
+                                prompt_config: prompt_config.clone(),
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%rt, %id, error = %error, "Failed to deserialize inline domain payload for prompt merge");
+                            return false;
+                        }
+                    },
                 }
-            } else if let Some(existing) = manifest.domains.iter().find(|domain| domain.id == id) {
-                let mut domain = existing.clone();
-                domain.prompt_config = prompt_config.clone();
-                domain
             } else {
                 warn!(%rt, %id, "Encrypted domain prompt received without inline or cached domain state");
                 return false;
             };
 
-            if let Some(pos) = manifest.domains.iter().position(|domain| domain.id == id) {
-                manifest.domains[pos] = next_domain;
-            } else {
-                manifest.domains.push(next_domain);
-            }
+            upsert_by_slug(&mut manifest.domains, next_domain);
 
             true
         }
@@ -226,46 +242,48 @@ where
             };
 
             let next_block = if let Some(block_payload) = decrypted.inline_payload {
-                match serde_json::from_value::<ContextBlockDocument>(block_payload.clone()) {
-                    Ok(block) => nenjo::manifest::ContextBlockManifest {
-                        id: block.summary.id,
-                        name: block.summary.name,
-                        path: block.summary.path,
-                        description: block.summary.description,
-                        template,
-                    },
-                    Err(error) => {
-                        warn!(%rt, %id, error = %error, "Failed to deserialize inline context block payload for content merge");
+                let (block_payload, canonical) = canonical_inline_payload_data(block_payload);
+                match serde_json::from_value::<nenjo::manifest::ContextBlockManifest>(
+                    block_payload.as_ref().clone(),
+                ) {
+                    Ok(mut block) => {
+                        block.template = template;
+                        block
+                    }
+                    Err(error) if canonical => {
+                        warn!(%rt, %id, error = %error, "Failed to deserialize canonical inline context block payload for content merge");
                         return false;
                     }
+                    Err(_) => match serde_json::from_value::<ContextBlockDocument>(
+                        block_payload.as_ref().clone(),
+                    ) {
+                        Ok(block) => nenjo::manifest::ContextBlockManifest {
+                            name: block.summary.name,
+                            path: block.summary.path,
+                            description: block.summary.description,
+                            template,
+                        },
+                        Err(error) => {
+                            warn!(%rt, %id, error = %error, "Failed to deserialize inline context block payload for content merge");
+                            return false;
+                        }
+                    },
                 }
-            } else if let Some(existing) =
-                manifest.context_blocks.iter().find(|block| block.id == id)
-            {
-                let mut block = existing.clone();
-                block.template = template;
-                block
             } else {
                 warn!(%rt, %id, "Encrypted context block content received without inline or cached context block state");
                 return false;
             };
 
-            if let Some(pos) = manifest
-                .context_blocks
-                .iter()
-                .position(|block| block.id == id)
-            {
-                manifest.context_blocks[pos] = next_block;
-            } else {
-                manifest.context_blocks.push(next_block);
-            }
+            upsert_by_slug(&mut manifest.context_blocks, next_block);
 
             true
         }
         SensitiveContentKind::DocumentContent => {
             let metadata = match decrypted
                 .inline_payload
-                .cloned()
+                .map(|inline| {
+                    canonical_resource_payload_data(inline).unwrap_or_else(|| inline.clone())
+                })
                 .map(serde_json::from_value::<InlineDocumentMeta>)
             {
                 Some(Ok(metadata)) => metadata,
@@ -348,7 +366,7 @@ fn apply_decrypted_project_settings(
         return false;
     };
 
-    apply_inline_upsert(manifest, rt, id, &project_payload)
+    apply_inline_upsert(manifest, rt, &project_payload)
 }
 
 fn merge_project_settings_payload(
@@ -415,6 +433,47 @@ mod tests {
             .await
         );
         assert!(manifest.agents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn decrypted_ability_prompt_uses_manifest_event_id() {
+        let id = Uuid::new_v4();
+        let mut manifest = Manifest::default();
+        let inline_payload = serde_json::json!({
+            "name": "ability",
+            "path": "testing/e2e",
+            "description": "ability description",
+            "activation_condition": "when needed",
+            "platform_scopes": [],
+            "mcp_servers": [],
+            "script_tools": []
+        });
+        let decrypted_payload = serde_json::json!({
+            "developer_prompt": "Use the decrypted prompt."
+        });
+
+        assert!(
+            apply_decrypted_manifest_upsert(
+                &mut manifest,
+                &NoopManifestStore,
+                ResourceType::Ability,
+                id,
+                DecryptedManifestPayload {
+                    object_type: "manifest.ability.prompt",
+                    object_id: id,
+                    inline_payload: Some(&inline_payload),
+                    decrypted_payload: &decrypted_payload,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(manifest.abilities.len(), 1);
+        assert_eq!(manifest.abilities[0].name, "ability");
+        assert_eq!(
+            manifest.abilities[0].prompt_config.developer_prompt,
+            "Use the decrypted prompt."
+        );
     }
 
     #[tokio::test]

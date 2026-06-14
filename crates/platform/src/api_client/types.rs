@@ -117,7 +117,6 @@ pub struct ProjectDetailResponse {
 impl From<ProjectDetailResponse> for nenjo::manifest::ProjectManifest {
     fn from(project: ProjectDetailResponse) -> Self {
         Self {
-            id: project.id,
             name: project.name,
             slug: Slug::derive(project.slug),
             description: project.description,
@@ -158,10 +157,14 @@ pub struct AgentDetailResponse {
 
 impl From<AgentDetailResponse> for AgentManifest {
     fn from(d: AgentDetailResponse) -> Self {
+        let slug = d
+            .slug
+            .as_deref()
+            .map(Slug::derive)
+            .unwrap_or_else(|| Slug::derive(&d.name));
         Self {
-            id: d.id,
             name: d.name,
-            slug: d.slug.map(Slug::derive),
+            slug,
             description: d.description,
             prompt_config: PromptConfig::default(),
             color: Some(d.color),
@@ -218,7 +221,6 @@ pub struct CouncilAgentSummary {
 impl From<CouncilDetailResponse> for CouncilManifest {
     fn from(d: CouncilDetailResponse) -> Self {
         Self {
-            id: d.id,
             name: d.name,
             delegation_strategy: d.delegation_strategy,
             leader_agent: d.leader_agent,
@@ -261,7 +263,6 @@ pub struct DomainManifestResponse {
 impl From<DomainManifestResponse> for DomainManifest {
     fn from(d: DomainManifestResponse) -> Self {
         Self {
-            id: d.id,
             name: d.name,
             path: d.path,
             description: d.description,
@@ -353,8 +354,8 @@ impl From<RoutineDetailResponse> for RoutineManifest {
             .map(Slug::derive)
             .unwrap_or_else(|| Slug::derive(&d.name));
         Self {
-            id: d.id,
             name: d.name,
+            slug: routine_slug.clone(),
             description: d.description,
             trigger: d.trigger,
             metadata: d.metadata,
@@ -362,7 +363,6 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                 .steps
                 .into_iter()
                 .map(|step| RoutineStepManifest {
-                    id: step.id,
                     slug: step
                         .slug
                         .map(Slug::derive)
@@ -380,7 +380,6 @@ impl From<RoutineDetailResponse> for RoutineManifest {
                 .edges
                 .into_iter()
                 .map(|edge| RoutineEdgeManifest {
-                    id: edge.id,
                     routine: routine_slug.clone(),
                     source_step: Slug::derive(edge.source_step),
                     target_step: Slug::derive(edge.target_step),

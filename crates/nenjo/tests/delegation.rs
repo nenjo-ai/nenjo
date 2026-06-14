@@ -16,9 +16,9 @@ use nenjo_tool_api::{Tool, ToolCall, ToolCategory, ToolResult};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-fn model(id: Uuid) -> ModelManifest {
+fn model(_id: Uuid) -> ModelManifest {
     ModelManifest {
-        id,
+        slug: model_manifest_slug("mock", "mock-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-v1".into(),
@@ -28,11 +28,10 @@ fn model(id: Uuid) -> ModelManifest {
     }
 }
 
-fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
+fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
-        id,
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -58,7 +57,6 @@ fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
 
 fn project() -> ProjectManifest {
     ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -455,7 +453,10 @@ async fn parent_tools_are_available_during_execution() {
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let manifest = Manifest {
-        agents: vec![agent(Uuid::new_v4(), "coder", model_id)],
+        agents: vec![
+            agent(Uuid::new_v4(), "coder", model_id),
+            agent(Uuid::new_v4(), "reviewer", model_id),
+        ],
         models: vec![model(model_id)],
         projects: vec![project()],
         ..Default::default()

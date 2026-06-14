@@ -47,8 +47,8 @@ impl ManifestLoader for StaticLoader {
 
 fn test_manifest() -> Manifest {
     let model = ModelManifest {
-        id: Uuid::new_v4(),
         name: "m".into(),
+        slug: crate::manifest::model_manifest_slug("mock", "mock"),
         description: None,
         model: "mock".into(),
         model_provider: "mock".into(),
@@ -56,9 +56,8 @@ fn test_manifest() -> Manifest {
         base_url: None,
     };
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "agent".into(),
-        slug: Some(Slug::derive("agent")),
+        slug: Slug::derive("agent"),
         description: Some("test".into()),
         prompt_config: PromptConfig::default(),
         color: None,
@@ -78,7 +77,6 @@ fn test_manifest() -> Manifest {
         agents: vec![agent],
         models: vec![model],
         projects: vec![ProjectManifest {
-            id: Uuid::new_v4(),
             name: "p".into(),
             slug: Slug::derive("p"),
             description: None,
@@ -133,7 +131,7 @@ impl KnowledgePack for TestKnowledgePack {
 #[tokio::test]
 async fn from_manifest_and_agent_slug_lookup() {
     let manifest = test_manifest();
-    let slug = manifest.agents[0].slug.clone().unwrap();
+    let slug = manifest.agents[0].slug.clone();
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockFactory)
@@ -150,7 +148,7 @@ async fn from_manifest_and_agent_slug_lookup() {
 async fn manifest_index_uses_agent_slug_not_name_when_present() {
     let mut manifest = test_manifest();
     manifest.agents[0].name = "Display Agent".into();
-    manifest.agents[0].slug = Some(Slug::derive("worker"));
+    manifest.agents[0].slug = Slug::derive("worker");
 
     let provider = Provider::builder()
         .with_manifest(manifest)
@@ -168,7 +166,6 @@ async fn manifest_index_uses_agent_slug_not_name_when_present() {
 async fn manifest_index_finds_abilities_and_domains_without_scanning() {
     let mut manifest = test_manifest();
     let ability = AbilityManifest {
-        id: Uuid::new_v4(),
         name: "Code Review".into(),
         path: Some("review".into()),
         description: None,
@@ -184,7 +181,6 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         metadata: serde_json::Value::Null,
     };
     let domain = DomainManifest {
-        id: Uuid::new_v4(),
         name: "creator".into(),
         path: "nenjo".into(),
         description: None,
@@ -207,13 +203,16 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         .await
         .unwrap();
 
-    assert_eq!(provider.find_ability("Code Review").unwrap().id, ability.id);
     assert_eq!(
-        provider.find_domain(domain_slug.as_str()).unwrap().id,
-        domain.id
+        provider.find_ability("Code Review").unwrap().name,
+        ability.name
     );
-    assert_eq!(provider.find_domain("creator").unwrap().id, domain.id);
-    assert_eq!(provider.find_domain("#creator").unwrap().id, domain.id);
+    assert_eq!(
+        provider.find_domain(domain_slug.as_str()).unwrap().name,
+        domain.name
+    );
+    assert_eq!(provider.find_domain("creator").unwrap().name, domain.name);
+    assert_eq!(provider.find_domain("#creator").unwrap().name, domain.name);
 }
 
 #[tokio::test]
@@ -336,7 +335,7 @@ async fn provider_registers_multiple_knowledge_packs() {
 #[tokio::test]
 async fn builder_via_loader() {
     let manifest = test_manifest();
-    let slug = manifest.agents[0].slug.clone().unwrap();
+    let slug = manifest.agents[0].slug.clone();
 
     let provider = Provider::builder()
         .with_loader(StaticLoader(manifest))
@@ -380,7 +379,7 @@ async fn new_agent_uses_provider_model_factory() {
 #[tokio::test]
 async fn builder_can_preserve_typed_model_factory() {
     let manifest = test_manifest();
-    let slug = manifest.agents[0].slug.clone().unwrap();
+    let slug = manifest.agents[0].slug.clone();
 
     let provider: Provider<MockFactory, NoopToolFactory, builder::NoMemory> = Provider::builder()
         .with_loader(StaticLoader(manifest))
@@ -398,7 +397,6 @@ async fn multiple_loaders_merge() {
 
     let local = Manifest {
         context_blocks: vec![ContextBlockManifest {
-            id: Uuid::new_v4(),
             name: "local_block".into(),
             path: "local".into(),
             description: None,
@@ -443,23 +441,17 @@ async fn agent_without_model_fails() {
 #[tokio::test]
 async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
     let model = ModelManifest {
-        id: Uuid::new_v4(),
         name: "m".into(),
+        slug: Slug::derive("m"),
         description: None,
         model: "mock".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
     };
-    let original_agent_id = Uuid::new_v4();
-    let updated_agent_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
-    let step_id = Uuid::new_v4();
-
     let original_agent = AgentManifest {
-        id: original_agent_id,
         name: "agent-old".into(),
-        slug: None,
+        slug: Slug::derive("agent-old"),
         description: Some("old".into()),
         prompt_config: PromptConfig::default(),
         color: None,
@@ -476,9 +468,8 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         heartbeat: None,
     };
     let updated_agent = AgentManifest {
-        id: updated_agent_id,
         name: "agent-new".into(),
-        slug: None,
+        slug: Slug::derive("agent-new"),
         description: Some("new".into()),
         prompt_config: PromptConfig::default(),
         color: None,
@@ -495,14 +486,13 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         heartbeat: None,
     };
     let routine = RoutineManifest {
-        id: routine_id,
         name: "routine".into(),
+        slug: Slug::derive("routine"),
         description: None,
         trigger: crate::manifest::RoutineTrigger::Task,
         metadata: crate::manifest::RoutineMetadata::default(),
         steps: vec![crate::manifest::RoutineStepManifest {
-            id: step_id,
-            slug: Slug::derive(step_id.to_string()),
+            slug: Slug::derive("step"),
             routine: Slug::derive("routine"),
             name: "step".into(),
             step_type: crate::manifest::RoutineStepType::Agent,
@@ -519,7 +509,6 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         models: vec![model.clone()],
         routines: vec![routine.clone()],
         projects: vec![ProjectManifest {
-            id: Uuid::new_v4(),
             name: "p".into(),
             slug: Slug::derive("p"),
             description: None,

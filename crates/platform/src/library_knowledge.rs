@@ -243,6 +243,31 @@ pub fn upsert_library_knowledge_entry(
     write_library_knowledge_manifest(pack_dir, &manifest)
 }
 
+pub fn write_library_document_content(
+    pack_dir: &Path,
+    relative_path: &str,
+    content: &str,
+) -> Result<()> {
+    let docs_dir = pack_dir.join("docs");
+    let target = docs_dir.join(relative_path.trim_matches('/'));
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create docs dir: {}", parent.display()))?;
+    }
+    let tmp = target.with_file_name(format!(
+        ".{}.tmp",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document")
+    ));
+    std::fs::write(&tmp, content.as_bytes())
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &target)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), target.display()))?;
+    Ok(())
+}
+
 pub fn remove_library_knowledge_entry(library_dir: &Path, doc: &Slug) -> Result<()> {
     let Some(mut manifest) = load_library_knowledge_manifest(library_dir) else {
         return Ok(());

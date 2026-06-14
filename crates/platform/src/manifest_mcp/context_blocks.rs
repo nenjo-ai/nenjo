@@ -3,7 +3,7 @@ use nenjo::{ToolCategory, ToolSpec};
 fn context_block_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "The slug of the target context block."
+        "description": "The slug of the target context block. Use the `slug` returned by list_context_blocks or get_context_block, not the path-like selector."
     })
 }
 
@@ -38,7 +38,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_context_blocks".to_string(),
-            description: "List context blocks so you can find a context block slug before reading, updating, or deleting one."
+            description: "List context blocks. Use `slug` for context block tool calls; use dotted `selector` when constructing prompt references."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -49,7 +49,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_context_block".to_string(),
-            description: "Get one context block's name, path, and description by slug.".to_string(),
+            description: "Get one context block's slug, selector, name, path, and description by slug.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["context_block"],
@@ -60,7 +60,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_context_block_content".to_string(),
-            description: "Get one context block's template text by slug.".to_string(),
+            description: "Get one context block's template text by slug. Pass the returned `slug`, not the path-like selector.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["context_block"],

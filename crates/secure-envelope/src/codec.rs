@@ -646,6 +646,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 )))
             }
             Command::ManifestChanged {
+                schema,
+                resource_id,
                 resource_type,
                 resource,
                 action,
@@ -656,6 +658,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 let Some(encrypted_payload) = encrypted_payload else {
                     return Ok(DecodeCommandResult::Command(Box::new(
                         Command::ManifestChanged {
+                            schema,
+                            resource_id,
                             resource_type,
                             resource,
                             action,
@@ -701,6 +705,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
 
                 let payload = serde_json::json!({
                     "__nenjo_decrypted_manifest_payload": true,
+                    "schema": "manifest.decrypted_resource.v1",
                     "object_type": object_type,
                     "object_id": object_id,
                     "inline_payload": payload,
@@ -709,6 +714,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
 
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::ManifestChanged {
+                        schema,
+                        resource_id,
                         resource_type,
                         resource,
                         action,

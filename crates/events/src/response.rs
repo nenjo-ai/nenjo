@@ -1200,6 +1200,8 @@ mod tests {
     #[test]
     fn command_manifest_changed_roundtrip() {
         let cmd = Command::ManifestChanged {
+            schema: "manifest.changed.v1".into(),
+            resource_id: uuid::Uuid::nil(),
             resource_type: crate::ResourceType::Agent,
             resource: "demo_agent".into(),
             action: crate::ResourceAction::Updated,

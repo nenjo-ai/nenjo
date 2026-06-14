@@ -173,8 +173,10 @@ async fn upsert_heartbeat_session<P, SessionRt>(
         .manifest_snapshot()
         .agents
         .iter()
-        .find(|agent| agent.id == agent_id)
-        .map(|agent| nenjo::Slug::derive(&agent.name).to_string());
+        .find(|agent| {
+            crate::resource_resolver::stable_resource_id("agent", &agent.slug) == agent_id
+        })
+        .map(|agent| agent.slug.to_string());
     if let Err(error) = harness
         .sessions()
         .upsert_scheduler(SchedulerSessionUpsert {
@@ -279,7 +281,9 @@ where
     let heartbeat_agent_name = manifest
         .agents
         .iter()
-        .find(|agent| agent.id == agent_id)
+        .find(|agent| {
+            crate::resource_resolver::stable_resource_id("agent", &agent.slug) == agent_id
+        })
         .map(|agent| agent.name.clone())
         .unwrap_or_else(|| agent_id.to_string());
     let heartbeat_memory_namespace = heartbeat_memory_namespace(&heartbeat_agent_name);

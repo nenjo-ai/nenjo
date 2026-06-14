@@ -1,8 +1,6 @@
 //! Request parameter types for manifest MCP tools.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use uuid::Uuid;
 
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 
@@ -65,13 +63,13 @@ pub struct AgentDeleteParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_ability`.
 pub struct AbilitiesGetParams {
-    pub ability: ResourceRef,
+    pub ability: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_ability_prompt`.
 pub struct AbilityPromptGetParams {
-    pub ability: ResourceRef,
+    pub ability: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +82,7 @@ pub struct AbilityCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_ability`.
 pub struct AbilityUpdateParams {
-    pub ability: ResourceRef,
+    pub ability: Slug,
     #[serde(flatten)]
     pub data: AbilityUpdateDocument,
 }
@@ -92,14 +90,14 @@ pub struct AbilityUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_ability_prompt`.
 pub struct AbilityPromptUpdateParams {
-    pub ability: ResourceRef,
+    pub ability: Slug,
     pub prompt_config: AbilityPromptConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_ability`.
 pub struct AbilityDeleteParams {
-    pub ability: ResourceRef,
+    pub ability: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,7 +214,7 @@ pub struct KnowledgeDocDeleteParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `get_routine`.
 pub struct RoutinesGetParams {
-    pub routine: Slug,
+    pub slug: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,7 +227,7 @@ pub struct RoutineCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_routine`.
 pub struct RoutineUpdateParams {
-    pub routine: Slug,
+    pub slug: Slug,
     #[serde(flatten)]
     pub data: RoutineUpdateDocument,
 }
@@ -237,7 +235,7 @@ pub struct RoutineUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_routine`.
 pub struct RoutineDeleteParams {
-    pub routine: Slug,
+    pub slug: Slug,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,28 +355,4 @@ pub struct ContextBlockContentUpdateParams {
 /// Parameters for `delete_context_block`.
 pub struct ContextBlockDeleteParams {
     pub context_block: Slug,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ResourceRef {
-    Id(Uuid),
-    Slug(String),
-}
-
-impl ResourceRef {
-    pub fn as_path_segment(&self) -> String {
-        match self {
-            Self::Id(id) => id.to_string(),
-            Self::Slug(slug) => slug.clone(),
-        }
-    }
-}
-
-impl fmt::Display for ResourceRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Id(id) => write!(f, "{id}"),
-            Self::Slug(slug) => f.write_str(slug),
-        }
-    }
 }

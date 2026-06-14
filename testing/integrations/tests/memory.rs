@@ -6,8 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use uuid::Uuid;
-
 use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
@@ -41,7 +39,7 @@ fn get_api_key() -> Option<String> {
 
 fn make_model() -> ModelManifest {
     ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"),
         name: "openrouter-nemotron".into(),
         description: None,
         model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
@@ -53,9 +51,8 @@ fn make_model() -> ModelManifest {
 
 fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
-        id: Uuid::new_v4(),
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("Test agent: {name}")),
         prompt_config: PromptConfig {
             system_prompt: system_prompt.into(),
@@ -101,7 +98,6 @@ async fn memory_store_writes_to_correct_scope() {
 
     let model = make_model();
     let project = ProjectManifest {
-        id: Uuid::new_v4(),
         name: "webapp".into(),
         slug: Slug::derive("webapp"),
         description: None,
@@ -190,7 +186,6 @@ async fn save_artifact_writes_to_workspace() {
 
     let model = make_model();
     let project = ProjectManifest {
-        id: Uuid::new_v4(),
         name: "webapp".into(),
         slug: Slug::derive("webapp"),
         description: None,

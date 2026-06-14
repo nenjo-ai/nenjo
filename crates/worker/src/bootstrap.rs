@@ -19,10 +19,12 @@ use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
-use nenjo::manifest::{ContextBlockManifest, Manifest, ManifestLoader};
+use nenjo::manifest::{ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader};
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
-use nenjo_platform::SensitiveContentKind;
 use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::{
+    PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind, SensitiveContentKind,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -37,13 +39,13 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     routines: Vec<BootstrapRoutineManifest>,
     #[serde(default)]
-    models: Vec<nenjo::manifest::ModelManifest>,
+    models: Vec<BootstrapModelManifest>,
     #[serde(default)]
     agents: Vec<BootstrapAgentManifest>,
     #[serde(default)]
     councils: Vec<nenjo::manifest::CouncilManifest>,
     #[serde(default)]
-    domains: Vec<nenjo::manifest::DomainManifest>,
+    domains: Vec<BootstrapDomainManifest>,
     #[serde(default)]
     projects: Vec<BootstrapProjectManifest>,
     #[serde(default)]
@@ -55,7 +57,7 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     script_tools: Vec<nenjo::manifest::ScriptToolManifest>,
     #[serde(default)]
-    abilities: Vec<nenjo::manifest::AbilityManifest>,
+    abilities: Vec<BootstrapAbilityManifest>,
     #[serde(default)]
     context_blocks: Vec<BootstrapContextBlockManifest>,
     #[serde(default)]
@@ -67,6 +69,7 @@ struct BootstrapManifestResponse {
 struct HydratedBootstrap {
     auth: BootstrapAuth,
     manifest: Manifest,
+    resource_ids: PlatformResourceIdSnapshot,
     nats: BootstrapNatsConfig,
     packages: Option<BootstrapPackages>,
 }
@@ -187,6 +190,13 @@ struct BootstrapAuthEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+struct BootstrapModelManifest {
+    id: Uuid,
+    #[serde(flatten)]
+    manifest: nenjo::manifest::ModelManifest,
+}
+
+#[derive(Debug, Deserialize)]
 struct BootstrapAgentManifest {
     id: Uuid,
     name: String,
@@ -211,6 +221,20 @@ struct BootstrapAgentManifest {
     heartbeat: Option<nenjo::manifest::AgentHeartbeatManifest>,
     #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapAbilityManifest {
+    id: Uuid,
+    #[serde(flatten)]
+    manifest: nenjo::manifest::AbilityManifest,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapDomainManifest {
+    id: Uuid,
+    #[serde(flatten)]
+    manifest: nenjo::manifest::DomainManifest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,8 +264,9 @@ struct BootstrapProjectManifest {
 
 #[derive(Debug, Deserialize)]
 struct BootstrapRoutineManifest {
-    id: Uuid,
     name: String,
+    #[serde(default)]
+    slug: Option<Slug>,
     description: Option<String>,
     #[serde(default)]
     trigger: nenjo::manifest::RoutineTrigger,
@@ -255,7 +280,6 @@ struct BootstrapRoutineManifest {
 
 #[derive(Debug, Deserialize)]
 struct BootstrapRoutineStepManifest {
-    id: Uuid,
     #[serde(default)]
     slug: Option<Slug>,
     #[serde(default)]
@@ -274,7 +298,6 @@ struct BootstrapRoutineStepManifest {
 
 #[derive(Debug, Deserialize)]
 struct BootstrapRoutineEdgeManifest {
-    id: Uuid,
     #[serde(default)]
     routine: Option<Slug>,
     source_step: String,
@@ -359,7 +382,6 @@ impl ManifestLoader for LocalManifestLoader {
                 }
                 let template = std::fs::read_to_string(&path)?;
                 blocks.push(ContextBlockManifest {
-                    id: Uuid::new_v4(),
                     name,
                     path: "local".to_string(),
                     description: None,
@@ -435,6 +457,7 @@ pub async fn sync(
     // Write auth info used for org-scoped transport setup and ACK routing.
     atomic_write_json(manifests_dir, "auth.json", &data.auth)?;
     atomic_write_json(manifests_dir, "nats.json", &data.nats)?;
+    PlatformResourceIdStore::new(manifests_dir).replace(&data.resource_ids)?;
     atomic_write_json(manifests_dir, "projects.json", &manifest.projects)?;
     atomic_write_json(manifests_dir, "routines.json", &manifest.routines)?;
     atomic_write_json(manifests_dir, "models.json", &manifest.models)?;
@@ -475,13 +498,25 @@ async fn hydrate_bootstrap_manifest(
         }
     };
 
+    let mut resource_ids = PlatformResourceIdSnapshot::default();
+
+    let mut models = Vec::with_capacity(bootstrap.models.len());
+    for model in bootstrap.models {
+        resource_ids.insert(PlatformResourceKind::Model, &model.manifest.slug, model.id);
+        models.push(model.manifest);
+    }
+
     let mut agents = Vec::with_capacity(bootstrap.agents.len());
     for agent in bootstrap.agents {
         let prompt_config = resolve_bootstrap_prompt_config(api, &agent, state_dir).await?;
+        let slug = agent
+            .slug
+            .clone()
+            .unwrap_or_else(|| Slug::derive(&agent.name));
+        resource_ids.insert(PlatformResourceKind::Agent, &slug, agent.id);
         agents.push(nenjo::manifest::AgentManifest {
-            id: agent.id,
             name: agent.name,
-            slug: agent.slug,
+            slug,
             description: agent.description,
             prompt_config,
             color: agent.color,
@@ -496,28 +531,58 @@ async fn hydrate_bootstrap_manifest(
         });
     }
 
+    let mut domains = Vec::with_capacity(bootstrap.domains.len());
+    for domain in bootstrap.domains {
+        resource_ids.insert(
+            PlatformResourceKind::Domain,
+            &domain.manifest.manifest_slug(),
+            domain.id,
+        );
+        domains.push(domain.manifest);
+    }
+
+    let mut abilities = Vec::with_capacity(bootstrap.abilities.len());
+    for ability in bootstrap.abilities {
+        resource_ids.insert(
+            PlatformResourceKind::Ability,
+            &ability.manifest.manifest_slug(),
+            ability.id,
+        );
+        abilities.push(ability.manifest);
+    }
+
     let mut context_blocks = Vec::with_capacity(bootstrap.context_blocks.len());
     for block in bootstrap.context_blocks {
         let template = resolve_bootstrap_context_block_template(&block, state_dir).await?;
-        context_blocks.push(ContextBlockManifest {
-            id: block.id,
+        let context_block = ContextBlockManifest {
             name: block.name,
             path: block.path,
             description: block.description,
             template,
-        });
+        };
+        resource_ids.insert(
+            PlatformResourceKind::ContextBlock,
+            &context_block.manifest_slug(),
+            block.id,
+        );
+        context_blocks.push(context_block);
     }
 
     let mut projects = Vec::with_capacity(bootstrap.projects.len());
     for project in bootstrap.projects {
         let settings = resolve_bootstrap_project_settings(&project, state_dir).await?;
-        projects.push(nenjo::manifest::ProjectManifest {
-            id: project.id,
+        let project_manifest = nenjo::manifest::ProjectManifest {
             name: project.name,
             slug: Slug::derive(&project.slug),
             description: project.description,
             settings,
-        });
+        };
+        resource_ids.insert(
+            PlatformResourceKind::Project,
+            &project_manifest.slug,
+            project.id,
+        );
+        projects.push(project_manifest);
     }
 
     let routines = bootstrap
@@ -530,19 +595,20 @@ async fn hydrate_bootstrap_manifest(
         auth: bootstrap.auth.clone(),
         manifest: Manifest {
             routines,
-            models: bootstrap.models,
+            models,
             agents,
             councils: bootstrap.councils,
-            domains: bootstrap.domains,
+            domains,
             projects,
             mcp_servers: bootstrap.mcp_servers,
-            abilities: bootstrap.abilities,
+            abilities,
             context_blocks,
             skills: Vec::new(),
             commands: bootstrap.commands,
             hooks: bootstrap.hooks,
             script_tools: bootstrap.script_tools,
         },
+        resource_ids,
         nats: bootstrap.nats,
         packages: bootstrap.packages,
     })
@@ -672,10 +738,13 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
 fn bootstrap_routine_manifest(
     routine: BootstrapRoutineManifest,
 ) -> nenjo::manifest::RoutineManifest {
-    let routine_slug = Slug::derive(&routine.name);
+    let routine_slug = routine
+        .slug
+        .clone()
+        .unwrap_or_else(|| Slug::derive(&routine.name));
     nenjo::manifest::RoutineManifest {
-        id: routine.id,
         name: routine.name,
+        slug: routine_slug.clone(),
         description: routine.description,
         trigger: routine.trigger,
         metadata: routine.metadata,
@@ -683,7 +752,6 @@ fn bootstrap_routine_manifest(
             .steps
             .into_iter()
             .map(|step| nenjo::manifest::RoutineStepManifest {
-                id: step.id,
                 slug: step.slug.unwrap_or_else(|| Slug::derive(&step.name)),
                 routine: step.routine.unwrap_or_else(|| routine_slug.clone()),
                 name: step.name,
@@ -698,7 +766,6 @@ fn bootstrap_routine_manifest(
             .edges
             .into_iter()
             .map(|edge| nenjo::manifest::RoutineEdgeManifest {
-                id: edge.id,
                 routine: edge.routine.unwrap_or_else(|| routine_slug.clone()),
                 source_step: Slug::derive(edge.source_step),
                 target_step: Slug::derive(edge.target_step),
@@ -789,8 +856,43 @@ impl ManifestStore for WorkerManifestCache {
         WorkerManifestCache::persist_resource(self, manifest, resource_type)
     }
 
+    async fn cleanup_deleted_resource(
+        &self,
+        resource_type: ResourceType,
+        resource: &nenjo::Slug,
+        _resource_id: Option<Uuid>,
+        _payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        if resource_type != ResourceType::KnowledgePack {
+            return Ok(());
+        }
+        let pack_dir = self.library_root().join(resource.as_str());
+        if pack_dir.exists() {
+            std::fs::remove_dir_all(&pack_dir).with_context(|| {
+                format!(
+                    "Failed to remove knowledge pack cache {}",
+                    pack_dir.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest> {
         WorkerManifestCache::full_refresh(self, client).await
+    }
+
+    async fn update_platform_resource_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource: &nenjo::Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        let store = PlatformResourceIdStore::new(&self.manifests_dir);
+        match resource_id {
+            Some(id) => store.upsert(kind, resource, id),
+            None => store.remove(kind, resource),
+        }
     }
 
     async fn sync_document_metadata(
@@ -881,8 +983,13 @@ async fn resolve_bootstrap_prompt_config(
     agent: &BootstrapAgentManifest,
     state_dir: &Path,
 ) -> Result<PromptConfig> {
+    let agent_slug = agent
+        .slug
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| Slug::derive(&agent.name));
     let Some(payload) = agent.encrypted_payload.as_ref() else {
-        let Some(response) = api.fetch_agent_prompt_config(agent.id).await? else {
+        let Some(response) = api.fetch_agent_prompt_config(&agent_slug).await? else {
             return Ok(PromptConfig::default());
         };
 

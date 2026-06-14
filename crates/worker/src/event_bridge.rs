@@ -14,7 +14,7 @@ use nenjo_harness::preview::{summarize_preview, truncate_preview};
 
 #[derive(Serialize)]
 pub struct StepCompletedData {
-    pub step_id: Uuid,
+    pub step_slug: String,
     pub step_run_id: Uuid,
     pub passed: bool,
     pub input_tokens: u64,
@@ -23,7 +23,7 @@ pub struct StepCompletedData {
 
 #[derive(Serialize)]
 pub struct StepFailedData {
-    pub step_id: Uuid,
+    pub step_slug: String,
     pub step_run_id: Uuid,
     pub error: &'static str,
 }
@@ -482,10 +482,13 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
 /// Resolve `StepAgent` from an optional agent ID using the manifest.
 fn resolve_agent(manifest: &Manifest, agent_id: Option<Uuid>) -> Option<StepAgent> {
     agent_id.map(|aid| {
-        let a = manifest.agents.iter().find(|a| a.id == aid);
+        let a = manifest
+            .agents
+            .iter()
+            .find(|a| crate::resource_resolver::stable_resource_id("agent", &a.slug) == aid);
         StepAgent {
             agent: a
-                .map(|a| nenjo::Slug::derive(&a.name).to_string())
+                .map(|a| a.slug.to_string())
                 .unwrap_or_else(|| aid.to_string()),
             agent_name: a.map(|a| a.name.clone()),
             agent_color: a.and_then(|a| a.color.clone()),
@@ -493,9 +496,9 @@ fn resolve_agent(manifest: &Manifest, agent_id: Option<Uuid>) -> Option<StepAgen
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RoutineStepRef {
-    pub step_id: Uuid,
+    pub step_slug: String,
     pub step_run_id: Uuid,
 }
 
@@ -516,8 +519,8 @@ fn task_data(
 ) -> serde_json::Value {
     if let Some(routine_step) = routine_step {
         data.insert(
-            "step_id".to_string(),
-            serde_json::Value::String(routine_step.step_id.to_string()),
+            "step_slug".to_string(),
+            serde_json::Value::String(routine_step.step_slug),
         );
         data.insert(
             "step_run_id".to_string(),
@@ -558,7 +561,7 @@ pub fn turn_event_to_task_step_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: task_data(
-                context.routine_step,
+                context.routine_step.clone(),
                 serde_json::Map::from_iter([
                     (
                         "parent_tool_name".to_string(),
@@ -623,7 +626,7 @@ pub fn turn_event_to_task_step_response(
             step_type: "tool".to_string(),
             duration_ms: None,
             data: task_data(
-                context.routine_step,
+                context.routine_step.clone(),
                 serde_json::Map::from_iter([
                     (
                         "parent_tool_name".to_string(),
@@ -671,6 +674,7 @@ pub fn turn_event_to_task_step_response(
             duration_ms: None,
             data: context
                 .routine_step
+                .clone()
                 .map(|step| task_data(Some(step), serde_json::Map::new()))
                 .unwrap_or(serde_json::Value::Null),
             payload: Some(serde_json::json!({
@@ -696,7 +700,7 @@ pub fn turn_event_to_task_step_response(
             step_type: "ability".to_string(),
             duration_ms: None,
             data: task_data(
-                context.routine_step,
+                context.routine_step.clone(),
                 serde_json::Map::from_iter([(
                     "success".to_string(),
                     serde_json::Value::Bool(*success),
@@ -750,36 +754,32 @@ pub fn routine_event_to_response(
 
     match event {
         nenjo::RoutineEvent::StepStarted {
-            step_id,
+            step_slug,
             step_run_id,
             step_name,
             step_type,
-            agent_id,
             ..
-        } => {
-            let agent = resolve_agent(manifest, *agent_id);
-            Some(Response::TaskStepEvent {
-                execution_run_id: eid,
-                task_id: tid,
-                event_type: "step_started".to_string(),
-                step_name: step_name.clone(),
-                step_type: step_type.clone(),
-                duration_ms: None,
-                data: serde_json::json!({ "step_id": step_id, "step_run_id": step_run_id }),
-                payload: None,
-                encrypted_payload: None,
-                agent,
-            })
-        }
+        } => Some(Response::TaskStepEvent {
+            execution_run_id: eid,
+            task_id: tid,
+            event_type: "step_started".to_string(),
+            step_name: step_name.clone(),
+            step_type: step_type.clone(),
+            duration_ms: None,
+            data: serde_json::json!({ "step_slug": step_slug, "step_run_id": step_run_id }),
+            payload: None,
+            encrypted_payload: None,
+            agent: None,
+        }),
         nenjo::RoutineEvent::StepCompleted {
-            step_id,
+            step_slug,
             step_run_id,
             result,
             duration_ms,
             ..
         } => {
             let data = StepCompletedData {
-                step_id: *step_id,
+                step_slug: step_slug.to_string(),
                 step_run_id: *step_run_id,
                 passed: result.passed,
                 input_tokens: result.input_tokens,
@@ -812,7 +812,7 @@ pub fn routine_event_to_response(
             })
         }
         nenjo::RoutineEvent::StepFailed {
-            step_id,
+            step_slug,
             step_run_id,
             error,
             duration_ms,
@@ -825,7 +825,7 @@ pub fn routine_event_to_response(
             step_type: String::new(),
             duration_ms: Some(*duration_ms),
             data: serde_json::to_value(StepFailedData {
-                step_id: *step_id,
+                step_slug: step_slug.to_string(),
                 step_run_id: *step_run_id,
                 error: "Step failed",
             })
@@ -835,14 +835,14 @@ pub fn routine_event_to_response(
             agent: None,
         }),
         nenjo::RoutineEvent::AgentEvent {
-            step_id,
+            step_slug,
             step_run_id,
             event,
         } => routine_agent_event_to_response(
             event,
             execution_run_id,
             task_id,
-            *step_id,
+            step_slug.to_string(),
             *step_run_id,
             current_agent_id,
             manifest,
@@ -885,7 +885,7 @@ fn routine_agent_event_to_response(
     event: &nenjo::TurnEvent,
     execution_run_id: Uuid,
     task_id: Option<Uuid>,
-    routine_step_id: Uuid,
+    routine_step_slug: String,
     routine_step_run_id: Uuid,
     current_agent_id: Option<Uuid>,
     manifest: &Manifest,
@@ -897,7 +897,7 @@ fn routine_agent_event_to_response(
             task_id,
             agent: resolve_agent(manifest, current_agent_id),
             routine_step: Some(RoutineStepRef {
-                step_id: routine_step_id,
+                step_slug: routine_step_slug,
                 step_run_id: routine_step_run_id,
             }),
             agent_duration_ms: None,
@@ -912,7 +912,11 @@ pub fn project_slug(manifest: &Manifest, project_id: Uuid) -> String {
     if project_id.is_nil() {
         return String::new();
     }
-    match manifest.projects.iter().find(|p| p.id == project_id) {
+    match manifest
+        .projects
+        .iter()
+        .find(|p| crate::resource_resolver::stable_resource_id("project", &p.slug) == project_id)
+    {
         Some(p) => p.slug.to_string(),
         None => project_id.to_string(),
     }
@@ -923,7 +927,7 @@ pub fn agent_name(manifest: &Manifest, agent_id: Uuid) -> String {
     manifest
         .agents
         .iter()
-        .find(|a| a.id == agent_id)
+        .find(|a| crate::resource_resolver::stable_resource_id("agent", &a.slug) == agent_id)
         .map(|a| a.name.clone())
         .unwrap_or_else(|| agent_id.to_string())
 }
@@ -1048,7 +1052,7 @@ mod tests {
                 task_id: Some(Uuid::new_v4()),
                 agent: None,
                 routine_step: Some(RoutineStepRef {
-                    step_id: Uuid::new_v4(),
+                    step_slug: "review".to_string(),
                     step_run_id: Uuid::new_v4(),
                 }),
                 agent_duration_ms: None,
@@ -1064,7 +1068,7 @@ mod tests {
     fn routine_step_ids_are_only_added_for_routine_turn_events() {
         let execution_run_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
-        let step_id = Uuid::new_v4();
+        let step_slug = "review".to_string();
         let step_run_id = Uuid::new_v4();
         let event = nenjo::TurnEvent::AbilityStarted {
             ability_tool_name: "ability.review".to_string(),
@@ -1080,7 +1084,7 @@ mod tests {
                 task_id: Some(task_id),
                 agent: None,
                 routine_step: Some(RoutineStepRef {
-                    step_id,
+                    step_slug: step_slug.clone(),
                     step_run_id,
                 }),
                 agent_duration_ms: None,
@@ -1106,7 +1110,7 @@ mod tests {
 
         match routine {
             Response::TaskStepEvent { data, .. } => {
-                assert_eq!(data["step_id"], step_id.to_string());
+                assert_eq!(data["step_slug"], step_slug);
                 assert_eq!(data["step_run_id"], step_run_id.to_string());
             }
             other => panic!("unexpected routine response: {other:?}"),

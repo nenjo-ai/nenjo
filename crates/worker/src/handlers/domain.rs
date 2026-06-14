@@ -89,7 +89,7 @@ where
                                 domain_session_id,
                                 domain_command: session.domain_command.clone(),
                                 domain_name: domain_name.clone(),
-                                agent_id,
+                                agent_id: Some(agent_id),
                             },
                             transcript_state: TranscriptState::Clean,
                         })

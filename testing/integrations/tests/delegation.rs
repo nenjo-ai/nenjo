@@ -6,14 +6,12 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use nenjo::{AgentConfig, Slug};
-use uuid::Uuid;
-
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
+use nenjo::{AgentConfig, Slug};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -40,7 +38,7 @@ fn get_api_key() -> Option<String> {
 
 fn make_model() -> ModelManifest {
     ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("openrouter", "deepseek/deepseek-v4-flash"),
         name: "openrouter".into(),
         description: None,
         model: "deepseek/deepseek-v4-flash".into(),
@@ -52,7 +50,6 @@ fn make_model() -> ModelManifest {
 
 fn make_project() -> ProjectManifest {
     ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -62,9 +59,8 @@ fn make_project() -> ProjectManifest {
 
 fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
-        id: Uuid::new_v4(),
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("Test agent: {name}")),
         prompt_config: PromptConfig {
             system_prompt: system_prompt.into(),

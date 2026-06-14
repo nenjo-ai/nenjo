@@ -838,7 +838,6 @@ mod tests {
 
     use nenjo::manifest::McpServerManifest;
     use serde_json::json;
-    use uuid::Uuid;
 
     use super::*;
 
@@ -853,7 +852,6 @@ mod tests {
             .unwrap();
 
         let server = McpServerManifest {
-            id: Uuid::new_v4(),
             name: "ralph_loop__review_server".to_string(),
             display_name: "ralph_loop:review_server".to_string(),
             description: Some("Review server".to_string()),

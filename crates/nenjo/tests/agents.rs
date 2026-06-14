@@ -130,7 +130,7 @@ impl ToolFactory for EchoToolFactory {
 
 fn test_manifest() -> Manifest {
     let model = ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("mock", "mock-llm-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-llm-v1".into(),
@@ -140,9 +140,8 @@ fn test_manifest() -> Manifest {
     };
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "test-coder".into(),
-        slug: None,
+        slug: Slug::derive("test-coder"),
         description: Some("A test coding agent".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a helpful coding assistant.".into(),
@@ -174,14 +173,12 @@ fn test_manifest() -> Manifest {
         agents: vec![agent],
         models: vec![model],
         projects: vec![ProjectManifest {
-            id: Uuid::new_v4(),
             name: "test-project".into(),
             slug: Slug::derive("test-project"),
             description: Some("A test project".into()),
             settings: serde_json::Value::Null,
         }],
         context_blocks: vec![ContextBlockManifest {
-            id: Uuid::new_v4(),
             name: "agent_notes".into(),
             path: "nenjo".into(),
             description: None,
@@ -455,7 +452,6 @@ async fn instance_renders_self_prompt_var() {
 
 fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
     AbilityManifest {
-        id: Uuid::new_v4(),
         name: name.into(),
         path: None,
         description: Some(format!("{name} ability")),
@@ -480,7 +476,6 @@ fn domain_manifest_with_config(
     mcp_servers: Vec<Slug>,
 ) -> DomainManifest {
     DomainManifest {
-        id: Uuid::new_v4(),
         name: name.into(),
         path: String::new(),
         description: Some(format!("{name} domain")),
@@ -503,7 +498,7 @@ fn manifest_with_abilities_and_domains(
     domains: Vec<DomainManifest>,
 ) -> Manifest {
     let model = ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("mock", "mock-llm-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-llm-v1".into(),
@@ -513,9 +508,8 @@ fn manifest_with_abilities_and_domains(
     };
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "test-agent".into(),
-        slug: None,
+        slug: Slug::derive("test-agent"),
         description: Some("Test agent".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a test agent.".into(),
@@ -545,7 +539,6 @@ fn manifest_with_abilities_and_domains(
         abilities,
         domains,
         projects: vec![ProjectManifest {
-            id: Uuid::new_v4(),
             name: "test-project".into(),
             slug: Slug::derive("test-project"),
             description: None,
@@ -964,7 +957,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
 
 #[tokio::test]
 async fn domain_expansion_tracks_active_domain_without_available_context() {
-    let github_id = Uuid::new_v4();
+    let _github_id = Uuid::new_v4();
     let domain = domain_manifest_with_config(
         "github",
         Some("GitHub mode"),
@@ -982,7 +975,6 @@ async fn domain_expansion_tracks_active_domain_without_available_context() {
     manifest
         .mcp_servers
         .push(nenjo::manifest::McpServerManifest {
-            id: github_id,
             name: "github".into(),
             display_name: "GitHub".into(),
             description: Some("GitHub API".into()),

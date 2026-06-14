@@ -8,7 +8,6 @@ use serde_json::Value;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::Slug;
 use crate::agents::AgentExecutionMode;
@@ -116,7 +115,7 @@ pub(crate) struct SubAgentRuntime<P: ProviderRuntime> {
 
 struct RuntimeInner<P: ProviderRuntime> {
     provider: P,
-    parent_agent_id: Uuid,
+    parent_agent_slug: Slug,
     parent_model_manifest: ModelManifest,
     inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
@@ -167,7 +166,7 @@ impl<P: ProviderRuntime> Clone for ChildRuntimeHandle<P> {
 impl<P: ProviderRuntime> SubAgentRuntime<P> {
     pub(crate) fn new(
         provider: P,
-        parent_agent_id: Uuid,
+        parent_agent_slug: Slug,
         parent_model_manifest: ModelManifest,
         inherited_host_tools: Vec<Arc<dyn Tool>>,
         limits: SubAgentLimits,
@@ -179,7 +178,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
         Self {
             inner: Arc::new(RuntimeInner {
                 provider,
-                parent_agent_id,
+                parent_agent_slug,
                 parent_model_manifest,
                 inherited_host_tools,
                 delegation_ctx,
@@ -244,7 +243,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let child_ctx = self
             .inner
             .delegation_ctx
-            .child(self.inner.parent_agent_id)
+            .child(&self.inner.parent_agent_slug)
             .ok_or_else(|| SubAgentError::DepthLimit(request.agent_name.clone()))?;
 
         let slug = self.reserve_slug(&request).await?;
@@ -708,6 +707,12 @@ fn ephemeral_agent_manifest(
 
     AgentManifest::builder()
         .with_name(request.agent_name.clone())
+        .with_slug(
+            request
+                .slug
+                .clone()
+                .unwrap_or_else(|| Slug::derive_with_fallback(&request.agent_name, "sub_agent")),
+        )
         .with_model(model)
         .with_system_prompt(prompt)
         .with_developer_prompt(

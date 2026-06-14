@@ -715,9 +715,8 @@ mod tests {
     fn test_instance_with_active_domain() -> AgentInstance {
         AgentInstance {
             manifest: AgentManifest {
-                id: uuid::Uuid::new_v4(),
                 name: "nenji".into(),
-                slug: Some(crate::Slug::derive("nenji")),
+                slug: crate::Slug::derive("nenji"),
                 description: Some("system agent".into()),
                 prompt_config: PromptConfig {
                     system_prompt: "caller system".into(),
@@ -736,8 +735,8 @@ mod tests {
                 heartbeat: None,
             },
             model_manifest: crate::manifest::ModelManifest {
-                id: uuid::Uuid::new_v4(),
                 name: "mock".into(),
+                slug: crate::Slug::derive("mock"),
                 description: None,
                 model: "mock".into(),
                 model_provider: "mock".into(),
@@ -746,7 +745,7 @@ mod tests {
             },
             model: AgentModel {
                 model_name: "mock".into(),
-                id: uuid::Uuid::new_v4(),
+                model_slug: crate::Slug::derive("mock"),
                 temperature: 0.2,
                 model_provider: Arc::new(NoopProvider),
             },
@@ -755,7 +754,6 @@ mod tests {
                     agent_name: "nenji".into(),
                     agent_description: "system agent".into(),
                     current_project: crate::manifest::ProjectManifest {
-                        id: uuid::Uuid::nil(),
                         name: String::new(),
                         slug: crate::Slug::derive("project"),
                         description: None,
@@ -763,10 +761,9 @@ mod tests {
                     },
                     active_domain: Some(ActiveDomain {
                         session_id: uuid::Uuid::new_v4(),
-                        domain_id: uuid::Uuid::new_v4(),
+                        domain_slug: crate::Slug::derive("creator"),
                         domain_name: "creator".into(),
                         manifest: DomainManifest {
-                            id: uuid::Uuid::new_v4(),
                             name: "creator".into(),
                             path: "nenjo/creator".into(),
                             description: None,
@@ -805,7 +802,6 @@ mod tests {
         caller.manifest.abilities = vec!["caller_ability".into()];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -853,7 +849,6 @@ mod tests {
         caller.manifest.abilities = vec!["caller_ability".into()];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "isolated".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Runs isolated".into()),
@@ -902,7 +897,6 @@ mod tests {
             },
         ]);
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -950,7 +944,6 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -996,7 +989,6 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1028,7 +1020,6 @@ mod tests {
     #[test]
     fn use_ability_schema_requires_self_contained_input() {
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1061,7 +1052,6 @@ mod tests {
     #[tokio::test]
     async fn list_assigned_abilities_returns_all_assigned_ability_metadata() {
         let review = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "Code Review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1077,7 +1067,6 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let docs = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "Search Docs!".into(),
             path: Some("docs".into()),
             description: None,
@@ -1119,7 +1108,6 @@ mod tests {
     #[test]
     fn duplicate_ability_ids_are_rejected() {
         let first = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "code_review".into(),
             path: Some("frontend".into()),
             description: None,
@@ -1135,7 +1123,6 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let second = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "code_review".into(),
             path: Some("backend".into()),
             description: None,

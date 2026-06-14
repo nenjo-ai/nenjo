@@ -297,7 +297,7 @@ fn chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 async fn stream_turn_output<P>(
     runner: &AgentRunner<P>,
     task: AgentRun,
-    step_id: Uuid,
+    step_slug: crate::Slug,
     step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput>
@@ -307,7 +307,7 @@ where
     let mut handle = runner.run_stream(task).await?;
     while let Some(event) = handle.recv().await {
         let _ = events_tx.send(RoutineEvent::AgentEvent {
-            step_id,
+            step_slug: step_slug.clone(),
             step_run_id,
             event,
         });
@@ -319,7 +319,7 @@ pub async fn execute_with_pass_verdict<P>(
     runner: &AgentRunner<P>,
     task: AgentRun,
     project: Option<crate::Slug>,
-    step_id: Uuid,
+    step_slug: crate::Slug,
     step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<TurnOutput>
@@ -333,8 +333,14 @@ where
     let mut total_tool_calls = 0u32;
 
     loop {
-        let output =
-            stream_turn_output(runner, pending_task, step_id, step_run_id, events_tx).await?;
+        let output = stream_turn_output(
+            runner,
+            pending_task,
+            step_slug.clone(),
+            step_run_id,
+            events_tx,
+        )
+        .await?;
         total_input_tokens += output.input_tokens;
         total_output_tokens += output.output_tokens;
         total_tool_calls += output.tool_calls;

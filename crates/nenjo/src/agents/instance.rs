@@ -12,6 +12,7 @@ use crate::hooks::HookRuntime;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
 use crate::manifest::{AgentManifest, ModelManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime};
+use crate::slug::Slug;
 use crate::tools::{Tool, ToolSecurity, ToolSpec};
 use crate::types::DelegationContext;
 
@@ -52,7 +53,7 @@ pub struct AgentInstance<P: ProviderRuntime = ErasedProvider> {
 /// Model provider binding selected for an agent instance.
 pub(crate) struct AgentModel<P: ProviderRuntime = ErasedProvider> {
     pub(crate) model_name: String,
-    pub(crate) id: Uuid,
+    pub(crate) model_slug: Slug,
     pub(crate) temperature: f64,
     pub(crate) model_provider: Arc<P::Model<'static>>,
 }
@@ -87,7 +88,7 @@ impl<P: ProviderRuntime> Clone for AgentModel<P> {
     fn clone(&self) -> Self {
         Self {
             model_name: self.model_name.clone(),
-            id: self.id,
+            model_slug: self.model_slug.clone(),
             temperature: self.temperature,
             model_provider: self.model_provider.clone(),
         }
@@ -124,7 +125,7 @@ impl<P: ProviderRuntime> std::fmt::Debug for AgentInstance<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentInstance")
             .field("name", &self.manifest.name)
-            .field("model_id", &self.model.id)
+            .field("model_slug", &self.model.model_slug)
             .field("model", &self.model.model_name)
             .field("temperature", &self.model.temperature)
             .field("tools_count", &self.runtime.tools.len())
@@ -143,9 +144,9 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         self.manifest.description.as_deref().unwrap_or_default()
     }
 
-    /// Agent manifest ID.
-    pub fn agent_id(&self) -> Uuid {
-        self.manifest.id
+    /// Agent manifest slug.
+    pub fn agent_slug(&self) -> &Slug {
+        &self.manifest.slug
     }
 
     /// Prompt configuration from the agent manifest.
@@ -163,9 +164,9 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         &self.model.model_name
     }
 
-    /// Model manifest ID selected for this instance.
-    pub fn model_id(&self) -> Uuid {
-        self.model.id
+    /// Model manifest slug selected for this instance.
+    pub fn model_slug(&self) -> &Slug {
+        &self.model.model_slug
     }
 
     /// Model temperature selected for this instance.

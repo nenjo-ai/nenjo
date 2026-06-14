@@ -338,9 +338,6 @@ pub fn skill_matches_selector(skill: &SkillManifest, selector: &str) -> bool {
         return false;
     }
     let selector_slug = Slug::derive(selector);
-    if skill.id.to_string() == selector {
-        return true;
-    }
     std::iter::once(skill.name.as_str())
         .chain(skill.display_name.as_deref())
         .chain(skill.aliases.iter().map(String::as_str))

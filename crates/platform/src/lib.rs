@@ -26,6 +26,8 @@ pub mod manifest_mcp;
 /// Access-policy helpers for filtering manifest resources by platform scopes.
 pub mod policy;
 mod prompt_merge;
+/// Platform-private resource id sidecar used for encrypted write metadata.
+pub mod resource_ids;
 /// REST tool specs shared by worker-side REST-backed tooling.
 pub mod rest;
 /// Platform scope parsing and implication rules.
@@ -76,11 +78,12 @@ pub use manifest_mcp::{
     ModelsListResult, ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams,
     ProjectDocument, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
     ProjectSummary, ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams,
-    ProjectsListResult, ResourceRef, RoutineCreateDocument, RoutineCreateParams,
-    RoutineDeleteParams, RoutineDocument, RoutineEdgeInput, RoutineGetResult, RoutineGraphInput,
-    RoutineManifestBackend, RoutineMutationResult, RoutineStepInput, RoutineSummary,
-    RoutineUpdateDocument, RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
+    ProjectsListResult, RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams,
+    RoutineDocument, RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
+    RoutineMutationResult, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
+    RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
 };
 pub use policy::ManifestAccessPolicy;
+pub use resource_ids::{PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind};
 pub use scope::{PlatformScope, ScopeAction, ScopeResource};
 pub use types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};

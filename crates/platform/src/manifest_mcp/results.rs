@@ -1,7 +1,6 @@
 //! Result payload types returned by manifest MCP tools.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
@@ -50,7 +49,6 @@ pub struct AgentPromptMutationResult {
 /// Result for delete operations.
 pub struct DeleteResult {
     pub deleted: bool,
-    pub id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

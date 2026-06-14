@@ -164,8 +164,8 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
         let agent_id = manifest
             .agents
             .iter()
-            .find(|item| nenjo::Slug::derive(&item.name) == agent)
-            .map(|item| item.id)
+            .any(|item| item.slug == agent)
+            .then(|| crate::resource_resolver::stable_resource_id("agent", &agent))
             .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
         self.ctx
             .harness

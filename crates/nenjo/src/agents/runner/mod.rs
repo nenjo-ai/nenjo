@@ -184,9 +184,9 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.instance.name()
     }
 
-    /// The agent's manifest ID.
-    pub fn agent_id(&self) -> Uuid {
-        self.instance.agent_id()
+    /// The agent's manifest slug.
+    pub fn agent_slug(&self) -> &crate::Slug {
+        self.instance.agent_slug()
     }
 
     /// Create a runner from a pre-built instance.
@@ -256,7 +256,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         // Build the active domain session state.
         let active_domain = ActiveDomain {
             session_id: Uuid::new_v4(),
-            domain_id: domain.id,
+            domain_slug: domain.slug().clone(),
             domain_name: domain.name.clone(),
             manifest: session_manifest.clone(),
         };
@@ -412,7 +412,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .collect();
             let runtime = SubAgentRuntime::new(
                 provider,
-                inst.agent_id(),
+                inst.agent_slug().clone(),
                 inst.model_manifest.clone(),
                 inherited_host_tools,
                 SubAgentLimits {

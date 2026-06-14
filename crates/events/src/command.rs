@@ -287,6 +287,10 @@ pub enum Command {
     /// or deleted. The harness should re-fetch the affected resource.
     #[serde(rename = "manifest.changed")]
     ManifestChanged {
+        #[serde(default = "default_manifest_changed_schema")]
+        schema: String,
+        #[serde(default, skip_serializing_if = "Uuid::is_nil")]
+        resource_id: Uuid,
         resource_type: ResourceType,
         resource: String,
         action: ResourceAction,
@@ -308,6 +312,10 @@ pub enum Command {
     /// manifests from the installed package tree.
     #[serde(rename = "package.graph_changed")]
     PackageGraphChanged { packages: PackageGraphUpdate },
+}
+
+fn default_manifest_changed_schema() -> String {
+    "manifest.changed.v1".to_string()
 }
 
 impl std::fmt::Display for Command {
@@ -493,6 +501,8 @@ mod tests {
         );
         assert_eq!(
             Command::ManifestChanged {
+                schema: "manifest.changed.v1".into(),
+                resource_id: Uuid::nil(),
                 resource_type: ResourceType::Agent,
                 resource: "demo_agent".into(),
                 action: ResourceAction::Updated,

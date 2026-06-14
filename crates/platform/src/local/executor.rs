@@ -8,9 +8,9 @@ use nenjo::{
     ManifestReader, ManifestResource, ManifestResourceKind, ManifestWriter, Slug,
     manifest::{
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
-        CouncilManifest, CouncilMemberManifest, DomainManifest, ModelManifest, ProjectManifest,
-        PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest,
-        RoutineTrigger,
+        CouncilManifest, CouncilMemberManifest, DomainManifest, HasManifestSlug, ModelManifest,
+        ProjectManifest, PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
+        RoutineStepManifest, RoutineTrigger,
     },
 };
 use nenjo_knowledge::tools::{
@@ -46,9 +46,9 @@ use crate::manifest_mcp::{
     ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
     ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
     ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
-    ProjectsGetParams, ProjectsListResult, ResourceRef, RoutineDeleteParams, RoutineDocument,
-    RoutineGetResult, RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult,
-    RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
+    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
+    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
+    RoutinesGetParams, RoutinesListResult,
 };
 use crate::prompt_merge::merge_prompt_config;
 use crate::{
@@ -57,7 +57,6 @@ use crate::{
 };
 
 fn graph_input_to_manifest_parts(
-    _routine_id: uuid::Uuid,
     routine: Slug,
     mut metadata: RoutineMetadata,
     graph: Option<RoutineGraphInput>,
@@ -70,21 +69,12 @@ fn graph_input_to_manifest_parts(
         return (Vec::new(), Vec::new(), metadata);
     };
 
-    let step_ids: std::collections::HashMap<Slug, uuid::Uuid> = graph
-        .steps
-        .iter()
-        .map(|step| (step.slug.clone(), uuid::Uuid::new_v4()))
-        .collect();
-
     metadata.entry_steps = graph.entry_steps.clone();
 
     let steps = graph
         .steps
         .into_iter()
         .map(|step| RoutineStepManifest {
-            id: *step_ids
-                .get(&step.slug)
-                .expect("step id mapping should exist"),
             slug: step.slug,
             routine: routine.clone(),
             name: step.name,
@@ -100,7 +90,6 @@ fn graph_input_to_manifest_parts(
         .edges
         .into_iter()
         .map(|edge| RoutineEdgeManifest {
-            id: uuid::Uuid::new_v4(),
             routine: routine.clone(),
             source_step: edge.source_step,
             target_step: edge.target_step,
@@ -217,21 +206,13 @@ where
     R: ManifestReader + Send + Sync,
     W: ManifestWriter + Send + Sync,
 {
-    async fn resolve_ability(&self, ability_ref: &ResourceRef) -> Result<AbilityManifest> {
-        match ability_ref {
-            ResourceRef::Id(id) => self
-                .reader
-                .get_ability(*id)
-                .await?
-                .ok_or_else(|| anyhow!("ability not found: {}", ability_ref)),
-            ResourceRef::Slug(name) => self
-                .reader
-                .list_abilities()
-                .await?
-                .into_iter()
-                .find(|ability| ability.name == *name)
-                .ok_or_else(|| anyhow!("ability not found: {}", ability_ref)),
-        }
+    async fn resolve_ability(&self, ability_ref: &Slug) -> Result<AbilityManifest> {
+        self.reader
+            .list_abilities()
+            .await?
+            .into_iter()
+            .find(|ability| Slug::derive(&ability.name) == *ability_ref)
+            .ok_or_else(|| anyhow!("ability not found: {}", ability_ref))
     }
 }
 
@@ -347,10 +328,10 @@ where
     }
 
     async fn create_agent(&self, params: AgentCreateParams) -> Result<AgentMutationResult> {
+        let name = params.data.name;
         let agent = AgentManifest {
-            id: uuid::Uuid::new_v4(),
-            name: params.data.name,
-            slug: None,
+            slug: Slug::derive(&name),
+            name,
             description: params.data.description,
             prompt_config: PromptConfig::default(),
             color: params.data.color,
@@ -423,12 +404,9 @@ where
     async fn delete_agent(&self, params: AgentDeleteParams) -> Result<DeleteResult> {
         let agent = local_agent_by_slug(self.reader.as_ref(), &params.agent).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Agent, agent.id)
+            .delete_resource(ManifestResourceKind::Agent, &agent.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: agent.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -468,7 +446,6 @@ where
 
     async fn create_ability(&self, params: AbilityCreateParams) -> Result<AbilityMutationResult> {
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: if params.data.path.is_empty() {
                 None
@@ -540,12 +517,9 @@ where
     async fn delete_ability(&self, params: AbilityDeleteParams) -> Result<DeleteResult> {
         let ability = self.resolve_ability(&params.ability).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Ability, ability.id)
+            .delete_resource(ManifestResourceKind::Ability, &ability.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: ability.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -585,7 +559,6 @@ where
 
     async fn create_domain(&self, params: DomainCreateParams) -> Result<DomainMutationResult> {
         let domain = DomainManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
             description: params.data.description,
@@ -652,12 +625,9 @@ where
     async fn delete_domain(&self, params: DomainDeleteParams) -> Result<DeleteResult> {
         let domain = local_domain_by_slug(self.reader.as_ref(), &params.domain).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Domain, domain.id)
+            .delete_resource(ManifestResourceKind::Domain, &domain.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: domain.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -693,7 +663,6 @@ where
             obj.insert("repo_url".into(), serde_json::json!(repo_url));
         }
         let project = ProjectManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name.clone(),
             slug: params.data.slug,
             description: params.data.description,
@@ -746,12 +715,9 @@ where
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
         let project = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Project, project.id)
+            .delete_resource(ManifestResourceKind::Project, &project.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: project.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -816,24 +782,22 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
+        let routine = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         Ok(RoutineGetResult {
             routine: RoutineDocument::from(routine),
         })
     }
 
     async fn create_routine(&self, params: RoutineCreateParams) -> Result<RoutineMutationResult> {
-        let routine_id = uuid::Uuid::new_v4();
         let routine_slug = Slug::derive(&params.data.name);
         let (steps, edges, metadata) = graph_input_to_manifest_parts(
-            routine_id,
             routine_slug.clone(),
             params.data.metadata.unwrap_or_default(),
             params.data.graph,
         );
         let routine = RoutineManifest {
-            id: routine_id,
             name: params.data.name,
+            slug: routine_slug,
             description: params.data.description,
             trigger: params.data.trigger.unwrap_or(RoutineTrigger::Task),
             metadata,
@@ -854,9 +818,10 @@ where
                 "routine update requires at least one field in data"
             ));
         }
-        let existing = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
+        let existing = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         let mut routine = existing.clone();
         if let Some(name) = params.data.name {
+            routine.slug = Slug::derive(&name);
             routine.name = name;
         }
         if let Some(description) = params.data.description {
@@ -870,8 +835,7 @@ where
         }
         if let Some(graph) = params.data.graph {
             let (steps, edges, metadata) = graph_input_to_manifest_parts(
-                routine.id,
-                Slug::derive(&routine.name),
+                routine.slug().clone(),
                 routine.metadata.clone(),
                 Some(graph),
             );
@@ -888,14 +852,11 @@ where
     }
 
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
-        let routine = local_routine_by_slug(self.reader.as_ref(), &params.routine).await?;
+        let routine = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Routine, routine.id)
+            .delete_resource(ManifestResourceKind::Routine, &routine.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: routine.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -926,8 +887,11 @@ where
 
     async fn create_model(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
         let model = ModelManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
+            slug: nenjo::manifest::model_manifest_slug(
+                params.data.model_provider.as_deref().unwrap_or("openai"),
+                &params.data.model,
+            ),
             description: params.data.description,
             model: params.data.model,
             model_provider: params
@@ -977,12 +941,9 @@ where
     async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
         let model = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Model, model.id)
+            .delete_resource(ManifestResourceKind::Model, &model.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: model.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1013,7 +974,6 @@ where
 
     async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
         let council = CouncilManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             delegation_strategy: params
                 .data
@@ -1126,12 +1086,9 @@ where
     async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
         let council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Council, council.id)
+            .delete_resource(ManifestResourceKind::Council, &council.manifest_slug())
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: council.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1180,7 +1137,6 @@ where
         params: ContextBlockCreateParams,
     ) -> Result<ContextBlockMutationResult> {
         let context_block = ContextBlockManifest {
-            id: uuid::Uuid::new_v4(),
             name: params.data.name,
             path: params.data.path,
             description: params.data.description,
@@ -1235,12 +1191,12 @@ where
         let context_block =
             local_context_block_by_slug(self.reader.as_ref(), &params.context_block).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::ContextBlock, context_block.id)
+            .delete_resource(
+                ManifestResourceKind::ContextBlock,
+                &context_block.manifest_slug(),
+            )
             .await?;
-        Ok(DeleteResult {
-            deleted: true,
-            id: context_block.id,
-        })
+        Ok(DeleteResult { deleted: true })
     }
 }
 
@@ -1249,7 +1205,6 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::tempdir;
-    use uuid::Uuid;
 
     use nenjo::manifest::local::LocalManifestStore;
     use nenjo::manifest::{
@@ -1290,7 +1245,7 @@ mod tests {
 
     fn sample_manifest() -> SampleManifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: Slug::derive("test-model"),
             name: "test-model".into(),
             description: None,
             model: "gpt-4o".into(),
@@ -1300,7 +1255,7 @@ mod tests {
         };
 
         let alt_model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: Slug::derive("reasoner"),
             name: "reasoner".into(),
             description: Some("Reasoning model".into()),
             model: "gpt-5".into(),
@@ -1310,9 +1265,8 @@ mod tests {
         };
 
         let agent = AgentManifest {
-            id: Uuid::new_v4(),
             name: "coder".into(),
-            slug: None,
+            slug: Slug::derive("coder"),
             description: Some("writes code".into()),
             prompt_config: PromptConfig {
                 system_prompt: "You are a coding agent.".into(),
@@ -1336,7 +1290,6 @@ mod tests {
         };
 
         let ability = AbilityManifest {
-            id: Uuid::new_v4(),
             name: "review_helper".into(),
             path: Some("team/core".into()),
             description: Some("Helps review code".into()),
@@ -1353,7 +1306,6 @@ mod tests {
         };
 
         let domain = DomainManifest {
-            id: Uuid::new_v4(),
             name: "creator".into(),
             path: "team".into(),
             description: Some("Creates new resources".into()),
@@ -1368,7 +1320,6 @@ mod tests {
         };
 
         let project = ProjectManifest {
-            id: Uuid::new_v4(),
             name: "workspace".into(),
             slug: Slug::derive("workspace"),
             description: Some("Main working project".into()),
@@ -1377,11 +1328,9 @@ mod tests {
             }),
         };
 
-        let routine_id = Uuid::new_v4();
-        let step_id = Uuid::new_v4();
         let routine = RoutineManifest {
-            id: routine_id,
             name: "nightly-build".into(),
+            slug: Slug::derive("nightly-build"),
             description: Some("Runs the nightly build".into()),
             trigger: RoutineTrigger::Cron,
             metadata: nenjo::manifest::RoutineMetadata {
@@ -1389,7 +1338,6 @@ mod tests {
                 entry_steps: vec![Slug::derive("compile")],
             },
             steps: vec![RoutineStepManifest {
-                id: step_id,
                 slug: Slug::derive("compile"),
                 routine: Slug::derive("nightly-build"),
                 name: "compile".into(),
@@ -1400,7 +1348,6 @@ mod tests {
                 order_index: 0,
             }],
             edges: vec![RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("nightly-build"),
                 source_step: Slug::derive("compile"),
                 target_step: Slug::derive("compile"),
@@ -1410,7 +1357,6 @@ mod tests {
         };
 
         let council = CouncilManifest {
-            id: Uuid::new_v4(),
             name: "triage".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
             leader_agent: Slug::derive(&agent.name),
@@ -1421,7 +1367,6 @@ mod tests {
         };
 
         let context_block = ContextBlockManifest {
-            id: Uuid::new_v4(),
             name: "repo_summary".into(),
             path: "team/core".into(),
             description: Some("Summarizes the current repository.".into()),
@@ -1490,7 +1435,7 @@ mod tests {
 
         let list = backend.list_agents().await.unwrap();
         assert_eq!(list.agents.len(), 1);
-        assert_eq!(list.agents[0].id, agent.id);
+        assert_eq!(list.agents[0].name, agent.name);
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["agents"][0].get("domains").is_none());
         assert!(list_value["agents"][0].get("abilities").is_none());
@@ -1520,7 +1465,6 @@ mod tests {
             ..
         } = sample_manifest();
         manifest.agents[0].heartbeat = Some(nenjo::manifest::AgentHeartbeatManifest {
-            id: Uuid::new_v4(),
             agent: Slug::derive(&agent.name),
             interval: "5m".into(),
             is_active: true,
@@ -1772,11 +1716,11 @@ mod tests {
 
         let list = backend.list_abilities().await.unwrap();
         assert_eq!(list.abilities.len(), 1);
-        assert_eq!(list.abilities[0].id, ability.id);
+        assert_eq!(list.abilities[0].name, ability.name);
 
         let get = backend
             .get_ability(AbilitiesGetParams {
-                ability: ResourceRef::Id(ability.id),
+                ability: Slug::derive(&ability.name),
             })
             .await
             .unwrap();
@@ -1792,7 +1736,7 @@ mod tests {
 
         let get = backend
             .get_ability_prompt(AbilityPromptGetParams {
-                ability: ResourceRef::Id(ability.id),
+                ability: Slug::derive(&ability.name),
             })
             .await
             .unwrap();
@@ -1811,7 +1755,7 @@ mod tests {
 
         let result = backend
             .update_ability(AbilityUpdateParams {
-                ability: ResourceRef::Id(ability.id),
+                ability: Slug::derive(&ability.name),
                 data: crate::AbilityUpdateDocument {
                     name: None,
                     description: None,
@@ -1842,7 +1786,7 @@ mod tests {
             &backend,
             "update_ability",
             serde_json::json!({
-                "ability": ability.id,
+                "ability": ability.name,
                 "description": "Updated",
                 "platform_scopes": ["projects:write"]
             }),
@@ -1868,7 +1812,7 @@ mod tests {
 
         let result = backend
             .update_ability_prompt(AbilityPromptUpdateParams {
-                ability: ResourceRef::Id(ability.id),
+                ability: Slug::derive(&ability.name),
                 prompt_config: AbilityPromptConfig {
                     developer_prompt: "New review prompt".into(),
                 },
@@ -1887,7 +1831,7 @@ mod tests {
 
         let list = backend.list_domains().await.unwrap();
         assert_eq!(list.domains.len(), 1);
-        assert_eq!(list.domains[0].id, domain.id);
+        assert_eq!(list.domains[0].slug, domain.slug());
 
         let get = backend
             .get_domain(DomainsGetParams {
@@ -2004,7 +1948,7 @@ mod tests {
             &backend,
             "update_ability",
             serde_json::json!({
-                "ability": ability.id,
+                "ability": ability.name,
                 "description": "Improved review helper"
             }),
         )
@@ -2019,7 +1963,7 @@ mod tests {
             &backend,
             "update_ability_prompt",
             serde_json::json!({
-                "ability": ability.id,
+                "ability": ability.name,
                 "prompt_config": {
                     "developer_prompt": "Upgraded prompt"
                 }
@@ -2073,7 +2017,7 @@ mod tests {
 
         let list = backend.list_projects().await.unwrap();
         assert_eq!(list.projects.len(), 1);
-        assert_eq!(list.projects[0].id, project.id);
+        assert_eq!(list.projects[0].slug, project.slug);
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["projects"][0].get("settings").is_none());
 
@@ -2098,7 +2042,7 @@ mod tests {
                 project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: Some("workspace-v2".into()),
-                    slug: None,
+                    slug: Some(Slug::derive("test-agent")),
                     description: None,
                     repo_url: None,
                 },
@@ -2128,7 +2072,7 @@ mod tests {
                 project: project.slug.clone(),
                 data: crate::ProjectUpdateDocument {
                     name: None,
-                    slug: None,
+                    slug: Some(Slug::derive("test-agent")),
                     description: Some(None),
                     repo_url: None,
                 },
@@ -2171,21 +2115,30 @@ mod tests {
 
         let list = backend.list_routines().await.unwrap();
         assert_eq!(list.routines.len(), 1);
-        assert_eq!(list.routines[0].id, routine.id);
+        assert_eq!(list.routines[0].slug, routine.slug().clone());
         let list_value = serde_json::to_value(&list).unwrap();
+        assert!(list_value["routines"][0].get("id").is_none());
+        assert_eq!(
+            list_value["routines"][0]["slug"],
+            serde_json::json!("nightly-build")
+        );
         assert!(list_value["routines"][0].get("metadata").is_none());
         assert!(list_value["routines"][0].get("steps").is_none());
         assert!(list_value["routines"][0].get("edges").is_none());
 
         let get = backend
             .get_routine(RoutinesGetParams {
-                routine: Slug::derive(&routine.name),
+                slug: Slug::derive(&routine.name),
             })
             .await
             .unwrap();
         assert_eq!(get.routine.summary.name, "nightly-build");
         assert_eq!(get.routine.summary.trigger, RoutineTrigger::Cron);
         assert_eq!(get.routine.steps.len(), 1);
+        let get_value = serde_json::to_value(&get).unwrap();
+        assert!(get_value["routine"].get("id").is_none());
+        assert!(get_value["routine"]["steps"][0].get("id").is_none());
+        assert!(get_value["routine"]["edges"][0].get("id").is_none());
     }
 
     #[tokio::test]
@@ -2196,7 +2149,7 @@ mod tests {
 
         let result = backend
             .update_routine(RoutineUpdateParams {
-                routine: Slug::derive(&routine.name),
+                slug: Slug::derive(&routine.name),
                 data: crate::RoutineUpdateDocument {
                     name: Some("nightly-release".into()),
                     description: None,
@@ -2209,6 +2162,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.routine.summary.name, "nightly-release");
+        assert_eq!(result.routine.summary.slug, Slug::derive("nightly-release"));
         assert_eq!(
             result.routine.summary.description,
             Some("Runs the nightly build".into())
@@ -2232,7 +2186,7 @@ mod tests {
 
         let result = backend
             .update_routine(RoutineUpdateParams {
-                routine: Slug::derive(&routine.name),
+                slug: Slug::derive(&routine.name),
                 data: crate::RoutineUpdateDocument {
                     name: None,
                     description: Some(None),
@@ -2258,7 +2212,7 @@ mod tests {
             &backend,
             "update_routine",
             serde_json::json!({
-                "routine": Slug::derive(&routine.name),
+                "slug": Slug::derive(&routine.name),
                 "metadata": {
                     "schedule": "0 6 * * *",
                     "entry_steps": [routine.steps[0].slug]
@@ -2330,7 +2284,7 @@ mod tests {
 
         let updated = backend
             .update_routine(RoutineUpdateParams {
-                routine: Slug::derive(&created.routine.summary.name),
+                slug: created.routine.summary.slug.clone(),
                 data: crate::RoutineUpdateDocument {
                     name: None,
                     description: None,
@@ -2365,12 +2319,16 @@ mod tests {
 
         let list = backend.list_models().await.unwrap();
         assert_eq!(list.models.len(), 2);
-        assert!(list.models.iter().any(|m| m.id == model.id));
+        assert!(
+            list.models
+                .iter()
+                .any(|m| m.model == model.model && m.model_provider == model.model_provider)
+        );
         let reasoner = serde_json::to_value(&list).unwrap()["models"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|item| item["id"] == serde_json::json!(model.id))
+            .find(|item| item["name"] == serde_json::json!(model.name))
             .cloned()
             .unwrap();
         assert!(reasoner.get("temperature").is_none());
@@ -2468,7 +2426,7 @@ mod tests {
 
         let list = backend.list_councils().await.unwrap();
         assert_eq!(list.councils.len(), 1);
-        assert_eq!(list.councils[0].id, council.id);
+        assert_eq!(list.councils[0].name, council.name);
         let list_value = serde_json::to_value(&list).unwrap();
         assert!(list_value["councils"][0].get("members").is_none());
 
@@ -2599,7 +2557,16 @@ mod tests {
 
         let list = backend.list_context_blocks().await.unwrap();
         assert_eq!(list.context_blocks.len(), 1);
-        assert_eq!(list.context_blocks[0].id, context_block.id);
+        assert_eq!(list.context_blocks[0].name, context_block.name);
+        assert_eq!(list.context_blocks[0].slug, context_block.slug());
+        assert_eq!(
+            list.context_blocks[0].slug.as_str(),
+            "team-core-repo_summary"
+        );
+        assert_eq!(
+            list.context_blocks[0].selector,
+            "{{ team.core.repo_summary }}"
+        );
         assert!(
             serde_json::to_value(&list).unwrap()["context_blocks"][0]
                 .get("template")
@@ -2613,6 +2580,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get.context_block.summary.name, "repo_summary");
+        assert_eq!(get.context_block.summary.slug, context_block.slug());
+        assert_eq!(
+            get.context_block.summary.selector,
+            "{{ team.core.repo_summary }}"
+        );
         assert!(
             serde_json::to_value(&get).unwrap()["context_block"]
                 .get("template")

@@ -60,10 +60,9 @@ async fn provider_with_manifest(manifest: Manifest) -> TestProvider {
         .expect("provider builds")
 }
 
-fn manifest_with_project(project_id: Uuid, slug: &str) -> Manifest {
+fn manifest_with_project(_project_id: Uuid, slug: &str) -> Manifest {
     Manifest {
         projects: vec![ProjectManifest {
-            id: project_id,
             name: "Alpha Project".to_string(),
             slug: Slug::derive(slug),
             description: None,

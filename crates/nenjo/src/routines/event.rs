@@ -2,6 +2,7 @@
 
 use uuid::Uuid;
 
+use crate::Slug;
 use crate::agents::runner::types::TurnEvent;
 use crate::routines::StepResult;
 
@@ -10,21 +11,19 @@ use crate::routines::StepResult;
 pub enum RoutineEvent {
     /// A step is about to execute.
     StepStarted {
-        /// Step manifest ID.
-        step_id: Uuid,
+        /// Step manifest slug.
+        step_slug: Slug,
         /// Unique ID for this step execution attempt.
         step_run_id: Uuid,
         /// Human-readable step name.
         step_name: String,
         /// Step type label.
         step_type: String,
-        /// Agent ID for agent-backed steps.
-        agent_id: Option<Uuid>,
     },
     /// A turn-loop event from an agent or gate step.
     AgentEvent {
-        /// Step manifest ID.
-        step_id: Uuid,
+        /// Step manifest slug.
+        step_slug: Slug,
         /// Unique ID for this step execution attempt.
         step_run_id: Uuid,
         /// Agent turn event emitted during the step.
@@ -32,8 +31,8 @@ pub enum RoutineEvent {
     },
     /// A step completed successfully.
     StepCompleted {
-        /// Step manifest ID.
-        step_id: Uuid,
+        /// Step manifest slug.
+        step_slug: Slug,
         /// Unique ID for this step execution attempt.
         step_run_id: Uuid,
         /// Step output.
@@ -43,8 +42,8 @@ pub enum RoutineEvent {
     },
     /// A step failed.
     StepFailed {
-        /// Step manifest ID.
-        step_id: Uuid,
+        /// Step manifest slug.
+        step_slug: Slug,
         /// Unique ID for this step execution attempt.
         step_run_id: Uuid,
         /// Error message.

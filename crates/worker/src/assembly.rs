@@ -412,7 +412,8 @@ fn build_platform_tool_services(
         platform_client,
         payload_encoder,
         cached_org_id,
-        config.config_dir.clone(),
+        config.workspace_dir.clone(),
+        config.config_dir.join("library"),
     )
 }
 

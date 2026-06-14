@@ -552,7 +552,7 @@ where
     let target_branch = manifest
         .projects
         .iter()
-        .find(|p| p.id == project_id)
+        .find(|p| crate::resource_resolver::stable_resource_id("project", &p.slug) == project_id)
         .and_then(|p| p.settings.get("target_branch"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
@@ -1135,9 +1135,9 @@ where
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
     // Track the current agent_id so step_completed events can carry it.
-    let mut current_agent_id: Option<uuid::Uuid> = None;
+    let current_agent_id: Option<uuid::Uuid> = None;
     let mut routine_passed = false;
-    let mut step_agents: std::collections::HashMap<uuid::Uuid, (uuid::Uuid, String)> =
+    let mut step_agents: std::collections::HashMap<uuid::Uuid, String> =
         std::collections::HashMap::new();
 
     loop {
@@ -1146,11 +1146,8 @@ where
                 match event {
                     Some(HarnessEvent::Routine { event: ev, .. }) => {
                         // Track agent identity across step events.
-                        if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, agent_id, .. } = &ev {
-                            current_agent_id = *agent_id;
-                            if let Some(agent_id) = agent_id {
-                                step_agents.insert(*step_run_id, (*agent_id, step_name.clone()));
-                            }
+                        if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, .. } = &ev {
+                            step_agents.insert(*step_run_id, step_name.clone());
                         }
                         // Track token totals from completed steps
                         if let nenjo::RoutineEvent::StepCompleted { result, .. } = &ev {
@@ -1160,24 +1157,17 @@ where
                         if let nenjo::RoutineEvent::Done { result, .. } = &ev {
                             routine_passed = result.passed;
                         }
-                        if let nenjo::RoutineEvent::AgentEvent { step_id, step_run_id, event } = &ev
-                            && let Some((agent_id, step_name)) = step_agents.get(step_run_id)
+                        if let nenjo::RoutineEvent::AgentEvent { step_slug, step_run_id, event } = &ev
+                            && let Some(step_name) = step_agents.get(step_run_id)
                         {
-                            let agent_name = harness.provider()
-                                .manifest_snapshot()
-                                .agents
-                                .iter()
-                                .find(|agent| agent.id == *agent_id)
-                                .map(|agent| agent.name.clone())
-                                .unwrap_or_else(|| "agent".to_string());
                             record_task_turn_event(
                                 harness,
                                 task_id,
-                                Some(*agent_id),
-                                Some(&agent_name),
+                                None,
+                                None,
                                 event,
                             );
-                            let _ = (step_id, step_name);
+                            let _ = (step_slug, step_name);
                             let _ = event;
                         }
                         if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, &harness.provider().manifest_snapshot()) {
@@ -1266,7 +1256,7 @@ where
                                     agent_color: manifest
                                         .agents
                                         .iter()
-                                        .find(|a| a.id == agent_id)
+                                        .find(|a| crate::resource_resolver::stable_resource_id("agent", &a.slug) == agent_id)
                                         .and_then(|a| a.color.clone()),
                                 }),
                                 routine_step: None,

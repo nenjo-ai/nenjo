@@ -119,7 +119,7 @@ where
 
     let mut current_step = entry_step.clone();
     let mut last_result = StepResult::default();
-    let mut edge_traversals: HashMap<Uuid, u32> = HashMap::new();
+    let mut edge_traversals: HashMap<String, u32> = HashMap::new();
     let max_iterations = steps.len() * 100;
 
     for iteration in 0..max_iterations {
@@ -142,7 +142,6 @@ where
         let step_run_id = Uuid::new_v4();
         state.current_step_name = Some(current_step.name.clone());
         state.current_step_type = Some(current_step.step_type.to_string());
-        state.current_agent_id = None;
         state.step_instructions = current_step
             .config
             .get("instructions")
@@ -167,11 +166,10 @@ where
 
         // Emit step started
         let _ = events_tx.send(RoutineEvent::StepStarted {
-            step_id: current_step.id,
+            step_slug: current_step.slug.clone(),
             step_run_id,
             step_name: current_step.name.clone(),
             step_type: current_step.step_type.to_string(),
-            agent_id: None,
         });
 
         // Execute the step
@@ -183,13 +181,13 @@ where
             Ok(step_result) => {
                 // Record metrics
                 state.metrics.record_step(
-                    current_step.id,
+                    &current_step.slug,
                     step_result.input_tokens,
                     step_result.output_tokens,
                 );
 
                 let _ = events_tx.send(RoutineEvent::StepCompleted {
-                    step_id: current_step.id,
+                    step_slug: current_step.slug.clone(),
                     step_run_id,
                     result: step_result.clone(),
                     duration_ms,
@@ -216,7 +214,7 @@ where
 
                 state
                     .step_results
-                    .insert(current_step.id, step_result.clone());
+                    .insert(current_step.slug.clone(), step_result.clone());
                 last_result = step_result;
             }
             Err(e) => {
@@ -224,7 +222,7 @@ where
                 warn!(step = %current_step.name, error = %error_msg, "Step failed");
 
                 let _ = events_tx.send(RoutineEvent::StepFailed {
-                    step_id: current_step.id,
+                    step_slug: current_step.slug.clone(),
                     step_run_id,
                     error: error_msg.clone(),
                     duration_ms,
@@ -233,13 +231,13 @@ where
                 last_result = StepResult {
                     passed: false,
                     output: error_msg,
-                    step_id: current_step.id,
+                    step_slug: current_step.slug.clone(),
                     step_name: current_step.name.clone(),
                     ..Default::default()
                 };
                 state
                     .step_results
-                    .insert(current_step.id, last_result.clone());
+                    .insert(current_step.slug.clone(), last_result.clone());
             }
         }
 
@@ -247,7 +245,7 @@ where
             last_result = StepResult {
                 passed: false,
                 output: "Cancelled".to_string(),
-                step_id: current_step.id,
+                step_slug: current_step.slug.clone(),
                 step_name: current_step.name.clone(),
                 ..Default::default()
             };
@@ -292,16 +290,18 @@ where
 
         match next_edge {
             Some(edge) => {
-                let traversal_count = edge_traversals.entry(edge.id).or_default();
+                let traversal_count = edge_traversals.entry(edge_key(edge)).or_default();
                 if let Some(max_attempts) = edge_max_attempts(&current_step, edge)
                     && *traversal_count >= max_attempts
                 {
-                    if let Some(exhausted_step_id) = edge_on_exhausted_step_id(edge) {
+                    if let Some(exhausted_step_slug) = edge_on_exhausted_step(edge) {
                         current_step = steps
                             .iter()
-                            .find(|s| s.id == exhausted_step_id)
+                            .find(|s| s.slug == exhausted_step_slug)
                             .with_context(|| {
-                                format!("Edge exhausted target step {exhausted_step_id} not found")
+                                format!(
+                                    "Edge exhausted target step {exhausted_step_slug} not found"
+                                )
                             })?
                             .clone();
                     } else {
@@ -309,9 +309,10 @@ where
                             passed: false,
                             output: format!(
                                 "Routine edge {} exhausted after {} attempts",
-                                edge.id, max_attempts
+                                edge_key(edge),
+                                max_attempts
                             ),
-                            step_id: current_step.id,
+                            step_slug: current_step.slug.clone(),
                             step_name: current_step.name.clone(),
                             ..Default::default()
                         };
@@ -360,11 +361,20 @@ fn edge_max_attempts(
     })
 }
 
-fn edge_on_exhausted_step_id(edge: &RoutineEdgeManifest) -> Option<Uuid> {
+fn edge_key(edge: &RoutineEdgeManifest) -> String {
+    let condition = match edge.condition {
+        RoutineEdgeCondition::Always => "always",
+        RoutineEdgeCondition::OnPass => "on_pass",
+        RoutineEdgeCondition::OnFail => "on_fail",
+    };
+    format!("{}:{}:{}", edge.source_step, condition, edge.target_step)
+}
+
+fn edge_on_exhausted_step(edge: &RoutineEdgeManifest) -> Option<crate::Slug> {
     edge.metadata
-        .get("on_exhausted_step_id")
+        .get("on_exhausted_step")
         .and_then(|value| value.as_str())
-        .and_then(|value| Uuid::parse_str(value).ok())
+        .map(crate::Slug::derive)
 }
 
 fn choose_next_edge<'a>(
@@ -421,7 +431,7 @@ where
             Ok(StepResult {
                 passed: true,
                 output: last.output,
-                step_id: step.id,
+                step_slug: step.slug.clone(),
                 step_name: step.name.clone(),
                 ..Default::default()
             })
@@ -436,7 +446,7 @@ where
             Ok(StepResult {
                 passed: false,
                 output: reason,
-                step_id: step.id,
+                step_slug: step.slug.clone(),
                 step_name: step.name.clone(),
                 ..Default::default()
             })
@@ -492,7 +502,7 @@ where
         &runner,
         task,
         state.input.project.clone(),
-        step.id,
+        step.slug.clone(),
         step_run_id,
         events_tx,
     )
@@ -511,7 +521,7 @@ where
         passed: verdict.passed,
         output: step_output,
         data,
-        step_id: step.id,
+        step_slug: step.slug.clone(),
         step_name: step.name.clone(),
         input_tokens: output.input_tokens,
         output_tokens: output.output_tokens,
@@ -574,7 +584,7 @@ where
         &runner,
         task,
         state.input.project.clone(),
-        step.id,
+        step.slug.clone(),
         step_run_id,
         events_tx,
     )
@@ -596,7 +606,7 @@ where
         passed: verdict.passed,
         output: step_output,
         data,
-        step_id: step.id,
+        step_slug: step.slug.clone(),
         step_name: step.name.clone(),
         input_tokens: output.input_tokens,
         output_tokens: output.output_tokens,
