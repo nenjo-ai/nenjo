@@ -24,13 +24,13 @@ pub mod library;
 pub mod models;
 /// Request parameter types for manifest MCP tools.
 pub mod params;
-mod serde_helpers;
 /// Tool specs for project operations.
 pub mod projects;
 /// Result payload types for manifest MCP tools.
 pub mod results;
 /// Tool specs for routine operations.
 pub mod routines;
+mod serde_helpers;
 /// Helpers for assembling the full manifest tool set.
 pub mod tools;
 mod types;

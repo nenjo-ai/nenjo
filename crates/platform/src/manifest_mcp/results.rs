@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 
+use crate::manifest_contract::KnowledgeDocumentEdgeRecord;
+
 use super::types::{
     AbilityDocument, AbilityPromptDocument, AbilitySummary, AgentDocument, AgentPromptDocument,
     AgentSummary, ContextBlockContentDocument, ContextBlockDocument, ContextBlockSummary,
@@ -142,8 +144,14 @@ pub struct KnowledgePackMutationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Result for creating or updating a library knowledge document.
+///
+/// `edges` contains canonical UUID-backed outbound edge records after an edge
+/// replacement. It is empty when the mutation left edges unchanged or created a
+/// document without related edges.
 pub struct KnowledgeDocMutationResult {
     pub knowledge_doc: KnowledgeDocSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<KnowledgeDocumentEdgeRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -262,7 +262,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = PlatformResourceIdStore::new(dir.path());
         let kept = Slug::parse("product").unwrap();
-        let removed = Slug::parse("legacy").unwrap();
+        let removed = Slug::parse("removed").unwrap();
         let doc = Slug::parse("overview").unwrap();
         let id = Uuid::new_v4();
 

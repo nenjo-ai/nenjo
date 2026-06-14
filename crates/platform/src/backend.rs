@@ -13,12 +13,16 @@ use nenjo::manifest::{
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use uuid::Uuid;
 
-use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
-use crate::library_knowledge::{
-    LibraryKnowledgePack, LibraryKnowledgePackManifest, upsert_library_knowledge_entry,
-    write_library_document_content, write_library_knowledge_manifest,
+use crate::client::{
+    CouncilCreateApiBody, CouncilCreateMemberApiBody, KnowledgeDocEdgeReplaceItem,
+    KnowledgeDocEdgeResponse, PlatformManifestClient,
 };
-use crate::manifest_contract::KnowledgeDocumentRecord;
+use crate::library_knowledge::{
+    LibraryKnowledgePackCacheEntry, ReplaceDocumentEdges, ensure_library_knowledge_pack_cache,
+    library_knowledge_doc_relative_path, remove_library_knowledge_entry,
+    upsert_library_knowledge_entry_with_edges, write_library_document_content,
+};
+use crate::manifest_contract::{KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord};
 use crate::manifest_kinds::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
@@ -27,6 +31,12 @@ use crate::resource_ids::{PlatformResourceIdStore, PlatformResourceKind};
 
 fn string_to_manifest_path(path: String) -> Option<String> {
     if path.is_empty() { None } else { Some(path) }
+}
+
+fn knowledge_edge_record_from_response(
+    edge: KnowledgeDocEdgeResponse,
+) -> KnowledgeDocumentEdgeRecord {
+    edge
 }
 
 fn local_agent_from_document(
@@ -338,32 +348,23 @@ where
         pack: &Slug,
         doc: &Slug,
         related: &[KnowledgeDocRelatedDocument],
-    ) -> Result<()> {
-        let existing = self
+    ) -> Result<Vec<KnowledgeDocumentEdgeRecord>> {
+        let related = related
+            .iter()
+            .map(|edge| KnowledgeDocEdgeReplaceItem {
+                target_doc: edge.target_doc.as_str(),
+                edge_type: edge.edge_type.as_str(),
+                note: edge.note.as_deref(),
+            })
+            .collect::<Vec<_>>();
+        let edges = self
             .platform_client
-            .list_knowledge_doc_edges(pack, doc)
+            .replace_knowledge_doc_edges(pack, doc, &related)
             .await?;
-        for edge in existing.into_iter().filter(|edge| edge.source_doc == *doc) {
-            self.platform_client
-                .delete_knowledge_doc_edge(pack, doc, edge.id)
-                .await?;
-        }
-        for edge in related {
-            let target_doc = self
-                .platform_client
-                .resolve_knowledge_doc_reference(pack, &edge.target_doc)
-                .await?;
-            self.platform_client
-                .create_knowledge_doc_edge(
-                    pack,
-                    doc,
-                    &target_doc,
-                    &edge.edge_type,
-                    edge.note.as_deref(),
-                )
-                .await?;
-        }
-        Ok(())
+        Ok(edges
+            .into_iter()
+            .map(knowledge_edge_record_from_response)
+            .collect())
     }
 
     async fn cached_or_remote_ability(&self, ability_ref: &Slug) -> Result<AbilityManifest> {
@@ -483,29 +484,45 @@ where
         Ok(self.workspace_dir()?.join("library"))
     }
 
-    fn cache_knowledge_pack(&self, pack: &KnowledgePackDocument) -> Result<()> {
-        let pack_slug = pack.slug.as_str();
-        let pack_dir = self.library_root()?.join(pack_slug);
-        if LibraryKnowledgePack::load(&pack_dir).is_none() {
-            write_library_knowledge_manifest(
-                &pack_dir,
-                &LibraryKnowledgePackManifest::library_pack(pack_slug),
-            )?;
-        }
+    async fn cache_knowledge_pack(&self, pack: &KnowledgePackDocument) -> Result<()> {
+        let library_root = self.library_root()?;
+        ensure_library_knowledge_pack_cache(
+            self.local_store.as_ref(),
+            &library_root,
+            LibraryKnowledgePackCacheEntry {
+                slug: pack.slug.clone(),
+                name: Some(pack.name.clone()),
+                description: Some(pack.description.clone()),
+                selector: pack.selector.clone(),
+                version: pack.version.clone(),
+                read_only: Some(pack.read_only),
+                metadata: Some(serde_json::json!({})),
+            },
+        )
+        .await?;
         Ok(())
     }
 
-    fn cache_knowledge_doc(
+    async fn cache_knowledge_doc(
         &self,
         doc: &KnowledgeDocSummary,
+        doc_id: Uuid,
         content: Option<&str>,
-        related: &[KnowledgeDocRelatedDocument],
+        edges: &[KnowledgeDocumentEdgeRecord],
+        replace_edges: ReplaceDocumentEdges,
     ) -> Result<()> {
         let pack_slug = doc.pack.as_str();
-        let pack_dir = self.library_root()?.join(pack_slug);
+        let library_root = self.library_root()?;
+        ensure_library_knowledge_pack_cache(
+            self.local_store.as_ref(),
+            &library_root,
+            LibraryKnowledgePackCacheEntry::from_slug(doc.pack.clone()),
+        )
+        .await?;
+        let pack_dir = library_root.join(pack_slug);
         let now = chrono::Utc::now();
         let record = KnowledgeDocumentRecord {
-            id: Uuid::new_v4(),
+            id: doc_id,
             org_id: Uuid::nil(),
             pack_id: Uuid::nil(),
             pack_slug: pack_slug.to_string(),
@@ -521,31 +538,29 @@ where
             updated_at: chrono::DateTime::parse_from_rfc3339(&doc.updated_at)
                 .map(|value| value.with_timezone(&chrono::Utc))
                 .unwrap_or(now),
-            edges: related
-                .iter()
-                .map(
-                    |edge| crate::manifest_contract::KnowledgeDocumentEdgeRecord {
-                        id: Uuid::new_v4(),
-                        org_id: Uuid::nil(),
-                        source_item_id: Uuid::nil(),
-                        source_doc: doc.slug.as_str().to_string(),
-                        target_item_id: Uuid::nil(),
-                        target_doc: edge.target_doc.clone(),
-                        edge_type: edge.edge_type.clone(),
-                        note: edge.note.clone(),
-                        created_at: now,
-                        updated_at: now,
-                    },
-                )
-                .collect(),
+            edges: edges.to_vec(),
         };
-        upsert_library_knowledge_entry(&pack_dir, pack_slug, &record)?;
+        upsert_library_knowledge_entry_with_edges(&pack_dir, pack_slug, &record, replace_edges)?;
         if let Some(content) = content {
             write_library_document_content(
                 &pack_dir,
                 &record.library_doc_relative_path(),
                 content,
             )?;
+        }
+        Ok(())
+    }
+
+    fn remove_cached_knowledge_doc(&self, pack: &Slug, doc: &Slug) -> Result<()> {
+        let pack_dir = self.library_root()?.join(pack.as_str());
+        let existing = library_knowledge_doc_relative_path(&pack_dir, doc);
+        remove_library_knowledge_entry(&pack_dir, doc)?;
+        if let Some(relative_path) = existing {
+            let path = pack_dir.join("docs").join(relative_path);
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to delete {}", path.display()))?;
+            }
         }
         Ok(())
     }
@@ -1210,11 +1225,10 @@ where
             .platform_client
             .create_knowledge_pack(&params.data)
             .await?;
-        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack) {
-            tracing::warn!(
-                pack = %knowledge_pack.slug,
-                error = %error,
-                "Failed to cache created knowledge pack locally"
+        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack).await {
+            bail!(
+                "knowledge pack '{}' was created on the platform, but local cache registration failed: {error}",
+                knowledge_pack.slug
             );
         }
         Ok(KnowledgePackMutationResult { knowledge_pack })
@@ -1228,11 +1242,10 @@ where
             .platform_client
             .update_knowledge_pack(&params.pack, &params.data)
             .await?;
-        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack) {
-            tracing::warn!(
-                pack = %knowledge_pack.slug,
-                error = %error,
-                "Failed to cache updated knowledge pack locally"
+        if let Err(error) = self.cache_knowledge_pack(&knowledge_pack).await {
+            bail!(
+                "knowledge pack '{}' was updated on the platform, but local cache registration failed: {error}",
+                knowledge_pack.slug
             );
         }
         Ok(KnowledgePackMutationResult { knowledge_pack })
@@ -1257,10 +1270,21 @@ where
             .platform_client
             .create_knowledge_doc(&data.pack, doc_id, &data, encrypted_payload)
             .await?;
-        self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.slug, &data.related)
-            .await?;
-        if let Err(error) =
-            self.cache_knowledge_doc(&knowledge_doc, Some(&data.content), &data.related)
+        let edges = if data.related.is_empty() {
+            Vec::new()
+        } else {
+            self.replace_knowledge_doc_related(&data.pack, &knowledge_doc.slug, &data.related)
+                .await?
+        };
+        if let Err(error) = self
+            .cache_knowledge_doc(
+                &knowledge_doc,
+                doc_id,
+                Some(&data.content),
+                &edges,
+                ReplaceDocumentEdges::Yes,
+            )
+            .await
         {
             tracing::warn!(
                 pack = %data.pack,
@@ -1270,7 +1294,10 @@ where
             );
         }
         self.record_knowledge_document_id(&data.pack, &knowledge_doc.slug, doc_id)?;
-        Ok(KnowledgeDocMutationResult { knowledge_doc })
+        Ok(KnowledgeDocMutationResult {
+            knowledge_doc,
+            edges,
+        })
     }
 
     async fn update_knowledge_doc(
@@ -1323,14 +1350,26 @@ where
                 .await?;
         }
 
-        if let Some(related) = params.data.related.as_deref() {
+        let edges = if let Some(related) = params.data.related.as_deref() {
             self.replace_knowledge_doc_related(&params.pack, &params.slug, related)
-                .await?;
-        }
-
-        if let Some(related) = params.data.related.as_deref()
-            && let Err(error) =
-                self.cache_knowledge_doc(&knowledge_doc, params.data.content.as_deref(), related)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let replace_edges = if params.data.related.is_some() {
+            ReplaceDocumentEdges::Yes
+        } else {
+            ReplaceDocumentEdges::No
+        };
+        if let Err(error) = self
+            .cache_knowledge_doc(
+                &knowledge_doc,
+                doc_id,
+                params.data.content.as_deref(),
+                &edges,
+                replace_edges,
+            )
+            .await
         {
             tracing::warn!(
                 pack = %params.pack,
@@ -1341,13 +1380,24 @@ where
         }
 
         self.record_knowledge_document_id(&params.pack, &knowledge_doc.slug, doc_id)?;
-        Ok(KnowledgeDocMutationResult { knowledge_doc })
+        Ok(KnowledgeDocMutationResult {
+            knowledge_doc,
+            edges,
+        })
     }
 
     async fn delete_knowledge_doc(&self, params: KnowledgeDocDeleteParams) -> Result<DeleteResult> {
         self.platform_client
             .delete_knowledge_doc(&params.pack, &params.slug)
             .await?;
+        if let Err(error) = self.remove_cached_knowledge_doc(&params.pack, &params.slug) {
+            tracing::warn!(
+                pack = %params.pack,
+                slug = %params.slug,
+                error = %error,
+                "Failed to remove deleted knowledge document from local cache"
+            );
+        }
         self.remove_knowledge_document_id(&params.pack, &params.slug)?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1938,7 +1988,7 @@ mod tests {
             ]
         });
         std::fs::write(
-            library_dir.join(LibraryKnowledgePack::MANIFEST_FILENAME),
+            library_dir.join(crate::library_knowledge::LIBRARY_KNOWLEDGE_MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest)?,
         )?;
 
@@ -2028,7 +2078,7 @@ mod tests {
         let base_url = format!("http://{address}");
         let handle = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for _ in 0..5 {
+            for _ in 0..4 {
                 let (mut stream, _) = listener.accept().await?;
                 let request = read_request(&mut stream).await?;
                 let body = match (request.method.as_str(), request.path.as_str()) {
@@ -2114,12 +2164,9 @@ mod tests {
                             "updated_at": "2026-05-23T00:01:00Z"
                         }),
                     ),
-                    ("GET", "/api/v1/knowledge/test-pack/items/guide/edges") => {
-                        response("200 OK", json!([]))
-                    }
-                    ("POST", "/api/v1/knowledge/test-pack/items/guide/edges") => response(
-                        "201 Created",
-                        json!({
+                    ("PUT", "/api/v1/knowledge/test-pack/items/guide/edges") => response(
+                        "200 OK",
+                        json!([{
                             "id": Uuid::new_v4(),
                             "org_id": Uuid::new_v4(),
                             "source_item_id": doc_id,
@@ -2130,7 +2177,7 @@ mod tests {
                             "note": "see target",
                             "created_at": "2026-05-23T00:02:00Z",
                             "updated_at": "2026-05-23T00:02:00Z"
-                        }),
+                        }]),
                     ),
                     _ => response("404 Not Found", json!({ "error": "not found" })),
                 };
@@ -2155,7 +2202,7 @@ mod tests {
         let base_url = format!("http://{address}");
         let handle = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..1 {
                 let (mut stream, _) = listener.accept().await?;
                 let request = read_request(&mut stream).await?;
                 let body = match (request.method.as_str(), request.path.as_str()) {
@@ -2177,10 +2224,6 @@ mod tests {
                             "updated_at": "2026-05-23T00:00:00Z"
                         }),
                     ),
-                    (
-                        "GET",
-                        "/api/v1/knowledge/test-pack/items/ownership-lifetimes-a1b2c3d4/edges",
-                    ) => response("200 OK", json!([])),
                     _ => response("404 Not Found", json!({ "error": "not found" })),
                 };
                 stream.write_all(body.as_bytes()).await?;
@@ -2238,14 +2281,7 @@ mod tests {
                 .iter()
                 .map(|request| (request.method.as_str(), request.path.clone()))
                 .collect::<Vec<_>>(),
-            vec![
-                ("POST", "/api/v1/knowledge/test-pack/items".to_string()),
-                (
-                    "GET",
-                    "/api/v1/knowledge/test-pack/items/ownership-lifetimes-a1b2c3d4/edges"
-                        .to_string()
-                )
-            ]
+            vec![("POST", "/api/v1/knowledge/test-pack/items".to_string())]
         );
         assert!(!requests[0].body.contains("name=\"slug\""));
     }
@@ -2291,13 +2327,14 @@ mod tests {
         assert_eq!(result.knowledge_doc.path.as_deref(), Some("docs/guide.md"));
         assert_eq!(result.knowledge_doc.title.as_deref(), Some("Guide"));
         assert_eq!(result.knowledge_doc.tags, vec!["core"]);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].target_doc, "target");
 
         let requests = server.await.unwrap().unwrap();
         let expected_paths = [
             "/api/v1/knowledge/test-pack/items".to_string(),
             "/api/v1/knowledge/test-pack/items/guide/content".to_string(),
             "/api/v1/knowledge/test-pack/items/guide".to_string(),
-            "/api/v1/knowledge/test-pack/items/guide/edges".to_string(),
             "/api/v1/knowledge/test-pack/items/guide/edges".to_string(),
         ];
         assert_eq!(
@@ -2309,16 +2346,15 @@ mod tests {
                 ("GET", expected_paths[0].clone()),
                 ("PUT", expected_paths[1].clone()),
                 ("PATCH", expected_paths[2].clone()),
-                ("GET", expected_paths[3].clone()),
-                ("POST", expected_paths[4].clone())
+                ("PUT", expected_paths[3].clone()),
             ]
         );
         assert!(requests[1].body.contains("updated content"));
         assert!(requests[2].body.contains("\"filename\":\"guide.md\""));
         assert!(!requests[2].body.contains("updated content"));
         assert!(!requests[2].body.contains("related"));
-        assert!(requests[4].body.contains("target"));
-        assert!(requests[4].body.contains("references"));
+        assert!(requests[3].body.contains("target"));
+        assert!(requests[3].body.contains("references"));
     }
 
     #[tokio::test]

@@ -20,8 +20,7 @@ pub use knowledge::{
     KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, KnowledgePackRecord,
     ParsedKnowledgeDocument, library_pack_selector, parse_doc_edge_type, parse_doc_kind,
     parse_document_payload, parse_library_pack_selector, parse_library_pack_slug,
-    to_knowledge_manifest,
-    wrap_document_record,
+    to_knowledge_manifest, wrap_document_record,
 };
 pub use model::ModelRecord;
 pub use project::{ProjectDetailRecord, ProjectRecord};

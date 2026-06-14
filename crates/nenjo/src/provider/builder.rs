@@ -8,11 +8,12 @@ use super::{
     ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory, ToolFactory,
     TypedModelProviderFactory,
 };
+use crate::ManifestReader;
 use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use nenjo_knowledge::tools::{CompositeKnowledgeRegistry, KnowledgePackEntry, KnowledgePackLoader};
+use nenjo_knowledge::tools::KnowledgePackEntry;
 
 /// Builder for creating a [`Provider`].
 ///
@@ -49,9 +50,8 @@ pub struct ProviderBuilder<
     memory: Option<Mem>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
-    knowledge_registry: CompositeKnowledgeRegistry,
-    static_knowledge_entries: Vec<KnowledgePackEntry>,
-    knowledge_pack_loader: Option<Arc<dyn KnowledgePackLoader>>,
+    knowledge_pack_entries: Vec<KnowledgePackEntry>,
+    live_manifest_reader: Option<Arc<dyn ManifestReader>>,
 }
 
 /// Marker used until `.with_model_factory(...)` is called.
@@ -106,9 +106,8 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             memory: None,
             agent_config: AgentConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
-            knowledge_registry: CompositeKnowledgeRegistry::new(),
-            static_knowledge_entries: Vec::new(),
-            knowledge_pack_loader: None,
+            knowledge_pack_entries: Vec::new(),
+            live_manifest_reader: None,
         }
     }
 }
@@ -151,9 +150,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
-            knowledge_registry: self.knowledge_registry,
-            static_knowledge_entries: self.static_knowledge_entries,
-            knowledge_pack_loader: self.knowledge_pack_loader,
+            knowledge_pack_entries: self.knowledge_pack_entries,
+            live_manifest_reader: self.live_manifest_reader,
         }
     }
 
@@ -176,9 +174,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
-            knowledge_registry: self.knowledge_registry,
-            static_knowledge_entries: self.static_knowledge_entries,
-            knowledge_pack_loader: self.knowledge_pack_loader,
+            knowledge_pack_entries: self.knowledge_pack_entries,
+            live_manifest_reader: self.live_manifest_reader,
         }
     }
 
@@ -200,9 +197,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
-            knowledge_registry: self.knowledge_registry,
-            static_knowledge_entries: self.static_knowledge_entries,
-            knowledge_pack_loader: self.knowledge_pack_loader,
+            knowledge_pack_entries: self.knowledge_pack_entries,
+            live_manifest_reader: self.live_manifest_reader,
         }
     }
 
@@ -225,9 +221,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: Some(memory),
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
-            knowledge_registry: self.knowledge_registry,
-            static_knowledge_entries: self.static_knowledge_entries,
-            knowledge_pack_loader: self.knowledge_pack_loader,
+            knowledge_pack_entries: self.knowledge_pack_entries,
+            live_manifest_reader: self.live_manifest_reader,
         }
     }
 
@@ -246,12 +241,26 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
         self
     }
 
+    /// Register a live manifest reader used by knowledge tools.
+    ///
+    /// The provider still builds from the manifest snapshot, but knowledge
+    /// tool execution can refresh `Manifest.knowledge_packs` from this reader
+    /// so local cache writes become visible without rebuilding the agent.
+    pub fn with_live_manifest_reader<Reader>(mut self, reader: Reader) -> Self
+    where
+        Reader: ManifestReader + 'static,
+    {
+        self.live_manifest_reader = Some(Arc::new(reader));
+        self
+    }
+
     /// Register multiple knowledge packs with this provider.
     ///
     /// Registered packs automatically contribute reusable knowledge tools and
     /// prompt metadata variables for all agents built by the provider. Use
     /// [`KnowledgePackEntry`] to preserve selector metadata and support
     /// collections with different concrete pack types.
+    ///
     pub fn with_knowledge_packs<I, E>(mut self, packs: I) -> Self
     where
         I: IntoIterator<Item = E>,
@@ -263,20 +272,9 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
         self
     }
 
-    /// Register a loader that supplies knowledge packs when agents are built.
-    ///
-    /// Use this when packs can change after the provider is constructed, for
-    /// example when library packs are synced from the platform. The loader is
-    /// also invoked once at provider build time to seed prompt metadata.
-    pub fn with_knowledge_pack_loader(mut self, loader: Arc<dyn KnowledgePackLoader>) -> Self {
-        self.knowledge_pack_loader = Some(loader);
-        self
-    }
-
     fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
-        self.static_knowledge_entries.push(entry.clone());
-        self.add_knowledge_prompt_vars(entry.clone());
-        self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
+        self.knowledge_pack_entries.push(entry.clone());
+        self.add_knowledge_prompt_vars(entry);
     }
 
     fn add_knowledge_prompt_vars(&mut self, entry: KnowledgePackEntry) {
@@ -311,12 +309,10 @@ where
         self.loaders.load_into(&mut manifest).await?;
 
         let manifest = Arc::new(manifest);
-        let knowledge_pack_loader = self.knowledge_pack_loader;
-        let static_knowledge_entries = self.static_knowledge_entries;
-        let (render_ctx_extra, knowledge_registry) = finalize_knowledge_state(
-            knowledge_pack_loader.as_ref(),
+        let (render_ctx_extra, knowledge) = finalize_knowledge_state(
             self.render_ctx_extra,
-            self.knowledge_registry,
+            self.knowledge_pack_entries,
+            self.live_manifest_reader,
         );
 
         Ok(Provider::new_inner(
@@ -326,11 +322,7 @@ where
             self.memory.map(Arc::new),
             self.agent_config,
             render_ctx_extra,
-            super::ProviderKnowledgeState {
-                registry: knowledge_registry,
-                static_entries: static_knowledge_entries,
-                loader: knowledge_pack_loader,
-            },
+            knowledge,
         ))
     }
 }
@@ -353,12 +345,10 @@ where
         let mut manifest = self.manifest.unwrap_or_default();
         self.loaders.load_into(&mut manifest).await?;
 
-        let knowledge_pack_loader = self.knowledge_pack_loader;
-        let static_knowledge_entries = self.static_knowledge_entries;
-        let (render_ctx_extra, knowledge_registry) = finalize_knowledge_state(
-            knowledge_pack_loader.as_ref(),
+        let (render_ctx_extra, knowledge) = finalize_knowledge_state(
             self.render_ctx_extra,
-            self.knowledge_registry,
+            self.knowledge_pack_entries,
+            self.live_manifest_reader,
         );
 
         Ok(Provider::new_inner(
@@ -369,28 +359,23 @@ where
                 .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
             self.agent_config,
             render_ctx_extra,
-            super::ProviderKnowledgeState {
-                registry: knowledge_registry,
-                static_entries: static_knowledge_entries,
-                loader: knowledge_pack_loader,
-            },
+            knowledge,
         ))
     }
 }
 
 fn finalize_knowledge_state(
-    loader: Option<&Arc<dyn KnowledgePackLoader>>,
-    mut render_ctx_extra: RenderContextVars,
-    mut knowledge_registry: CompositeKnowledgeRegistry,
-) -> (RenderContextVars, CompositeKnowledgeRegistry) {
-    if let Some(loader) = loader {
-        let loaded = loader.load_packs();
-        render_ctx_extra.knowledge_vars.extend(
-            nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(loaded.iter().cloned()),
-        );
-        knowledge_registry = knowledge_registry.with_entries(loaded);
-    }
-    (render_ctx_extra, knowledge_registry)
+    render_ctx_extra: RenderContextVars,
+    knowledge_pack_entries: Vec<KnowledgePackEntry>,
+    live_manifest_reader: Option<Arc<dyn ManifestReader>>,
+) -> (RenderContextVars, super::ProviderKnowledgeState) {
+    (
+        render_ctx_extra,
+        super::ProviderKnowledgeState {
+            pack_entries: knowledge_pack_entries,
+            live_manifest_reader,
+        },
+    )
 }
 
 impl Default for ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory> {

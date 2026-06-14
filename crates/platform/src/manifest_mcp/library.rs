@@ -4,7 +4,7 @@ use serde_json::json;
 fn doc_slug_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "The stable slug of the target library knowledge document. Use knowledge_doc.slug returned by create_knowledge_doc or document.slug returned by read/search metadata."
+        "description": "Stable library knowledge document slug. Use knowledge_doc.slug returned by create_knowledge_doc or document.slug returned by read/search metadata; do not invent slugs from titles unless the document was just returned with that slug."
     })
 }
 
@@ -51,7 +51,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_knowledge_doc".to_string(),
-            description: "Create a new org-level library knowledge document. Provide filename and optional folder path; the platform derives the document slug from path plus filename and returns it as knowledge_doc.slug. If creating multiple related documents, create them first, collect each returned knowledge_doc.slug, then call update_knowledge_doc to assign related edges.".to_string(),
+            description: "Create a new org-level library knowledge document. Provide filename and optional folder path; the platform derives the document slug from path plus filename and returns it as knowledge_doc.slug. The response also includes edges when related is provided. If creating multiple documents that relate to each other, create all documents first, collect their returned knowledge_doc.slug values, then call update_knowledge_doc once per source document with the full related list.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pack", "filename", "content"],
@@ -65,7 +65,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
                     "kind": { "type": ["string", "null"], "description": "Optional open-ended document kind, such as guide, playbook, policy, or note." },
                     "summary": { "type": ["string", "null"], "description": "Optional concise summary for retrieval." },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional retrieval tags." },
-                    "related": related_schema()
+                    "related": related_schema("Optional full outbound relationship list for this new document. Targets must already exist. If the targets are being created in the same workflow, omit related here and set it later with update_knowledge_doc after collecting the target knowledge_doc.slug values.")
                 },
                 "additionalProperties": false
             }),
@@ -87,7 +87,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_knowledge_doc".to_string(),
-            description: "Update an existing library knowledge document. Requires slug, the document slug returned by create_knowledge_doc or discovered from read/search metadata. Providing related replaces the document's full outbound relationship list; use this after creating documents and collecting their returned slugs.".to_string(),
+            description: "Update an existing library knowledge document. Requires slug, the document slug returned by create_knowledge_doc or discovered from read/search metadata. Providing related performs one canonical full replacement of the document's outbound edge list and returns the stored edge records.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pack", "slug"],
@@ -101,7 +101,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
                     "kind": { "type": ["string", "null"], "description": "Optional replacement document kind. Use null to clear." },
                     "summary": { "type": ["string", "null"], "description": "Optional replacement summary. Use null to clear." },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional full replacement tag list." },
-                    "related": related_schema()
+                    "related": related_schema("Optional full outbound relationship replacement list. Providing related replaces every outbound edge from this document in one backend operation; omit related to leave existing edges unchanged. Use an empty array to remove all outbound edges.")
                 },
                 "additionalProperties": false
             }),
@@ -110,10 +110,10 @@ pub fn library_tools() -> Vec<ToolSpec> {
     ]
 }
 
-fn related_schema() -> serde_json::Value {
+fn related_schema(description: &str) -> serde_json::Value {
     json!({
         "type": "array",
-        "description": "Optional full outbound relationship list. On update, providing this replaces existing outbound edges for the document. Each target_doc must be the stable document.slug from create_knowledge_doc or search/read metadata (preferred), or a resolvable selector/path; create all target documents before assigning relations.",
+        "description": description,
         "items": {
             "type": "object",
             "required": ["target_doc", "type"],
@@ -121,7 +121,17 @@ fn related_schema() -> serde_json::Value {
                 "target_doc": doc_slug_schema(),
                 "type": {
                     "type": "string",
-                    "description": "Relationship type such as references, depends_on, defines, part_of, extends, or related_to."
+                    "enum": [
+                        "references",
+                        "depends_on",
+                        "defines",
+                        "part_of",
+                        "extends",
+                        "related_to",
+                        "governs",
+                        "classifies"
+                    ],
+                    "description": "Relationship type for this outbound edge."
                 },
                 "note": {
                     "type": ["string", "null"],

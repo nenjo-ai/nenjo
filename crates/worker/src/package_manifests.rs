@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nenjo::Slug;
-use nenjo::manifest::{Manifest, ManifestLoader};
+use nenjo::manifest::{KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader};
 use nenjo_nenpm::{
     LockedModule, NenpmLock, PackageInstallIndex, PackageSource,
     package_install_path_in_packages_dir,
@@ -241,6 +241,8 @@ fn package_root_from_index(root: &Path, packages_dir: &Path, indexed_root: &str)
 #[derive(Debug)]
 struct RuntimeResourceManifest {
     name: String,
+    selector: Option<String>,
+    root_uri: Option<String>,
     fields: serde_json::Map<String, Value>,
 }
 
@@ -249,7 +251,12 @@ impl RuntimeResourceManifest {
         let name = resource.name()?.to_string();
         let mut fields = resource.manifest_object()?.clone();
         fields.remove("name");
-        Ok(Self { name, fields })
+        Ok(Self {
+            name,
+            selector: resource.selector().map(str::to_string),
+            root_uri: resource.root_uri().map(str::to_string),
+            fields,
+        })
     }
 
     fn into_value(self) -> Value {
@@ -473,13 +480,41 @@ fn normalize_assignment_ref(reference: impl AsRef<str>) -> String {
         .replace('\\', "/")
 }
 
+fn package_knowledge_selector_name(
+    package_name: &str,
+    source: Option<&PackageSource>,
+    pack_id: &str,
+) -> String {
+    let mut segments = package_selector_segments(package_name, source);
+    segments.push(knowledge_pack_leaf_segment(pack_id));
+    segments
+        .into_iter()
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn knowledge_pack_leaf_segment(pack_id: &str) -> String {
+    let leaf = pack_id
+        .trim()
+        .rsplit(['.', '/'])
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("knowledge");
+    selector_segment(leaf)
+}
+
 fn push_package_resource(
     manifest: &mut Manifest,
     context: PackageResourceContext<'_>,
     resource_manifest: RuntimeResourceManifest,
 ) -> Result<()> {
     match context.kind {
-        PackageKind::Routine | PackageKind::Knowledge | PackageKind::Plugin => return Ok(()),
+        PackageKind::Knowledge => {
+            push_package_knowledge_resource(manifest, context, resource_manifest);
+            return Ok(());
+        }
+        PackageKind::Routine | PackageKind::Plugin => return Ok(()),
         PackageKind::Agent
         | PackageKind::Ability
         | PackageKind::Domain
@@ -526,6 +561,65 @@ fn push_package_resource(
         }
     }
     Ok(())
+}
+
+fn push_package_knowledge_resource(
+    manifest: &mut Manifest,
+    context: PackageResourceContext<'_>,
+    resource_manifest: RuntimeResourceManifest,
+) {
+    let pack_id = resource_manifest
+        .fields
+        .get("pack_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(resource_manifest.name.as_str());
+    let selector_name =
+        package_knowledge_selector_name(context.package_name, context.package_source, pack_id);
+    let selector = resource_manifest
+        .selector
+        .filter(|value| value.starts_with("pkg:") && !value.starts_with("pkg://"))
+        .unwrap_or_else(|| format!("pkg:{selector_name}"));
+    let root_uri = resource_manifest
+        .root_uri
+        .or_else(|| {
+            resource_manifest
+                .fields
+                .get("root_uri")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("pkg://{}/", pack_id.trim().trim_matches('/')));
+
+    manifest.knowledge_packs.push(KnowledgePackManifest {
+        slug: Slug::derive(&selector),
+        name: resource_manifest.name,
+        description: resource_manifest
+            .fields
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_type: KnowledgePackSource::Package,
+        selector,
+        version: resource_manifest
+            .fields
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| Some(context.package_version.to_string())),
+        root_uri,
+        root_path: Some(context.package_root.join(context.module_path)),
+        read_only: true,
+        metadata: serde_json::json!({
+            "package": {
+                "name": context.package_name,
+                "version": context.package_version,
+                "module_path": context.module_path,
+                "source_path": context.source_path,
+                "kind": context.kind,
+            }
+        }),
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -1358,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn package_loader_skips_non_runtime_resource_names_before_id_validation() {
+    fn package_loader_pushes_knowledge_pack_manifests() {
         let mut manifest = Manifest::default();
         push_package_resource(
             &mut manifest,
@@ -1373,12 +1467,20 @@ mod tests {
             },
             RuntimeResourceManifest {
                 name: "Nenjo Core".to_string(),
+                selector: Some("pkg://nenjo.core/".to_string()),
+                root_uri: Some("pkg://nenjo/core/".to_string()),
                 fields: serde_json::Map::new(),
             },
         )
         .unwrap();
         assert!(manifest.agents.is_empty());
         assert!(manifest.context_blocks.is_empty());
+        assert_eq!(manifest.knowledge_packs.len(), 1);
+        assert_eq!(
+            manifest.knowledge_packs[0].selector,
+            "pkg:nenjo_ai.knowledge.nenjo_core"
+        );
+        assert_eq!(manifest.knowledge_packs[0].root_uri, "pkg://nenjo/core/");
     }
 
     #[test]

@@ -479,7 +479,7 @@ pub async fn sync(
         warn!(%error, "Platform package install failed; cached manifest resources remain available");
     }
 
-    // Sync platform-uploaded and repo-backed library knowledge under ~/.nenjo/library.
+    // Sync user-uploaded library knowledge under ~/.nenjo/library.
     crate::local_documents::sync_all(
         api,
         nenjo_home,
@@ -614,6 +614,7 @@ async fn hydrate_bootstrap_manifest(
             commands: bootstrap.commands,
             hooks: bootstrap.hooks,
             script_tools: bootstrap.script_tools,
+            knowledge_packs: Vec::new(),
         },
         resource_ids,
         nats: bootstrap.nats,
@@ -825,7 +826,11 @@ impl WorkerManifestCache {
             }
             ResourceType::Domain => sync_tree(&manifests_dir.join("domains"), &manifest.domains),
             ResourceType::Document => Ok(()),
-            ResourceType::KnowledgePack => Ok(()),
+            ResourceType::KnowledgePack => atomic_write_json(
+                manifests_dir,
+                "knowledge_packs.json",
+                &manifest.knowledge_packs,
+            ),
         }
     }
 
@@ -940,8 +945,15 @@ impl ManifestStore for WorkerManifestCache {
             return Ok(());
         };
         let pack_dir = self.knowledge_pack_dir(meta);
-        crate::local_documents::sync_document_metadata(client, &pack_dir, doc, metadata, edges)
-            .await
+        crate::local_documents::sync_document_metadata(
+            client,
+            &pack_dir,
+            doc,
+            &self.manifests_dir,
+            metadata,
+            edges,
+        )
+        .await
     }
 
     async fn sync_document(
@@ -954,8 +966,15 @@ impl ManifestStore for WorkerManifestCache {
             return Ok(());
         };
         let pack_dir = self.knowledge_pack_dir(meta);
-        crate::local_documents::sync_document(client, &pack_dir, doc, &self.state_dir, metadata)
-            .await
+        crate::local_documents::sync_document(
+            client,
+            &pack_dir,
+            doc,
+            &self.state_dir,
+            &self.manifests_dir,
+            metadata,
+        )
+        .await
     }
 
     async fn remove_document(

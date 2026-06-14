@@ -8,8 +8,8 @@ use tracing::warn;
 use super::store::{ManifestReader, ManifestWriter};
 use super::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    HasManifestSlug, Manifest, ManifestLoader, ManifestResource, ManifestResourceKind,
-    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
+    HasManifestSlug, KnowledgePackManifest, Manifest, ManifestLoader, ManifestResource,
+    ManifestResourceKind, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
 };
 use crate::Slug;
 
@@ -96,6 +96,11 @@ impl LocalManifestStore {
             ManifestResourceKind::ScriptTool => {
                 atomic_write_json(&self.root, "script_tools.json", &manifest.script_tools)
             }
+            ManifestResourceKind::KnowledgePack => atomic_write_json(
+                &self.root,
+                "knowledge_packs.json",
+                &manifest.knowledge_packs,
+            ),
         }
     }
 }
@@ -117,6 +122,7 @@ impl ManifestReader for LocalManifestStore {
             commands: self.load_json("commands.json"),
             hooks: self.load_json("hooks.json"),
             script_tools: self.load_json("script_tools.json"),
+            knowledge_packs: self.load_json("knowledge_packs.json"),
         })
     }
 
@@ -235,6 +241,18 @@ impl ManifestReader for LocalManifestStore {
             .into_iter()
             .find(|item| item.manifest_slug() == *slug))
     }
+
+    async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackManifest>> {
+        Ok(self.load_manifest().await?.knowledge_packs)
+    }
+
+    async fn get_knowledge_pack(&self, slug: &Slug) -> Result<Option<KnowledgePackManifest>> {
+        Ok(self
+            .list_knowledge_packs()
+            .await?
+            .into_iter()
+            .find(|item| item.manifest_slug() == *slug))
+    }
 }
 
 #[async_trait]
@@ -259,6 +277,11 @@ impl ManifestWriter for LocalManifestStore {
         atomic_write_json(&self.root, "commands.json", &manifest.commands)?;
         atomic_write_json(&self.root, "hooks.json", &manifest.hooks)?;
         atomic_write_json(&self.root, "script_tools.json", &manifest.script_tools)?;
+        atomic_write_json(
+            &self.root,
+            "knowledge_packs.json",
+            &manifest.knowledge_packs,
+        )?;
         Ok(())
     }
 

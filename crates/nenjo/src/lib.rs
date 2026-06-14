@@ -42,7 +42,8 @@ pub use input::{
     ProjectLocation, RoutineRun, RoutineRunKind, TaskInput,
 };
 pub use manifest::{
-    Manifest, ManifestLoader, ManifestResource, ManifestResourceKind,
+    KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader, ManifestResource,
+    ManifestResourceKind,
     local::LocalManifestStore,
     store::{ManifestReader, ManifestWriter},
 };

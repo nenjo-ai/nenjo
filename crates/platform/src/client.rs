@@ -385,6 +385,7 @@ pub struct ProjectDocumentMetadata {
     pub updated_at: String,
 }
 
+pub use crate::manifest_contract::KnowledgeDocumentEdgeRecord as KnowledgeDocEdgeResponse;
 pub use crate::manifest_contract::KnowledgeDocumentRecord as KnowledgeDocMetadataResponse;
 use crate::manifest_contract::{KnowledgeDocumentRecord, KnowledgePackRecord};
 
@@ -410,20 +411,12 @@ pub struct ProjectDocumentEdge {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Directed relationship between two library knowledge documents.
-pub struct KnowledgeDocEdgeResponse {
-    pub id: Uuid,
-    pub org_id: Uuid,
-    pub source_item_id: Uuid,
-    pub source_doc: Slug,
-    pub target_item_id: Uuid,
-    pub target_doc: Slug,
-    pub edge_type: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnowledgeDocEdgeReplaceItem<'a> {
+    pub target_doc: &'a str,
+    pub edge_type: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1134,10 +1127,22 @@ impl PlatformManifestClient {
                     .context("failed to decode created library knowledge document")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            StatusCode::CONFLICT => bail!(
-                "library knowledge document create conflicted in pack {pack}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc"
-            ),
-            status => bail!("library knowledge document create failed with status {status}"),
+            StatusCode::CONFLICT => {
+                let body = response.text().await.unwrap_or_default();
+                if body.trim().is_empty() {
+                    bail!(
+                        "library knowledge document create conflicted in pack {pack}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc"
+                    )
+                } else {
+                    bail!(
+                        "library knowledge document create conflicted in pack {pack}: {}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc",
+                        body.trim()
+                    )
+                }
+            }
+            _ => Err(self
+                .response_error(response, "library knowledge document create")
+                .await),
         }
     }
 
@@ -1177,9 +1182,9 @@ impl PlatformManifestClient {
                     .context("failed to decode updated library knowledge document metadata")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            status => {
-                bail!("library knowledge document metadata update failed with status {status}")
-            }
+            _ => Err(self
+                .response_error(response, "library knowledge document metadata update")
+                .await),
         }
     }
 
@@ -1218,9 +1223,9 @@ impl PlatformManifestClient {
                     .context("failed to decode updated library knowledge document")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            status => {
-                bail!("library knowledge document content update failed with status {status}")
-            }
+            _ => Err(self
+                .response_error(response, "library knowledge document content update")
+                .await),
         }
     }
 
@@ -1248,7 +1253,9 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode library knowledge document edges"),
-            status => bail!("library knowledge document edge list failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge list")
+                .await),
         }
     }
 
@@ -1284,7 +1291,41 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode created library knowledge document edge"),
-            status => bail!("library knowledge document edge create failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge create")
+                .await),
+        }
+    }
+
+    /// Replace all outbound graph edges for a library knowledge document.
+    pub async fn replace_knowledge_doc_edges(
+        &self,
+        pack: &Slug,
+        doc: &Slug,
+        related: &[KnowledgeDocEdgeReplaceItem<'_>],
+    ) -> Result<Vec<KnowledgeDocEdgeResponse>> {
+        let response = self
+            .http
+            .put(format!(
+                "{}/api/v1/knowledge/{pack}/items/{doc}/edges",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({ "related": related }))
+            .send()
+            .await
+            .with_context(|| {
+                format!("failed to replace edges for library knowledge document {doc}")
+            })?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode replaced library knowledge document edges"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge replace")
+                .await),
         }
     }
 
@@ -1310,7 +1351,9 @@ impl PlatformManifestClient {
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("library knowledge document edge delete failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge delete")
+                .await),
         }
     }
 
@@ -1329,7 +1372,9 @@ impl PlatformManifestClient {
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("library knowledge document delete failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document delete")
+                .await),
         }
     }
 
@@ -2296,6 +2341,24 @@ impl PlatformManifestClient {
         header::HeaderValue::from_str(&self.api_key).context("invalid api key header")
     }
 
+    async fn response_error(
+        &self,
+        response: reqwest::Response,
+        operation: impl AsRef<str>,
+    ) -> anyhow::Error {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if body.trim().is_empty() {
+            anyhow!("{} failed with status {status}", operation.as_ref())
+        } else {
+            anyhow!(
+                "{} failed with status {status}: {}",
+                operation.as_ref(),
+                body.trim()
+            )
+        }
+    }
+
     pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackRecord>> {
         let response = self
             .http
@@ -2446,13 +2509,13 @@ impl PlatformManifestClient {
 
 fn knowledge_doc_reference_paths(reference: &str) -> Vec<String> {
     let mut paths = vec![reference.trim_matches('/').to_string()];
-    if reference.contains('.') && !reference.contains('/') {
-        if let Some((stem, extension)) = reference.rsplit_once('.')
-            && (extension == "md" || extension == "markdown")
-        {
-            paths.push(format!("{}.md", stem.replace('.', "/")));
-            paths.push(stem.replace('.', "/"));
-        }
+    if reference.contains('.')
+        && !reference.contains('/')
+        && let Some((stem, extension)) = reference.rsplit_once('.')
+        && (extension == "md" || extension == "markdown")
+    {
+        paths.push(format!("{}.md", stem.replace('.', "/")));
+        paths.push(stem.replace('.', "/"));
     }
     paths
 }

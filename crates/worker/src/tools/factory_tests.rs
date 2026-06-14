@@ -394,7 +394,7 @@ async fn scoped_backend(
 }
 
 #[tokio::test]
-async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
+async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools() {
     let temp = tempdir().unwrap();
     let root = temp.path();
 

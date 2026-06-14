@@ -26,15 +26,6 @@ pub trait KnowledgeRegistry: Send + Sync {
     async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>>;
 }
 
-/// Loads knowledge pack entries for provider tool registration.
-///
-/// Implementations typically discover packs from disk, installed packages, or
-/// remote sync caches. The provider calls this when building knowledge tools
-/// so agents see packs added or refreshed after the provider is constructed.
-pub trait KnowledgePackLoader: Send + Sync {
-    fn load_packs(&self) -> Vec<KnowledgePackEntry>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KnowledgeName(String);
 
@@ -377,6 +368,24 @@ impl KnowledgePackSummary {
             document_count: manifest.docs().len(),
         }
     }
+
+    pub fn from_parts(
+        selector: impl Into<String>,
+        pack_id: impl Into<String>,
+        version: impl Into<String>,
+        root_uri: impl Into<String>,
+        document_count: usize,
+    ) -> Self {
+        let selector = selector.into();
+        Self {
+            pack: selector.clone(),
+            selector,
+            pack_id: pack_id.into(),
+            version: version.into(),
+            root_uri: root_uri.into(),
+            document_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -542,11 +551,7 @@ pub fn knowledge_neighbors_result(
     neighbors: KnowledgeDocNeighbor,
 ) -> KnowledgeDocNeighborsResult {
     KnowledgeDocNeighborsResult {
-        document: knowledge_document_metadata(
-            pack.clone(),
-            &neighbors.document,
-            Some(pack_source),
-        ),
+        document: knowledge_document_metadata(pack.clone(), &neighbors.document, Some(pack_source)),
         edges: neighbors
             .edges
             .into_iter()
@@ -1026,9 +1031,7 @@ impl Tool for KnowledgeTool {
                 let hits = pack
                     .search(&args.query, filter)
                     .into_iter()
-                    .map(|hit| {
-                        knowledge_search_result(args.pack.clone(), pack.as_ref(), hit)
-                    })
+                    .map(|hit| knowledge_search_result(args.pack.clone(), pack.as_ref(), hit))
                     .collect::<Vec<_>>();
                 serde_json::to_value(hits)?
             }

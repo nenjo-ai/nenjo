@@ -183,7 +183,9 @@ pub struct KnowledgePackCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_knowledge_pack`.
 pub struct KnowledgePackUpdateParams {
-    #[serde(deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug")]
+    #[serde(
+        deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug"
+    )]
     pub pack: Slug,
     #[serde(flatten)]
     pub data: KnowledgePackUpdateDocument,
@@ -199,7 +201,9 @@ pub struct KnowledgeDocCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `update_knowledge_doc`.
 pub struct KnowledgeDocUpdateParams {
-    #[serde(deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug")]
+    #[serde(
+        deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug"
+    )]
     pub pack: Slug,
     pub slug: Slug,
     #[serde(flatten)]
@@ -209,7 +213,9 @@ pub struct KnowledgeDocUpdateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Parameters for `delete_knowledge_doc`.
 pub struct KnowledgeDocDeleteParams {
-    #[serde(deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug")]
+    #[serde(
+        deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug"
+    )]
     pub pack: Slug,
     pub slug: Slug,
 }

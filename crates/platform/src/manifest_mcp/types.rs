@@ -558,7 +558,9 @@ pub struct KnowledgeDocContentDocument {
 #[builder(pattern = "owned")]
 /// Request body for creating a library knowledge document.
 pub struct KnowledgeDocCreateDocument {
-    #[serde(deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug")]
+    #[serde(
+        deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug"
+    )]
     pub pack: Slug,
     pub filename: String,
     pub content: String,

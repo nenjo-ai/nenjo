@@ -1,12 +1,14 @@
-//! Library knowledge sync — download library documents to the local workspace.
+//! Library knowledge sync — download user-uploaded library documents locally.
 //!
-//! At bootstrap, fetches library document metadata via the v1 API, diffs against
-//! the local library `manifest.json`, and downloads new/changed documents.
-//! Deleted documents are removed locally. Network errors are soft-fail (logged);
-//! filesystem errors are hard-fail.
+//! At bootstrap, fetches uploaded pack metadata via the v1 API, diffs against the
+//! local library `manifest.json`, and downloads new/changed documents from object
+//! storage. Package- and GitHub-backed knowledge stays in installed package
+//! trees; it is not mirrored through platform S3. Network errors are soft-fail
+//! (logged); filesystem errors are hard-fail.
 
 use anyhow::{Context, Result};
 use nenjo::Slug;
+use nenjo::manifest::{KnowledgePackManifest, KnowledgePackSource};
 use nenjo_events::EncryptedPayload;
 use nenjo_knowledge::KnowledgeDocManifest;
 use nenjo_platform::PlatformResourceIdStore;
@@ -20,10 +22,11 @@ use crate::crypto::WorkerAuthProvider;
 use crate::crypto::decrypt_text_with_provider;
 use crate::handlers::manifest::knowledge::DocumentEdgesSource;
 use nenjo_platform::library_knowledge::{
-    LibraryKnowledgePackManifest, build_library_knowledge_manifest,
+    LibraryKnowledgePackCacheEntry, LibraryKnowledgePackManifest, ReplaceDocumentEdges,
+    build_library_knowledge_manifest, ensure_library_knowledge_pack_cache,
     library_knowledge_doc_relative_path, load_library_knowledge_manifest,
     manifest_doc_relative_path, remove_library_knowledge_entry, upsert_library_knowledge_entry,
-    write_library_knowledge_manifest,
+    upsert_library_knowledge_entry_with_edges, write_library_knowledge_manifest,
 };
 
 pub fn remove_manifest_document_from_pack_dir(
@@ -187,12 +190,106 @@ pub fn reconcile_knowledge_document_resource_ids(
     Ok(())
 }
 
+fn is_uploaded_library_pack(pack: &KnowledgePackRecord) -> bool {
+    pack.source_type == "uploaded"
+}
+
 fn remote_library_pack_slugs(packs: &[KnowledgePackRecord]) -> HashSet<String> {
     packs
         .iter()
-        .filter(|pack| pack.source_type != "github")
+        .filter(|pack| is_uploaded_library_pack(pack))
         .map(|pack| pack.slug.clone())
         .collect()
+}
+
+async fn sync_library_knowledge_pack_manifests(
+    manifests_dir: &Path,
+    library_dir: &Path,
+    remote_packs: &[KnowledgePackRecord],
+) -> Result<()> {
+    let remote_slugs = remote_library_pack_slugs(remote_packs);
+    let store = nenjo::LocalManifestStore::new(manifests_dir);
+    let mut manifest = nenjo::ManifestReader::load_manifest(&store).await?;
+    manifest.knowledge_packs.retain(|pack| {
+        pack.source_type != KnowledgePackSource::Library
+            || remote_slugs.contains(pack.slug.as_str())
+    });
+    for pack in remote_packs
+        .iter()
+        .filter(|pack| is_uploaded_library_pack(pack))
+    {
+        let entry = library_knowledge_pack_manifest(pack, library_dir);
+        manifest.upsert_resource(nenjo::ManifestResource::KnowledgePack(entry));
+    }
+    nenjo::ManifestWriter::replace_manifest(&store, &manifest).await
+}
+
+async fn upsert_library_knowledge_pack_manifest(
+    manifests_dir: &Path,
+    library_dir: &Path,
+    pack: &KnowledgePackRecord,
+) -> Result<()> {
+    if !is_uploaded_library_pack(pack) {
+        return Ok(());
+    }
+    let store = nenjo::LocalManifestStore::new(manifests_dir);
+    ensure_library_knowledge_pack_cache(
+        &store,
+        library_dir,
+        LibraryKnowledgePackCacheEntry {
+            slug: Slug::derive(&pack.slug),
+            name: Some(pack.name.clone()),
+            description: Some(pack.description.clone()),
+            selector: pack
+                .selector
+                .clone()
+                .or_else(|| Some(format!("lib:{}", pack.slug))),
+            version: pack.version.clone(),
+            read_only: Some(pack.read_only),
+            metadata: Some(pack.metadata.clone()),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_library_knowledge_pack_registered(
+    manifests_dir: &Path,
+    pack_dir: &Path,
+    pack_slug: &str,
+) -> Result<()> {
+    let Some(library_dir) = pack_dir.parent() else {
+        return Ok(());
+    };
+    let store = nenjo::LocalManifestStore::new(manifests_dir);
+    ensure_library_knowledge_pack_cache(
+        &store,
+        library_dir,
+        LibraryKnowledgePackCacheEntry::from_slug(Slug::derive(pack_slug)),
+    )
+    .await?;
+    Ok(())
+}
+
+fn library_knowledge_pack_manifest(
+    pack: &KnowledgePackRecord,
+    library_dir: &Path,
+) -> KnowledgePackManifest {
+    KnowledgePackManifest {
+        slug: Slug::derive(&pack.slug),
+        name: pack.name.clone(),
+        description: pack.description.clone(),
+        source_type: KnowledgePackSource::Library,
+        selector: pack
+            .selector
+            .clone()
+            .unwrap_or_else(|| format!("lib:{}", pack.slug)),
+        version: pack.version.clone(),
+        root_uri: format!("library://{}/", pack.slug),
+        root_path: Some(library_dir.join(&pack.slug)),
+        read_only: pack.read_only,
+        metadata: pack.metadata.clone(),
+    }
 }
 
 /// Remove local library packs and sidecar entries that no longer exist on the platform.
@@ -273,12 +370,22 @@ pub async fn sync_all(
         }
     };
 
+    if let Err(error) =
+        sync_library_knowledge_pack_manifests(manifests_dir, &library_dir, &packs).await
+    {
+        warn!(
+            error = %error,
+            "Failed to sync local knowledge pack manifests"
+        );
+    }
+
     for pack in &packs {
-        let result = if pack.source_type == "github" {
-            warn!(
+        let result = if !is_uploaded_library_pack(pack) {
+            debug!(
                 pack_id = %pack.id,
                 pack_slug = %pack.slug,
-                "Skipping legacy GitHub knowledge pack; external knowledge should be installed through packages"
+                source_type = %pack.source_type,
+                "Skipping non-uploaded knowledge pack; content is served from its source resolver"
             );
             Ok(())
         } else {
@@ -326,17 +433,20 @@ pub async fn sync_pack_by_slug(
         return Ok(());
     };
 
-    if pack.source_type == "github" {
-        warn!(
+    if !is_uploaded_library_pack(&pack) {
+        debug!(
             pack_id = %pack.id,
             pack_slug = %pack.slug,
-            "Skipping legacy GitHub knowledge pack; external knowledge should be installed through packages"
+            source_type = %pack.source_type,
+            "Skipping knowledge pack sync for non-uploaded pack"
         );
-        Ok(())
-    } else {
-        let pack_dir = nenjo_home.join("library").join(&pack.slug);
-        sync_pack(api, &pack_dir, &pack.slug, state_dir, manifests_dir).await
+        return Ok(());
     }
+
+    let pack_dir = nenjo_home.join("library").join(&pack.slug);
+    upsert_library_knowledge_pack_manifest(manifests_dir, &nenjo_home.join("library"), &pack)
+        .await?;
+    sync_pack(api, &pack_dir, &pack.slug, state_dir, manifests_dir).await
 }
 
 /// Sync knowledge documents for a single pack.
@@ -347,6 +457,8 @@ pub async fn sync_pack(
     state_dir: &Path,
     manifests_dir: &Path,
 ) -> Result<()> {
+    ensure_library_knowledge_pack_registered(manifests_dir, pack_dir, pack_slug).await?;
+
     let remote_docs = match api.list_knowledge_docs(pack_slug).await {
         Ok(docs) => docs,
         Err(e) => {
@@ -587,6 +699,7 @@ pub async fn sync_document(
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
     state_dir: &Path,
+    manifests_dir: &Path,
     metadata: Option<&KnowledgeDocumentRecord>,
 ) -> Result<()> {
     let pack_slug = pack_dir
@@ -594,6 +707,7 @@ pub async fn sync_document(
         .and_then(|name| name.to_str())
         .unwrap_or("default")
         .to_string();
+    ensure_library_knowledge_pack_registered(manifests_dir, pack_dir, &pack_slug).await?;
     let mut resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
@@ -631,6 +745,7 @@ pub async fn sync_document_metadata(
     api: &ApiClient,
     pack_dir: &Path,
     doc_slug: &nenjo::Slug,
+    manifests_dir: &Path,
     metadata: Option<&KnowledgeDocumentRecord>,
     edges: Option<DocumentEdgesSource<'_>>,
 ) -> Result<()> {
@@ -639,6 +754,7 @@ pub async fn sync_document_metadata(
         .and_then(|name| name.to_str())
         .unwrap_or("default")
         .to_string();
+    ensure_library_knowledge_pack_registered(manifests_dir, pack_dir, &pack_slug).await?;
     let mut resolved_meta = if let Some(metadata) = metadata.cloned() {
         metadata
     } else {
@@ -672,7 +788,12 @@ pub async fn sync_document_metadata(
         )?;
     }
 
-    upsert_library_knowledge_entry(pack_dir, &pack_slug, &resolved_meta)?;
+    upsert_library_knowledge_entry_with_edges(
+        pack_dir,
+        &pack_slug,
+        &resolved_meta,
+        ReplaceDocumentEdges::Yes,
+    )?;
     Ok(())
 }
 
@@ -707,6 +828,7 @@ pub async fn resolve_document_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo::ManifestReader;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -905,6 +1027,45 @@ mod tests {
         assert_eq!(knowledge.docs[0].updated_at, doc.updated_at_rfc3339());
     }
 
+    #[tokio::test]
+    async fn sync_document_metadata_repairs_missing_pack_registry_entry() {
+        let temp = tempdir().unwrap();
+        let manifests_dir = temp.path().join("manifests");
+        let library_dir = temp.path().join("library");
+        let pack_dir = library_dir.join("humanizer");
+        let api = ApiClient::new("http://127.0.0.1:9", "test");
+        let mut doc = meta(1, "intro.md", "2026-02-22T00:00:00Z");
+        doc.pack_slug = "humanizer".to_string();
+        doc.slug = "intro".to_string();
+
+        sync_document_metadata(
+            &api,
+            &pack_dir,
+            &Slug::derive("intro"),
+            &manifests_dir,
+            Some(&doc),
+            Some(DocumentEdgesSource::Inline(&[])),
+        )
+        .await
+        .unwrap();
+
+        let store = nenjo::LocalManifestStore::new(&manifests_dir);
+        let manifest = store.load_manifest().await.unwrap();
+        let pack = manifest
+            .knowledge_packs
+            .iter()
+            .find(|pack| pack.slug.as_str() == "humanizer")
+            .unwrap();
+        assert_eq!(pack.selector, "lib:humanizer");
+        assert_eq!(pack.root_path, Some(pack_dir.clone()));
+        assert!(
+            load_library_knowledge_manifest(&pack_dir)
+                .unwrap()
+                .doc_by_slug(&Slug::derive("intro"))
+                .is_some()
+        );
+    }
+
     fn pack_meta(slug: &str) -> KnowledgePackRecord {
         let now = chrono::Utc::now();
         KnowledgePackRecord {
@@ -912,7 +1073,7 @@ mod tests {
             slug: slug.to_string(),
             name: slug.to_string(),
             description: None,
-            source_type: "library".to_string(),
+            source_type: "uploaded".to_string(),
             read_only: false,
             metadata: serde_json::Value::Null,
             selector: None,
@@ -928,7 +1089,7 @@ mod tests {
         let manifests_dir = tempdir().unwrap();
         let library_dir = nenjo_home.path().join("library");
         let kept_dir = library_dir.join("product");
-        let stale_dir = library_dir.join("legacy");
+        let stale_dir = library_dir.join("removed");
         std::fs::create_dir_all(kept_dir.join("docs")).unwrap();
         std::fs::create_dir_all(stale_dir.join("docs")).unwrap();
 
@@ -938,7 +1099,7 @@ mod tests {
             .upsert_knowledge_document(&Slug::parse("product").unwrap(), &doc, Uuid::new_v4())
             .unwrap();
         store
-            .upsert_knowledge_document(&Slug::parse("legacy").unwrap(), &doc, Uuid::new_v4())
+            .upsert_knowledge_document(&Slug::parse("removed").unwrap(), &doc, Uuid::new_v4())
             .unwrap();
 
         reconcile_library_knowledge_packs(
@@ -958,7 +1119,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get_knowledge_document(&Slug::parse("legacy").unwrap(), &doc)
+                .get_knowledge_document(&Slug::parse("removed").unwrap(), &doc)
                 .unwrap(),
             None
         );

@@ -46,6 +46,8 @@ pub struct Manifest {
     pub hooks: Vec<HookManifest>,
     #[serde(default)]
     pub script_tools: Vec<ScriptToolManifest>,
+    #[serde(default)]
+    pub knowledge_packs: Vec<KnowledgePackManifest>,
 }
 
 impl Manifest {
@@ -69,6 +71,7 @@ impl Manifest {
         merge_commands(&mut self.commands, other.commands);
         merge_by_slug(&mut self.hooks, other.hooks);
         merge_by_slug(&mut self.script_tools, other.script_tools);
+        merge_by_slug(&mut self.knowledge_packs, other.knowledge_packs);
     }
 
     /// Insert or replace a single resource in this manifest.
@@ -87,6 +90,9 @@ impl Manifest {
             ManifestResource::Command(item) => upsert_command(&mut self.commands, item),
             ManifestResource::Hook(item) => upsert_by_slug(&mut self.hooks, item),
             ManifestResource::ScriptTool(item) => upsert_by_slug(&mut self.script_tools, item),
+            ManifestResource::KnowledgePack(item) => {
+                upsert_by_slug(&mut self.knowledge_packs, item)
+            }
         }
     }
 
@@ -123,6 +129,9 @@ impl Manifest {
             ManifestResourceKind::Hook => self.hooks.retain(|item| item.manifest_slug() != *slug),
             ManifestResourceKind::ScriptTool => self
                 .script_tools
+                .retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::KnowledgePack => self
+                .knowledge_packs
                 .retain(|item| item.manifest_slug() != *slug),
         }
     }
@@ -430,6 +439,56 @@ pub struct ProjectManifest {
 impl HasManifestSlug for ProjectManifest {
     fn manifest_slug(&self) -> Slug {
         self.slug.clone()
+    }
+}
+
+/// A knowledge pack manifest entry.
+///
+/// This metadata tells the runtime how to resolve a pack and where its local
+/// content cache lives. Document bodies are intentionally not stored here; the
+/// knowledge tools lazy-load content from `root_path`/`root_uri` when a document
+/// is read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgePackManifest {
+    pub slug: Slug,
+    pub name: String,
+    pub description: Option<String>,
+    pub source_type: KnowledgePackSource,
+    pub selector: String,
+    pub version: Option<String>,
+    pub root_uri: String,
+    pub root_path: Option<PathBuf>,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+impl HasManifestSlug for KnowledgePackManifest {
+    fn manifest_slug(&self) -> Slug {
+        self.slug.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum KnowledgePackSource {
+    #[default]
+    Library,
+    Package,
+    Local,
+    Connector,
+}
+
+impl KnowledgePackSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Library => "library",
+            Self::Package => "package",
+            Self::Local => "local",
+            Self::Connector => "connector",
+        }
     }
 }
 
@@ -1034,6 +1093,7 @@ pub enum ManifestResource {
     Command(CommandManifest),
     Hook(HookManifest),
     ScriptTool(ScriptToolManifest),
+    KnowledgePack(KnowledgePackManifest),
 }
 
 impl ManifestResource {
@@ -1052,6 +1112,7 @@ impl ManifestResource {
             Self::Command(_) => ManifestResourceKind::Command,
             Self::Hook(_) => ManifestResourceKind::Hook,
             Self::ScriptTool(_) => ManifestResourceKind::ScriptTool,
+            Self::KnowledgePack(_) => ManifestResourceKind::KnowledgePack,
         }
     }
 
@@ -1070,6 +1131,7 @@ impl ManifestResource {
             Self::Command(item) => item.manifest_slug(),
             Self::Hook(item) => item.manifest_slug(),
             Self::ScriptTool(item) => item.manifest_slug(),
+            Self::KnowledgePack(item) => item.manifest_slug(),
         }
     }
 }
@@ -1091,6 +1153,7 @@ pub enum ManifestResourceKind {
     Command,
     Hook,
     ScriptTool,
+    KnowledgePack,
 }
 
 #[cfg(test)]

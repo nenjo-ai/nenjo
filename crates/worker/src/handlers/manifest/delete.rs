@@ -34,7 +34,7 @@ pub(super) fn apply_delete(
             .domains
             .retain(|r| domain_slug(&r.path, &r.name) != *resource),
         ResourceType::Document => return,
-        ResourceType::KnowledgePack => return,
+        ResourceType::KnowledgePack => manifest.knowledge_packs.retain(|r| r.slug != *resource),
     }
 
     info!(%rt, %resource, "Removed deleted resource from manifest");

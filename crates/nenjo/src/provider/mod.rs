@@ -27,14 +27,19 @@ use crate::agents::prompts::{self as prompts, PromptContext};
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::manifest::{
-    AbilityManifest, AgentManifest, DomainManifest, HasManifestSlug, Manifest, ModelManifest,
-    ProjectManifest,
+    AbilityManifest, AgentManifest, DomainManifest, HasManifestSlug, KnowledgePackManifest,
+    KnowledgePackSource, Manifest, ModelManifest, ProjectManifest,
 };
 use crate::memory::Memory;
 use crate::tools::Tool;
 use crate::types::RenderContextVars;
-use crate::{IntoSlug, Slug};
-use tracing::debug;
+use crate::{IntoSlug, ManifestReader, Slug};
+use nenjo_knowledge::tools::{
+    CompositeKnowledgeRegistry, KnowledgePackEntry, KnowledgePackSummary, KnowledgeRef,
+    KnowledgeRegistry,
+};
+use nenjo_knowledge::{FilesystemKnowledgePack, KnowledgePack, PackageKnowledgePack};
+use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -175,29 +180,206 @@ fn index_domains_by_command(items: &[DomainManifest]) -> HashMap<String, usize> 
     index
 }
 
-pub(crate) struct ProviderKnowledgeState {
-    registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
-    static_entries: Vec<nenjo_knowledge::tools::KnowledgePackEntry>,
-    loader: Option<Arc<dyn nenjo_knowledge::tools::KnowledgePackLoader>>,
-}
-
-impl Default for ProviderKnowledgeState {
-    fn default() -> Self {
-        Self {
-            registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry::new(),
-            static_entries: Vec::new(),
-            loader: None,
+fn manifest_knowledge_pack_entry(manifest: &KnowledgePackManifest) -> Option<KnowledgePackEntry> {
+    match manifest.source_type {
+        KnowledgePackSource::Library | KnowledgePackSource::Local => {
+            let knowledge_ref = filesystem_manifest_knowledge_ref(manifest)?;
+            let root = manifest.root_path.as_ref().or_else(|| {
+                warn!(
+                    selector = %manifest.selector,
+                    "Skipping filesystem knowledge pack without root_path"
+                );
+                None
+            })?;
+            let pack = FilesystemKnowledgePack::load(root).or_else(|| {
+                warn!(
+                    selector = %manifest.selector,
+                    path = %root.display(),
+                    "Skipping unreadable filesystem knowledge pack"
+                );
+                None
+            })?;
+            Some(KnowledgePackEntry::new(knowledge_ref, pack))
+        }
+        KnowledgePackSource::Package => {
+            let root = manifest.root_path.as_ref().or_else(|| {
+                warn!(
+                    selector = %manifest.selector,
+                    "Skipping package knowledge pack without root_path"
+                );
+                None
+            })?;
+            let version = manifest.version.as_deref().unwrap_or("1");
+            let pack = PackageKnowledgePack::load(root, version)
+                .map_err(|error| {
+                    warn!(
+                        selector = %manifest.selector,
+                        path = %root.display(),
+                        error = %error,
+                        "Skipping unreadable package knowledge pack"
+                    );
+                })
+                .ok()?;
+            let knowledge_ref = package_manifest_knowledge_ref(manifest, &pack)?;
+            Some(KnowledgePackEntry::new(knowledge_ref, pack))
+        }
+        KnowledgePackSource::Connector => {
+            warn!(
+                selector = %manifest.selector,
+                "Skipping connector knowledge pack without a local runtime resolver"
+            );
+            None
         }
     }
+}
+
+fn filesystem_manifest_knowledge_ref(manifest: &KnowledgePackManifest) -> Option<KnowledgeRef> {
+    if let Ok(knowledge_ref) = manifest.selector.parse::<KnowledgeRef>() {
+        return Some(knowledge_ref);
+    }
+    let derived_ref = match manifest.source_type {
+        KnowledgePackSource::Library => KnowledgeRef::library(manifest.slug.as_str()),
+        KnowledgePackSource::Local => KnowledgeRef::local(manifest.slug.as_str()),
+        KnowledgePackSource::Package | KnowledgePackSource::Connector => return None,
+    };
+    derived_ref
+        .map_err(|error| {
+            warn!(
+                selector = %manifest.selector,
+                slug = %manifest.slug,
+                error = %error,
+                "Skipping knowledge pack with invalid manifest selector"
+            );
+        })
+        .ok()
+}
+
+fn package_manifest_knowledge_ref(
+    manifest: &KnowledgePackManifest,
+    pack: &PackageKnowledgePack,
+) -> Option<KnowledgeRef> {
+    if let Ok(knowledge_ref) = manifest.selector.parse::<KnowledgeRef>() {
+        return Some(knowledge_ref);
+    }
+    if let Some(selector) = pack.selector()
+        && let Ok(knowledge_ref) = selector
+            .parse::<KnowledgeRef>()
+            .or_else(|_| KnowledgeRef::package(selector))
+    {
+        return Some(knowledge_ref);
+    }
+    KnowledgeRef::package(pack.manifest().pack_id())
+        .map_err(|error| {
+            warn!(
+                selector = %manifest.selector,
+                pack_id = %pack.manifest().pack_id(),
+                error = %error,
+                "Skipping package knowledge pack with invalid manifest selector"
+            );
+        })
+        .ok()
+}
+
+#[derive(Default)]
+pub(crate) struct ProviderKnowledgeState {
+    pack_entries: Vec<KnowledgePackEntry>,
+    live_manifest_reader: Option<Arc<dyn ManifestReader>>,
 }
 
 impl Clone for ProviderKnowledgeState {
     fn clone(&self) -> Self {
         Self {
-            registry: self.registry.clone(),
-            static_entries: self.static_entries.clone(),
-            loader: self.loader.clone(),
+            pack_entries: self.pack_entries.clone(),
+            live_manifest_reader: self.live_manifest_reader.clone(),
         }
+    }
+}
+
+struct ManifestBackedKnowledgeRegistry {
+    manifest: Arc<Manifest>,
+    explicit_entries: Vec<KnowledgePackEntry>,
+    live_manifest_reader: Option<Arc<dyn ManifestReader>>,
+}
+
+impl ManifestBackedKnowledgeRegistry {
+    async fn registry(&self) -> CompositeKnowledgeRegistry {
+        let mut entries = self
+            .manifest
+            .knowledge_packs
+            .iter()
+            .filter_map(manifest_knowledge_pack_entry)
+            .collect::<Vec<_>>();
+        if let Some(reader) = &self.live_manifest_reader {
+            match reader.list_knowledge_packs().await {
+                Ok(packs) => {
+                    entries.extend(packs.iter().filter_map(manifest_knowledge_pack_entry));
+                }
+                Err(error) => {
+                    warn!(error = %error, "Failed to refresh live knowledge pack manifest");
+                }
+            }
+        }
+        entries.extend(self.explicit_entries.iter().cloned());
+        CompositeKnowledgeRegistry::from_entries(entries)
+    }
+}
+
+#[async_trait::async_trait]
+impl KnowledgeRegistry for ManifestBackedKnowledgeRegistry {
+    async fn list_packs(&self) -> anyhow::Result<Vec<KnowledgePackSummary>> {
+        let mut summaries = self
+            .manifest
+            .knowledge_packs
+            .iter()
+            .filter_map(manifest_knowledge_pack_summary)
+            .collect::<Vec<_>>();
+        if let Some(reader) = &self.live_manifest_reader {
+            match reader.list_knowledge_packs().await {
+                Ok(packs) => {
+                    summaries.extend(packs.iter().filter_map(manifest_knowledge_pack_summary));
+                }
+                Err(error) => {
+                    warn!(error = %error, "Failed to refresh live knowledge pack manifest");
+                }
+            }
+        }
+        summaries.extend(
+            self.explicit_entries
+                .iter()
+                .map(|entry| KnowledgePackSummary::new(entry.selector(), entry.pack().manifest())),
+        );
+        summaries.sort_by(|left, right| left.selector.cmp(&right.selector));
+        summaries.dedup_by(|left, right| left.selector == right.selector);
+        Ok(summaries)
+    }
+
+    async fn resolve_pack(&self, selector: &str) -> anyhow::Result<Arc<dyn KnowledgePack>> {
+        self.registry().await.resolve_pack(selector).await
+    }
+}
+
+fn manifest_knowledge_pack_summary(
+    manifest: &KnowledgePackManifest,
+) -> Option<KnowledgePackSummary> {
+    let selector = manifest_knowledge_selector(manifest)?;
+    Some(KnowledgePackSummary::from_parts(
+        selector,
+        manifest.slug.as_str(),
+        manifest.version.clone().unwrap_or_else(|| "1".to_string()),
+        manifest.root_uri.clone(),
+        0,
+    ))
+}
+
+fn manifest_knowledge_selector(manifest: &KnowledgePackManifest) -> Option<String> {
+    if manifest.selector.parse::<KnowledgeRef>().is_ok() {
+        return Some(manifest.selector.clone());
+    }
+    match manifest.source_type {
+        KnowledgePackSource::Library => Some(format!("lib:{}", manifest.slug)),
+        KnowledgePackSource::Local => Some(format!("local:{}", manifest.slug)),
+        KnowledgePackSource::Package => Some(format!("pkg:{}", manifest.slug)),
+        KnowledgePackSource::Connector => None,
     }
 }
 
@@ -448,19 +630,16 @@ where
     }
 
     pub(crate) fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>> {
-        let registry = if let Some(loader) = &self.inner.services.knowledge.loader {
-            Arc::new(
-                nenjo_knowledge::tools::CompositeKnowledgeRegistry::from_entries(
-                    loader.load_packs(),
-                ),
-            )
-        } else {
-            Arc::new(self.inner.services.knowledge.registry.clone())
-        };
+        let knowledge = &self.inner.services.knowledge;
+        let registry = Arc::new(ManifestBackedKnowledgeRegistry {
+            manifest: self.inner.manifest.manifest.clone(),
+            explicit_entries: knowledge.pack_entries.clone(),
+            live_manifest_reader: knowledge.live_manifest_reader.clone(),
+        });
         let mut tools = vec![nenjo_knowledge::tools::knowledge_list_packs_tool(
             registry.clone(),
         )];
-        if !registry.is_empty() {
+        if knowledge.live_manifest_reader.is_some() || !self.knowledge_pack_entries().is_empty() {
             tools.extend(nenjo_knowledge::tools::knowledge_traversal_tools(registry));
         }
         tools
@@ -512,20 +691,25 @@ where
     }
 
     fn refresh_knowledge_prompt_vars(&self) -> std::collections::HashMap<String, String> {
-        let services = &self.inner.services;
-        if services.knowledge.loader.is_some() || !services.knowledge.static_entries.is_empty() {
-            let mut vars = nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(
-                services.knowledge.static_entries.iter().cloned(),
-            );
-            if let Some(loader) = &services.knowledge.loader {
-                vars.extend(nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(
-                    loader.load_packs(),
-                ));
-            }
-            vars
+        let entries = self.knowledge_pack_entries();
+        if entries.is_empty() {
+            self.inner.services.render_ctx_extra.knowledge_vars.clone()
         } else {
-            services.render_ctx_extra.knowledge_vars.clone()
+            nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(entries)
         }
+    }
+
+    fn knowledge_pack_entries(&self) -> Vec<KnowledgePackEntry> {
+        let mut entries = self.inner.services.knowledge.pack_entries.clone();
+        entries.extend(
+            self.inner
+                .manifest
+                .manifest
+                .knowledge_packs
+                .iter()
+                .filter_map(manifest_knowledge_pack_entry),
+        );
+        entries
     }
 
     async fn create_model_provider(

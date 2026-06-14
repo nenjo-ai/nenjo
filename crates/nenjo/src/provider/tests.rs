@@ -1,17 +1,16 @@
 use std::borrow::Cow;
 
 use super::*;
+use crate::ManifestWriter;
 use crate::manifest::{
-    AbilityManifest, AbilityPromptConfig, DomainManifest, DomainPromptConfig, PromptConfig,
+    AbilityManifest, AbilityPromptConfig, DomainManifest, DomainPromptConfig,
+    KnowledgePackManifest as ProviderKnowledgePackManifest, KnowledgePackSource, PromptConfig,
 };
-use crate::manifest::{ContextBlockManifest, ManifestLoader, RoutineManifest};
+use crate::manifest::{ContextBlockManifest, ManifestLoader, ManifestResource, RoutineManifest};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgePackLoader, KnowledgeRegistry};
-use nenjo_knowledge::{
-    KnowledgeDocFilter, KnowledgeDocManifest, KnowledgePack, KnowledgePackManifestData,
-};
+use nenjo_knowledge::tools::KnowledgePackEntry;
+use nenjo_knowledge::{KnowledgeDocManifest, KnowledgePack, KnowledgePackManifestData};
 
 struct MockProvider;
 
@@ -320,95 +319,91 @@ async fn provider_registers_multiple_knowledge_packs() {
     assert!(vars.contains_key("local.first"));
     assert!(vars.contains_key("local.second"));
 
-    let registry = provider.inner.services.knowledge.registry.clone();
-    let packs = registry.list_packs().await.unwrap();
-    assert_eq!(packs.len(), 2);
-    assert!(packs.iter().any(|pack| pack.pack == "local:first"));
-    assert!(packs.iter().any(|pack| pack.pack == "local:second"));
-
-    let first = registry.resolve_pack("local:first").await.unwrap();
-    assert!(
-        first
-            .list_docs(KnowledgeDocFilter::default())
-            .iter()
-            .any(|doc| doc.id == "first_doc")
-    );
-}
-
-struct RefreshingKnowledgeLoader {
-    use_second: Arc<AtomicBool>,
-}
-
-impl KnowledgePackLoader for RefreshingKnowledgeLoader {
-    fn load_packs(&self) -> Vec<KnowledgePackEntry> {
-        let pack_name = if self.use_second.load(Ordering::SeqCst) {
-            "second"
-        } else {
-            "first"
-        };
-        vec![
-            KnowledgePackEntry::library(
-                pack_name,
-                TestKnowledgePack::new(
-                    pack_name,
-                    &format!("library://{pack_name}/"),
-                    &format!("{pack_name}_doc"),
-                    &format!("library://{pack_name}/{pack_name}.md"),
-                ),
-            )
-            .unwrap(),
-        ]
-    }
+    assert!(tool_names.iter().any(|name| name == "search_knowledge"));
+    assert!(tool_names.iter().any(|name| name == "read_knowledge_doc"));
 }
 
 #[tokio::test]
-async fn knowledge_pack_loader_refreshes_prompt_vars_on_agent_build() {
-    let use_second = Arc::new(AtomicBool::new(false));
-    let loader = Arc::new(RefreshingKnowledgeLoader {
-        use_second: use_second.clone(),
-    });
+async fn manifest_knowledge_pack_provides_prompt_vars_and_lazy_doc_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack_dir = temp.path().join("demo");
+    let docs_dir = pack_dir.join("docs");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(docs_dir.join("intro.md"), "# Intro\n\nLoaded from disk.").unwrap();
+    std::fs::write(
+        pack_dir.join("manifest.json"),
+        r#"{
+          "pack_id": "demo",
+          "version": "1",
+          "schema_version": 1,
+          "root_uri": "library://demo/",
+          "content_hash": "",
+          "docs": [
+            {
+              "id": "intro",
+              "selector": "intro",
+              "source_path": "docs/intro.md",
+              "title": "Intro",
+              "summary": "Intro summary",
+              "kind": "reference",
+              "tags": [],
+              "related": [],
+              "updated_at": ""
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let mut manifest = test_manifest();
+    manifest
+        .knowledge_packs
+        .push(ProviderKnowledgePackManifest {
+            slug: crate::Slug::derive("demo"),
+            name: "Demo".to_string(),
+            description: None,
+            source_type: KnowledgePackSource::Library,
+            selector: "lib:demo".to_string(),
+            version: Some("1".to_string()),
+            root_uri: "library://demo/".to_string(),
+            root_path: Some(pack_dir),
+            read_only: true,
+            metadata: serde_json::Value::Null,
+        });
 
     let provider = Provider::builder()
-        .with_manifest(test_manifest())
+        .with_manifest(manifest)
         .with_model_factory(MockFactory)
         .with_tool_factory(NoopToolFactory)
-        .with_knowledge_pack_loader(loader)
         .build()
         .await
         .unwrap();
 
-    let first_runner = provider
+    let runner = provider
         .agent("agent")
         .await
         .unwrap()
         .build()
         .await
         .unwrap();
-    let first_vars = first_runner
+    let vars = runner
         .instance()
         .prompt_context()
         .render_ctx_extra
         .knowledge_vars
         .clone();
-    assert!(first_vars.contains_key("lib.first"));
+    assert!(vars.contains_key("lib.demo.intro"));
 
-    use_second.store(true, Ordering::SeqCst);
-
-    let second_runner = provider
-        .agent("agent")
-        .await
-        .unwrap()
-        .build()
+    let read_tool = provider
+        .create_knowledge_tools()
+        .into_iter()
+        .find(|tool| tool.name() == "read_knowledge_doc")
+        .unwrap();
+    let result = read_tool
+        .execute(serde_json::json!({ "pack": "lib:demo", "selector": "intro" }))
         .await
         .unwrap();
-    let second_vars = second_runner
-        .instance()
-        .prompt_context()
-        .render_ctx_extra
-        .knowledge_vars
-        .clone();
-    assert!(second_vars.contains_key("lib.second"));
-    assert!(!second_vars.contains_key("lib.first"));
+    assert!(result.output.contains("Loaded from disk."));
 }
 
 #[tokio::test]
@@ -429,6 +424,68 @@ async fn provider_exposes_list_knowledge_packs_without_registered_packs() {
     assert!(result.success);
     let packs: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
     assert!(packs.is_empty());
+}
+
+#[tokio::test]
+async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = crate::manifest::local::LocalManifestStore::new(temp.path().join("manifests"));
+    let pack_dir = temp.path().join("library").join("live");
+
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .with_live_manifest_reader(store.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let tools = provider.create_knowledge_tools();
+    assert!(tools.iter().any(|tool| tool.name() == "read_knowledge_doc"));
+    let list_tool = tools
+        .iter()
+        .find(|tool| tool.name() == "list_knowledge_packs")
+        .unwrap()
+        .clone();
+
+    let packs: Vec<serde_json::Value> = serde_json::from_str(
+        &list_tool
+            .execute(serde_json::json!({}))
+            .await
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert!(packs.is_empty());
+
+    store
+        .upsert_resource(&ManifestResource::KnowledgePack(
+            ProviderKnowledgePackManifest {
+                slug: crate::Slug::derive("live"),
+                name: "Live".to_string(),
+                description: None,
+                source_type: KnowledgePackSource::Library,
+                selector: "lib:live".to_string(),
+                version: Some("1".to_string()),
+                root_uri: "library://live/".to_string(),
+                root_path: Some(pack_dir),
+                read_only: true,
+                metadata: serde_json::Value::Null,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let packs: Vec<serde_json::Value> = serde_json::from_str(
+        &list_tool
+            .execute(serde_json::json!({}))
+            .await
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert_eq!(packs[0]["selector"], "lib:live");
 }
 
 #[tokio::test]

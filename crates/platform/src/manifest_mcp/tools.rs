@@ -205,8 +205,28 @@ mod tests {
             update.parameters["properties"]["related"]["description"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("create all target documents before assigning relations"),
-            "related schema must document the two-phase relation workflow"
+                .contains("replaces every outbound edge"),
+            "related schema must document full replacement semantics"
+        );
+        assert!(
+            create.parameters["properties"]["related"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Targets must already exist"),
+            "create related schema must explain target existence"
+        );
+        assert_eq!(
+            update.parameters["properties"]["related"]["items"]["properties"]["type"]["enum"],
+            serde_json::json!([
+                "references",
+                "depends_on",
+                "defines",
+                "part_of",
+                "extends",
+                "related_to",
+                "governs",
+                "classifies"
+            ])
         );
     }
 

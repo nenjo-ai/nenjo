@@ -3,8 +3,8 @@ use async_trait::async_trait;
 
 use super::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    Manifest, ManifestResource, ManifestResourceKind, McpServerManifest, ModelManifest,
-    ProjectManifest, RoutineManifest,
+    KnowledgePackManifest, Manifest, ManifestResource, ManifestResourceKind, McpServerManifest,
+    ModelManifest, ProjectManifest, RoutineManifest,
 };
 use crate::Slug;
 
@@ -66,6 +66,20 @@ pub trait ManifestReader: Send + Sync {
     async fn list_context_blocks(&self) -> Result<Vec<ContextBlockManifest>>;
     /// Look up one context block by slug.
     async fn get_context_block(&self, slug: &Slug) -> Result<Option<ContextBlockManifest>>;
+
+    /// List all cached knowledge packs.
+    async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackManifest>> {
+        Ok(self.load_manifest().await?.knowledge_packs)
+    }
+
+    /// Look up one knowledge pack by slug.
+    async fn get_knowledge_pack(&self, slug: &Slug) -> Result<Option<KnowledgePackManifest>> {
+        Ok(self
+            .list_knowledge_packs()
+            .await?
+            .into_iter()
+            .find(|item| item.slug == *slug))
+    }
 }
 
 /// Write manifest resources to any backing store.
