@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Client, StatusCode, Url, header, multipart};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::manifest_contract::ContextBlockRecord;
@@ -149,6 +150,47 @@ struct ContentMutationEnvelope<T> {
 #[derive(Debug, serde::Deserialize)]
 struct AuthMeResponse {
     org_id: Option<String>,
+}
+
+const PLATFORM_CLIENT_429_RETRY_DELAY: Duration = Duration::from_millis(250);
+const PLATFORM_CLIENT_429_MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+trait PlatformRetryRequestBuilderExt {
+    /// Send a platform API request with the one transport-level retry policy.
+    ///
+    /// The platform client retries cloneable requests once when the backend
+    /// returns `429 Too Many Requests`. Keep this as the only retry point for
+    /// platform manifests so endpoints do not grow competing backoff behavior.
+    async fn send_with_platform_retry(self) -> reqwest::Result<reqwest::Response>;
+}
+
+impl PlatformRetryRequestBuilderExt for reqwest::RequestBuilder {
+    async fn send_with_platform_retry(self) -> reqwest::Result<reqwest::Response> {
+        let retry_request = self.try_clone();
+        let response = self.send().await?;
+        if response.status() != StatusCode::TOO_MANY_REQUESTS {
+            return Ok(response);
+        }
+
+        let Some(retry_request) = retry_request else {
+            return Ok(response);
+        };
+        let delay = retry_after_delay(response.headers());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        retry_request.send().await
+    }
+}
+
+fn retry_after_delay(headers: &header::HeaderMap) -> Duration {
+    headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(PLATFORM_CLIENT_429_RETRY_DELAY)
+        .min(PLATFORM_CLIENT_429_MAX_RETRY_DELAY)
 }
 
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
@@ -550,7 +592,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/manifest", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch manifest bootstrap")?;
 
@@ -569,7 +611,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/agents", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch agents")?;
 
@@ -585,7 +627,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/agents/{agent}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch agent {agent}"))?;
 
@@ -616,7 +658,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/agents", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create agent")?;
 
@@ -641,7 +683,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/agents/{agent_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update agent {agent_ref}"))?;
 
@@ -673,7 +715,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/agents/{agent}/prompt", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update agent prompt {agent}"))?;
 
@@ -695,7 +737,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/agents/{agent}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete agent {agent}"))?;
 
@@ -725,7 +767,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/abilities", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create ability")?;
 
@@ -745,7 +787,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/abilities/{selector}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch ability {ability}"))?;
 
@@ -774,7 +816,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/abilities/{selector}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update ability {ability_ref}"))?;
 
@@ -807,7 +849,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update ability prompt {ability}"))?;
 
@@ -832,7 +874,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/abilities/{selector}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete ability {ability}"))?;
 
@@ -862,7 +904,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/domains", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create domain")?;
 
@@ -887,7 +929,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/domains/{domain}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update domain {domain}"))?;
 
@@ -909,7 +951,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/domains/{domain}/prompt", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch domain prompt {domain}"))?;
 
@@ -940,7 +982,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/domains/{domain}/prompt", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update domain prompt {domain}"))?;
 
@@ -964,7 +1006,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/domains/{domain}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete domain {domain}"))?;
 
@@ -990,7 +1032,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/projects", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create project")?;
 
@@ -1031,7 +1073,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/projects/{project_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&serde_json::Value::Object(body))
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update project {project_ref}"))?;
 
@@ -1050,7 +1092,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/projects/{project}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete project {project}"))?;
 
@@ -1110,7 +1152,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/knowledge/{pack}/items", self.base_url))
             .header("X-API-Key", &self.api_key)
             .multipart(form)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!(
@@ -1168,7 +1210,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to update metadata for library knowledge document {doc}")
@@ -1209,7 +1251,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to update content for library knowledge document {doc}")
@@ -1242,7 +1284,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to list edges for library knowledge document {doc}")
@@ -1280,7 +1322,7 @@ impl PlatformManifestClient {
                 "edge_type": edge_type,
                 "note": note,
             }))
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to create edge for library knowledge document {doc}")
@@ -1312,7 +1354,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&serde_json::json!({ "related": related }))
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to replace edges for library knowledge document {doc}")
@@ -1343,7 +1385,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to delete edge {edge_id} for library knowledge document {doc}")
@@ -1366,7 +1408,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete library knowledge document {doc}"))?;
 
@@ -1417,7 +1459,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list tasks for project {}", query.project))?;
 
@@ -1436,7 +1478,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/auth/me", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch authenticated org context")?;
 
@@ -1476,7 +1518,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to list notification sessions")?;
 
@@ -1513,7 +1555,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list notification messages for {session_id}"))?;
 
@@ -1532,7 +1574,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch task {task_id}"))?;
 
@@ -1549,7 +1591,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/tasks", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create project task")?;
 
@@ -1572,7 +1614,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/tasks/bulk", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to bulk create project tasks")?;
 
@@ -1596,7 +1638,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update task {task_id}"))?;
 
@@ -1615,7 +1657,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete task {task_id}"))?;
 
@@ -1655,7 +1697,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!(
@@ -1685,7 +1727,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch execution run {execution_run_id}"))?;
 
@@ -1708,7 +1750,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/executions", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(request)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create execution run")?;
 
@@ -1735,7 +1777,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&ExecutionCommandRequest { command })
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to send '{command}' command to execution run {execution_run_id}")
@@ -1768,7 +1810,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/routines", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create routine")?;
 
@@ -1832,7 +1874,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/routines/{routine_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update routine {routine_ref}"))?;
 
@@ -1861,7 +1903,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to save routine graph for {routine_ref}"))?;
 
@@ -1896,7 +1938,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/routines/{routine_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete routine {routine_ref}"))?;
 
@@ -1924,7 +1966,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/models", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create model")?;
 
@@ -1949,7 +1991,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/models/{model_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update model {model_ref}"))?;
 
@@ -1968,7 +2010,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/models/{model}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete model {model}"))?;
 
@@ -1989,7 +2031,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch council {council_ref}"))?;
 
@@ -2014,7 +2056,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/councils", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create council")?;
 
@@ -2043,7 +2085,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update council {council_ref}"))?;
 
@@ -2065,7 +2107,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete council {council_ref}"))?;
 
@@ -2091,7 +2133,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to add member to council {council_ref}"))?;
 
@@ -2124,7 +2166,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update member in council {council_ref}"))?;
 
@@ -2153,7 +2195,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to remove member from council {council_ref}"))?;
 
@@ -2183,7 +2225,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/context-blocks", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create context block")?;
 
@@ -2215,7 +2257,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update context block {context_block_ref}"))?;
 
@@ -2250,7 +2292,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update context block content {context_block}"))?;
 
@@ -2277,7 +2319,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete context block {context_block}"))?;
 
@@ -2302,7 +2344,7 @@ impl PlatformManifestClient {
                 id
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch manifest resource {path}{id}"))?;
 
@@ -2364,7 +2406,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/knowledge", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to list knowledge packs")?;
 
@@ -2387,7 +2429,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/knowledge", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(pack)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to create knowledge pack {}", pack.name))?;
 
@@ -2412,7 +2454,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/knowledge/{pack}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(update)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update knowledge pack {pack}"))?;
 
@@ -2443,7 +2485,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/knowledge/{pack}/items", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list knowledge documents for pack {pack}"))?;
 
@@ -2552,6 +2594,9 @@ fn knowledge_pack_document(pack: KnowledgePackRecord) -> KnowledgePackDocument {
 mod tests {
     use super::*;
     use crate::manifest_mcp::{RoutineEdgeInput, RoutineStepInput};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn routine_graph_body_uses_step_slugs_for_platform_refs() {
@@ -2593,5 +2638,56 @@ mod tests {
             Slug::derive("implement_pr_changes")
         );
         assert_eq!(body.edges[0].target_step, Slug::derive("evaluate_result"));
+    }
+
+    #[tokio::test]
+    async fn platform_client_retries_cloneable_request_once_after_429() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read test server address");
+
+        let server = thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept test request");
+                let mut buffer = [0_u8; 4096];
+                let bytes = stream.read(&mut buffer).expect("read test request");
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+
+                let response = if attempt == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let body = r#"[{"id":"00000000-0000-0000-0000-000000000001","slug":"humanizer","name":"Humanizer","description":null,"source_type":"uploaded","read_only":false,"metadata":{},"selector":"lib:humanizer","version":null,"created_at":"2026-06-11T00:00:00Z","updated_at":"2026-06-11T00:00:00Z"}]"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write test response");
+            }
+            request_lines
+        });
+
+        let client = PlatformManifestClient::new(format!("http://{addr}"), "test-key")
+            .expect("build platform client");
+        let packs = client
+            .list_knowledge_packs()
+            .await
+            .expect("list knowledge packs after retry");
+
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].slug, "humanizer");
+
+        let request_lines = server.join().expect("join test server");
+        assert_eq!(
+            request_lines,
+            vec![
+                "GET /api/v1/knowledge HTTP/1.1".to_string(),
+                "GET /api/v1/knowledge HTTP/1.1".to_string()
+            ]
+        );
     }
 }

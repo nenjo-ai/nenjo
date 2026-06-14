@@ -147,7 +147,7 @@ impl<T: Transport> EventBusBuilder<T> {
     fn new() -> Self {
         Self {
             transport: None,
-            subscription: Subscription::Subject(nenjo_events::requests_subject_all()),
+            subscription: Subscription::Subject("work_requests.>".to_string()),
         }
     }
 

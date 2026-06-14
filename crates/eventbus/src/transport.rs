@@ -131,10 +131,7 @@ pub trait Transport: Send + Sync + 'static {
     ) -> Result<tokio::sync::mpsc::Receiver<Message>, EventBusError> {
         match subscription {
             Subscription::Subject(subject) => self.subscribe_subject(&subject).await,
-            Subscription::WorkerCommands { .. } => {
-                self.subscribe_subject(&nenjo_events::requests_subject_all())
-                    .await
-            }
+            Subscription::WorkerCommands { .. } => self.subscribe_subject("work_requests.>").await,
         }
     }
 
