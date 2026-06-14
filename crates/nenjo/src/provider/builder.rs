@@ -12,7 +12,7 @@ use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
-use nenjo_knowledge::tools::{CompositeKnowledgeRegistry, KnowledgePackEntry};
+use nenjo_knowledge::tools::{CompositeKnowledgeRegistry, KnowledgePackEntry, KnowledgePackLoader};
 
 /// Builder for creating a [`Provider`].
 ///
@@ -50,6 +50,8 @@ pub struct ProviderBuilder<
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
     knowledge_registry: CompositeKnowledgeRegistry,
+    static_knowledge_entries: Vec<KnowledgePackEntry>,
+    knowledge_pack_loader: Option<Arc<dyn KnowledgePackLoader>>,
 }
 
 /// Marker used until `.with_model_factory(...)` is called.
@@ -105,6 +107,8 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             agent_config: AgentConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
             knowledge_registry: CompositeKnowledgeRegistry::new(),
+            static_knowledge_entries: Vec::new(),
+            knowledge_pack_loader: None,
         }
     }
 }
@@ -148,6 +152,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
             knowledge_registry: self.knowledge_registry,
+            static_knowledge_entries: self.static_knowledge_entries,
+            knowledge_pack_loader: self.knowledge_pack_loader,
         }
     }
 
@@ -171,6 +177,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
             knowledge_registry: self.knowledge_registry,
+            static_knowledge_entries: self.static_knowledge_entries,
+            knowledge_pack_loader: self.knowledge_pack_loader,
         }
     }
 
@@ -193,6 +201,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
             knowledge_registry: self.knowledge_registry,
+            static_knowledge_entries: self.static_knowledge_entries,
+            knowledge_pack_loader: self.knowledge_pack_loader,
         }
     }
 
@@ -216,6 +226,8 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
             knowledge_registry: self.knowledge_registry,
+            static_knowledge_entries: self.static_knowledge_entries,
+            knowledge_pack_loader: self.knowledge_pack_loader,
         }
     }
 
@@ -251,7 +263,18 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
         self
     }
 
+    /// Register a loader that supplies knowledge packs when agents are built.
+    ///
+    /// Use this when packs can change after the provider is constructed, for
+    /// example when library packs are synced from the platform. The loader is
+    /// also invoked once at provider build time to seed prompt metadata.
+    pub fn with_knowledge_pack_loader(mut self, loader: Arc<dyn KnowledgePackLoader>) -> Self {
+        self.knowledge_pack_loader = Some(loader);
+        self
+    }
+
     fn add_knowledge_pack(&mut self, entry: KnowledgePackEntry) {
+        self.static_knowledge_entries.push(entry.clone());
         self.add_knowledge_prompt_vars(entry.clone());
         self.knowledge_registry = self.knowledge_registry.clone().with_entry(entry);
     }
@@ -288,6 +311,13 @@ where
         self.loaders.load_into(&mut manifest).await?;
 
         let manifest = Arc::new(manifest);
+        let knowledge_pack_loader = self.knowledge_pack_loader;
+        let static_knowledge_entries = self.static_knowledge_entries;
+        let (render_ctx_extra, knowledge_registry) = finalize_knowledge_state(
+            knowledge_pack_loader.as_ref(),
+            self.render_ctx_extra,
+            self.knowledge_registry,
+        );
 
         Ok(Provider::new_inner(
             manifest,
@@ -295,8 +325,12 @@ where
             Arc::new(self.tool_factory),
             self.memory.map(Arc::new),
             self.agent_config,
-            self.render_ctx_extra,
-            self.knowledge_registry,
+            render_ctx_extra,
+            super::ProviderKnowledgeState {
+                registry: knowledge_registry,
+                static_entries: static_knowledge_entries,
+                loader: knowledge_pack_loader,
+            },
         ))
     }
 }
@@ -319,6 +353,14 @@ where
         let mut manifest = self.manifest.unwrap_or_default();
         self.loaders.load_into(&mut manifest).await?;
 
+        let knowledge_pack_loader = self.knowledge_pack_loader;
+        let static_knowledge_entries = self.static_knowledge_entries;
+        let (render_ctx_extra, knowledge_registry) = finalize_knowledge_state(
+            knowledge_pack_loader.as_ref(),
+            self.render_ctx_extra,
+            self.knowledge_registry,
+        );
+
         Ok(Provider::new_inner(
             Arc::new(manifest),
             Arc::new(model_factory) as Arc<dyn ModelProviderFactory>,
@@ -326,10 +368,29 @@ where
             self.memory
                 .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
             self.agent_config,
-            self.render_ctx_extra,
-            self.knowledge_registry,
+            render_ctx_extra,
+            super::ProviderKnowledgeState {
+                registry: knowledge_registry,
+                static_entries: static_knowledge_entries,
+                loader: knowledge_pack_loader,
+            },
         ))
     }
+}
+
+fn finalize_knowledge_state(
+    loader: Option<&Arc<dyn KnowledgePackLoader>>,
+    mut render_ctx_extra: RenderContextVars,
+    mut knowledge_registry: CompositeKnowledgeRegistry,
+) -> (RenderContextVars, CompositeKnowledgeRegistry) {
+    if let Some(loader) = loader {
+        let loaded = loader.load_packs();
+        render_ctx_extra.knowledge_vars.extend(
+            nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(loaded.iter().cloned()),
+        );
+        knowledge_registry = knowledge_registry.with_entries(loaded);
+    }
+    (render_ctx_extra, knowledge_registry)
 }
 
 impl Default for ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory> {

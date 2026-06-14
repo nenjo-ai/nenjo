@@ -4,6 +4,7 @@
 //! [`nenjo_knowledge::KnowledgeDocManifest`] (agent runtime).
 
 use super::wire::{PlatformRecord, data_field_present, wrap_resource_record};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo_events::ManifestResourcePayload;
@@ -27,6 +28,139 @@ pub struct KnowledgeDocumentEdgeRecord {
     pub note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_knowledge_pack_source_type() -> String {
+    "uploaded".to_string()
+}
+
+/// Metadata for a library knowledge pack on REST, events, and worker sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgePackRecord {
+    pub id: Uuid,
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_knowledge_pack_source_type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Canonical `lib:<slug>` selector for uploaded library knowledge packs.
+pub fn library_pack_selector(pack_slug: &str) -> String {
+    format!("lib:{}", pack_slug.trim())
+}
+
+/// Parse a library pack slug from either `humanizer` or `lib:humanizer`.
+pub fn parse_library_pack_slug(value: &str) -> Result<Slug, nenjo::SlugError> {
+    let slug = value
+        .strip_prefix("lib:")
+        .map(str::trim)
+        .unwrap_or_else(|| value.trim());
+    Slug::parse(slug)
+}
+
+/// Parse the slug from a `lib:<slug>` library knowledge pack selector.
+pub fn parse_library_pack_selector(selector: &str) -> Result<&str> {
+    let slug = selector.strip_prefix("lib:").with_context(|| {
+        format!("library knowledge packs must use lib:<slug>, got '{selector}'")
+    })?;
+    if slug.is_empty() {
+        bail!("library knowledge pack selector must include a slug");
+    }
+    Ok(slug)
+}
+
+impl PlatformRecord for KnowledgePackRecord {
+    fn id(&self) -> Uuid {
+        self.id
+    }
+
+    fn slug(&self) -> &str {
+        &self.slug
+    }
+}
+
+impl KnowledgePackRecord {
+    pub fn updated_at_rfc3339(&self) -> String {
+        self.updated_at.to_rfc3339()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pack_fields(
+        id: Uuid,
+        slug: String,
+        name: String,
+        description: Option<String>,
+        source_type: String,
+        read_only: bool,
+        metadata: serde_json::Value,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            slug,
+            name,
+            description,
+            source_type,
+            read_only,
+            metadata,
+            selector: None,
+            version: None,
+            created_at,
+            updated_at,
+        }
+        .with_derived_install_fields()
+    }
+
+    /// Fill selector/version from pack metadata when absent on the wire record.
+    pub fn with_derived_install_fields(mut self) -> Self {
+        if self.selector.is_none() {
+            self.selector =
+                selector_from_pack_metadata(&self.metadata, &self.source_type, &self.slug);
+        }
+        if self.version.is_none() {
+            self.version = version_from_pack_metadata(&self.metadata);
+        }
+        self
+    }
+}
+
+fn selector_from_pack_metadata(
+    metadata: &serde_json::Value,
+    source_type: &str,
+    slug: &str,
+) -> Option<String> {
+    metadata
+        .pointer("/install/selector")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            if source_type == "uploaded" {
+                Some(library_pack_selector(slug))
+            } else {
+                None
+            }
+        })
+}
+
+fn version_from_pack_metadata(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .pointer("/version/requested_ref")
+        .or_else(|| metadata.pointer("/version/ref"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 /// Metadata for a library knowledge document on REST, events, and worker sync.
@@ -139,7 +273,7 @@ pub fn parse_doc_kind(value: Option<&str>) -> KnowledgeDocKind {
     KnowledgeDocKind::new(value.unwrap_or("reference"))
 }
 
-pub fn to_agent_manifest(
+pub fn to_knowledge_manifest(
     pack_slug: &str,
     record: &KnowledgeDocumentRecord,
     resolve_target: impl Fn(Slug) -> Option<String>,
@@ -239,6 +373,39 @@ mod tests {
         let parsed = parse_document_payload(&value).expect("payload should parse");
         assert!(parsed.record.edges.is_empty());
         assert!(!parsed.edges_present);
+    }
+
+    #[test]
+    fn parse_library_pack_slug_accepts_selector_or_slug() {
+        assert_eq!(
+            parse_library_pack_slug("humanizer").unwrap().as_str(),
+            "humanizer"
+        );
+        assert_eq!(
+            parse_library_pack_slug("lib:humanizer").unwrap().as_str(),
+            "humanizer"
+        );
+    }
+
+    #[test]
+    fn knowledge_pack_record_derives_selector_for_uploaded_packs() {
+        let now = Utc::now();
+        let record = KnowledgePackRecord {
+            id: Uuid::from_u128(1),
+            slug: "product".into(),
+            name: "Product".into(),
+            description: None,
+            source_type: "uploaded".into(),
+            read_only: false,
+            metadata: serde_json::json!({}),
+            selector: None,
+            version: None,
+            created_at: now,
+            updated_at: now,
+        }
+        .with_derived_install_fields();
+
+        assert_eq!(record.selector.as_deref(), Some("lib:product"));
     }
 
     #[test]

@@ -803,5 +803,6 @@ async fn max_depth_zero_disables_parent_tools() {
         .unwrap();
 
     runner.chat("work").await.unwrap();
-    assert!(captured.tool_names().remove(0).is_empty());
+    let first_tools = captured.tool_names().remove(0);
+    assert_eq!(first_tools, vec!["list_knowledge_packs"]);
 }

@@ -151,33 +151,6 @@ struct AuthMeResponse {
     org_id: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PlatformKnowledgePackMetadata {
-    pub id: Uuid,
-    pub slug: Slug,
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default = "default_knowledge_pack_status")]
-    pub status: String,
-    #[serde(default = "default_knowledge_pack_source_type")]
-    pub source_type: String,
-    #[serde(default)]
-    pub read_only: bool,
-    #[serde(default)]
-    pub selector: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-}
-
-fn default_knowledge_pack_status() -> String {
-    "active".to_string()
-}
-
-fn default_knowledge_pack_source_type() -> String {
-    "uploaded".to_string()
-}
-
 fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
     let routine = detail
         .routine
@@ -412,8 +385,8 @@ pub struct ProjectDocumentMetadata {
     pub updated_at: String,
 }
 
-pub use crate::knowledge_contract::KnowledgeDocumentRecord as KnowledgeDocMetadataResponse;
-use crate::knowledge_contract::KnowledgeDocumentRecord;
+pub use crate::manifest_contract::KnowledgeDocumentRecord as KnowledgeDocMetadataResponse;
+use crate::manifest_contract::{KnowledgeDocumentRecord, KnowledgePackRecord};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 /// Directed relationship between two library knowledge documents.
@@ -1091,99 +1064,6 @@ impl PlatformManifestClient {
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
             status => bail!("project delete failed with status {status}"),
-        }
-    }
-
-    /// List library knowledge document metadata records for a project.
-    pub async fn list_project_document_metadata(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Vec<ProjectDocumentMetadata>> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to list documents for project {project_id}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document metadata"),
-            status => bail!("library knowledge document list failed with status {status}"),
-        }
-    }
-
-    /// Fetch one library knowledge document metadata record.
-    pub async fn get_project_document_metadata(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<Option<ProjectDocumentMetadata>> {
-        let documents = self.list_project_document_metadata(project_id).await?;
-        Ok(documents
-            .into_iter()
-            .find(|document| document.id == document_id))
-    }
-
-    /// Fetch raw library knowledge document content from the platform.
-    pub async fn fetch_project_document_content(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<KnowledgeDocContentResponse> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}/content",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to fetch content for library knowledge document {document_id}")
-            })?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document content"),
-            status => bail!("library knowledge document content fetch failed with status {status}"),
-        }
-    }
-
-    /// List graph edges connected to a library knowledge document.
-    pub async fn list_project_document_edges(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<Vec<ProjectDocumentEdge>> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}/edges",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to list edges for library knowledge document {document_id}")
-            })?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document edges"),
-            status => bail!("library knowledge document edge list failed with status {status}"),
         }
     }
 
@@ -2416,7 +2296,7 @@ impl PlatformManifestClient {
         header::HeaderValue::from_str(&self.api_key).context("invalid api key header")
     }
 
-    pub async fn list_knowledge_packs(&self) -> Result<Vec<PlatformKnowledgePackMetadata>> {
+    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackRecord>> {
         let response = self
             .http
             .get(format!("{}/api/v1/knowledge", self.base_url))
@@ -2487,7 +2367,7 @@ impl PlatformManifestClient {
         self.list_knowledge_packs()
             .await?
             .into_iter()
-            .find(|candidate| candidate.slug == *pack)
+            .find(|candidate| Slug::derive(&candidate.slug) == *pack)
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("knowledge pack not found: {pack}"))
     }
@@ -2521,6 +2401,60 @@ impl PlatformManifestClient {
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("knowledge document not found in pack {pack}: {doc}"))
     }
+
+    /// Resolve a document reference from slug, selector, filename, or search metadata path.
+    pub async fn resolve_knowledge_doc_reference(
+        &self,
+        pack: &Slug,
+        reference: &str,
+    ) -> Result<Slug> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            bail!("knowledge document reference cannot be empty");
+        }
+
+        if let Ok(slug) = Slug::parse(reference) {
+            return Ok(slug);
+        }
+
+        let docs = self.list_knowledge_doc_metadata(pack).await?;
+        if let Some(doc) = docs.iter().find(|candidate| candidate.slug == reference) {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        let derived = Slug::derive(reference);
+        if let Some(doc) = docs
+            .iter()
+            .find(|candidate| Slug::derive(&candidate.slug) == derived)
+        {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        let path_candidates = knowledge_doc_reference_paths(reference);
+        if let Some(doc) = docs.iter().find(|candidate| {
+            let relative = candidate.library_doc_relative_path();
+            path_candidates.iter().any(|path| path == &relative)
+                || candidate.filename == reference
+                || candidate.library_selector(pack.as_str()) == reference
+        }) {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        bail!("knowledge document not found in pack {pack}: {reference}")
+    }
+}
+
+fn knowledge_doc_reference_paths(reference: &str) -> Vec<String> {
+    let mut paths = vec![reference.trim_matches('/').to_string()];
+    if reference.contains('.') && !reference.contains('/') {
+        if let Some((stem, extension)) = reference.rsplit_once('.')
+            && (extension == "md" || extension == "markdown")
+        {
+            paths.push(format!("{}.md", stem.replace('.', "/")));
+            paths.push(stem.replace('.', "/"));
+        }
+    }
+    paths
 }
 
 fn knowledge_doc_summary(pack: &Slug, document: KnowledgeDocumentRecord) -> KnowledgeDocSummary {
@@ -2539,12 +2473,11 @@ fn knowledge_doc_summary(pack: &Slug, document: KnowledgeDocumentRecord) -> Know
     }
 }
 
-fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePackDocument {
+fn knowledge_pack_document(pack: KnowledgePackRecord) -> KnowledgePackDocument {
     KnowledgePackDocument {
-        slug: pack.slug,
+        slug: Slug::derive(&pack.slug),
         name: pack.name,
         description: pack.description,
-        status: pack.status,
         source_type: pack.source_type,
         read_only: pack.read_only,
         selector: pack.selector,

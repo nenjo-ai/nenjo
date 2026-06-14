@@ -490,7 +490,6 @@ pub struct KnowledgePackDocument {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub status: String,
     pub source_type: String,
     pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -525,9 +524,6 @@ pub struct KnowledgePackUpdateDocument {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
 }
 
 /// Library knowledge document metadata returned by knowledge pack routes.
@@ -562,6 +558,7 @@ pub struct KnowledgeDocContentDocument {
 #[builder(pattern = "owned")]
 /// Request body for creating a library knowledge document.
 pub struct KnowledgeDocCreateDocument {
+    #[serde(deserialize_with = "crate::manifest_mcp::serde_helpers::deserialize_library_pack_slug")]
     pub pack: Slug,
     pub filename: String,
     pub content: String,
@@ -592,7 +589,8 @@ pub struct KnowledgeDocCreateDocument {
 #[builder(pattern = "owned")]
 /// Outbound relationship authored on a library knowledge document.
 pub struct KnowledgeDocRelatedDocument {
-    pub target_doc: Slug,
+    /// Stable document slug, selector, or search metadata path accepted at authoring time.
+    pub target_doc: String,
     #[serde(rename = "type")]
     pub edge_type: String,
     #[builder(default)]

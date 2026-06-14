@@ -8,7 +8,7 @@ use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
-use nenjo_knowledge::tools::KnowledgePackEntry;
+use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgePackLoader};
 use nenjo_knowledge::{KnowledgePack, PackageKnowledgePack};
 use nenjo_nenpm::{
     NenpmLock, PackageInstallIndex, PackageSource, package_install_path_in_packages_dir,
@@ -16,7 +16,7 @@ use nenjo_nenpm::{
 use nenjo_packages::PackageKind;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::api_client::PayloadCodec;
-use nenjo_platform::library_knowledge::LibraryKnowledgePack;
+use nenjo_platform::library_knowledge::discover_library_knowledge_packs;
 use nenjo_secure_envelope::SecureEnvelopeCodec;
 use tracing::warn;
 use uuid::Uuid;
@@ -153,7 +153,6 @@ pub(crate) async fn build_provider(
         package_runtime_roots(config),
     );
     let platform_tools = build_platform_tool_services(config, auth_provider);
-    let knowledge_packs = load_provider_knowledge_packs(&config.config_dir);
     let tool_factory = WorkerToolFactory::with_skill_registry(
         security,
         NativeRuntime,
@@ -166,7 +165,10 @@ pub(crate) async fn build_provider(
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
 
-    Provider::builder()
+    let knowledge_loader = Arc::new(WorkerKnowledgePackLoader {
+        config_dir: config.config_dir.clone(),
+    });
+    let provider = Provider::builder()
         .with_loader(global_package_manifest_loader(config))
         .with_loader(platform_package_manifest_loader(config))
         .with_loader(loader)
@@ -175,10 +177,22 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
-        .with_knowledge_packs(knowledge_packs)
+        .with_knowledge_pack_loader(knowledge_loader)
         .build()
         .await
-        .context("Failed to build Provider")
+        .context("Failed to build Provider")?;
+
+    Ok(provider)
+}
+
+struct WorkerKnowledgePackLoader {
+    config_dir: PathBuf,
+}
+
+impl KnowledgePackLoader for WorkerKnowledgePackLoader {
+    fn load_packs(&self) -> Vec<KnowledgePackEntry> {
+        load_provider_knowledge_packs(&self.config_dir)
+    }
 }
 
 pub(crate) async fn load_runtime_manifest(config: &Config) -> Result<Manifest> {
@@ -227,25 +241,10 @@ fn extend_runtime_roots(target: &mut Vec<PathBuf>, roots: Vec<PathBuf>) {
 }
 
 fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
-    let mut packs = Vec::new();
-    let library_dir = nenjo_home.join("library");
-    if let Ok(entries) = std::fs::read_dir(&library_dir) {
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let slug = entry.file_name().to_string_lossy().to_string();
-            if let Some(pack) = LibraryKnowledgePack::load(entry.path())
-                && let Ok(entry) = KnowledgePackEntry::library(slug, pack)
-            {
-                packs.push(entry);
-            }
-        }
-    }
-    packs
+    discover_library_knowledge_packs(&nenjo_home.join("library"))
+        .into_iter()
+        .filter_map(|(slug, pack)| KnowledgePackEntry::library(slug, pack).ok())
+        .collect()
 }
 
 fn load_package_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
@@ -420,6 +419,7 @@ fn build_platform_tool_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo_platform::library_knowledge::LibraryKnowledgePack;
 
     fn write_library_pack(root: &Path) {
         let pack_dir = root.join("library").join("demo");

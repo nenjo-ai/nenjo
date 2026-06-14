@@ -170,20 +170,6 @@ pub struct KnowledgeDocSearchHit {
     pub matched: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocTree {
-    pub root_uri: String,
-    pub entries: Vec<KnowledgeDocTreeEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocTreeEntry {
-    pub selector: String,
-    pub title: String,
-    pub kind: KnowledgeDocKind,
-    pub tags: Vec<String>,
-}
-
 /// Runtime access to a knowledge pack's metadata and lazy document content.
 pub trait KnowledgePack: Send + Sync {
     fn manifest(&self) -> &dyn KnowledgePackManifest;

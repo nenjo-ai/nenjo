@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -42,6 +42,9 @@ impl PlatformResourceKind {
 pub struct PlatformResourceIdSnapshot {
     #[serde(default)]
     entries: BTreeMap<String, BTreeMap<String, Uuid>>,
+    /// Pack slug -> document slug -> platform item id.
+    #[serde(default)]
+    knowledge_documents: BTreeMap<String, BTreeMap<String, Uuid>>,
 }
 
 impl PlatformResourceIdSnapshot {
@@ -70,6 +73,45 @@ impl PlatformResourceIdSnapshot {
             .get(kind.as_str())
             .and_then(|entries| entries.get(slug.as_str()))
             .copied()
+    }
+
+    pub fn insert_knowledge_document(&mut self, pack: &str, doc: &str, id: Uuid) {
+        self.knowledge_documents
+            .entry(pack.to_owned())
+            .or_default()
+            .insert(doc.to_owned(), id);
+    }
+
+    pub fn remove_knowledge_document(&mut self, pack: &str, doc: &str) {
+        if let Some(entries) = self.knowledge_documents.get_mut(pack) {
+            entries.remove(doc);
+            if entries.is_empty() {
+                self.knowledge_documents.remove(pack);
+            }
+        }
+    }
+
+    pub fn remove_knowledge_document_by_id(&mut self, id: Uuid) {
+        self.knowledge_documents.retain(|_, entries| {
+            entries.retain(|_, existing_id| *existing_id != id);
+            !entries.is_empty()
+        });
+    }
+
+    pub fn get_knowledge_document(&self, pack: &str, doc: &str) -> Option<Uuid> {
+        self.knowledge_documents
+            .get(pack)
+            .and_then(|entries| entries.get(doc))
+            .copied()
+    }
+
+    pub fn remove_knowledge_pack(&mut self, pack: &str) {
+        self.knowledge_documents.remove(pack);
+    }
+
+    pub fn reconcile_knowledge_packs(&mut self, remote_packs: &HashSet<String>) {
+        self.knowledge_documents
+            .retain(|pack, _| remote_packs.contains(pack));
     }
 }
 
@@ -130,6 +172,43 @@ impl PlatformResourceIdStore {
     pub fn get(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Option<Uuid>> {
         Ok(self.load()?.get(kind, slug))
     }
+
+    pub fn upsert_knowledge_document(&self, pack: &Slug, doc: &Slug, id: Uuid) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.remove_knowledge_document_by_id(id);
+        snapshot.insert_knowledge_document(pack.as_str(), doc.as_str(), id);
+        self.replace(&snapshot)
+    }
+
+    pub fn remove_knowledge_document(&self, pack: &Slug, doc: &Slug) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.remove_knowledge_document(pack.as_str(), doc.as_str());
+        self.replace(&snapshot)
+    }
+
+    pub fn remove_knowledge_document_by_id(&self, id: Uuid) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.remove_knowledge_document_by_id(id);
+        self.replace(&snapshot)
+    }
+
+    pub fn get_knowledge_document(&self, pack: &Slug, doc: &Slug) -> Result<Option<Uuid>> {
+        Ok(self
+            .load()?
+            .get_knowledge_document(pack.as_str(), doc.as_str()))
+    }
+
+    pub fn remove_knowledge_pack(&self, pack: &Slug) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.remove_knowledge_pack(pack.as_str());
+        self.replace(&snapshot)
+    }
+
+    pub fn reconcile_knowledge_packs(&self, remote_packs: &HashSet<String>) -> Result<()> {
+        let mut snapshot = self.load()?;
+        snapshot.reconcile_knowledge_packs(remote_packs);
+        self.replace(&snapshot)
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +239,59 @@ mod tests {
             store.get(PlatformResourceKind::Routine, &new_slug).unwrap(),
             Some(id)
         );
+    }
+
+    #[test]
+    fn knowledge_document_ids_are_pack_scoped() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let pack = Slug::parse("product").unwrap();
+        let doc = Slug::parse("overview").unwrap();
+        let id = Uuid::new_v4();
+
+        store.upsert_knowledge_document(&pack, &doc, id).unwrap();
+
+        assert_eq!(store.get_knowledge_document(&pack, &doc).unwrap(), Some(id));
+
+        store.remove_knowledge_document(&pack, &doc).unwrap();
+        assert_eq!(store.get_knowledge_document(&pack, &doc).unwrap(), None);
+    }
+
+    #[test]
+    fn reconcile_knowledge_packs_removes_stale_pack_entries() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let kept = Slug::parse("product").unwrap();
+        let removed = Slug::parse("legacy").unwrap();
+        let doc = Slug::parse("overview").unwrap();
+        let id = Uuid::new_v4();
+
+        store.upsert_knowledge_document(&kept, &doc, id).unwrap();
+        store
+            .upsert_knowledge_document(&removed, &doc, Uuid::new_v4())
+            .unwrap();
+
+        let mut remote = HashSet::new();
+        remote.insert(kept.as_str().to_string());
+        store.reconcile_knowledge_packs(&remote).unwrap();
+
+        assert_eq!(store.get_knowledge_document(&kept, &doc).unwrap(), Some(id));
+        assert_eq!(store.get_knowledge_document(&removed, &doc).unwrap(), None);
+    }
+
+    #[test]
+    fn remove_knowledge_pack_clears_all_document_ids() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let pack = Slug::parse("product").unwrap();
+        let doc = Slug::parse("overview").unwrap();
+
+        store
+            .upsert_knowledge_document(&pack, &doc, Uuid::new_v4())
+            .unwrap();
+        store.remove_knowledge_pack(&pack).unwrap();
+
+        assert_eq!(store.get_knowledge_document(&pack, &doc).unwrap(), None);
     }
 
     #[test]

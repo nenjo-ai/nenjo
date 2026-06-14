@@ -480,7 +480,14 @@ pub async fn sync(
     }
 
     // Sync platform-uploaded and repo-backed library knowledge under ~/.nenjo/library.
-    crate::local_documents::sync_all(api, nenjo_home, state_dir, &manifest.projects).await?;
+    crate::local_documents::sync_all(
+        api,
+        nenjo_home,
+        state_dir,
+        manifests_dir,
+        &manifest.projects,
+    )
+    .await?;
 
     Ok(())
 }
@@ -875,6 +882,7 @@ impl ManifestStore for WorkerManifestCache {
                 )
             })?;
         }
+        PlatformResourceIdStore::new(&self.manifests_dir).remove_knowledge_pack(resource)?;
         Ok(())
     }
 
@@ -901,6 +909,24 @@ impl ManifestStore for WorkerManifestCache {
         resource_id: Uuid,
     ) -> Result<()> {
         PlatformResourceIdStore::new(&self.manifests_dir).remove_by_id(kind, resource_id)
+    }
+
+    async fn update_knowledge_document_resource_id(
+        &self,
+        pack: &nenjo::Slug,
+        doc: &nenjo::Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        let store = PlatformResourceIdStore::new(&self.manifests_dir);
+        match resource_id {
+            Some(id) => store.upsert_knowledge_document(pack, doc, id),
+            None => store.remove_knowledge_document(pack, doc),
+        }
+    }
+
+    async fn remove_knowledge_document_resource_id_by_id(&self, resource_id: Uuid) -> Result<()> {
+        PlatformResourceIdStore::new(&self.manifests_dir)
+            .remove_knowledge_document_by_id(resource_id)
     }
 
     async fn sync_document_metadata(
@@ -950,8 +976,14 @@ impl ManifestStore for WorkerManifestCache {
     }
 
     async fn sync_knowledge_pack(&self, client: &ApiClient, pack: &nenjo::Slug) -> Result<()> {
-        crate::local_documents::sync_pack_by_slug(client, &self.config_dir, &self.state_dir, pack)
-            .await
+        crate::local_documents::sync_pack_by_slug(
+            client,
+            &self.config_dir,
+            &self.state_dir,
+            &self.manifests_dir,
+            pack,
+        )
+        .await
     }
 
     fn write_document_content(

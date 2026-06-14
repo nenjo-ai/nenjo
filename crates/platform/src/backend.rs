@@ -11,25 +11,14 @@ use nenjo::manifest::{
     RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
-use nenjo_knowledge::tools::{
-    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackSummary, KnowledgeReadArgs,
-    KnowledgeRegistry, KnowledgeSearchArgs, knowledge_document_metadata, knowledge_filter,
-    knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
-};
-use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 use uuid::Uuid;
 
 use crate::client::{CouncilCreateApiBody, CouncilCreateMemberApiBody, PlatformManifestClient};
-use crate::knowledge_backend::{
-    ResolvedKnowledgePack, ensure_known_pack_selector, library_pack_selector,
-    parse_library_pack_selector, unknown_pack,
-};
-use crate::knowledge_contract::KnowledgeDocumentRecord;
 use crate::library_knowledge::{
-    LibraryKnowledgePack, LibraryKnowledgePackManifest, library_doc_relative_path,
-    upsert_library_knowledge_entry, write_library_document_content,
-    write_library_knowledge_manifest,
+    LibraryKnowledgePack, LibraryKnowledgePackManifest, upsert_library_knowledge_entry,
+    write_library_document_content, write_library_knowledge_manifest,
 };
+use crate::manifest_contract::KnowledgeDocumentRecord;
 use crate::manifest_kinds::SensitiveContentKind;
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
@@ -312,6 +301,27 @@ where
         Ok(())
     }
 
+    fn knowledge_document_object_id(&self, pack: &Slug, doc: &Slug) -> Result<Option<Uuid>> {
+        let Some(store) = self.resource_ids.as_ref() else {
+            return Ok(None);
+        };
+        store.get_knowledge_document(pack, doc)
+    }
+
+    fn record_knowledge_document_id(&self, pack: &Slug, doc: &Slug, id: Uuid) -> Result<()> {
+        if let Some(store) = self.resource_ids.as_ref() {
+            store.upsert_knowledge_document(pack, doc, id)?;
+        }
+        Ok(())
+    }
+
+    fn remove_knowledge_document_id(&self, pack: &Slug, doc: &Slug) -> Result<()> {
+        if let Some(store) = self.resource_ids.as_ref() {
+            store.remove_knowledge_document(pack, doc)?;
+        }
+        Ok(())
+    }
+
     async fn local_manifest_org_id(&self) -> Result<Uuid> {
         if let Some(org_id) = self.cached_org_id {
             return Ok(org_id);
@@ -339,11 +349,15 @@ where
                 .await?;
         }
         for edge in related {
+            let target_doc = self
+                .platform_client
+                .resolve_knowledge_doc_reference(pack, &edge.target_doc)
+                .await?;
             self.platform_client
                 .create_knowledge_doc_edge(
                     pack,
                     doc,
-                    &edge.target_doc,
+                    &target_doc,
                     &edge.edge_type,
                     edge.note.as_deref(),
                 )
@@ -398,7 +412,7 @@ where
             .list_agents()
             .await?
             .into_iter()
-            .find(|item| Slug::derive(&item.name) == *agent)
+            .find(|item| item.manifest_slug() == *agent || Slug::derive(&item.name) == *agent)
             .ok_or_else(|| anyhow!("agent not found in local manifest: {agent}"))
     }
 
@@ -469,16 +483,6 @@ where
         Ok(self.workspace_dir()?.join("library"))
     }
 
-    async fn workspace_library_dir(&self, pack_slug: &str) -> Result<PathBuf> {
-        Ok(self.library_root()?.join(pack_slug))
-    }
-
-    async fn library_knowledge_pack(&self, pack_slug: &str) -> Result<LibraryKnowledgePack> {
-        let pack_dir = self.workspace_library_dir(pack_slug).await?;
-        LibraryKnowledgePack::load(&pack_dir)
-            .ok_or_else(|| anyhow!("knowledge pack '{pack_slug}' is not cached locally"))
-    }
-
     fn cache_knowledge_pack(&self, pack: &KnowledgePackDocument) -> Result<()> {
         let pack_slug = pack.slug.as_str();
         let pack_dir = self.library_root()?.join(pack_slug);
@@ -520,13 +524,13 @@ where
             edges: related
                 .iter()
                 .map(
-                    |edge| crate::knowledge_contract::KnowledgeDocumentEdgeRecord {
+                    |edge| crate::manifest_contract::KnowledgeDocumentEdgeRecord {
                         id: Uuid::new_v4(),
                         org_id: Uuid::nil(),
                         source_item_id: Uuid::nil(),
                         source_doc: doc.slug.as_str().to_string(),
                         target_item_id: Uuid::nil(),
-                        target_doc: edge.target_doc.as_str().to_string(),
+                        target_doc: edge.target_doc.clone(),
                         edge_type: edge.edge_type.clone(),
                         note: edge.note.clone(),
                         created_at: now,
@@ -539,123 +543,11 @@ where
         if let Some(content) = content {
             write_library_document_content(
                 &pack_dir,
-                &library_doc_relative_path(&record),
+                &record.library_doc_relative_path(),
                 content,
             )?;
         }
         Ok(())
-    }
-
-    async fn resolve_knowledge_pack(&self, selector: &str) -> Result<ResolvedKnowledgePack> {
-        ensure_known_pack_selector(selector)?;
-        if selector.starts_with("lib:") {
-            let pack_slug = parse_library_pack_selector(selector)?;
-            return self
-                .library_knowledge_pack(pack_slug)
-                .await
-                .map(ResolvedKnowledgePack::Library);
-        }
-        Err(unknown_pack(selector))
-    }
-}
-
-#[async_trait]
-impl<L, E> KnowledgeRegistry for PlatformManifestBackend<L, E>
-where
-    L: ManifestReader + ManifestWriter + Send + Sync,
-    E: SensitivePayloadEncoder + Send + Sync,
-{
-    async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
-        let mut packs = Vec::new();
-        if let Ok(library_dir) = self.library_root()
-            && let Ok(entries) = std::fs::read_dir(library_dir)
-        {
-            for entry in entries.flatten() {
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if !file_type.is_dir() {
-                    continue;
-                }
-                let Some(slug) = entry.file_name().to_str().map(str::to_string) else {
-                    continue;
-                };
-                let selector = library_pack_selector(&slug);
-                let Some(pack) = LibraryKnowledgePack::load(entry.path()) else {
-                    continue;
-                };
-                packs.push(KnowledgePackSummary::new(selector, pack.manifest()));
-            }
-        }
-        Ok(packs)
-    }
-
-    async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
-        self.resolve_knowledge_pack(selector)
-            .await
-            .map(|pack| Arc::new(pack) as Arc<dyn KnowledgePack>)
-    }
-}
-
-#[async_trait]
-impl<L, E> KnowledgeManifestBackend for PlatformManifestBackend<L, E>
-where
-    L: ManifestReader + ManifestWriter + Send + Sync,
-    E: SensitivePayloadEncoder + Send + Sync,
-{
-    async fn list_knowledge_packs(&self) -> Result<serde_json::Value> {
-        let packs = KnowledgeRegistry::list_packs(self).await?;
-        serde_json::to_value(packs).map_err(Into::into)
-    }
-
-    async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeReadArgs =
-            serde_json::from_value(params).context("invalid read_knowledge_doc args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let doc = pack.read_doc(&args.selector).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.selector,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(KnowledgeDocReadResult {
-            document: knowledge_document_metadata(args.pack, &doc.manifest),
-            content: doc.content,
-        })
-        .map_err(Into::into)
-    }
-
-    async fn search_knowledge(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeSearchArgs =
-            serde_json::from_value(params).context("invalid search_knowledge args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.search(&args.query, filter)
-                .into_iter()
-                .map(|hit| knowledge_search_result(args.pack.clone(), hit))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn list_knowledge_neighbors(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: KnowledgeNeighborArgs =
-            serde_json::from_value(params).context("invalid list_knowledge_neighbors args")?;
-        let pack = self.resolve_knowledge_pack(&args.pack).await?;
-        let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        let neighbors = pack.neighbors(&args.selector, edge_type).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.selector,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors)).map_err(Into::into)
     }
 }
 
@@ -772,11 +664,17 @@ where
         if agent.prompt_locked {
             return Err(anyhow!("agent prompt is locked: {}", params.agent));
         }
-        if let Some(prompt_patch) = params.prompt_config {
-            agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
+        let prompt_patch = params
+            .prompt_config
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !prompt_patch
+            .as_object()
+            .is_some_and(|fields| fields.is_empty())
+        {
+            agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch.clone())?;
         }
-        let prompt_patch = agent.prompt_config.clone();
-        let prompt_payload = serde_json::to_value(&prompt_patch)?;
+        let merged_local = agent.prompt_config.clone();
         let agent_object_id =
             self.platform_object_id(PlatformResourceKind::Agent, &params.agent)?;
         let encrypted_payload = self
@@ -785,16 +683,16 @@ where
                 self.local_manifest_org_id().await?,
                 agent_object_id,
                 SensitiveContentKind::AgentPrompt.encrypted_object_type(),
-                &prompt_payload,
+                &prompt_patch,
             )
             .await?;
         let prompt_config = self
             .platform_client
-            .update_agent_prompt_document(&params.agent, &prompt_payload, encrypted_payload)
+            .update_agent_prompt_document(&params.agent, &prompt_patch, encrypted_payload)
             .await?
             .map(serde_json::from_value)
             .transpose()?
-            .unwrap_or(prompt_patch);
+            .unwrap_or(merged_local);
 
         agent.prompt_config = prompt_config.clone();
         self.local_store
@@ -1371,6 +1269,7 @@ where
                 "Failed to cache created knowledge document locally"
             );
         }
+        self.record_knowledge_document_id(&data.pack, &knowledge_doc.slug, doc_id)?;
         Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
@@ -1378,10 +1277,14 @@ where
         &self,
         params: KnowledgeDocUpdateParams,
     ) -> Result<KnowledgeDocMutationResult> {
-        let doc_id = self
-            .platform_client
-            .resolve_knowledge_doc_slug(&params.pack, &params.slug)
-            .await?;
+        let doc_id = match self.knowledge_document_object_id(&params.pack, &params.slug)? {
+            Some(id) => id,
+            None => {
+                self.platform_client
+                    .resolve_knowledge_doc_slug(&params.pack, &params.slug)
+                    .await?
+            }
+        };
         let mut knowledge_doc = if let Some(content) = params.data.content.as_deref() {
             let encrypted_payload = self
                 .sensitive_payload_encoder
@@ -1437,6 +1340,7 @@ where
             );
         }
 
+        self.record_knowledge_document_id(&params.pack, &knowledge_doc.slug, doc_id)?;
         Ok(KnowledgeDocMutationResult { knowledge_doc })
     }
 
@@ -1444,6 +1348,7 @@ where
         self.platform_client
             .delete_knowledge_doc(&params.pack, &params.slug)
             .await?;
+        self.remove_knowledge_document_id(&params.pack, &params.slug)?;
         Ok(DeleteResult { deleted: true })
     }
 }
@@ -2287,69 +2192,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn library_knowledge_uses_slug_selector() {
-        let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
-        let backend = backend.with_current_library_slug(Some(pack_slug.clone()));
-
-        let packs = backend.list_knowledge_packs().await.unwrap();
-        let packs = packs.as_array().expect("packs array");
-        assert!(
-            packs
-                .iter()
-                .any(|pack| pack["pack"] == format!("lib:{pack_slug}"))
-        );
-
-        let value = backend
-            .read_knowledge_doc(json!({
-                "pack": format!("lib:{pack_slug}"),
-                "selector": "routine"
-            }))
-            .await
-            .unwrap();
-
-        assert_eq!(value["content"], "# routine.md\n");
-        assert_eq!(
-            value["document"]["selector"],
-            format!("library://{pack_slug}/docs/routine.md")
-        );
-    }
-
-    #[tokio::test]
-    async fn library_knowledge_neighbors_expose_outgoing_edges_with_metadata() {
-        let (backend, _project_id, pack_slug, _temp) = library_backend_fixture().await.unwrap();
-        let routine_path = format!("library://{pack_slug}/docs/routine.md");
-        let gate_path = format!("library://{pack_slug}/docs/gate.md");
-
-        let value = backend
-            .list_knowledge_neighbors(json!({
-                "pack": format!("lib:{pack_slug}"),
-                "selector": "routine"
-            }))
-            .await
-            .unwrap();
-        assert_eq!(value["document"]["selector"], routine_path);
-        let edges = value["edges"].as_array().expect("edges array");
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0]["type"], "depends_on");
-        assert_eq!(edges[0]["target"]["selector"], gate_path);
-        assert_eq!(edges[0]["target"]["title"], "Gate");
-        assert!(edges[0].get("note").is_none());
-
-        let filtered = backend
-            .list_knowledge_neighbors(json!({
-                "pack": format!("lib:{pack_slug}"),
-                "selector": routine_path,
-                "edge_type": "depends_on"
-            }))
-            .await
-            .unwrap();
-        let filtered = filtered["edges"].as_array().expect("filtered edges array");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["target"]["selector"], gate_path);
-        assert_eq!(filtered[0]["type"], "depends_on");
-    }
-
-    #[tokio::test]
     async fn create_knowledge_doc_without_doc_returns_generated_slug() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
@@ -2435,7 +2277,7 @@ mod tests {
                     summary: Some(Some("Updated guide".into())),
                     tags: Some(vec!["core".into()]),
                     related: Some(vec![KnowledgeDocRelatedDocument {
-                        target_doc: Slug::parse("target").unwrap(),
+                        target_doc: "target".to_string(),
                         edge_type: "references".into(),
                         note: Some("see target".into()),
                     }]),

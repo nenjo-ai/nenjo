@@ -15,9 +15,6 @@ pub mod api_client;
 pub mod backend;
 /// Thin HTTP client for the platform manifest API.
 pub mod client;
-mod knowledge_backend;
-/// Back-compat re-export shim for knowledge wire types.
-pub mod knowledge_contract;
 pub mod library_knowledge;
 /// Local in-process manifest MCP backend implementations.
 pub mod local;
@@ -49,7 +46,7 @@ pub use local::LocalManifestMcpBackend;
 pub use manifest_contract::{
     ContextBlockContentRecord, ContextBlockRecord, KnowledgeDocumentEdgeRecord,
     KnowledgeDocumentRecord, ParsedKnowledgeDocument, PlatformRecord, parse_doc_edge_type,
-    parse_doc_kind, parse_document_payload, parse_resource_payload, to_agent_manifest,
+    parse_doc_kind, parse_document_payload, parse_resource_payload, to_knowledge_manifest,
     wrap_document_record, wrap_resource_record,
 };
 pub use manifest_kinds::{ContentScope, ManifestKind, SensitiveContentKind};
@@ -80,17 +77,17 @@ pub use manifest_mcp::{
     DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocContentDocument,
     KnowledgeDocCreateDocument, KnowledgeDocCreateParams, KnowledgeDocDeleteParams,
     KnowledgeDocMutationResult, KnowledgeDocRelatedDocument, KnowledgeDocSummary,
-    KnowledgeDocUpdateDocument, KnowledgeDocUpdateParams, KnowledgeManifestBackend,
-    KnowledgePackCreateDocument, KnowledgePackCreateParams, KnowledgePackDocument,
-    KnowledgePackMutationResult, KnowledgePackUpdateDocument, KnowledgePackUpdateParams,
-    LibraryManifestBackend, ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument,
-    ModelCreateParams, ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend,
-    ModelMutationResult, ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams,
-    ModelsListResult, ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams,
-    ProjectDocument, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
-    ProjectSummary, ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams,
-    ProjectsListResult, RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams,
-    RoutineDocument, RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
+    KnowledgeDocUpdateDocument, KnowledgeDocUpdateParams, KnowledgePackCreateDocument,
+    KnowledgePackCreateParams, KnowledgePackDocument, KnowledgePackMutationResult,
+    KnowledgePackUpdateDocument, KnowledgePackUpdateParams, LibraryManifestBackend,
+    ManifestMcpBackend, ManifestMcpContract, ModelCreateDocument, ModelCreateParams,
+    ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend, ModelMutationResult,
+    ModelSummary, ModelUpdateDocument, ModelUpdateParams, ModelsGetParams, ModelsListResult,
+    ProjectCreateDocument, ProjectCreateParams, ProjectDeleteParams, ProjectDocument,
+    ProjectGetResult, ProjectManifestBackend, ProjectMutationResult, ProjectSummary,
+    ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    RoutineCreateDocument, RoutineCreateParams, RoutineDeleteParams, RoutineDocument,
+    RoutineEdgeInput, RoutineGetResult, RoutineGraphInput, RoutineManifestBackend,
     RoutineMutationResult, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
     RoutineUpdateParams, RoutinesGetParams, RoutinesListResult,
 };

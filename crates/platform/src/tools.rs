@@ -49,12 +49,6 @@ const PROJECT_REST_READ_TOOLS: &[&str] = &[
 ];
 const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
     &["create_project", "update_project", "delete_project"];
-const LIBRARY_MANIFEST_READ_TOOLS: &[&str] = &[
-    "list_knowledge_packs",
-    "read_knowledge_doc",
-    "search_knowledge",
-    "list_knowledge_neighbors",
-];
 const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_knowledge_pack",
     "update_knowledge_pack",
@@ -124,11 +118,7 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         PROJECT_MANIFEST_READ_TOOLS,
         PROJECT_MANIFEST_WRITE_TOOLS,
     ),
-    (
-        ScopeResource::Library,
-        LIBRARY_MANIFEST_READ_TOOLS,
-        LIBRARY_MANIFEST_WRITE_TOOLS,
-    ),
+    (ScopeResource::Library, &[], LIBRARY_MANIFEST_WRITE_TOOLS),
     (
         ScopeResource::Routines,
         ROUTINE_READ_TOOLS,

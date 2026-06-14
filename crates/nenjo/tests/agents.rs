@@ -274,8 +274,9 @@ async fn runner_with_custom_tool() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].name, "echo");
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().any(|spec| spec.name == "echo"));
+    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
 
     let output = runner.chat("Use the echo tool").await.unwrap();
     assert_eq!(output.text, "Done!");
@@ -300,8 +301,9 @@ async fn runner_with_tool_factory() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].name, "echo");
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().any(|spec| spec.name == "echo"));
+    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
 
     let output = runner.chat("Hello").await.unwrap();
     assert_eq!(output.text, "Tool factory works!");

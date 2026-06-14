@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::Value;
 
 use super::params::{
     AbilitiesGetParams, AbilityCreateParams, AbilityDeleteParams, AbilityPromptGetParams,
@@ -29,19 +28,6 @@ use super::results::{
     ProjectGetResult, ProjectMutationResult, ProjectsListResult, RoutineGetResult,
     RoutineMutationResult, RoutinesListResult,
 };
-
-#[async_trait]
-/// Backend operations for generic knowledge pack resources.
-pub trait KnowledgeManifestBackend: Send + Sync {
-    /// List locally available knowledge packs.
-    async fn list_knowledge_packs(&self) -> Result<Value>;
-    /// Read one full document from one pack.
-    async fn read_knowledge_doc(&self, params: Value) -> Result<Value>;
-    /// Search one pack using metadata only.
-    async fn search_knowledge(&self, params: Value) -> Result<Value>;
-    /// List outbound graph neighbors for one document in one pack.
-    async fn list_knowledge_neighbors(&self, params: Value) -> Result<Value>;
-}
 
 #[async_trait]
 /// Backend operations for agent manifest resources.
@@ -260,7 +246,6 @@ pub trait ManifestMcpBackend:
     AgentManifestBackend
     + AbilityManifestBackend
     + DomainManifestBackend
-    + KnowledgeManifestBackend
     + ProjectManifestBackend
     + LibraryManifestBackend
     + RoutineManifestBackend
@@ -276,7 +261,6 @@ impl<T> ManifestMcpBackend for T where
     T: AgentManifestBackend
         + AbilityManifestBackend
         + DomainManifestBackend
-        + KnowledgeManifestBackend
         + ProjectManifestBackend
         + LibraryManifestBackend
         + RoutineManifestBackend

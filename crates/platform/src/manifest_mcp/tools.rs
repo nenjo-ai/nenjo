@@ -9,7 +9,6 @@ use super::library::library_tools;
 use super::models::model_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
-use nenjo_knowledge::tools::knowledge_tools;
 
 /// Return the complete manifest MCP tool registry.
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -17,7 +16,6 @@ pub fn all_tools() -> Vec<ToolSpec> {
     tools.extend(agent_tools());
     tools.extend(ability_tools());
     tools.extend(domain_tools());
-    tools.extend(knowledge_tools());
     tools.extend(project_tools());
     tools.extend(library_tools());
     tools.extend(routine_tools());
@@ -75,19 +73,24 @@ mod tests {
     }
 
     #[test]
-    fn manifest_tool_registry_exposes_only_default_knowledge_tools() {
+    fn manifest_tool_registry_exposes_library_mutation_tools_only() {
         let names: HashSet<_> = all_tools().into_iter().map(|tool| tool.name).collect();
 
         for expected in [
-            "list_knowledge_packs",
-            "read_knowledge_doc",
-            "search_knowledge",
-            "list_knowledge_neighbors",
+            "create_knowledge_pack",
+            "update_knowledge_pack",
+            "create_knowledge_doc",
+            "update_knowledge_doc",
+            "delete_knowledge_doc",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
 
         for removed in [
+            "list_knowledge_packs",
+            "read_knowledge_doc",
+            "search_knowledge",
+            "list_knowledge_neighbors",
             "list_knowledge_docs",
             "read_knowledge_doc_manifest",
             "search_knowledge_paths",
@@ -233,10 +236,6 @@ mod tests {
                 ("update_domain".into(), ToolCategory::Write),
                 ("update_domain_prompt".into(), ToolCategory::Write),
                 ("delete_domain".into(), ToolCategory::Write),
-                ("list_knowledge_packs".into(), ToolCategory::Read),
-                ("read_knowledge_doc".into(), ToolCategory::Read),
-                ("search_knowledge".into(), ToolCategory::Read),
-                ("list_knowledge_neighbors".into(), ToolCategory::Read),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),

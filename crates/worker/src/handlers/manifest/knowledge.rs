@@ -1,4 +1,4 @@
-use nenjo_platform::knowledge_contract::{
+use nenjo_platform::manifest_contract::{
     KnowledgeDocumentEdgeRecord, ParsedKnowledgeDocument, parse_document_payload,
 };
 

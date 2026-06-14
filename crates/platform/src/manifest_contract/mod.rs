@@ -17,8 +17,10 @@ pub use context_block::{ContextBlockContentRecord, ContextBlockRecord};
 pub use council::{CouncilMemberRecord, CouncilRecord};
 pub use domain::{DomainPromptRecord, DomainRecord};
 pub use knowledge::{
-    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, ParsedKnowledgeDocument,
-    parse_doc_edge_type, parse_doc_kind, parse_document_payload, to_agent_manifest,
+    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, KnowledgePackRecord,
+    ParsedKnowledgeDocument, library_pack_selector, parse_doc_edge_type, parse_doc_kind,
+    parse_document_payload, parse_library_pack_selector, parse_library_pack_slug,
+    to_knowledge_manifest,
     wrap_document_record,
 };
 pub use model::ModelRecord;

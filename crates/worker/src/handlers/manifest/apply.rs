@@ -147,6 +147,34 @@ where
                 "Failed to update platform resource id sidecar"
             );
         }
+    } else if resource_type == ResourceType::Document {
+        let pack_slug = knowledge_document_pack_slug(payload.as_ref());
+        let sidecar_result = if action == ResourceAction::Deleted {
+            if let Some(pack) = pack_slug.as_ref() {
+                store
+                    .update_knowledge_document_resource_id(pack, &resource, None)
+                    .await
+            } else if let Some(id) = resource_id {
+                store.remove_knowledge_document_resource_id_by_id(id).await
+            } else {
+                Ok(())
+            }
+        } else if let (Some(pack), Some(id)) = (pack_slug.as_ref(), resource_id) {
+            store
+                .update_knowledge_document_resource_id(pack, &resource, Some(id))
+                .await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = sidecar_result {
+            warn!(
+                %resource,
+                pack_slug = ?pack_slug,
+                resource_id = ?resource_id,
+                error = %error,
+                "Failed to update knowledge document resource id sidecar"
+            );
+        }
     }
 
     let mut manifest = current.clone();
@@ -368,6 +396,19 @@ where
     };
     if let Err(e) = result {
         warn!(%pack, %resource, error = %e, "Document sync failed");
+    }
+}
+
+fn knowledge_document_pack_slug(payload: Option<&serde_json::Value>) -> Option<Slug> {
+    let payload = payload?;
+    if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+        return knowledge_document_pack_slug(decrypted.inline_payload);
+    }
+    let parsed = parse_knowledge_document_payload(payload)?;
+    if parsed.record.pack_slug.trim().is_empty() {
+        None
+    } else {
+        Some(Slug::derive(&parsed.record.pack_slug))
     }
 }
 

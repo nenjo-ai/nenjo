@@ -486,21 +486,6 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "list_projects"));
 
-    let library_read_agent = AgentManifest {
-        platform_scopes: vec!["library:read".into()],
-        ..agent.clone()
-    };
-    let tools = factory.create_tools(&library_read_agent).await;
-    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
-
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "list_knowledge_neighbors"));
-    assert!(!names.iter().any(|name| name == "create_knowledge_pack"));
-    assert!(!names.iter().any(|name| name == "update_knowledge_pack"));
-    assert!(!names.iter().any(|name| name == "create_knowledge_doc"));
-
     let library_agent = AgentManifest {
         platform_scopes: vec!["library:write".into()],
         ..agent
@@ -508,10 +493,10 @@ async fn worker_factory_exposes_manifest_tools_without_legacy_platform_tools() {
     let tools = factory.create_tools(&library_agent).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-    assert!(names.iter().any(|name| name == "list_knowledge_packs"));
-    assert!(names.iter().any(|name| name == "read_knowledge_doc"));
-    assert!(names.iter().any(|name| name == "search_knowledge"));
-    assert!(names.iter().any(|name| name == "list_knowledge_neighbors"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
+    assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
+    assert!(!names.iter().any(|name| name == "search_knowledge"));
+    assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(names.iter().any(|name| name == "create_knowledge_pack"));
     assert!(names.iter().any(|name| name == "update_knowledge_pack"));
     assert!(names.iter().any(|name| name == "create_knowledge_doc"));

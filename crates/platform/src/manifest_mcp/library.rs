@@ -8,7 +8,7 @@ fn doc_slug_schema() -> serde_json::Value {
     })
 }
 
-fn pack_id_schema() -> serde_json::Value {
+fn pack_slug_schema() -> serde_json::Value {
     json!({
         "type": "string",
         "description": "The stable slug of the org-level library knowledge pack, such as user-rust-skills. Do not use selector syntax such as lib:user-rust-skills."
@@ -35,16 +35,15 @@ pub fn library_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_knowledge_pack".to_string(),
-            description: "Update a user-managed Library knowledge pack's name, slug, description, or status.".to_string(),
+            description: "Update a user-managed Library knowledge pack's name, slug, or description.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pack"],
                 "properties": {
-                    "pack": pack_id_schema(),
+                    "pack": pack_slug_schema(),
                     "name": { "type": ["string", "null"], "description": "Optional replacement name." },
                     "slug": { "type": ["string", "null"], "description": "Optional replacement slug." },
-                    "description": { "type": ["string", "null"], "description": "Optional replacement description. Use null to clear." },
-                    "status": { "type": ["string", "null"], "enum": ["active", "archived", null], "description": "Optional replacement status." }
+                    "description": { "type": ["string", "null"], "description": "Optional replacement description. Use null to clear." }
                 },
                 "additionalProperties": false
             }),
@@ -57,7 +56,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "required": ["pack", "filename", "content"],
                 "properties": {
-                    "pack": pack_id_schema(),
+                    "pack": pack_slug_schema(),
                     "filename": { "type": "string", "description": "Filesystem-safe filename used for storage, such as ownership-lifetimes.md." },
                     "content": { "type": "string", "description": "Full text content for the new library knowledge document." },
                     "content_type": { "type": ["string", "null"], "description": "Optional MIME type such as text/markdown or application/json." },
@@ -79,7 +78,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "required": ["pack", "slug"],
                 "properties": {
-                    "pack": pack_id_schema(),
+                    "pack": pack_slug_schema(),
                     "slug": doc_slug_schema()
                 },
                 "additionalProperties": false
@@ -93,7 +92,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "required": ["pack", "slug"],
                 "properties": {
-                    "pack": pack_id_schema(),
+                    "pack": pack_slug_schema(),
                     "slug": doc_slug_schema(),
                     "content": { "type": ["string", "null"], "description": "Optional full replacement text content." },
                     "filename": { "type": ["string", "null"], "description": "Optional replacement filename." },
@@ -114,7 +113,7 @@ pub fn library_tools() -> Vec<ToolSpec> {
 fn related_schema() -> serde_json::Value {
     json!({
         "type": "array",
-        "description": "Optional full outbound relationship list. On update, providing this replaces existing outbound edges for the document. Each target_doc must be a document slug returned by create_knowledge_doc or found as document.slug via read/search metadata; create all target documents before assigning relations.",
+        "description": "Optional full outbound relationship list. On update, providing this replaces existing outbound edges for the document. Each target_doc must be the stable document.slug from create_knowledge_doc or search/read metadata (preferred), or a resolvable selector/path; create all target documents before assigning relations.",
         "items": {
             "type": "object",
             "required": ["target_doc", "type"],

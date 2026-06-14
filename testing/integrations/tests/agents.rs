@@ -200,8 +200,9 @@ async fn tool_call_round_trip() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].name, "get_weather");
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().any(|spec| spec.name == "get_weather"));
+    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
 
     let output = match skip_on_provider_rate_limit(
         runner

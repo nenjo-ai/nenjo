@@ -5,7 +5,10 @@ use crate::manifest::{
     AbilityManifest, AbilityPromptConfig, DomainManifest, DomainPromptConfig, PromptConfig,
 };
 use crate::manifest::{ContextBlockManifest, ManifestLoader, RoutineManifest};
-use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgeRegistry};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use nenjo_knowledge::tools::{KnowledgePackEntry, KnowledgePackLoader, KnowledgeRegistry};
 use nenjo_knowledge::{
     KnowledgeDocFilter, KnowledgeDocManifest, KnowledgePack, KnowledgePackManifestData,
 };
@@ -317,7 +320,7 @@ async fn provider_registers_multiple_knowledge_packs() {
     assert!(vars.contains_key("local.first"));
     assert!(vars.contains_key("local.second"));
 
-    let registry = provider.inner.services.knowledge_registry.clone();
+    let registry = provider.inner.services.knowledge.registry.clone();
     let packs = registry.list_packs().await.unwrap();
     assert_eq!(packs.len(), 2);
     assert!(packs.iter().any(|pack| pack.pack == "local:first"));
@@ -330,6 +333,102 @@ async fn provider_registers_multiple_knowledge_packs() {
             .iter()
             .any(|doc| doc.id == "first_doc")
     );
+}
+
+struct RefreshingKnowledgeLoader {
+    use_second: Arc<AtomicBool>,
+}
+
+impl KnowledgePackLoader for RefreshingKnowledgeLoader {
+    fn load_packs(&self) -> Vec<KnowledgePackEntry> {
+        let pack_name = if self.use_second.load(Ordering::SeqCst) {
+            "second"
+        } else {
+            "first"
+        };
+        vec![
+            KnowledgePackEntry::library(
+                pack_name,
+                TestKnowledgePack::new(
+                    pack_name,
+                    &format!("library://{pack_name}/"),
+                    &format!("{pack_name}_doc"),
+                    &format!("library://{pack_name}/{pack_name}.md"),
+                ),
+            )
+            .unwrap(),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn knowledge_pack_loader_refreshes_prompt_vars_on_agent_build() {
+    let use_second = Arc::new(AtomicBool::new(false));
+    let loader = Arc::new(RefreshingKnowledgeLoader {
+        use_second: use_second.clone(),
+    });
+
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .with_knowledge_pack_loader(loader)
+        .build()
+        .await
+        .unwrap();
+
+    let first_runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let first_vars = first_runner
+        .instance()
+        .prompt_context()
+        .render_ctx_extra
+        .knowledge_vars
+        .clone();
+    assert!(first_vars.contains_key("lib.first"));
+
+    use_second.store(true, Ordering::SeqCst);
+
+    let second_runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let second_vars = second_runner
+        .instance()
+        .prompt_context()
+        .render_ctx_extra
+        .knowledge_vars
+        .clone();
+    assert!(second_vars.contains_key("lib.second"));
+    assert!(!second_vars.contains_key("lib.first"));
+}
+
+#[tokio::test]
+async fn provider_exposes_list_knowledge_packs_without_registered_packs() {
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let tools = provider.create_knowledge_tools();
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+    assert_eq!(names, vec!["list_knowledge_packs"]);
+
+    let result = tools[0].execute(serde_json::json!({})).await.unwrap();
+    assert!(result.success);
+    let packs: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+    assert!(packs.is_empty());
 }
 
 #[tokio::test]

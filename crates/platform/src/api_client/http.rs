@@ -302,13 +302,13 @@ impl ApiClient {
     // Knowledge sync
     // -----------------------------------------------------------------------
 
-    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackSyncMeta>> {
+    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackRecord>> {
         let url = format!("{}/api/v1/knowledge", self.base_url);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let packs: Vec<KnowledgePackSyncMeta> = resp.json().await?;
+                let packs: Vec<KnowledgePackRecord> = resp.json().await?;
                 debug!(count = packs.len(), "Listed knowledge packs");
                 Ok(packs)
             }

@@ -136,18 +136,6 @@ impl ManifestMcpContract {
                 let args: DomainDeleteParams = serde_json::from_value(params)?;
                 to_json(backend.delete_domain(args).await?)
             }
-            "list_knowledge_packs" => {
-                if !params.is_null() {
-                    let object = params.as_object().cloned().unwrap_or_default();
-                    if !object.is_empty() {
-                        return Err(anyhow!("list_knowledge_packs does not accept parameters"));
-                    }
-                }
-                to_json(backend.list_knowledge_packs().await?)
-            }
-            "read_knowledge_doc" => to_json(backend.read_knowledge_doc(params).await?),
-            "search_knowledge" => to_json(backend.search_knowledge(params).await?),
-            "list_knowledge_neighbors" => to_json(backend.list_knowledge_neighbors(params).await?),
             "list_projects" => {
                 if !params.is_null() {
                     let object = params.as_object().cloned().unwrap_or_default();

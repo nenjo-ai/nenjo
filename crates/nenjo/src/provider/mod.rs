@@ -175,13 +175,39 @@ fn index_domains_by_command(items: &[DomainManifest]) -> HashMap<String, usize> 
     index
 }
 
+pub(crate) struct ProviderKnowledgeState {
+    registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
+    static_entries: Vec<nenjo_knowledge::tools::KnowledgePackEntry>,
+    loader: Option<Arc<dyn nenjo_knowledge::tools::KnowledgePackLoader>>,
+}
+
+impl Default for ProviderKnowledgeState {
+    fn default() -> Self {
+        Self {
+            registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry::new(),
+            static_entries: Vec::new(),
+            loader: None,
+        }
+    }
+}
+
+impl Clone for ProviderKnowledgeState {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            static_entries: self.static_entries.clone(),
+            loader: self.loader.clone(),
+        }
+    }
+}
+
 pub(crate) struct ProviderServices<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
     model_factory: Arc<ModelFactory>,
     tool_factory: Arc<ToolFactoryImpl>,
     memory: Option<Arc<Mem>>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
-    knowledge_registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
+    knowledge: ProviderKnowledgeState,
 }
 
 impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
@@ -194,7 +220,7 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
             render_ctx_extra: self.render_ctx_extra.clone(),
-            knowledge_registry: self.knowledge_registry.clone(),
+            knowledge: self.knowledge.clone(),
         }
     }
 }
@@ -219,7 +245,7 @@ where
         memory: Option<Arc<Mem>>,
         agent_config: AgentConfig,
         render_ctx_extra: RenderContextVars,
-        knowledge_registry: nenjo_knowledge::tools::CompositeKnowledgeRegistry,
+        knowledge: ProviderKnowledgeState,
     ) -> Self {
         let services = ProviderServices {
             model_factory,
@@ -227,7 +253,7 @@ where
             memory,
             agent_config,
             render_ctx_extra,
-            knowledge_registry,
+            knowledge,
         };
         Self::from_services(manifest, services)
     }
@@ -422,13 +448,22 @@ where
     }
 
     pub(crate) fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>> {
-        if self.inner.services.knowledge_registry.is_empty() {
-            Vec::new()
+        let registry = if let Some(loader) = &self.inner.services.knowledge.loader {
+            Arc::new(
+                nenjo_knowledge::tools::CompositeKnowledgeRegistry::from_entries(
+                    loader.load_packs(),
+                ),
+            )
         } else {
-            nenjo_knowledge::tools::knowledge_toolbelt(Arc::new(
-                self.inner.services.knowledge_registry.clone(),
-            ))
+            Arc::new(self.inner.services.knowledge.registry.clone())
+        };
+        let mut tools = vec![nenjo_knowledge::tools::knowledge_list_packs_tool(
+            registry.clone(),
+        )];
+        if !registry.is_empty() {
+            tools.extend(nenjo_knowledge::tools::knowledge_traversal_tools(registry));
         }
+        tools
     }
 
     fn resolve_model(&self, agent: &AgentManifest) -> Result<ModelManifest, ProviderError> {
@@ -463,13 +498,33 @@ where
                 settings: serde_json::Value::Null,
             });
 
+        let mut render_ctx_extra = self.inner.services.render_ctx_extra.clone();
+        render_ctx_extra.knowledge_vars = self.refresh_knowledge_prompt_vars();
+
         PromptContext {
             agent_name: agent.name.clone(),
             agent_description: agent.description.clone().unwrap_or_default(),
             current_project,
             active_domain: None,
             append_active_domain_addon: true,
-            render_ctx_extra: self.inner.services.render_ctx_extra.clone(),
+            render_ctx_extra,
+        }
+    }
+
+    fn refresh_knowledge_prompt_vars(&self) -> std::collections::HashMap<String, String> {
+        let services = &self.inner.services;
+        if services.knowledge.loader.is_some() || !services.knowledge.static_entries.is_empty() {
+            let mut vars = nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(
+                services.knowledge.static_entries.iter().cloned(),
+            );
+            if let Some(loader) = &services.knowledge.loader {
+                vars.extend(nenjo_knowledge::tools::knowledge_prompt_vars_from_entries(
+                    loader.load_packs(),
+                ));
+            }
+            vars
+        } else {
+            services.render_ctx_extra.knowledge_vars.clone()
         }
     }
 

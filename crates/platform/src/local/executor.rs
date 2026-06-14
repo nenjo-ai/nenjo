@@ -13,14 +13,7 @@ use nenjo::{
         RoutineStepManifest, RoutineTrigger,
     },
 };
-use nenjo_knowledge::tools::{
-    KnowledgeDocReadResult, KnowledgeNeighborArgs, KnowledgePackSummary, KnowledgeReadArgs,
-    KnowledgeRegistry, KnowledgeSearchArgs, knowledge_document_metadata, knowledge_filter,
-    knowledge_neighbors_result, knowledge_search_result, parse_knowledge_enum,
-};
-use nenjo_knowledge::{KnowledgeDocEdgeType, KnowledgePack};
 
-use crate::knowledge_backend::unknown_pack;
 use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityDeleteParams, AbilityDocument,
     AbilityGetResult, AbilityManifestBackend, AbilityMutationResult, AbilityPromptDocument,
@@ -41,14 +34,14 @@ use crate::manifest_mcp::{
     DomainManifestMutationResult, DomainManifestUpdateParams, DomainMutationResult, DomainSummary,
     DomainUpdateParams, DomainsGetParams, DomainsListResult, KnowledgeDocCreateParams,
     KnowledgeDocDeleteParams, KnowledgeDocMutationResult, KnowledgeDocUpdateParams,
-    KnowledgeManifestBackend, KnowledgePackCreateParams, KnowledgePackMutationResult,
-    KnowledgePackUpdateParams, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
-    ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
-    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
-    ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
-    ProjectsGetParams, ProjectsListResult, RoutineDeleteParams, RoutineDocument, RoutineGetResult,
-    RoutineGraphInput, RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams,
-    RoutinesGetParams, RoutinesListResult,
+    KnowledgePackCreateParams, KnowledgePackMutationResult, KnowledgePackUpdateParams,
+    LibraryManifestBackend, ModelDeleteParams, ModelDocument, ModelGetResult, ModelManifestBackend,
+    ModelMutationResult, ModelUpdateParams, ModelsGetParams, ModelsListResult, ProjectDeleteParams,
+    ProjectDocument, ProjectGetResult, ProjectManifestBackend, ProjectMutationResult,
+    ProjectSummary, ProjectUpdateParams, ProjectsGetParams, ProjectsListResult,
+    RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
+    RoutineManifestBackend, RoutineMutationResult, RoutineUpdateParams, RoutinesGetParams,
+    RoutinesListResult,
 };
 use crate::prompt_merge::merge_prompt_config;
 use crate::{
@@ -214,86 +207,6 @@ where
             .find(|ability| Slug::derive(&ability.name) == *ability_ref)
             .ok_or_else(|| anyhow!("ability not found: {}", ability_ref))
     }
-}
-
-#[async_trait]
-impl<R, W> KnowledgeRegistry for LocalManifestMcpBackend<R, W>
-where
-    R: ManifestReader + Send + Sync,
-    W: ManifestWriter + Send + Sync,
-{
-    async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
-        local_knowledge_pack(selector).map(|pack| Arc::new(pack) as Arc<dyn KnowledgePack>)
-    }
-}
-
-#[async_trait]
-impl<R, W> KnowledgeManifestBackend for LocalManifestMcpBackend<R, W>
-where
-    R: ManifestReader + Send + Sync,
-    W: ManifestWriter + Send + Sync,
-{
-    async fn list_knowledge_packs(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(KnowledgeRegistry::list_packs(self).await?).map_err(Into::into)
-    }
-
-    async fn read_knowledge_doc(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeReadArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let doc = pack.read_doc(&args.selector).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.selector,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(KnowledgeDocReadResult {
-            document: knowledge_document_metadata(args.pack, &doc.manifest),
-            content: doc.content,
-        })
-        .map_err(Into::into)
-    }
-
-    async fn search_knowledge(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let args: KnowledgeSearchArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let filter = knowledge_filter(args.filter)?;
-        serde_json::to_value(
-            pack.search(&args.query, filter)
-                .into_iter()
-                .map(|hit| knowledge_search_result(args.pack.clone(), hit))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(Into::into)
-    }
-
-    async fn list_knowledge_neighbors(
-        &self,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let args: KnowledgeNeighborArgs =
-            serde_json::from_value(params).map_err(anyhow::Error::from)?;
-        let pack = local_knowledge_pack(&args.pack)?;
-        let edge_type: Option<KnowledgeDocEdgeType> = parse_knowledge_enum(args.edge_type)?;
-        let neighbors = pack.neighbors(&args.selector, edge_type).ok_or_else(|| {
-            anyhow!(
-                "unknown knowledge doc '{}' in pack '{}'",
-                args.selector,
-                args.pack
-            )
-        })?;
-        serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors)).map_err(Into::into)
-    }
-}
-
-fn local_knowledge_pack(selector: &str) -> Result<crate::knowledge_backend::ResolvedKnowledgePack> {
-    Err(unknown_pack(selector))
 }
 
 #[async_trait]

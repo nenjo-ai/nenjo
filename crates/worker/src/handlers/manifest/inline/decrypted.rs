@@ -199,7 +199,7 @@ where
         SensitiveContentKind::DocumentContent => {
             let metadata = match decrypted.inline_payload.and_then(
                 nenjo_events::ManifestResourcePayload::<
-                    nenjo_platform::knowledge_contract::KnowledgeDocumentRecord,
+                    nenjo_platform::manifest_contract::KnowledgeDocumentRecord,
                 >::parse,
             ) {
                 Some(payload) => payload.data,

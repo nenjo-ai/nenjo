@@ -24,6 +24,7 @@ pub mod library;
 pub mod models;
 /// Request parameter types for manifest MCP tools.
 pub mod params;
+mod serde_helpers;
 /// Tool specs for project operations.
 pub mod projects;
 /// Result payload types for manifest MCP tools.
@@ -36,9 +37,8 @@ mod types;
 
 pub use backend::{
     AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend,
-    LibraryManifestBackend, ManifestMcpBackend, ModelManifestBackend, ProjectManifestBackend,
-    RoutineManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, LibraryManifestBackend, ManifestMcpBackend,
+    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{

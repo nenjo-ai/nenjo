@@ -77,6 +77,21 @@ pub trait ManifestStore: Send + Sync {
         Ok(())
     }
 
+    /// Persist or remove pack-scoped knowledge document platform ids.
+    async fn update_knowledge_document_resource_id(
+        &self,
+        _pack: &Slug,
+        _doc: &Slug,
+        _resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove all pack aliases for one knowledge document platform id.
+    async fn remove_knowledge_document_resource_id_by_id(&self, _resource_id: Uuid) -> Result<()> {
+        Ok(())
+    }
+
     /// Rebuild the full manifest cache from the platform client.
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest>;
 
@@ -210,6 +225,23 @@ where
     ) -> Result<()> {
         (**self)
             .remove_platform_resource_id_by_id(kind, resource_id)
+            .await
+    }
+
+    async fn update_knowledge_document_resource_id(
+        &self,
+        pack: &Slug,
+        doc: &Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        (**self)
+            .update_knowledge_document_resource_id(pack, doc, resource_id)
+            .await
+    }
+
+    async fn remove_knowledge_document_resource_id_by_id(&self, resource_id: Uuid) -> Result<()> {
+        (**self)
+            .remove_knowledge_document_resource_id_by_id(resource_id)
             .await
     }
 

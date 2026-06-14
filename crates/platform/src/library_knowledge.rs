@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::knowledge_contract::{KnowledgeDocumentRecord, parse_doc_edge_type, to_agent_manifest};
+use crate::manifest_contract::{
+    KnowledgeDocumentRecord, parse_doc_edge_type, to_knowledge_manifest,
+};
 use anyhow::{Context, Result};
 use nenjo::Slug;
 use nenjo_knowledge::{
@@ -40,7 +42,8 @@ pub const LIBRARY_KNOWLEDGE_MANIFEST_FILENAME: &str = "manifest.json";
 /// knowledge metadata. Do not add a second library knowledge manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryKnowledgePackManifest {
-    pub pack_id: String,
+    #[serde(alias = "pack_id")]
+    pub pack_slug: String,
     #[serde(default = "default_library_version")]
     pub version: String,
     pub schema_version: u32,
@@ -58,7 +61,7 @@ fn default_library_version() -> String {
 
 impl KnowledgePackManifest for LibraryKnowledgePackManifest {
     fn pack_id(&self) -> &str {
-        &self.pack_id
+        &self.pack_slug
     }
 
     fn version(&self) -> &str {
@@ -85,7 +88,7 @@ impl KnowledgePackManifest for LibraryKnowledgePackManifest {
 impl LibraryKnowledgePackManifest {
     pub fn library_pack(pack_slug: &str) -> Self {
         Self {
-            pack_id: pack_slug.to_string(),
+            pack_slug: pack_slug.to_string(),
             version: "1".to_string(),
             schema_version: 1,
             root_uri: format!("library://{pack_slug}/"),
@@ -165,6 +168,28 @@ impl LibraryKnowledgePackManifest {
     }
 }
 
+/// Discover locally synced library knowledge packs under `library_root`.
+pub fn discover_library_knowledge_packs(
+    library_root: &Path,
+) -> Vec<(String, LibraryKnowledgePack)> {
+    let Ok(entries) = std::fs::read_dir(library_root) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() {
+                return None;
+            }
+            let slug = entry.file_name().to_string_lossy().to_string();
+            let pack = LibraryKnowledgePack::load(entry.path())?;
+            Some((slug, pack))
+        })
+        .collect()
+}
+
 pub fn load_library_knowledge_manifest(library_dir: &Path) -> Option<LibraryKnowledgePackManifest> {
     let path = library_dir.join(LIBRARY_KNOWLEDGE_MANIFEST_FILENAME);
     let content = std::fs::read_to_string(&path).ok()?;
@@ -215,7 +240,7 @@ pub fn build_library_knowledge_manifest(
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.selector.cmp(&right.selector));
     LibraryKnowledgePackManifest {
-        pack_id: pack_slug.to_string(),
+        pack_slug: pack_slug.to_string(),
         version: "1".to_string(),
         schema_version: 1,
         root_uri: format!("library://{pack_slug}/"),
@@ -273,14 +298,10 @@ pub fn remove_library_knowledge_entry(library_dir: &Path, doc: &Slug) -> Result<
 
 pub fn library_knowledge_doc_relative_path(library_dir: &Path, doc: &Slug) -> Option<String> {
     load_library_knowledge_manifest(library_dir)
-        .and_then(|manifest| manifest.doc_by_slug(doc).map(knowledge_doc_relative_path))
+        .and_then(|manifest| manifest.doc_by_slug(doc).map(manifest_doc_relative_path))
 }
 
-pub fn library_doc_relative_path(record: &KnowledgeDocumentRecord) -> String {
-    record.library_doc_relative_path()
-}
-
-fn knowledge_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
+pub fn manifest_doc_relative_path(doc: &KnowledgeDocManifest) -> String {
     doc.source_path
         .strip_prefix("docs/")
         .unwrap_or(&doc.source_path)
@@ -293,7 +314,7 @@ fn library_knowledge_doc(
     record: &KnowledgeDocumentRecord,
     resolve_target: impl Fn(Slug) -> Option<String>,
 ) -> KnowledgeDocManifest {
-    to_agent_manifest(pack_slug, record, resolve_target)
+    to_knowledge_manifest(pack_slug, record, resolve_target)
 }
 
 impl KnowledgePack for LibraryKnowledgePack {
@@ -431,7 +452,7 @@ mod tests {
 
     fn library_manifest() -> LibraryKnowledgePackManifest {
         LibraryKnowledgePackManifest {
-            pack_id: "library-test".into(),
+            pack_slug: "library-test".into(),
             version: "1".into(),
             schema_version: 1,
             root_uri: "library://test/".into(),
@@ -497,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn library_pack_reads_clean_manifest_metadata_fields() {
+    fn library_pack_reads_legacy_pack_id_field() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(LibraryKnowledgePack::MANIFEST_FILENAME),
@@ -525,8 +546,16 @@ mod tests {
 
         let pack = LibraryKnowledgePack::load(dir.path()).unwrap();
 
+        assert_eq!(pack.manifest().pack_id(), "library-test");
         assert_eq!(pack.manifest().docs()[0].kind.as_str(), "guide");
         assert_eq!(pack.manifest().docs()[0].title, "Draft");
+    }
+
+    #[test]
+    fn library_pack_serializes_pack_slug_field() {
+        let manifest = library_manifest();
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"pack_slug\":\"library-test\""));
     }
 
     #[test]
