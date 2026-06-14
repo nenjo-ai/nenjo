@@ -260,7 +260,7 @@ struct PreparedTaskExecution {
     task_id: Uuid,
     project: nenjo::Slug,
     execution_run_id: Uuid,
-    agent_id: Uuid,
+    agent_id: Option<Uuid>,
     agent: nenjo::Slug,
     agent_name: String,
     run: AgentRun,
@@ -287,7 +287,7 @@ where
     let agent_manifest = provider
         .find_agent_manifest(agent)
         .ok_or_else(|| anyhow!("agent not found: {}", agent))?;
-    let agent_id = agent_manifest.id;
+    let agent_id = None;
     let aname = agent_manifest.name.clone();
     let pslug = project_slug(Some(&request.project));
     let task_slug = request.slug.clone().unwrap_or_else(|| "task".to_string());
@@ -435,7 +435,7 @@ where
                             let session_event_context = TurnEventContext {
                                 session_id: task_id,
                                 turn_id: Some(execution_run_id),
-                                agent_id: Some(agent_id),
+                                agent_id,
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };

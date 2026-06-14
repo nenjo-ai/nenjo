@@ -2,18 +2,21 @@ use anyhow::Result;
 use nenjo::manifest::{context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
-use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::api_client::ApiClient;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::delete::apply_delete;
 use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
-use super::payload::{InlineDocumentMeta, parse_decrypted_manifest_payload};
+use super::knowledge::{document_edges_source, parse_knowledge_document_payload};
+use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
+use nenjo_platform::PlatformResourceKind;
 
 #[derive(Debug, Clone)]
 pub(super) struct ManifestChange {
+    pub resource_id: Uuid,
     pub resource_type: ResourceType,
     pub resource: Slug,
     pub action: ResourceAction,
@@ -85,6 +88,7 @@ where
 {
     let ManifestChange {
         resource_type,
+        resource_id: event_resource_id,
         resource,
         action,
         project,
@@ -92,7 +96,11 @@ where
         encrypted_payload,
     } = change;
 
-    let resource_id = resolve_resource_id(current, resource_type, &resource, payload.as_ref());
+    let resource_id = if event_resource_id.is_nil() {
+        resolve_resource_id(current, resource_type, &resource, payload.as_ref())
+    } else {
+        Some(event_resource_id)
+    };
     let payload_state =
         ManifestPayloadState::from_parts(payload.as_ref(), encrypted_payload.as_ref());
 
@@ -116,6 +124,59 @@ where
         "Manifest resource change details"
     );
 
+    if let Some(kind) = platform_resource_kind(resource_type) {
+        let sidecar_result = if action == ResourceAction::Deleted {
+            if let Some(id) = resource_id {
+                store.remove_platform_resource_id_by_id(kind, id).await
+            } else {
+                store
+                    .update_platform_resource_id(kind, &resource, None)
+                    .await
+            }
+        } else {
+            store
+                .update_platform_resource_id(kind, &resource, resource_id)
+                .await
+        };
+        if let Err(error) = sidecar_result {
+            warn!(
+                %resource_type,
+                %resource,
+                resource_id = ?resource_id,
+                error = %error,
+                "Failed to update platform resource id sidecar"
+            );
+        }
+    } else if resource_type == ResourceType::Document {
+        let pack_slug = knowledge_document_pack_slug(payload.as_ref());
+        let sidecar_result = if action == ResourceAction::Deleted {
+            if let Some(pack) = pack_slug.as_ref() {
+                store
+                    .update_knowledge_document_resource_id(pack, &resource, None)
+                    .await
+            } else if let Some(id) = resource_id {
+                store.remove_knowledge_document_resource_id_by_id(id).await
+            } else {
+                Ok(())
+            }
+        } else if let (Some(pack), Some(id)) = (pack_slug.as_ref(), resource_id) {
+            store
+                .update_knowledge_document_resource_id(pack, &resource, Some(id))
+                .await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = sidecar_result {
+            warn!(
+                %resource,
+                pack_slug = ?pack_slug,
+                resource_id = ?resource_id,
+                error = %error,
+                "Failed to update knowledge document resource id sidecar"
+            );
+        }
+    }
+
     let mut manifest = current.clone();
     let mut source = ManifestApplySource::Ignored;
     let mut applied_inline = false;
@@ -136,10 +197,9 @@ where
         }
         source = ManifestApplySource::Deleted;
     } else {
-        if let Some(resource_id) = resource_id {
-            if let Some(ref data) = payload
-                && let Some(decrypted) = parse_decrypted_manifest_payload(data)
-            {
+        if let Some(ref data) = payload {
+            if let Some(decrypted) = parse_decrypted_manifest_payload(data) {
+                let resource_id = resource_id.unwrap_or(decrypted.object_id);
                 applied_inline = apply_decrypted_manifest_upsert(
                     &mut manifest,
                     store,
@@ -151,9 +211,8 @@ where
                 if applied_inline {
                     source = ManifestApplySource::DecryptedInline;
                 }
-            } else if let Some(ref data) = payload {
-                applied_inline =
-                    apply_inline_upsert(&mut manifest, resource_type, resource_id, data);
+            } else {
+                applied_inline = apply_inline_upsert(&mut manifest, resource_type, data);
                 if applied_inline {
                     source = ManifestApplySource::Inline;
                 }
@@ -166,34 +225,13 @@ where
             ) {
                 source = ManifestApplySource::Ignored;
             } else {
-                let Some(resource_id) = resource_id else {
-                    warn!(
-                        %resource_type,
-                        %resource,
-                        "Manifest change did not include a resolvable resource id, falling back to full refresh"
-                    );
-                    manifest = store.full_refresh(client).await?;
-                    if let Some(mcp) = mcp {
-                        mcp.reconcile_mcp(&manifest.mcp_servers).await;
-                    }
-                    source = ManifestApplySource::FullRefresh;
-                    return finish_manifest_change(
-                        store,
-                        manifest,
-                        resource_type,
-                        &resource,
-                        source,
-                    )
-                    .await;
-                };
-                if let Err(e) =
-                    apply_upsert(&mut manifest, client, resource_type, resource_id).await
+                if let Err(e) = apply_upsert(&mut manifest, client, resource_type, &resource).await
                 {
                     warn!(
                         error = %e,
                         %resource_type,
                         %resource,
-                        %resource_id,
+                        resource_id = ?resource_id,
                         "Incremental fetch failed, falling back to full refresh"
                     );
                     manifest = store.full_refresh(client).await?;
@@ -233,6 +271,7 @@ where
                 resource: &resource,
                 action,
                 payload: payload.as_ref(),
+                encrypted_payload: encrypted_payload.as_ref(),
                 applied_inline,
             })
             .await;
@@ -264,21 +303,19 @@ where
     Ok(ManifestChangeResult { manifest })
 }
 
-async fn finish_manifest_change<StoreRt>(
-    store: &StoreRt,
-    manifest: Manifest,
-    resource_type: ResourceType,
-    resource: &Slug,
-    source: ManifestApplySource,
-) -> Result<ManifestChangeResult>
-where
-    StoreRt: ManifestStore,
-{
-    if let Err(e) = store.persist_resource(&manifest, resource_type).await {
-        warn!(error = %e, rt = %resource_type, "Failed to persist resource cache");
+fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourceKind> {
+    match resource_type {
+        ResourceType::Agent => Some(PlatformResourceKind::Agent),
+        ResourceType::Ability => Some(PlatformResourceKind::Ability),
+        ResourceType::Domain => Some(PlatformResourceKind::Domain),
+        ResourceType::ContextBlock => Some(PlatformResourceKind::ContextBlock),
+        ResourceType::Project => Some(PlatformResourceKind::Project),
+        ResourceType::Routine => Some(PlatformResourceKind::Routine),
+        ResourceType::Model => Some(PlatformResourceKind::Model),
+        ResourceType::Council => Some(PlatformResourceKind::Council),
+        ResourceType::McpServer => Some(PlatformResourceKind::McpServer),
+        ResourceType::Document | ResourceType::KnowledgePack => None,
     }
-    debug!(?source, %resource_type, %resource, "Manifest change applied");
-    Ok(ManifestChangeResult { manifest })
 }
 
 struct DocumentSideEffectContext<'a, StoreRt>
@@ -290,6 +327,7 @@ where
     resource: &'a Slug,
     action: ResourceAction,
     payload: Option<&'a serde_json::Value>,
+    encrypted_payload: Option<&'a EncryptedPayload>,
     applied_inline: bool,
 }
 
@@ -303,66 +341,74 @@ where
         resource,
         action,
         payload,
+        encrypted_payload,
         applied_inline,
     } = ctx;
 
-    let metadata_value = payload.and_then(|payload| {
-        if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
-            decrypted.inline_payload.cloned()
-        } else {
-            Some(payload.clone())
-        }
-    });
-
-    let metadata = metadata_value
-        .map(serde_json::from_value::<InlineDocumentMeta>)
-        .transpose()
-        .map_err(|error| {
-            warn!(%resource, error = %error, "Failed to deserialize inline document metadata");
-            error
-        })
-        .ok()
-        .flatten()
-        .map(|meta| DocumentSyncMeta {
-            id: Some(meta.id),
-            pack_id: meta.pack_id,
-            pack_slug: meta.pack_slug.unwrap_or_else(|| "default".to_string()),
-            slug: meta.slug.unwrap_or_else(|| meta.filename.clone()),
-            filename: meta.filename,
-            path: meta.path,
-            title: meta.title,
-            kind: meta.kind,
-            summary: meta.summary,
-            tags: meta.tags,
-            content_type: "application/octet-stream".to_string(),
-            updated_at: meta.updated_at.to_rfc3339(),
-        });
-
-    let Some(metadata) = metadata
-        .as_ref()
-        .filter(|meta| !meta.pack_slug.trim().is_empty())
-    else {
-        warn!(%resource, "Document change without knowledge pack slug, skipping sync");
-        return;
-    };
-    let pack = metadata.pack_slug.as_str();
-
     if action == ResourceAction::Deleted {
-        if let Err(error) = store.remove_document(resource, Some(metadata)).await {
-            warn!(%pack, %resource, error = %error, "Failed to update local knowledge manifest");
+        let metadata = payload.and_then(|payload| {
+            let envelope = if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+                decrypted.inline_payload
+            } else {
+                Some(payload)
+            }?;
+            let parsed = parse_knowledge_document_payload(envelope)?;
+            Some(parsed.record.clone())
+        });
+        if let Err(error) = store.remove_document(resource, metadata.as_ref()).await {
+            warn!(%resource, error = %error, "Failed to update local knowledge manifest");
         }
         return;
     }
 
-    let result = if applied_inline {
+    let envelope = payload.and_then(|payload| {
+        if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+            decrypted.inline_payload
+        } else {
+            Some(payload)
+        }
+    });
+
+    let Some(parsed) = envelope.and_then(parse_knowledge_document_payload) else {
+        let result = store.sync_document(client, resource, None).await;
+        if let Err(error) = result {
+            warn!(%resource, error = %error, "Document sync failed without inline payload");
+        }
+        return;
+    };
+
+    let metadata = parsed.record.clone();
+    let edges_source = document_edges_source(&parsed, &metadata.edges);
+
+    if metadata.pack_slug.trim().is_empty() {
+        warn!(%resource, "Document change without knowledge pack slug, skipping sync");
+        return;
+    }
+    let pack = metadata.pack_slug.as_str();
+
+    let needs_content_fetch = encrypted_payload.is_some() && !applied_inline;
+    let result = if applied_inline || !needs_content_fetch {
         store
-            .sync_document_metadata(client, resource, Some(metadata))
+            .sync_document_metadata(client, resource, Some(&metadata), Some(edges_source))
             .await
     } else {
-        store.sync_document(client, resource, Some(metadata)).await
+        store.sync_document(client, resource, Some(&metadata)).await
     };
     if let Err(e) = result {
         warn!(%pack, %resource, error = %e, "Document sync failed");
+    }
+}
+
+fn knowledge_document_pack_slug(payload: Option<&serde_json::Value>) -> Option<Slug> {
+    let payload = payload?;
+    if let Some(decrypted) = parse_decrypted_manifest_payload(payload) {
+        return knowledge_document_pack_slug(decrypted.inline_payload);
+    }
+    let parsed = parse_knowledge_document_payload(payload)?;
+    if parsed.record.pack_slug.trim().is_empty() {
+        None
+    } else {
+        Some(Slug::derive(&parsed.record.pack_slug))
     }
 }
 
@@ -374,7 +420,6 @@ fn resolve_resource_id(
 ) -> Option<Uuid> {
     payload
         .and_then(resource_id_from_payload)
-        .or_else(|| Uuid::parse_str(resource.as_str()).ok())
         .or_else(|| resource_id_from_manifest(manifest, resource_type, resource))
 }
 
@@ -385,6 +430,7 @@ fn resource_id_from_payload(payload: &serde_json::Value) -> Option<Uuid> {
             .and_then(resource_id_from_payload)
             .or(Some(decrypted.object_id));
     }
+    let payload = payload.get("data").unwrap_or(payload);
     payload
         .get("id")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -399,48 +445,48 @@ fn resource_id_from_manifest(
         ResourceType::Agent => manifest
             .agents
             .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .find(|item| item.slug == *resource)
+            .map(|item| crate::resource_resolver::stable_resource_id("agent", &item.slug)),
         ResourceType::Model => manifest
             .models
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("model", resource)),
         ResourceType::Routine => manifest
             .routines
             .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .find(|item| item.slug == *resource)
+            .map(|item| crate::resource_resolver::stable_resource_id("routine", &item.slug)),
         ResourceType::Project => manifest
             .projects
             .iter()
             .find(|item| item.slug == *resource)
-            .map(|item| item.id),
+            .map(|item| crate::resource_resolver::stable_resource_id("project", &item.slug)),
         ResourceType::Council => manifest
             .councils
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("council", resource)),
         ResourceType::Ability => manifest
             .abilities
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("ability", resource)),
         ResourceType::ContextBlock => manifest
             .context_blocks
             .iter()
             .find(|item| context_block_slug(&item.path, &item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("context_block", resource)),
         ResourceType::McpServer => manifest
             .mcp_servers
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("mcp_server", resource)),
         ResourceType::Domain => manifest
             .domains
             .iter()
             .find(|item| domain_slug(&item.path, &item.name) == *resource)
-            .map(|item| item.id),
+            .map(|_| crate::resource_resolver::stable_resource_id("domain", resource)),
         ResourceType::Document | ResourceType::KnowledgePack => None,
     }
 }

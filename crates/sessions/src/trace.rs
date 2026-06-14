@@ -27,6 +27,8 @@ pub enum TracePhase {
     AbilityCompleted,
     SubAgentEvent,
     SubAgentTranscript,
+    AsyncOperationEvent,
+    AsyncOperationTranscript,
     MessageCompacted,
     Paused,
     Resumed,

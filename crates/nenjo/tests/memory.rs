@@ -3,8 +3,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use uuid::Uuid;
-
 use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
@@ -70,7 +68,7 @@ impl ModelProviderFactory for MockModelProviderFactory {
 
 fn test_manifest() -> Manifest {
     let model = ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("mock", "mock-llm-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-llm-v1".into(),
@@ -80,9 +78,8 @@ fn test_manifest() -> Manifest {
     };
 
     let agent = AgentManifest {
-        id: Uuid::new_v4(),
         name: "memory-agent".into(),
-        slug: None,
+        slug: Slug::derive("memory-agent"),
         description: Some("An agent with memory".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are a helpful assistant.\n{{ memories }}".into(),
@@ -106,7 +103,6 @@ fn test_manifest() -> Manifest {
     };
 
     let project = ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -608,7 +604,7 @@ async fn ability_inherits_memory_vars() {
         .unwrap();
 
     let model = ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("mock", "mock-llm-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-llm-v1".into(),
@@ -618,7 +614,6 @@ async fn ability_inherits_memory_vars() {
     };
 
     let ability = AbilityManifest {
-        id: Uuid::new_v4(),
         name: "code-review".into(),
         path: None,
         description: Some("Reviews code".into()),
@@ -635,9 +630,8 @@ async fn ability_inherits_memory_vars() {
     };
 
     let agent = nenjo::manifest::AgentManifest {
-        id: Uuid::new_v4(),
         name: "ability-agent".into(),
-        slug: None,
+        slug: Slug::derive("ability-agent"),
         description: Some("Agent with abilities".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are helpful.\n{{ memories }}".into(),
@@ -661,7 +655,6 @@ async fn ability_inherits_memory_vars() {
     };
 
     let project = nenjo::manifest::ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -734,7 +727,7 @@ async fn domain_expansion_preserves_memory() {
         .unwrap();
 
     let model = ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("mock", "mock-llm-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-llm-v1".into(),
@@ -744,7 +737,6 @@ async fn domain_expansion_preserves_memory() {
     };
 
     let domain = DomainManifest {
-        id: Uuid::new_v4(),
         name: "prd".into(),
         path: String::new(),
         description: Some("Product requirements".into()),
@@ -759,9 +751,8 @@ async fn domain_expansion_preserves_memory() {
     };
 
     let agent = nenjo::manifest::AgentManifest {
-        id: Uuid::new_v4(),
         name: "domain-agent".into(),
-        slug: None,
+        slug: Slug::derive("domain-agent"),
         description: Some("Agent with domains".into()),
         prompt_config: PromptConfig {
             system_prompt: "You are helpful.\n{{ memories }}".into(),
@@ -785,7 +776,6 @@ async fn domain_expansion_preserves_memory() {
     };
 
     let project = nenjo::manifest::ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,

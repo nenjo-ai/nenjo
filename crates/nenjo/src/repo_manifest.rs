@@ -95,8 +95,6 @@ pub struct RoutineStepManifestV1 {
     #[serde(default)]
     pub council: Option<String>,
     #[serde(default)]
-    pub lambda_id: Option<String>,
-    #[serde(default)]
     pub config: serde_json::Value,
     #[serde(default)]
     pub position: Option<RoutineStepPositionV1>,
@@ -120,8 +118,6 @@ pub struct RoutineEdgeManifestV1 {
     pub condition: String,
     #[serde(default)]
     pub max_attempts: Option<u32>,
-    #[serde(default)]
-    pub on_exhausted: Option<String>,
     #[serde(default)]
     pub metadata: Map<String, serde_json::Value>,
 }
@@ -220,8 +216,7 @@ mod tests {
                     "from": "review",
                     "to": "failed",
                     "condition": "on_fail",
-                    "max_attempts": 3,
-                    "on_exhausted": "failed"
+                    "max_attempts": 3
                 }
             ]
         });

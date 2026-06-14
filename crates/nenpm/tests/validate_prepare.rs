@@ -193,6 +193,196 @@ manifest:
 }
 
 #[test]
+fn validate_accepts_official_package_knowledge_selector_dependency() {
+    let workspace = temp_workspace("validate-package-knowledge-selector");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "agent": packages/agent/nenjo.package.yaml
+  "knowledge": packages/knowledge/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/knowledge/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "knowledge"
+version: "0.1.0"
+modules:
+  - core/manifest.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/knowledge/core/manifest.yaml",
+        r#"schema: nenjo.knowledge.v1
+manifest:
+  name: Core
+  docs:
+    - selector: orientation.nenjo
+      source_path: docs/orientation.md
+      title: Nenjo
+      summary: Core orientation.
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/knowledge/core/docs/orientation.md",
+        "# Nenjo\n",
+    );
+    write_file(
+        &workspace,
+        "packages/agent/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "agent"
+version: "0.1.0"
+dependencies:
+  knowledge: "^0.1.0"
+modules:
+  - agent.yml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agent/agent.yml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: agent
+  prompt_config:
+    developer_prompt: |
+      {{ pkg.nenjo_ai.packages.knowledge.core.orientation.nenjo }}
+"#,
+    );
+
+    validate(ValidateOptions::new(&workspace)).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_accepts_valid_routine_manifest_graph() {
+    let workspace = temp_workspace("validate-routine-graph");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "routines": packages/routines/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "routines"
+version: "0.1.0"
+modules:
+  - review.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/review.yaml",
+        r#"schema: nenjo.routine.v1
+manifest:
+  name: review_flow
+  trigger: task
+  entry_steps:
+    - implement
+  steps:
+    - ref: implement
+      name: Implement
+      type: agent
+      agent: coder
+    - ref: review
+      name: Review
+      type: gate
+      agent: reviewer
+    - ref: done
+      name: Done
+      type: terminal
+  edges:
+    - from: implement
+      to: review
+      condition: on_pass
+    - from: review
+      to: done
+      condition: on_pass
+    - from: review
+      to: implement
+      condition: on_fail
+      max_attempts: 2
+"#,
+    );
+
+    validate(ValidateOptions::new(&workspace)).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_rejects_invalid_routine_manifest_graph_with_context() {
+    let workspace = temp_workspace("validate-invalid-routine-graph");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "routines": packages/routines/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "routines"
+version: "0.1.0"
+modules:
+  - review.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/review.yaml",
+        r#"schema: nenjo.routine.v1
+manifest:
+  name: review_flow
+  trigger: task
+  entry_steps:
+    - implement
+  steps:
+    - ref: implement
+      name: Implement
+      type: agent
+      agent: coder
+    - ref: review
+      name: Review
+      type: gate
+      agent: reviewer
+    - ref: done
+      name: Done
+      type: terminal
+  edges:
+    - from: implement
+      to: review
+      condition: on_pass
+    - from: review
+      to: done
+      condition: always
+"#,
+    );
+
+    let err = format!(
+        "{:?}",
+        validate(ValidateOptions::new(&workspace)).unwrap_err()
+    );
+
+    assert!(err.contains("review.yaml (routine) failed routine graph validation"));
+    assert!(err.contains("Gate step 'Review' must use on_pass/on_fail edges"));
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn validate_rejects_context_import_cycles() {
     let workspace = temp_workspace("validate-context-cycle");
     write_file(

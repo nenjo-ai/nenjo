@@ -30,57 +30,50 @@ pub mod projects;
 pub mod results;
 /// Tool specs for routine operations.
 pub mod routines;
+mod serde_helpers;
 /// Helpers for assembling the full manifest tool set.
 pub mod tools;
 mod types;
 
 pub use backend::{
     AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, KnowledgeManifestBackend,
-    LibraryManifestBackend, ManifestMcpBackend, ModelManifestBackend, ProjectManifestBackend,
-    RoutineManifestBackend,
+    CouncilManifestBackend, DomainManifestBackend, LibraryManifestBackend, ManifestMcpBackend,
+    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{
-    AbilitiesGetParams, AbilityCreateParams, AbilityDeleteParams, AbilityPromptGetParams,
-    AbilityPromptUpdateParams, AbilityUpdateParams, AgentCreateParams, AgentDeleteParams,
-    AgentPromptGetParams, AgentPromptUpdateParams, AgentUpdateParams, AgentsGetParams,
-    ContextBlockContentGetParams, ContextBlockContentUpdateParams, ContextBlockCreateParams,
-    ContextBlockDeleteParams, ContextBlockUpdateParams, ContextBlocksGetParams,
-    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
-    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
-    DomainDeleteParams, DomainManifestGetParams, DomainManifestUpdateParams, DomainPromptGetParams,
-    DomainPromptUpdateParams, DomainUpdateParams, DomainsGetParams, KnowledgeDocCreateParams,
-    KnowledgeDocDeleteParams, KnowledgeDocUpdateParams, KnowledgePackCreateParams,
-    KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams, ModelUpdateParams,
-    ModelsGetParams, ProjectCreateParams, ProjectDeleteParams, ProjectUpdateParams,
-    ProjectsGetParams, ResourceRef, RoutineCreateParams, RoutineDeleteParams, RoutineUpdateParams,
+    AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
+    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
+    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
+    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
+    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
+    ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
+    ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutineDeleteParams,
     RoutinesGetParams,
 };
 pub use results::{
-    AbilitiesListResult, AbilityGetResult, AbilityMutationResult, AbilityPromptGetResult,
-    AbilityPromptMutationResult, AgentGetResult, AgentMutationResult, AgentPromptGetResult,
-    AgentPromptMutationResult, AgentsListResult, ContextBlockContentGetResult,
-    ContextBlockContentMutationResult, ContextBlockGetResult, ContextBlockMutationResult,
+    AbilitiesListResult, AbilityConfigureResult, AbilityGetResult, AgentConfigureResult,
+    AgentGetResult, AgentsListResult, ContextBlockConfigureResult, ContextBlockGetResult,
     ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
-    DeleteResult, DomainGetResult, DomainManifestGetResult, DomainManifestMutationResult,
-    DomainMutationResult, DomainPromptGetResult, DomainPromptMutationResult, DomainsListResult,
+    DeleteResult, DomainConfigureResult, DomainGetResult, DomainsListResult,
     KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
     ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
-    RoutineGetResult, RoutineMutationResult, RoutinesListResult,
+    RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
 };
 pub use types::{
-    AbilityCreateDocument, AbilityDocument, AbilityPromptDocument, AbilitySummary,
-    AbilityUpdateDocument, AgentCreateDocument, AgentDocument, AgentPromptDocument, AgentSummary,
-    AgentUpdateDocument, ContextBlockContentDocument, ContextBlockCreateDocument,
-    ContextBlockDocument, ContextBlockSummary, ContextBlockUpdateDocument, CouncilCreateDocument,
-    CouncilCreateMemberDocument, CouncilDocument, CouncilMemberDocument,
-    CouncilMemberUpdateDocument, CouncilSummary, CouncilUpdateDocument, DomainCreateDocument,
-    DomainDocument, DomainManifestDocument, DomainPromptDocument, DomainSummary,
-    DomainUpdateDocument, KnowledgeDocContentDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocRelatedDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
-    KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
-    ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument, ProjectCreateDocument,
-    ProjectDocument, ProjectSummary, ProjectUpdateDocument, RoutineCreateDocument, RoutineDocument,
-    RoutineEdgeInput, RoutineGraphInput, RoutineStepInput, RoutineSummary, RoutineUpdateDocument,
+    AbilityConfigureAssignments, AbilityConfigureDocument, AbilityConfigureMetadata,
+    AbilityDocument, AbilitySummary, AgentConfigureAssignments, AgentConfigureDocument,
+    AgentConfigureMetadata, AgentDocument, AgentSummary, ContextBlockConfigureDocument,
+    ContextBlockConfigureMetadata, ContextBlockDocument, ContextBlockSummary,
+    CouncilCreateDocument, CouncilCreateMemberDocument, CouncilDocument, CouncilMemberDocument,
+    CouncilMemberUpdateDocument, CouncilSummary, CouncilUpdateDocument, DomainConfigureAssignments,
+    DomainConfigureDocument, DomainConfigureMetadata, DomainDocument, DomainSummary,
+    KnowledgeDocContentDocument, KnowledgeDocCreateDocument, KnowledgeDocRelatedDocument,
+    KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
+    KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
+    ModelSummary, ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectSummary,
+    ProjectUpdateDocument, RoutineConfigureDocument, RoutineConfigureMetadata, RoutineDocument,
+    RoutineEdgeDocument, RoutineEdgeInput, RoutineGraphInput, RoutineStepDocument,
+    RoutineStepInput, RoutineSummary,
 };

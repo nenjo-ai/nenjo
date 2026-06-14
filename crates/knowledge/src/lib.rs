@@ -39,12 +39,17 @@ pub trait KnowledgePackManifest: Send + Sync {
 /// and MCP tools see one metadata schema across all pack sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgePackManifestData {
+    #[serde(alias = "pack_slug")]
     pub pack_id: String,
+    #[serde(default = "default_knowledge_pack_version")]
     pub version: String,
+    #[serde(default = "default_knowledge_schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
     pub root_uri: String,
     #[serde(default)]
     pub content_hash: String,
+    #[serde(default)]
     pub docs: Vec<KnowledgeDocManifest>,
 }
 
@@ -72,6 +77,14 @@ impl KnowledgePackManifest for KnowledgePackManifestData {
     fn docs(&self) -> &[KnowledgeDocManifest] {
         &self.docs
     }
+}
+
+fn default_knowledge_pack_version() -> String {
+    "1".to_string()
+}
+
+fn default_knowledge_schema_version() -> u32 {
+    1
 }
 
 /// Stored metadata for one knowledge document.
@@ -168,20 +181,6 @@ pub struct KnowledgeDocSearchHit {
     pub score: usize,
     /// Metadata fields that matched the query.
     pub matched: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocTree {
-    pub root_uri: String,
-    pub entries: Vec<KnowledgeDocTreeEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeDocTreeEntry {
-    pub selector: String,
-    pub title: String,
-    pub kind: KnowledgeDocKind,
-    pub tags: Vec<String>,
 }
 
 /// Runtime access to a knowledge pack's metadata and lazy document content.
@@ -309,6 +308,56 @@ impl KnowledgePack for PackageKnowledgePack {
     fn doc_content(&self, manifest: &KnowledgeDocManifest) -> Option<Cow<'_, str>> {
         let content =
             std::fs::read_to_string(self.content_root.join(&manifest.source_path)).ok()?;
+        Some(Cow::Owned(content))
+    }
+}
+
+/// Filesystem-backed knowledge pack loaded from a local cache directory.
+///
+/// The manifest is loaded eagerly, while document bodies are read lazily from
+/// `source_path` when a tool asks for a document.
+#[derive(Debug, Clone)]
+pub struct FilesystemKnowledgePack {
+    content_root: PathBuf,
+    manifest: KnowledgePackManifestData,
+}
+
+impl FilesystemKnowledgePack {
+    pub const MANIFEST_FILENAME: &'static str = "manifest.json";
+
+    pub fn load(root: &Path) -> Option<Self> {
+        let manifest_path = root.join(Self::MANIFEST_FILENAME);
+        let content = std::fs::read_to_string(&manifest_path).ok()?;
+        let mut manifest: KnowledgePackManifestData = serde_json::from_str(&content).ok()?;
+        if manifest.root_uri.trim().is_empty() {
+            manifest.root_uri = format!("file://{}/", root.display());
+        }
+        Some(Self {
+            content_root: root.to_path_buf(),
+            manifest,
+        })
+    }
+
+    fn doc_path(&self, source_path: &str) -> Option<PathBuf> {
+        let relative = Path::new(source_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(self.content_root.join(relative))
+    }
+}
+
+impl KnowledgePack for FilesystemKnowledgePack {
+    fn manifest(&self) -> &dyn KnowledgePackManifest {
+        &self.manifest
+    }
+
+    fn doc_content(&self, manifest: &KnowledgeDocManifest) -> Option<Cow<'_, str>> {
+        let content = std::fs::read_to_string(self.doc_path(&manifest.source_path)?).ok()?;
         Some(Cow::Owned(content))
     }
 }

@@ -1,33 +1,7 @@
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-pub use nenjo_platform::{
-    AbilityDocument, AbilityPromptDocument, AgentDocument, AgentPromptDocument,
-    ContextBlockContentDocument, ContextBlockDocument, CouncilDocument, DomainDocument,
-    DomainPromptDocument, ProjectDocument,
-};
-
-#[derive(Debug, Deserialize)]
-pub(super) struct InlineDocumentMeta {
-    pub id: Uuid,
-    #[serde(default)]
-    pub pack_id: Option<Uuid>,
-    #[serde(default)]
-    pub pack_slug: Option<String>,
-    #[serde(default)]
-    pub slug: Option<String>,
-    pub filename: String,
-    pub path: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
+use nenjo_events::{MANIFEST_RESOURCE_SCHEMA, ManifestResourcePayload};
 
 pub(super) struct DecryptedManifestPayload<'a> {
     pub object_type: &'a str,
@@ -55,4 +29,24 @@ pub(super) fn parse_decrypted_manifest_payload(
             .filter(|value| !value.is_null()),
         decrypted_payload: object.get("decrypted_payload")?,
     })
+}
+
+pub(super) fn parse_inline_record<T: DeserializeOwned>(value: &serde_json::Value) -> Option<T> {
+    ManifestResourcePayload::<T>::parse(value).map(|envelope| envelope.data)
+}
+
+pub(super) fn is_canonical_inline_envelope(value: &serde_json::Value) -> bool {
+    serde_json::from_value::<ManifestResourcePayload<serde_json::Value>>(value.clone())
+        .ok()
+        .is_some_and(|envelope| envelope.schema == MANIFEST_RESOURCE_SCHEMA)
+}
+
+pub(super) fn envelope_data_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    if !is_canonical_inline_envelope(value) {
+        return None;
+    }
+    value.get("data")?.get(field)
 }

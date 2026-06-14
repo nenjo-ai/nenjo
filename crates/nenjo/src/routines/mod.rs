@@ -25,6 +25,8 @@ pub mod cron;
 pub mod event;
 pub mod executor;
 pub mod gate;
+pub mod graph;
+pub mod routing;
 pub mod runner;
 pub mod types;
 
@@ -36,8 +38,7 @@ use crate::provider::ProviderRuntime;
 pub use event::RoutineEvent;
 pub use runner::{RoutineExecutionHandle, RoutineRunner};
 pub use types::{
-    EdgeCondition, LambdaStepConfig, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics,
-    StepResult, StepType,
+    EdgeCondition, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics, StepResult, StepType,
 };
 
 pub(crate) fn with_agent_step_tools<P>(builder: AgentBuilder<P>) -> AgentBuilder<P>

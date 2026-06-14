@@ -9,7 +9,6 @@ use super::library::library_tools;
 use super::models::model_tools;
 use super::projects::project_tools;
 use super::routines::routine_tools;
-use nenjo_knowledge::tools::knowledge_tools;
 
 /// Return the complete manifest MCP tool registry.
 pub fn all_tools() -> Vec<ToolSpec> {
@@ -17,7 +16,6 @@ pub fn all_tools() -> Vec<ToolSpec> {
     tools.extend(agent_tools());
     tools.extend(ability_tools());
     tools.extend(domain_tools());
-    tools.extend(knowledge_tools());
     tools.extend(project_tools());
     tools.extend(library_tools());
     tools.extend(routine_tools());
@@ -61,33 +59,33 @@ mod tests {
         let names: HashSet<_> = all_tools().into_iter().map(|tool| tool.name).collect();
 
         for expected in [
-            "get_agent_prompt",
-            "update_agent_prompt",
-            "get_ability_prompt",
-            "update_ability_prompt",
-            "get_domain_prompt",
-            "update_domain_prompt",
-            "get_context_block_content",
-            "update_context_block_content",
+            "configure_ability",
+            "configure_domain",
+            "configure_context_block",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
     }
 
     #[test]
-    fn manifest_tool_registry_exposes_only_default_knowledge_tools() {
+    fn manifest_tool_registry_exposes_library_mutation_tools_only() {
         let names: HashSet<_> = all_tools().into_iter().map(|tool| tool.name).collect();
 
         for expected in [
-            "list_knowledge_packs",
-            "read_knowledge_doc",
-            "search_knowledge",
-            "list_knowledge_neighbors",
+            "create_knowledge_pack",
+            "update_knowledge_pack",
+            "create_knowledge_doc",
+            "update_knowledge_doc",
+            "delete_knowledge_doc",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
 
         for removed in [
+            "list_knowledge_packs",
+            "read_knowledge_doc",
+            "search_knowledge",
+            "list_knowledge_neighbors",
             "list_knowledge_docs",
             "read_knowledge_doc_manifest",
             "search_knowledge_paths",
@@ -127,12 +125,10 @@ mod tests {
         let tools = all_tools();
 
         for tool_name in [
-            "create_agent",
-            "update_agent",
-            "create_ability",
-            "update_ability",
-            "create_domain",
-            "update_domain",
+            "configure_agent",
+            "configure_ability",
+            "configure_domain",
+            "configure_context_block",
             "create_knowledge_pack",
             "update_knowledge_pack",
         ] {
@@ -151,35 +147,96 @@ mod tests {
     }
 
     #[test]
+    fn library_knowledge_doc_tools_describe_slug_workflow() {
+        let tools = all_tools();
+        let create = tools
+            .iter()
+            .find(|tool| tool.name == "create_knowledge_doc")
+            .expect("missing create_knowledge_doc");
+        let update = tools
+            .iter()
+            .find(|tool| tool.name == "update_knowledge_doc")
+            .expect("missing update_knowledge_doc");
+        let delete = tools
+            .iter()
+            .find(|tool| tool.name == "delete_knowledge_doc")
+            .expect("missing delete_knowledge_doc");
+
+        assert_eq!(
+            create.parameters["required"],
+            serde_json::json!(["pack", "filename", "content"])
+        );
+        assert_eq!(
+            update.parameters["required"],
+            serde_json::json!(["pack", "slug"])
+        );
+        assert_eq!(
+            delete.parameters["required"],
+            serde_json::json!(["pack", "slug"])
+        );
+        assert!(
+            create
+                .description
+                .contains("returns it as knowledge_doc.slug"),
+            "create_knowledge_doc must tell agents where to get the generated slug"
+        );
+        assert!(
+            create
+                .description
+                .contains("derives the document slug from path plus filename"),
+            "create_knowledge_doc must describe how the slug is derived"
+        );
+        assert!(create.parameters["properties"].get("slug").is_none());
+        assert!(create.parameters["properties"].get("doc").is_none());
+        assert!(update.parameters["properties"].get("doc").is_none());
+        assert!(delete.parameters["properties"].get("doc").is_none());
+        assert!(
+            update.description.contains("Requires slug"),
+            "update_knowledge_doc must require the returned document slug"
+        );
+        assert!(
+            update.parameters["properties"]["related"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("replaces every outbound edge"),
+            "related schema must document full replacement semantics"
+        );
+        assert!(
+            create.parameters["properties"]["related"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Targets must already exist"),
+            "create related schema must explain target existence"
+        );
+        assert_eq!(
+            update.parameters["properties"]["related"]["items"]["properties"]["type"]["enum"],
+            serde_json::json!([
+                "references",
+                "depends_on",
+                "defines",
+                "part_of",
+                "extends",
+                "related_to",
+                "governs",
+                "classifies"
+            ])
+        );
+    }
+
+    #[test]
     fn manifest_tool_registry_matches_expected_name_and_category_snapshot() {
         assert_eq!(
             tool_snapshot(),
             vec![
                 ("list_agents".into(), ToolCategory::Read),
                 ("get_agent".into(), ToolCategory::Read),
-                ("get_agent_prompt".into(), ToolCategory::Read),
-                ("create_agent".into(), ToolCategory::Write),
-                ("update_agent".into(), ToolCategory::Write),
-                ("update_agent_prompt".into(), ToolCategory::Write),
-                ("delete_agent".into(), ToolCategory::Write),
+                ("configure_agent".into(), ToolCategory::Write),
                 ("list_abilities".into(), ToolCategory::Read),
                 ("get_ability".into(), ToolCategory::Read),
-                ("get_ability_prompt".into(), ToolCategory::Read),
-                ("create_ability".into(), ToolCategory::Write),
-                ("update_ability".into(), ToolCategory::Write),
-                ("update_ability_prompt".into(), ToolCategory::Write),
-                ("delete_ability".into(), ToolCategory::Write),
+                ("configure_ability".into(), ToolCategory::Write),
                 ("list_domains".into(), ToolCategory::Read),
                 ("get_domain".into(), ToolCategory::Read),
-                ("get_domain_prompt".into(), ToolCategory::Read),
-                ("create_domain".into(), ToolCategory::Write),
-                ("update_domain".into(), ToolCategory::Write),
-                ("update_domain_prompt".into(), ToolCategory::Write),
-                ("delete_domain".into(), ToolCategory::Write),
-                ("list_knowledge_packs".into(), ToolCategory::Read),
-                ("read_knowledge_doc".into(), ToolCategory::Read),
-                ("search_knowledge".into(), ToolCategory::Read),
-                ("list_knowledge_neighbors".into(), ToolCategory::Read),
+                ("configure_domain".into(), ToolCategory::Write),
                 ("list_projects".into(), ToolCategory::Read),
                 ("get_project".into(), ToolCategory::Read),
                 ("create_project".into(), ToolCategory::Write),
@@ -192,9 +249,7 @@ mod tests {
                 ("update_knowledge_doc".into(), ToolCategory::Write),
                 ("list_routines".into(), ToolCategory::Read),
                 ("get_routine".into(), ToolCategory::Read),
-                ("create_routine".into(), ToolCategory::Write),
-                ("update_routine".into(), ToolCategory::Write),
-                ("delete_routine".into(), ToolCategory::Write),
+                ("configure_routine".into(), ToolCategory::Write),
                 ("list_models".into(), ToolCategory::Read),
                 ("get_model".into(), ToolCategory::Read),
                 ("create_model".into(), ToolCategory::Write),
@@ -210,11 +265,7 @@ mod tests {
                 ("delete_council".into(), ToolCategory::Write),
                 ("list_context_blocks".into(), ToolCategory::Read),
                 ("get_context_block".into(), ToolCategory::Read),
-                ("get_context_block_content".into(), ToolCategory::Read),
-                ("create_context_block".into(), ToolCategory::Write),
-                ("update_context_block".into(), ToolCategory::Write),
-                ("update_context_block_content".into(), ToolCategory::Write),
-                ("delete_context_block".into(), ToolCategory::Write),
+                ("configure_context_block".into(), ToolCategory::Write),
             ]
         );
     }

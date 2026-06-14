@@ -9,7 +9,7 @@ use nenjo::commands::{
     render_command_invocation as render_loaded_command_invocation,
 };
 use nenjo::hooks::{ActiveHookScope, ResolvedHook};
-use nenjo::manifest::{CommandManifest, Manifest};
+use nenjo::manifest::CommandManifest;
 use nenjo_sessions::{
     SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
     TranscriptState,
@@ -26,7 +26,7 @@ use nenjo_harness::registry::ExecutionKind;
 use nenjo_harness::request::ChatRequest;
 use nenjo_harness::{Harness, ProviderRuntime};
 
-use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_event};
+use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_events};
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::tools::with_platform_notification_emitter;
@@ -231,16 +231,6 @@ where
         .transpose()?
         .context("No agent provided for chat")?;
     let manifest = harness.provider().manifest_snapshot();
-    if let Some(rendered) = &rendered_command {
-        emit_command_hook_activation_events(
-            ctx,
-            session_id,
-            &manifest,
-            &rendered.command,
-            &rendered.hooks,
-            agent.or(target),
-        )?;
-    }
     let resolver = PlatformResourceResolver::new(&manifest);
     let agent_id = resolver.agent_id(&agent_slug)?;
     let mut chat =
@@ -282,6 +272,17 @@ where
         });
     let mut stream =
         with_platform_notification_emitter(notification_emitter, harness.chat_stream(chat)).await?;
+    let run_id = Uuid::new_v4().to_string();
+    ctx.response_sink.send(Response::AgentResponse {
+        session_id: Some(session_id),
+        payload: StreamEvent::RunStarted {
+            run_id: run_id.clone(),
+            session_id: session_id.to_string(),
+            parent_run_id: None,
+            agent_id: Some(agent_slug.to_string()),
+            agent_name: Some(aname.clone()),
+        },
+    })?;
 
     while let Some(event) = stream.recv().await {
         match event {
@@ -302,7 +303,7 @@ where
                 event: ev,
                 ..
             } => {
-                if let Some(se) = turn_event_to_stream_event(&ev, &aname) {
+                for se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
                     debug!(
                         stream_event = %summarize_stream_event(&se),
                         agent = %aname,
@@ -353,14 +354,6 @@ where
     let resolved_hooks = harness
         .provider()
         .resolve_hooks_for_command(command_manifest);
-    emit_command_hook_activation_events(
-        ctx,
-        request.session_id,
-        &manifest,
-        command_manifest,
-        &resolved_hooks,
-        request.agent.or(request.target),
-    )?;
     let hook_scopes = if resolved_hooks.is_empty() {
         Vec::new()
     } else {
@@ -386,60 +379,6 @@ where
         },
     )
     .await
-}
-
-fn emit_command_hook_activation_events<S>(
-    ctx: &ChatCommandContext<S>,
-    session_id: Uuid,
-    manifest: &Manifest,
-    command: &CommandManifest,
-    hooks: &[ResolvedHook],
-    agent: Option<&str>,
-) -> Result<()>
-where
-    S: ResponseSender,
-{
-    for hook in hooks {
-        let hook_label = hook.label().to_string();
-        ctx.response_sink.send(Response::AgentResponse {
-            session_id: Some(session_id),
-            payload: StreamEvent::HookActivated {
-                agent: chat_agent_label(manifest, agent),
-                hook: hook_label,
-                hook_event: hook.event.as_str().to_string(),
-                hook_type: hook.hook_type.clone(),
-                source: "command".to_string(),
-                payload: Some(serde_json::json!({
-                    "command": command.command,
-                    "command_name": command.name,
-                    "display_name": hook.display_name,
-                    "matcher": hook.matcher,
-                    "hook_name": hook.name,
-                })),
-                encrypted_payload: None,
-            },
-        })?;
-    }
-    Ok(())
-}
-
-fn chat_agent_label(manifest: &Manifest, requested: Option<&str>) -> String {
-    let Some(requested) = requested else {
-        return "agent".to_string();
-    };
-    let requested_slug = match Slug::parse(requested) {
-        Ok(slug) => slug,
-        Err(_) => return requested.to_string(),
-    };
-    manifest
-        .agents
-        .iter()
-        .find(|agent| {
-            agent.slug.as_ref() == Some(&requested_slug)
-                || Slug::derive(&agent.name) == requested_slug
-        })
-        .map(|agent| agent.name.clone())
-        .unwrap_or_else(|| requested.to_string())
 }
 
 struct RenderedCommandInvocation {
@@ -826,7 +765,7 @@ mod tests {
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
-            count_hook_events(&responses, HookStreamKind::Activated, "Stop", "command"),
+            count_hook_events(&responses, HookStreamKind::Started, "Stop", "command"),
             1,
             "command hook activation should be emitted once"
         );
@@ -927,7 +866,6 @@ mod tests {
         .unwrap();
 
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -947,7 +885,6 @@ mod tests {
             metadata: Value::Null,
         };
         let hook = HookManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop-stop".to_string(),
             display_name: Some("Ralph Loop Stop".to_string()),
             description: None,
@@ -1035,7 +972,7 @@ mod tests {
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
-            count_hook_events(&responses, HookStreamKind::Activated, "Stop", "skill"),
+            count_hook_events(&responses, HookStreamKind::Started, "Stop", "skill"),
             1,
             "use_skill should emit one skill hook activation"
         );
@@ -1155,7 +1092,6 @@ mod tests {
         .unwrap();
 
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -1270,7 +1206,7 @@ mod tests {
         let responses = response_sink.responses.lock().unwrap().clone();
         for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] {
             assert_eq!(
-                count_hook_events(&responses, HookStreamKind::Activated, event, "skill"),
+                count_hook_events(&responses, HookStreamKind::Started, event, "skill"),
                 1,
                 "{event} hook activation should be emitted once"
             );
@@ -1437,7 +1373,7 @@ mod tests {
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
-            count_hook_events(&responses, HookStreamKind::Activated, "PreToolUse", "skill"),
+            count_hook_events(&responses, HookStreamKind::Started, "PreToolUse", "skill"),
             1,
             "use_skill should emit one PreToolUse hook activation"
         );
@@ -1636,12 +1572,7 @@ mod tests {
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
-            count_hook_events(
-                &responses,
-                HookStreamKind::Activated,
-                "PostToolUse",
-                "skill"
-            ),
+            count_hook_events(&responses, HookStreamKind::Started, "PostToolUse", "skill"),
             2,
             "use_skill should emit both PostToolUse hook activations"
         );
@@ -1707,7 +1638,6 @@ mod tests {
 
         let mcp_server = skill_mcp_server_manifest(&plugin_dir);
         let skill = SkillManifest {
-            id: Uuid::new_v4(),
             name: "mcp-skill".to_string(),
             display_name: Some("mcp-skill".to_string()),
             aliases: Vec::new(),
@@ -1924,7 +1854,7 @@ mod tests {
         assert_eq!(
             count_hook_events(
                 &responses,
-                HookStreamKind::Activated,
+                HookStreamKind::Started,
                 "UserPromptSubmit",
                 "command"
             ),
@@ -2054,11 +1984,6 @@ mod tests {
             .unwrap();
 
         let responses = response_sink.responses.lock().unwrap().clone();
-        assert_eq!(
-            count_hook_events(&responses, HookStreamKind::Activated, "Stop", "command"),
-            1,
-            "command hook activation should be emitted once"
-        );
         assert_eq!(
             count_hook_events(&responses, HookStreamKind::Started, "Stop", "command"),
             2,
@@ -2223,7 +2148,7 @@ mod tests {
         script_name: &str,
     ) -> Manifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: model_manifest_slug("test", "mock"),
             name: "test-model".to_string(),
             description: None,
             model: "mock".to_string(),
@@ -2235,9 +2160,8 @@ mod tests {
         Manifest {
             models: vec![model],
             agents: vec![AgentManifest {
-                id: Uuid::new_v4(),
                 name: "Coder".to_string(),
-                slug: Some(Slug::derive("coder")),
+                slug: Slug::derive("coder"),
                 description: None,
                 prompt_config: PromptConfig::default(),
                 color: None,
@@ -2251,14 +2175,12 @@ mod tests {
                 heartbeat: None,
             }],
             projects: vec![ProjectManifest {
-                id: Uuid::new_v4(),
                 name: "Demo Project".to_string(),
                 slug: Slug::derive("demo-project"),
                 description: None,
                 settings: Value::Null,
             }],
             commands: vec![CommandManifest {
-                id: Uuid::new_v4(),
                 name: "ralph-loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("Ralph Loop".to_string()),
@@ -2274,7 +2196,6 @@ mod tests {
                 metadata: Value::Null,
             }],
             hooks: vec![HookManifest {
-                id: Uuid::new_v4(),
                 name: "ralph-loop-stop".to_string(),
                 display_name: Some("Ralph Loop Stop".to_string()),
                 description: None,
@@ -2302,7 +2223,7 @@ mod tests {
 
     fn skill_test_manifest_with_hooks(skill: SkillManifest, hooks: Vec<HookManifest>) -> Manifest {
         let model = ModelManifest {
-            id: Uuid::new_v4(),
+            slug: model_manifest_slug("test", "mock"),
             name: "test-model".to_string(),
             description: None,
             model: "mock".to_string(),
@@ -2314,9 +2235,8 @@ mod tests {
         Manifest {
             models: vec![model],
             agents: vec![AgentManifest {
-                id: Uuid::new_v4(),
                 name: "Coder".to_string(),
-                slug: Some(Slug::derive("coder")),
+                slug: Slug::derive("coder"),
                 description: None,
                 prompt_config: PromptConfig::default(),
                 color: None,
@@ -2330,7 +2250,6 @@ mod tests {
                 heartbeat: None,
             }],
             projects: vec![ProjectManifest {
-                id: Uuid::new_v4(),
                 name: "Demo Project".to_string(),
                 slug: Slug::derive("demo-project"),
                 description: None,
@@ -2348,7 +2267,6 @@ mod tests {
         hook_names: Vec<&str>,
     ) -> SkillManifest {
         SkillManifest {
-            id: Uuid::new_v4(),
             name: "ralph-loop".to_string(),
             display_name: Some("ralph-loop".to_string()),
             aliases: vec!["ralph".to_string()],
@@ -2391,7 +2309,6 @@ mod tests {
         matcher: &str,
     ) -> HookManifest {
         HookManifest {
-            id: Uuid::new_v4(),
             name: name.to_string(),
             display_name: Some("Ralph Loop Stop".to_string()),
             description: None,
@@ -2413,7 +2330,6 @@ mod tests {
 
     fn skill_mcp_server_manifest(plugin_dir: &Path) -> McpServerManifest {
         McpServerManifest {
-            id: Uuid::new_v4(),
             name: "mcp_skill__review_server".to_string(),
             display_name: "mcp-skill:review-server".to_string(),
             description: Some("Review MCP server".to_string()),
@@ -2930,7 +2846,6 @@ done
 
     #[derive(Clone, Copy)]
     enum HookStreamKind {
-        Activated,
         Started,
         Completed,
     }
@@ -2946,15 +2861,6 @@ done
             .filter(|response| match response {
                 Response::AgentResponse { payload, .. } => match (kind, payload) {
                     (
-                        HookStreamKind::Activated,
-                        StreamEvent::HookActivated {
-                            hook,
-                            hook_event,
-                            source,
-                            ..
-                        },
-                    )
-                    | (
                         HookStreamKind::Started,
                         StreamEvent::HookStarted {
                             hook,

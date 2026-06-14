@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::types::ActiveAgentHeartbeatState;
+use crate::manifest_contract::ProjectDetailRecord;
 use async_trait::async_trait;
 use nenjo_events::EncryptedPayload;
 use reqwest::{Client, StatusCode, header};
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 use super::error::ApiClientError;
 use super::types::*;
+use nenjo::Slug;
 use nenjo::manifest::*;
 
 /// Result alias for client operations.
@@ -35,25 +37,6 @@ impl PayloadCodec for NoopPayloadCodec {
     async fn decode_text(&self, _payload: &EncryptedPayload) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
-}
-
-fn merge_json_object(
-    target: &mut serde_json::Value,
-    source: serde_json::Value,
-) -> std::result::Result<(), &'static str> {
-    if target.is_null() {
-        *target = serde_json::json!({});
-    }
-    let Some(target) = target.as_object_mut() else {
-        return Err("target was not an object");
-    };
-    let Some(source) = source.as_object() else {
-        return Err("source was not an object");
-    };
-    for (key, value) in source {
-        target.insert(key.clone(), value.clone());
-    }
-    Ok(())
 }
 
 /// Typed HTTP client for the Nenjo backend.
@@ -177,22 +160,19 @@ impl ApiClient {
     // Single-resource fetch (for incremental bootstrap sync)
     // -----------------------------------------------------------------------
 
-    pub async fn fetch_model(&self, id: Uuid) -> Result<Option<ModelManifest>> {
-        self.fetch_resource(&format!("/api/v1/models/{id}")).await
+    pub async fn fetch_model(&self, resource: &Slug) -> Result<Option<ModelManifest>> {
+        self.fetch_resource(&format!("/api/v1/models/{resource}"))
+            .await
     }
 
-    pub async fn fetch_project(&self, id: Uuid) -> Result<Option<ProjectManifest>> {
-        let detail: Option<ProjectDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/projects/{id}"))
-            .await?;
-        Ok(self.decode_project_settings(detail).await?.map(Into::into))
+    pub async fn fetch_project(&self, resource: &Slug) -> Result<Option<ProjectDetailRecord>> {
+        self.fetch_resource(&format!("/api/v1/projects/{resource}"))
+            .await
     }
 
-    pub async fn fetch_routine(&self, id: Uuid) -> Result<Option<RoutineManifest>> {
-        let detail: Option<RoutineDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/routines/{id}"))
-            .await?;
-        Ok(detail.map(Into::into))
+    pub async fn fetch_routine(&self, resource: &Slug) -> Result<Option<RoutineRecord>> {
+        self.fetch_resource(&format!("/api/v1/routines/{resource}"))
+            .await
     }
 
     pub async fn list_active_cron_routines(&self) -> Result<Vec<ActiveCronRoutineState>> {
@@ -238,70 +218,87 @@ impl ApiClient {
             .await
     }
 
-    pub async fn fetch_domain(&self, id: Uuid) -> Result<Option<DomainManifest>> {
-        let url = format!("{}/api/v1/domains/{id}/manifest", self.base_url);
+    pub async fn fetch_domain(&self, resource: &Slug) -> Result<Option<DomainManifest>> {
+        let url = format!("{}/api/v1/domains/{resource}/prompt", self.base_url);
         let resp = self.get(&url).await?;
         match resp.status() {
             StatusCode::OK => {
-                let response: DomainManifestResponse = resp.json().await.map_err(|source| {
+                let response = resp.json::<DomainPromptRecord>().await.map_err(|source| {
                     ApiClientError::Parse(format!(
-                        "Failed to parse /api/v1/domains/{id}/manifest: {source}"
+                        "Failed to parse /api/v1/domains/{resource}/prompt: {source}"
                     ))
                 })?;
-                Ok(Some(response.into()))
+                Ok(self
+                    .decode_domain_prompt(Some(response))
+                    .await?
+                    .map(|record| record.to_manifest()))
             }
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(self.api_error(status, resp).await),
         }
     }
 
-    pub async fn fetch_mcp_server(&self, id: Uuid) -> Result<Option<McpServerManifest>> {
-        self.fetch_resource(&format!("/api/v1/mcp-servers/{id}"))
+    pub async fn fetch_mcp_server(&self, resource: &Slug) -> Result<Option<McpServerManifest>> {
+        self.fetch_resource(&format!("/api/v1/mcp-servers/{resource}"))
             .await
     }
 
-    pub async fn fetch_ability(&self, id: Uuid) -> Result<Option<AbilityManifest>> {
-        self.fetch_resource(&format!("/api/v1/abilities/{id}"))
-            .await
+    pub async fn fetch_ability(&self, resource: &Slug) -> Result<Option<AbilityManifest>> {
+        let url = format!("{}/api/v1/abilities/{resource}", self.base_url);
+        let resp = self.get(&url).await?;
+        match resp.status() {
+            StatusCode::OK => {
+                let response = resp.json::<AbilityPromptRecord>().await.map_err(|source| {
+                    ApiClientError::Parse(format!(
+                        "Failed to parse /api/v1/abilities/{resource}: {source}"
+                    ))
+                })?;
+                Ok(self
+                    .decode_ability_prompt(Some(response))
+                    .await?
+                    .map(|record| record.to_manifest()))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(self.api_error(status, resp).await),
+        }
     }
 
     pub async fn fetch_context_block_summary(
         &self,
-        id: Uuid,
-    ) -> Result<Option<ContextBlockSummaryResponse>> {
-        self.fetch_resource(&format!("/api/v1/context-blocks/{id}"))
+        resource: &Slug,
+    ) -> Result<Option<ContextBlockRecord>> {
+        self.fetch_resource(&format!("/api/v1/context-blocks/{resource}"))
             .await
     }
 
     pub async fn fetch_context_block_content(
         &self,
-        id: Uuid,
-    ) -> Result<Option<ContextBlockContentResponse>> {
+        resource: &Slug,
+    ) -> Result<Option<ContextBlockContentRecord>> {
         let content = self
-            .fetch_resource::<ContextBlockContentResponse>(&format!(
-                "/api/v1/context-blocks/{id}/content"
+            .fetch_resource::<ContextBlockContentRecord>(&format!(
+                "/api/v1/context-blocks/{resource}/content"
             ))
             .await?;
         self.decode_context_block_content(content).await
     }
 
-    pub async fn fetch_agent(&self, id: Uuid) -> Result<Option<AgentManifest>> {
-        let detail: Option<AgentDetailResponse> =
-            self.fetch_resource(&format!("/api/v1/agents/{id}")).await?;
-        Ok(detail.map(Into::into))
+    pub async fn fetch_agent(&self, resource: &Slug) -> Result<Option<AgentRecord>> {
+        self.fetch_resource(&format!("/api/v1/agents/{resource}"))
+            .await
     }
 
     pub async fn fetch_agent_prompt_config(
         &self,
-        id: Uuid,
-    ) -> Result<Option<AgentPromptConfigResponse>> {
-        let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, id);
+        resource: &Slug,
+    ) -> Result<Option<AgentPromptRecord>> {
+        let url = format!("{}/api/v1/agents/{}/prompt", self.base_url, resource);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
                 let response = resp
-                    .json::<AgentPromptConfigResponse>()
+                    .json::<AgentPromptRecord>()
                     .await
                     .map_err(ApiClientError::Http)?;
                 self.decode_agent_prompt_config(Some(response)).await
@@ -311,24 +308,22 @@ impl ApiClient {
         }
     }
 
-    pub async fn fetch_council(&self, id: Uuid) -> Result<Option<CouncilManifest>> {
-        let detail: Option<CouncilDetailResponse> = self
-            .fetch_resource(&format!("/api/v1/councils/{id}"))
-            .await?;
-        Ok(detail.map(|d| d.into()))
+    pub async fn fetch_council(&self, resource: &Slug) -> Result<Option<CouncilRecord>> {
+        self.fetch_resource(&format!("/api/v1/councils/{resource}"))
+            .await
     }
 
     // -----------------------------------------------------------------------
     // Knowledge sync
     // -----------------------------------------------------------------------
 
-    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackSyncMeta>> {
+    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackRecord>> {
         let url = format!("{}/api/v1/knowledge", self.base_url);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let packs: Vec<KnowledgePackSyncMeta> = resp.json().await?;
+                let packs: Vec<KnowledgePackRecord> = resp.json().await?;
                 debug!(count = packs.len(), "Listed knowledge packs");
                 Ok(packs)
             }
@@ -336,15 +331,15 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocSyncMeta>> {
+    pub async fn list_knowledge_docs(&self, pack: &str) -> Result<Vec<KnowledgeDocumentRecord>> {
         let url = format!("{}/api/v1/knowledge/{}/items", self.base_url, pack);
         let resp = self.get(&url).await?;
 
         match resp.status() {
             StatusCode::OK => {
-                let mut docs: Vec<KnowledgeDocSyncMeta> = resp.json().await?;
+                let mut docs: Vec<KnowledgeDocumentRecord> = resp.json().await?;
                 for doc in &mut docs {
-                    if doc.pack_slug.trim().is_empty() {
+                    if doc.pack_slug.is_empty() {
                         doc.pack_slug = pack.to_string();
                     }
                 }
@@ -381,7 +376,7 @@ impl ApiClient {
         &self,
         pack: &str,
         doc: &str,
-    ) -> Result<Vec<KnowledgeDocSyncEdge>> {
+    ) -> Result<Vec<KnowledgeDocumentEdgeRecord>> {
         let url = format!(
             "{}/api/v1/knowledge/{}/items/{}/edges",
             self.base_url, pack, doc
@@ -390,7 +385,7 @@ impl ApiClient {
 
         match resp.status() {
             StatusCode::OK => {
-                let edges: Vec<KnowledgeDocSyncEdge> = resp.json().await?;
+                let edges: Vec<KnowledgeDocumentEdgeRecord> = resp.json().await?;
                 debug!(pack = %pack, doc = %doc, count = edges.len(), "Listed knowledge document edges");
                 Ok(edges)
             }
@@ -474,12 +469,12 @@ impl ApiClient {
 
     async fn decode_agent_prompt_config(
         &self,
-        response: Option<AgentPromptConfigResponse>,
-    ) -> Result<Option<AgentPromptConfigResponse>> {
+        response: Option<AgentPromptRecord>,
+    ) -> Result<Option<AgentPromptRecord>> {
         let Some(mut response) = response else {
             return Ok(None);
         };
-        let Some(payload) = response.encrypted_payload.as_ref() else {
+        let Some(payload) = response.agent.encrypted_payload.as_ref() else {
             return Ok(Some(response));
         };
         let Some(plaintext) = self
@@ -493,17 +488,17 @@ impl ApiClient {
             return Ok(Some(response));
         };
 
-        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+        response.agent.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
             ApiClientError::Parse(format!("Failed to parse decrypted agent prompt: {error}"))
         })?);
-        response.encrypted_payload = None;
+        response.agent.encrypted_payload = None;
         Ok(Some(response))
     }
 
-    async fn decode_project_settings(
+    async fn decode_domain_prompt(
         &self,
-        response: Option<ProjectDetailResponse>,
-    ) -> Result<Option<ProjectDetailResponse>> {
+        response: Option<DomainPromptRecord>,
+    ) -> Result<Option<DomainPromptRecord>> {
         let Some(mut response) = response else {
             return Ok(None);
         };
@@ -515,31 +510,51 @@ impl ApiClient {
             .decode_text(payload)
             .await
             .map_err(|error| {
-                ApiClientError::Parse(format!("Failed to decrypt project settings: {error}"))
+                ApiClientError::Parse(format!("Failed to decrypt domain prompt: {error}"))
             })?
         else {
             return Ok(Some(response));
         };
 
-        let decrypted_settings =
-            serde_json::from_str::<serde_json::Value>(&plaintext).map_err(|error| {
-                ApiClientError::Parse(format!(
-                    "Failed to parse decrypted project settings: {error}"
-                ))
-            })?;
-        merge_json_object(&mut response.settings, decrypted_settings).map_err(|error| {
-            ApiClientError::Parse(format!(
-                "Failed to merge decrypted project settings: {error}"
-            ))
-        })?;
+        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!("Failed to parse decrypted domain prompt: {error}"))
+        })?);
+        response.encrypted_payload = None;
+        Ok(Some(response))
+    }
+
+    async fn decode_ability_prompt(
+        &self,
+        response: Option<AbilityPromptRecord>,
+    ) -> Result<Option<AbilityPromptRecord>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+        let Some(payload) = response.encrypted_payload.as_ref() else {
+            return Ok(Some(response));
+        };
+        let Some(plaintext) = self
+            .payload_codec
+            .decode_text(payload)
+            .await
+            .map_err(|error| {
+                ApiClientError::Parse(format!("Failed to decrypt ability prompt: {error}"))
+            })?
+        else {
+            return Ok(Some(response));
+        };
+
+        response.prompt_config = Some(serde_json::from_str(&plaintext).map_err(|error| {
+            ApiClientError::Parse(format!("Failed to parse decrypted ability prompt: {error}"))
+        })?);
         response.encrypted_payload = None;
         Ok(Some(response))
     }
 
     async fn decode_context_block_content(
         &self,
-        response: Option<ContextBlockContentResponse>,
-    ) -> Result<Option<ContextBlockContentResponse>> {
+        response: Option<ContextBlockContentRecord>,
+    ) -> Result<Option<ContextBlockContentRecord>> {
         let Some(mut response) = response else {
             return Ok(None);
         };
@@ -647,42 +662,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_project_settings_merges_decrypted_payload() {
-        let id = Uuid::new_v4();
+    async fn decode_domain_prompt_decrypts_encrypted_payload() {
         let client =
             ApiClient::new("http://localhost", "key").with_payload_codec(StaticPayloadCodec {
                 plaintext: Some(
                     serde_json::json!({
-                        "context": "Use this private context.",
-                        "metadata": { "tier": "gold" }
+                        "developer_prompt_addon": "You are helpful."
                     })
                     .to_string(),
                 ),
             });
-        let project = ProjectDetailResponse {
-            id,
-            name: "Project".to_string(),
-            slug: "project".to_string(),
-            description: None,
-            settings: serde_json::json!({
-                "repo_url": "https://github.com/nenjo-ai/nenjo.git",
-                "context": "stale"
-            }),
-            encrypted_payload: Some(encrypted_payload(id)),
+        let record = DomainPromptRecord {
+            domain: DomainRecord {
+                id: Uuid::new_v4(),
+                org_id: Uuid::new_v4(),
+                slug: "eng".to_string(),
+                name: "Engineering".to_string(),
+                path: "".to_string(),
+                description: None,
+                command: "bash".to_string(),
+                platform_scopes: vec![],
+                abilities: vec![],
+                mcp_servers: vec![],
+                script_tools: vec![],
+                source_type: "native".to_string(),
+                read_only: false,
+                metadata: serde_json::json!({}),
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            prompt_config: None,
+            encrypted_payload: Some(encrypted_payload(Uuid::new_v4())),
         };
 
         let decoded = client
-            .decode_project_settings(Some(project))
+            .decode_domain_prompt(Some(record))
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(
-            decoded.settings["repo_url"],
-            "https://github.com/nenjo-ai/nenjo.git"
+            decoded
+                .prompt_config
+                .as_ref()
+                .unwrap()
+                .developer_prompt_addon
+                .as_deref(),
+            Some("You are helpful.")
         );
-        assert_eq!(decoded.settings["context"], "Use this private context.");
-        assert_eq!(decoded.settings["metadata"]["tier"], "gold");
         assert!(decoded.encrypted_payload.is_none());
     }
 }

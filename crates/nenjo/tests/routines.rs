@@ -115,7 +115,7 @@ impl ModelProvider for SequentialResponseMockLlm {
             .get(idx)
             .unwrap_or(self.responses.last().unwrap())
             .clone();
-        Ok(resp)
+        Ok(adapt_legacy_verdict_response(resp, &request))
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -186,7 +186,10 @@ impl ModelProvider for RecordingToolsMockLlm {
             .lock()
             .unwrap()
             .push(request.tools.map(tool_names).unwrap_or_default());
-        Ok(self.response.clone())
+        Ok(adapt_legacy_verdict_response(
+            self.response.clone(),
+            &request,
+        ))
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -246,7 +249,10 @@ impl ModelProvider for RecordingMessagesMockLlm {
             .lock()
             .unwrap()
             .push(request.messages.to_vec());
-        Ok(self.response.clone())
+        Ok(adapt_legacy_verdict_response(
+            self.response.clone(),
+            &request,
+        ))
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -293,6 +299,59 @@ fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
     tools.iter().map(|tool| tool.name.clone()).collect()
 }
 
+fn adapt_legacy_verdict_response(
+    mut response: ChatResponse,
+    request: &ChatRequest<'_>,
+) -> ChatResponse {
+    let Some(tools) = request.tools else {
+        return response;
+    };
+    let Some(route_tool) = tools.iter().find(|tool| tool.name == "route_next_steps") else {
+        return response;
+    };
+    if tools.iter().any(|tool| tool.name == "pass_verdict") {
+        return response;
+    }
+
+    let targets = route_tool.parameters["properties"]["next_steps"]["items"]["properties"]
+        ["target_step"]["enum"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for call in &mut response.tool_calls {
+        if call.name != "pass_verdict" {
+            continue;
+        }
+        let mut args = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let output = args
+            .get("output")
+            .cloned()
+            .or_else(|| response.text.clone().map(serde_json::Value::String))
+            .unwrap_or_else(|| serde_json::json!(""));
+        args["output"] = output;
+        if args.get("verdict").and_then(|value| value.as_str()) == Some("pass") {
+            args["next_steps"] = serde_json::Value::Array(
+                targets
+                    .iter()
+                    .filter_map(|target| target.as_str())
+                    .map(|target| {
+                        serde_json::json!({
+                            "target_step": target,
+                            "task": format!("Continue to {target}"),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        call.name = "route_next_steps".into();
+        call.arguments = args.to_string();
+    }
+
+    response
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -304,9 +363,9 @@ fn test_task(_project_id: Uuid, title: &str, desc: &str) -> TaskInput {
         .source("test")
 }
 
-fn model(id: Uuid) -> ModelManifest {
+fn model(_id: Uuid) -> ModelManifest {
     ModelManifest {
-        id,
+        slug: model_manifest_slug("mock", "mock-v1"),
         name: "test-model".into(),
         description: None,
         model: "mock-v1".into(),
@@ -316,11 +375,10 @@ fn model(id: Uuid) -> ModelManifest {
     }
 }
 
-fn agent(id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
+fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     AgentManifest {
-        id,
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
@@ -355,7 +413,6 @@ fn messages_contain(messages: &[Vec<ChatMessage>], needle: &str) -> bool {
 
 fn project() -> ProjectManifest {
     ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: Some("A test project".into()),
@@ -378,6 +435,109 @@ fn verdict_response(text: &str, verdict: &str, reasoning: &str) -> ChatResponse 
     }
 }
 
+fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
+    if routine.metadata.entry_steps.is_empty() {
+        let required_targets = routine
+            .edges
+            .iter()
+            .filter(|edge| edge.condition != RoutineEdgeCondition::OnFail)
+            .map(|edge| edge.target_step.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(entry) = routine
+            .steps
+            .iter()
+            .filter(|step| !required_targets.contains(&step.slug))
+            .min_by_key(|step| step.order_index)
+            .or_else(|| routine.steps.iter().min_by_key(|step| step.order_index))
+        {
+            routine.metadata.entry_steps = vec![entry.slug.clone()];
+        }
+    }
+
+    let has_terminal = routine.steps.iter().any(|step| {
+        matches!(
+            step.step_type,
+            RoutineStepType::Terminal | RoutineStepType::TerminalFail
+        )
+    });
+    if !has_terminal {
+        let terminal_slug = Slug::derive("__done");
+        let outgoing = routine
+            .edges
+            .iter()
+            .map(|edge| edge.source_step.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let sink_steps = routine
+            .steps
+            .iter()
+            .filter(|step| !outgoing.contains(&step.slug))
+            .map(|step| (step.slug.clone(), step.step_type))
+            .collect::<Vec<_>>();
+        routine.steps.push(RoutineStepManifest {
+            slug: terminal_slug.clone(),
+            routine: routine.slug.clone(),
+            name: "__done".into(),
+            step_type: RoutineStepType::Terminal,
+            council: None,
+            agent: None,
+            config: serde_json::json!({}),
+            order_index: routine
+                .steps
+                .iter()
+                .map(|step| step.order_index)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        });
+        for (source_step, step_type) in sink_steps {
+            routine.edges.push(RoutineEdgeManifest {
+                routine: routine.slug.clone(),
+                source_step,
+                target_step: terminal_slug.clone(),
+                condition: match step_type {
+                    RoutineStepType::Gate => RoutineEdgeCondition::OnPass,
+                    RoutineStepType::Agent
+                    | RoutineStepType::Council
+                    | RoutineStepType::Terminal
+                    | RoutineStepType::TerminalFail => RoutineEdgeCondition::Always,
+                },
+                metadata: serde_json::json!({}),
+            });
+        }
+    }
+
+    routine
+}
+
+fn route_response(
+    text: &str,
+    verdict: &str,
+    reasoning: &str,
+    next_steps: serde_json::Value,
+) -> ChatResponse {
+    let mut arguments = serde_json::json!({
+        "verdict": verdict,
+        "reasoning": reasoning,
+        "output": text,
+    });
+    if verdict == "pass" {
+        arguments["next_steps"] = next_steps;
+    }
+
+    ChatResponse {
+        text: Some(text.into()),
+        tool_calls: vec![ToolCall {
+            id: format!("call_route_{verdict}"),
+            name: "route_next_steps".into(),
+            arguments: arguments.to_string(),
+        }],
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        },
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -388,16 +548,15 @@ async fn single_agent_step() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "simple-routine".into(),
+        slug: Slug::derive("simple-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("simple-routine"),
             name: "implement".into(),
@@ -414,7 +573,7 @@ async fn single_agent_step() {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -445,21 +604,20 @@ async fn single_agent_step() {
 }
 
 #[tokio::test]
-async fn routine_agent_request_includes_pass_verdict_tool() {
+async fn routine_agent_request_includes_route_next_steps_tool() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "tool-check-routine".into(),
+        slug: Slug::derive("tool-check-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("tool-check-routine"),
             name: "implement".into(),
@@ -475,11 +633,8 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
     let manifest = Manifest {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
-        projects: vec![ProjectManifest {
-            id: project_id,
-            ..project()
-        }],
-        routines: vec![routine],
+        projects: vec![ProjectManifest { ..project() }],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
     let factory = RecordingToolsMockFactory::new(verdict_response(
@@ -521,8 +676,15 @@ async fn routine_agent_request_includes_pass_verdict_tool() {
     assert!(
         seen_tools
             .first()
-            .is_some_and(|tools| tools.iter().any(|name| name == "pass_verdict")),
-        "pass_verdict should be sent in the routine model request. Tool requests: {:?}",
+            .is_some_and(|tools| tools.iter().any(|name| name == "route_next_steps")),
+        "route_next_steps should be sent in the routine model request. Tool requests: {:?}",
+        *seen_tools
+    );
+    assert!(
+        seen_tools
+            .first()
+            .is_some_and(|tools| !tools.iter().any(|name| name == "pass_verdict")),
+        "pass_verdict should not be sent to agent routine steps. Tool requests: {:?}",
         *seen_tools
     );
 }
@@ -532,7 +694,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
     let instructions = "Use the migration checklist before editing files.";
 
     let mut coder = agent(agent_id, "coder", model_id);
@@ -541,13 +703,12 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
             .into();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "agent-instructions".into(),
+        slug: Slug::derive("agent-instructions"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("agent-instructions"),
             name: "implement".into(),
@@ -566,7 +727,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         agents: vec![coder],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
     let factory = RecordingMessagesMockFactory::new(verdict_response(
@@ -607,19 +768,18 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let mut coder = agent(agent_id, "coder", model_id);
     coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "cron-agent-template".into(),
+        slug: Slug::derive("cron-agent-template"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-agent-template"),
             name: "implement".into(),
@@ -636,7 +796,7 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
         agents: vec![coder],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
     let factory = RecordingMessagesMockFactory::new(verdict_response(
@@ -685,19 +845,18 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let mut coder = agent(agent_id, "coder", model_id);
     coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "cron-agent-no-project".into(),
+        slug: Slug::derive("cron-agent-no-project"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-agent-no-project"),
             name: "implement".into(),
@@ -714,7 +873,7 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
         agents: vec![coder],
         models: vec![model(model_id)],
         projects: vec![],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
     let factory = RecordingMessagesMockFactory::new(verdict_response(
@@ -759,7 +918,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
     let instructions = "Reject unless the output cites the acceptance criteria.";
 
     let mut reviewer = agent(agent_id, "reviewer", model_id);
@@ -768,13 +927,12 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
             .into();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "gate-instructions".into(),
+        slug: Slug::derive("gate-instructions"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("gate-instructions"),
             name: "review".into(),
@@ -793,7 +951,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         agents: vec![reviewer],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
     let factory = RecordingMessagesMockFactory::new(verdict_response(
@@ -829,23 +987,22 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
     );
 }
 
-/// If an agent omits pass_verdict, the runtime should route back with an
+/// If an agent omits route_next_steps, the runtime should route back with an
 /// explicit corrective instruction and accept the follow-up tool call.
 #[tokio::test]
-async fn single_agent_step_retries_until_pass_verdict() {
+async fn single_agent_step_retries_until_route_next_steps() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "retry-for-pass-verdict".into(),
+        slug: Slug::derive("retry-for-pass-verdict"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("retry-for-pass-verdict"),
             name: "implement".into(),
@@ -865,7 +1022,7 @@ async fn single_agent_step_retries_until_pass_verdict() {
         agents: vec![coder],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -911,8 +1068,11 @@ async fn single_agent_step_retries_until_pass_verdict() {
     assert_eq!(seen_messages.len(), 2);
     let retry_messages = &seen_messages[1];
     assert!(
-        messages_contain(std::slice::from_ref(retry_messages), "call `pass_verdict`"),
-        "retry turn should instruct the agent to call pass_verdict. Messages: {retry_messages:#?}"
+        messages_contain(
+            std::slice::from_ref(retry_messages),
+            "call `route_next_steps`"
+        ),
+        "retry turn should instruct the agent to call route_next_steps. Messages: {retry_messages:#?}"
     );
     assert!(
         !messages_contain(std::slice::from_ref(retry_messages), "CHAT TEMPLATE"),
@@ -926,16 +1086,15 @@ async fn stream_events_single_step() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "stream-test".into(),
+        slug: Slug::derive("stream-test"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("stream-test"),
             name: "work".into(),
@@ -952,7 +1111,7 @@ async fn stream_events_single_step() {
         agents: vec![agent(agent_id, "worker", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -987,9 +1146,10 @@ async fn stream_events_single_step() {
                 step_type,
                 ..
             } => {
-                assert_eq!(step_name, "work");
-                assert_eq!(step_type, "agent");
-                saw_step_started = true;
+                if step_name == "work" {
+                    assert_eq!(step_type, "agent");
+                    saw_step_started = true;
+                }
             }
             RoutineEvent::StepCompleted { result, .. } => {
                 assert!(result.passed);
@@ -1017,17 +1177,16 @@ async fn two_step_chain() {
     let reviewer_id = Uuid::new_v4();
     let step1_id = Uuid::new_v4();
     let step2_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "code-review".into(),
+        slug: Slug::derive("code-review"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("code-review"),
                 name: "implement".into(),
@@ -1038,7 +1197,6 @@ async fn two_step_chain() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: step2_id,
                 slug: Slug::derive(step2_id.to_string()),
                 routine: Slug::derive("code-review"),
                 name: "review".into(),
@@ -1050,7 +1208,6 @@ async fn two_step_chain() {
             },
         ],
         edges: vec![RoutineEdgeManifest {
-            id: Uuid::new_v4(),
             routine: Slug::derive("code-review"),
             source_step: Slug::derive(step1_id.to_string()),
             target_step: Slug::derive(step2_id.to_string()),
@@ -1066,7 +1223,7 @@ async fn two_step_chain() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1097,32 +1254,31 @@ async fn two_step_chain() {
         }
     }
 
-    assert_eq!(step_names, vec!["implement", "review"]);
+    assert_eq!(step_names, vec!["implement", "review", "__done"]);
 
     let result = handle.output().await.unwrap();
     assert!(result.passed);
 }
 
-/// A fail pass_verdict from an agent step terminates the routine and does not
+/// A fail route_next_steps verdict from an agent step terminates the routine and does not
 /// continue along outgoing edges.
 #[tokio::test]
-async fn agent_step_fail_verdict_terminates_routine() {
+async fn agent_step_route_fail_verdict_terminates_routine() {
     let model_id = Uuid::new_v4();
     let first_agent_id = Uuid::new_v4();
     let second_agent_id = Uuid::new_v4();
     let step1_id = Uuid::new_v4();
     let step2_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "agent-fail-stops-routine".into(),
+        slug: Slug::derive("agent-fail-stops-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("agent-fail-stops-routine"),
                 name: "first-agent".into(),
@@ -1133,7 +1289,6 @@ async fn agent_step_fail_verdict_terminates_routine() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: step2_id,
                 slug: Slug::derive(step2_id.to_string()),
                 routine: Slug::derive("agent-fail-stops-routine"),
                 name: "second-agent".into(),
@@ -1145,7 +1300,6 @@ async fn agent_step_fail_verdict_terminates_routine() {
             },
         ],
         edges: vec![RoutineEdgeManifest {
-            id: Uuid::new_v4(),
             routine: Slug::derive("agent-fail-stops-routine"),
             source_step: Slug::derive(step1_id.to_string()),
             target_step: Slug::derive(step2_id.to_string()),
@@ -1161,7 +1315,7 @@ async fn agent_step_fail_verdict_terminates_routine() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1236,17 +1390,16 @@ async fn gate_step_pass() {
     let step1_id = Uuid::new_v4();
     let gate_id = Uuid::new_v4();
     let terminal_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "gated-routine".into(),
+        slug: Slug::derive("gated-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("gated-routine"),
                 name: "implement".into(),
@@ -1257,7 +1410,6 @@ async fn gate_step_pass() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: gate_id,
                 slug: Slug::derive(gate_id.to_string()),
                 routine: Slug::derive("gated-routine"),
                 name: "quality-check".into(),
@@ -1268,7 +1420,6 @@ async fn gate_step_pass() {
                 order_index: 1,
             },
             RoutineStepManifest {
-                id: terminal_id,
                 slug: Slug::derive(terminal_id.to_string()),
                 routine: Slug::derive("gated-routine"),
                 name: "done".into(),
@@ -1281,7 +1432,6 @@ async fn gate_step_pass() {
         ],
         edges: vec![
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("gated-routine"),
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
@@ -1289,7 +1439,6 @@ async fn gate_step_pass() {
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
@@ -1303,7 +1452,7 @@ async fn gate_step_pass() {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1341,17 +1490,16 @@ async fn gate_always_edge_is_invalid() {
     let step1_id = Uuid::new_v4();
     let gate_id = Uuid::new_v4();
     let terminal_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "invalid-gate-routing".into(),
+        slug: Slug::derive("invalid-gate-routing"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("invalid-gate-routing"),
                 name: "analyze_and_develop".into(),
@@ -1362,7 +1510,6 @@ async fn gate_always_edge_is_invalid() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: gate_id,
                 slug: Slug::derive(gate_id.to_string()),
                 routine: Slug::derive("invalid-gate-routing"),
                 name: "verify".into(),
@@ -1373,7 +1520,6 @@ async fn gate_always_edge_is_invalid() {
                 order_index: 1,
             },
             RoutineStepManifest {
-                id: terminal_id,
                 slug: Slug::derive(terminal_id.to_string()),
                 routine: Slug::derive("invalid-gate-routing"),
                 name: "complete".into(),
@@ -1386,7 +1532,6 @@ async fn gate_always_edge_is_invalid() {
         ],
         edges: vec![
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("invalid-gate-routing"),
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
@@ -1394,7 +1539,6 @@ async fn gate_always_edge_is_invalid() {
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("invalid-gate-routing"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
@@ -1408,7 +1552,7 @@ async fn gate_always_edge_is_invalid() {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1435,7 +1579,7 @@ async fn gate_always_edge_is_invalid() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("must route with on_pass/on_fail"));
+    assert!(err.to_string().contains("must use on_pass/on_fail"));
 }
 
 #[tokio::test]
@@ -1445,17 +1589,16 @@ async fn gate_on_fail_routes_back_before_completion() {
     let step1_id = Uuid::new_v4();
     let gate_id = Uuid::new_v4();
     let terminal_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "retry-gated-routine".into(),
+        slug: Slug::derive("retry-gated-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("retry-gated-routine"),
                 name: "analyze_and_develop".into(),
@@ -1466,7 +1609,6 @@ async fn gate_on_fail_routes_back_before_completion() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: gate_id,
                 slug: Slug::derive(gate_id.to_string()),
                 routine: Slug::derive("retry-gated-routine"),
                 name: "verify".into(),
@@ -1477,7 +1619,6 @@ async fn gate_on_fail_routes_back_before_completion() {
                 order_index: 1,
             },
             RoutineStepManifest {
-                id: terminal_id,
                 slug: Slug::derive(terminal_id.to_string()),
                 routine: Slug::derive("retry-gated-routine"),
                 name: "complete".into(),
@@ -1490,7 +1631,6 @@ async fn gate_on_fail_routes_back_before_completion() {
         ],
         edges: vec![
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("retry-gated-routine"),
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
@@ -1498,7 +1638,6 @@ async fn gate_on_fail_routes_back_before_completion() {
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("retry-gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(step1_id.to_string()),
@@ -1506,7 +1645,6 @@ async fn gate_on_fail_routes_back_before_completion() {
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("retry-gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
@@ -1520,7 +1658,7 @@ async fn gate_on_fail_routes_back_before_completion() {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1578,19 +1716,18 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
     let agent_id = Uuid::new_v4();
     let step1_id = Uuid::new_v4();
     let gate_id = Uuid::new_v4();
-    let failed_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
-    let retry_edge_id = Uuid::new_v4();
+    let done_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
+    let _retry_edge_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "retry-exhaustion-routine".into(),
+        slug: Slug::derive("retry-exhaustion-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: step1_id,
                 slug: Slug::derive(step1_id.to_string()),
                 routine: Slug::derive("retry-exhaustion-routine"),
                 name: "analyze_and_develop".into(),
@@ -1601,7 +1738,6 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: gate_id,
                 slug: Slug::derive(gate_id.to_string()),
                 routine: Slug::derive("retry-exhaustion-routine"),
                 name: "verify".into(),
@@ -1612,20 +1748,18 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
                 order_index: 1,
             },
             RoutineStepManifest {
-                id: failed_id,
-                slug: Slug::derive(failed_id.to_string()),
+                slug: Slug::derive(done_id.to_string()),
                 routine: Slug::derive("retry-exhaustion-routine"),
-                name: "failed".into(),
-                step_type: RoutineStepType::TerminalFail,
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
                 council: None,
                 agent: None,
-                config: serde_json::json!({ "reason": "Retry limit exhausted." }),
+                config: serde_json::json!({ "message": "Done." }),
                 order_index: 2,
             },
         ],
         edges: vec![
             RoutineEdgeManifest {
-                id: Uuid::new_v4(),
                 routine: Slug::derive("retry-exhaustion-routine"),
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
@@ -1633,15 +1767,18 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
                 metadata: serde_json::json!({}),
             },
             RoutineEdgeManifest {
-                id: retry_edge_id,
+                routine: Slug::derive("retry-exhaustion-routine"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(done_id.to_string()),
+                condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
                 routine: Slug::derive("retry-exhaustion-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(step1_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
-                metadata: serde_json::json!({
-                    "max_attempts": 1,
-                    "on_exhausted_step_id": failed_id,
-                }),
+                metadata: serde_json::json!({ "max_attempts": 1 }),
             },
         ],
     };
@@ -1650,7 +1787,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         agents: vec![agent(agent_id, "coder", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1687,8 +1824,14 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         .unwrap();
 
     assert!(!result.passed);
-    assert_eq!(result.step_id, failed_id);
-    assert_eq!(result.output, "Retry limit exhausted.");
+    assert_eq!(result.step_slug, Slug::derive(gate_id.to_string()));
+    assert_eq!(result.step_name, "verify");
+    assert!(
+        result.output.contains("exhausted after 1 attempts"),
+        "unexpected output: {}",
+        result.output
+    );
+    assert_eq!(result.data["reason"], "retry_exhausted");
 }
 
 /// Routine not found → error.
@@ -1712,16 +1855,15 @@ async fn routine_not_found() {
 #[tokio::test]
 async fn terminal_fail_step() {
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "fail-routine".into(),
+        slug: Slug::derive("fail-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("fail-routine"),
             name: "abort".into(),
@@ -1735,7 +1877,7 @@ async fn terminal_fail_step() {
     };
 
     let manifest = Manifest {
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -1765,18 +1907,17 @@ async fn council_decompose() {
     let model_id = Uuid::new_v4();
     let leader_id = Uuid::new_v4();
     let member_id = Uuid::new_v4();
-    let council_id = Uuid::new_v4();
+    let _council_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "council-routine".into(),
+        slug: Slug::derive("council-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("council-routine"),
             name: "council-step".into(),
@@ -1796,9 +1937,8 @@ async fn council_decompose() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
-            id: council_id,
             name: "test-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
             leader_agent: Slug::derive("leader"),
@@ -1840,18 +1980,17 @@ async fn council_broadcast() {
     let leader_id = Uuid::new_v4();
     let member_a_id = Uuid::new_v4();
     let member_b_id = Uuid::new_v4();
-    let council_id = Uuid::new_v4();
+    let _council_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "broadcast-council-routine".into(),
+        slug: Slug::derive("broadcast-council-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("broadcast-council-routine"),
             name: "broadcast-council-step".into(),
@@ -1872,9 +2011,8 @@ async fn council_broadcast() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
-            id: council_id,
             name: "broadcast-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Broadcast,
             leader_agent: Slug::derive("leader"),
@@ -1943,18 +2081,17 @@ async fn council_round_robin() {
     let leader_id = Uuid::new_v4();
     let member_a_id = Uuid::new_v4();
     let member_b_id = Uuid::new_v4();
-    let council_id = Uuid::new_v4();
+    let _council_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "round-robin-council-routine".into(),
+        slug: Slug::derive("round-robin-council-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("round-robin-council-routine"),
             name: "round-robin-council-step".into(),
@@ -1975,9 +2112,8 @@ async fn council_round_robin() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
-            id: council_id,
             name: "round-robin-council".into(),
             delegation_strategy: CouncilDelegationStrategy::RoundRobin,
             leader_agent: Slug::derive("leader"),
@@ -2042,18 +2178,17 @@ async fn council_vote() {
     let leader_id = Uuid::new_v4();
     let member_a_id = Uuid::new_v4();
     let member_b_id = Uuid::new_v4();
-    let council_id = Uuid::new_v4();
+    let _council_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "vote-council-routine".into(),
+        slug: Slug::derive("vote-council-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("vote-council-routine"),
             name: "vote-council-step".into(),
@@ -2074,9 +2209,8 @@ async fn council_vote() {
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
-            id: council_id,
             name: "vote-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Vote,
             leader_agent: Slug::derive("leader"),
@@ -2145,16 +2279,15 @@ async fn scheduled_cron_routine_execution() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "cron-routine".into(),
+        slug: Slug::derive("cron-routine"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-routine"),
             name: "check".into(),
@@ -2171,7 +2304,7 @@ async fn scheduled_cron_routine_execution() {
         agents: vec![agent(agent_id, "monitor", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -2242,17 +2375,16 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
     let agent_id = Uuid::new_v4();
     let agent_step_id = Uuid::new_v4();
     let terminal_step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        id: routine_id,
         name: "cron-agent-terminal".into(),
+        slug: Slug::derive("cron-agent-terminal"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
-                id: agent_step_id,
                 slug: Slug::derive(agent_step_id.to_string()),
                 routine: Slug::derive("cron-agent-terminal"),
                 name: "inspect".into(),
@@ -2263,7 +2395,6 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
                 order_index: 0,
             },
             RoutineStepManifest {
-                id: terminal_step_id,
                 slug: Slug::derive(terminal_step_id.to_string()),
                 routine: Slug::derive("cron-agent-terminal"),
                 name: "done".into(),
@@ -2275,7 +2406,6 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
             },
         ],
         edges: vec![RoutineEdgeManifest {
-            id: Uuid::new_v4(),
             routine: Slug::derive("cron-agent-terminal"),
             source_step: Slug::derive(agent_step_id.to_string()),
             target_step: Slug::derive(terminal_step_id.to_string()),
@@ -2288,7 +2418,7 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
         agents: vec![agent(agent_id, "monitor", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -2361,15 +2491,14 @@ async fn cron_cancellation() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
-    let routine_id = Uuid::new_v4();
+    let _routine_id = Uuid::new_v4();
     let routine = RoutineManifest {
-        id: routine_id,
         name: "cancel-cron".into(),
+        slug: Slug::derive("cancel-cron"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
-            id: step_id,
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cancel-cron"),
             name: "poll".into(),
@@ -2386,7 +2515,7 @@ async fn cron_cancellation() {
         agents: vec![agent(agent_id, "poller", model_id)],
         models: vec![model(model_id)],
         projects: vec![project()],
-        routines: vec![routine],
+        routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
 
@@ -2431,6 +2560,355 @@ async fn cron_cancellation() {
 
     let result = handle.output().await.unwrap();
     assert!(result.passed);
+}
+
+#[tokio::test]
+async fn agent_step_receives_route_next_steps_not_pass_verdict() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "route-tool-check".into(),
+        slug: Slug::derive("route-tool-check"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("work")],
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("work"),
+                routine: Slug::derive("route-tool-check"),
+                name: "work".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("worker")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("route-tool-check"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+        ],
+        edges: vec![RoutineEdgeManifest {
+            routine: Slug::derive("route-tool-check"),
+            source_step: Slug::derive("work"),
+            target_step: Slug::derive("done"),
+            condition: RoutineEdgeCondition::Always,
+            metadata: serde_json::json!({"purpose": "finish the routine"}),
+        }],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "worker", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+    let factory = RecordingToolsMockFactory::new(route_response(
+        "work complete",
+        "pass",
+        "ready",
+        serde_json::json!([{"target_step": "done", "task": "finish"}]),
+    ));
+    let seen_tools = factory.seen_tools();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    provider
+        .routine("route-tool-check")
+        .unwrap()
+        .run(test_task(Uuid::new_v4(), "Task", "Do work"))
+        .await
+        .unwrap();
+
+    let seen_tools = seen_tools.lock().unwrap();
+    let first_tools = seen_tools.first().expect("model should receive tool specs");
+    assert!(first_tools.iter().any(|name| name == "route_next_steps"));
+    assert!(!first_tools.iter().any(|name| name == "pass_verdict"));
+}
+
+#[tokio::test]
+async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
+    let model_id = Uuid::new_v4();
+    let start_agent_id = Uuid::new_v4();
+    let left_agent_id = Uuid::new_v4();
+    let right_agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "fanout-fanin".into(),
+        slug: Slug::derive("fanout-fanin"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("start")],
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("start"),
+                routine: Slug::derive("fanout-fanin"),
+                name: "start".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("start-agent")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("left"),
+                routine: Slug::derive("fanout-fanin"),
+                name: "left".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("left-agent")),
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("right"),
+                routine: Slug::derive("fanout-fanin"),
+                name: "right".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("right-agent")),
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("fanout-fanin"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 3,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("fanout-fanin"),
+                source_step: Slug::derive("start"),
+                target_step: Slug::derive("left"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "left branch"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("fanout-fanin"),
+                source_step: Slug::derive("start"),
+                target_step: Slug::derive("right"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "right branch"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("fanout-fanin"),
+                source_step: Slug::derive("left"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("fanout-fanin"),
+                source_step: Slug::derive("right"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![
+            agent(start_agent_id, "start-agent", model_id),
+            agent(left_agent_id, "left-agent", model_id),
+            agent(right_agent_id, "right-agent", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            route_response(
+                "start complete",
+                "pass",
+                "fan out",
+                serde_json::json!([
+                    {"target_step": "left", "task": "left task"},
+                    {"target_step": "right", "task": "right task"}
+                ]),
+            ),
+            route_response(
+                "branch complete",
+                "pass",
+                "branch done",
+                serde_json::json!([{"target_step": "done", "task": "finish"}]),
+            ),
+            route_response(
+                "branch complete",
+                "pass",
+                "branch done",
+                serde_json::json!([{"target_step": "done", "task": "finish"}]),
+            ),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("fanout-fanin")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Do branches"))
+        .await
+        .unwrap();
+
+    let mut step_names = Vec::new();
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            step_names.push(step_name);
+        }
+    }
+
+    assert_eq!(step_names.first().map(String::as_str), Some("start"));
+    assert_eq!(step_names.last().map(String::as_str), Some("done"));
+    assert!(step_names.contains(&"left".to_string()));
+    assert!(step_names.contains(&"right".to_string()));
+
+    let result = handle.output().await.unwrap();
+    assert!(result.passed);
+}
+
+#[tokio::test]
+async fn route_next_steps_fail_verdict_stops_routine() {
+    let model_id = Uuid::new_v4();
+    let first_agent_id = Uuid::new_v4();
+    let second_agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "route-fail-stops".into(),
+        slug: Slug::derive("route-fail-stops"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("first")],
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("first"),
+                routine: Slug::derive("route-fail-stops"),
+                name: "first".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("first-agent")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("second"),
+                routine: Slug::derive("route-fail-stops"),
+                name: "second".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("second-agent")),
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("route-fail-stops"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("route-fail-stops"),
+                source_step: Slug::derive("first"),
+                target_step: Slug::derive("second"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("route-fail-stops"),
+                source_step: Slug::derive("second"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![
+            agent(first_agent_id, "first-agent", model_id),
+            agent(second_agent_id, "second-agent", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![route_response(
+            "blocked",
+            "fail",
+            "cannot continue",
+            serde_json::json!([]),
+        )]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("route-fail-stops")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Do work"))
+        .await
+        .unwrap();
+
+    let mut step_names = Vec::new();
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            step_names.push(step_name);
+        }
+    }
+
+    assert_eq!(step_names, vec!["first"]);
+    let result = handle.output().await.unwrap();
+    assert!(!result.passed);
+    assert_eq!(result.output, "blocked");
+    assert_eq!(
+        result.data.get("verdict").and_then(|value| value.as_str()),
+        Some("fail")
+    );
 }
 
 // ===========================================================================

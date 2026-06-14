@@ -5,19 +5,14 @@ use nenjo::ToolSpec;
 
 use super::backend::ManifestMcpBackend;
 use super::params::{
-    AbilitiesGetParams, AbilityCreateParams, AbilityDeleteParams, AbilityPromptGetParams,
-    AbilityPromptUpdateParams, AbilityUpdateParams, AgentCreateParams, AgentDeleteParams,
-    AgentPromptGetParams, AgentPromptUpdateParams, AgentUpdateParams, AgentsGetParams,
-    ContextBlockContentGetParams, ContextBlockContentUpdateParams, ContextBlockCreateParams,
-    ContextBlockDeleteParams, ContextBlockUpdateParams, ContextBlocksGetParams,
-    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
-    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainCreateParams,
-    DomainDeleteParams, DomainPromptGetParams, DomainPromptUpdateParams, DomainUpdateParams,
-    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
+    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
+    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
+    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
+    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
     KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
     ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
-    ProjectUpdateParams, ProjectsGetParams, RoutineCreateParams, RoutineDeleteParams,
-    RoutineUpdateParams, RoutinesGetParams,
+    ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutinesGetParams,
 };
 use super::tools::all_tools;
 
@@ -50,25 +45,9 @@ impl ManifestMcpContract {
                 let args: AgentsGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_agent(args).await?)
             }
-            "get_agent_prompt" => {
-                let args: AgentPromptGetParams = serde_json::from_value(params)?;
-                to_json(backend.get_agent_prompt(args).await?)
-            }
-            "create_agent" => {
-                let args: AgentCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_agent(args).await?)
-            }
-            "update_agent" => {
-                let args: AgentUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_agent(args).await?)
-            }
-            "update_agent_prompt" => {
-                let args: AgentPromptUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_agent_prompt(args).await?)
-            }
-            "delete_agent" => {
-                let args: AgentDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_agent(args).await?)
+            "configure_agent" => {
+                let args: AgentConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_agent(args).await?)
             }
             "list_abilities" => {
                 if !params.is_null() {
@@ -83,25 +62,9 @@ impl ManifestMcpContract {
                 let args: AbilitiesGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_ability(args).await?)
             }
-            "get_ability_prompt" => {
-                let args: AbilityPromptGetParams = serde_json::from_value(params)?;
-                to_json(backend.get_ability_prompt(args).await?)
-            }
-            "create_ability" => {
-                let args: AbilityCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_ability(args).await?)
-            }
-            "update_ability" => {
-                let args: AbilityUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_ability(args).await?)
-            }
-            "update_ability_prompt" => {
-                let args: AbilityPromptUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_ability_prompt(args).await?)
-            }
-            "delete_ability" => {
-                let args: AbilityDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_ability(args).await?)
+            "configure_ability" => {
+                let args: AbilityConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_ability(args).await?)
             }
             "list_domains" => {
                 if !params.is_null() {
@@ -116,38 +79,10 @@ impl ManifestMcpContract {
                 let args: DomainsGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_domain(args).await?)
             }
-            "get_domain_prompt" => {
-                let args: DomainPromptGetParams = serde_json::from_value(params)?;
-                to_json(backend.get_domain_prompt(args).await?)
+            "configure_domain" => {
+                let args: DomainConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_domain(args).await?)
             }
-            "create_domain" => {
-                let args: DomainCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_domain(args).await?)
-            }
-            "update_domain" => {
-                let args: DomainUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_domain(args).await?)
-            }
-            "update_domain_prompt" => {
-                let args: DomainPromptUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_domain_prompt(args).await?)
-            }
-            "delete_domain" => {
-                let args: DomainDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_domain(args).await?)
-            }
-            "list_knowledge_packs" => {
-                if !params.is_null() {
-                    let object = params.as_object().cloned().unwrap_or_default();
-                    if !object.is_empty() {
-                        return Err(anyhow!("list_knowledge_packs does not accept parameters"));
-                    }
-                }
-                to_json(backend.list_knowledge_packs().await?)
-            }
-            "read_knowledge_doc" => to_json(backend.read_knowledge_doc(params).await?),
-            "search_knowledge" => to_json(backend.search_knowledge(params).await?),
-            "list_knowledge_neighbors" => to_json(backend.list_knowledge_neighbors(params).await?),
             "list_projects" => {
                 if !params.is_null() {
                     let object = params.as_object().cloned().unwrap_or_default();
@@ -206,17 +141,9 @@ impl ManifestMcpContract {
                 let args: RoutinesGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_routine(args).await?)
             }
-            "create_routine" => {
-                let args: RoutineCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_routine(args).await?)
-            }
-            "update_routine" => {
-                let args: RoutineUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_routine(args).await?)
-            }
-            "delete_routine" => {
-                let args: RoutineDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_routine(args).await?)
+            "configure_routine" => {
+                let args: RoutineConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_routine(args).await?)
             }
             "list_models" => {
                 if !params.is_null() {
@@ -293,25 +220,9 @@ impl ManifestMcpContract {
                 let args: ContextBlocksGetParams = serde_json::from_value(params)?;
                 to_json(backend.get_context_block(args).await?)
             }
-            "get_context_block_content" => {
-                let args: ContextBlockContentGetParams = serde_json::from_value(params)?;
-                to_json(backend.get_context_block_content(args).await?)
-            }
-            "create_context_block" => {
-                let args: ContextBlockCreateParams = serde_json::from_value(params)?;
-                to_json(backend.create_context_block(args).await?)
-            }
-            "update_context_block" => {
-                let args: ContextBlockUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_context_block(args).await?)
-            }
-            "update_context_block_content" => {
-                let args: ContextBlockContentUpdateParams = serde_json::from_value(params)?;
-                to_json(backend.update_context_block_content(args).await?)
-            }
-            "delete_context_block" => {
-                let args: ContextBlockDeleteParams = serde_json::from_value(params)?;
-                to_json(backend.delete_context_block(args).await?)
+            "configure_context_block" => {
+                let args: ContextBlockConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_context_block(args).await?)
             }
             other => Err(anyhow!("unknown manifest MCP tool: {other}")),
         }

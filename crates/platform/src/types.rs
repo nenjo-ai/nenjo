@@ -21,8 +21,6 @@ pub struct BootstrapManifestResponse {
     pub councils: Vec<PlatformManifestItem>,
     /// Domain resources included in the bootstrap snapshot.
     pub domains: Vec<PlatformManifestItem>,
-    /// Legacy lambda resources included in the bootstrap snapshot.
-    pub lambdas: Vec<PlatformManifestItem>,
     /// MCP server resources included in the bootstrap snapshot.
     pub mcp_servers: Vec<PlatformManifestItem>,
     /// Ability resources included in the bootstrap snapshot.

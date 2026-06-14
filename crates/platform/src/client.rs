@@ -2,24 +2,26 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Client, StatusCode, Url, header, multipart};
+use std::time::Duration;
 use uuid::Uuid;
 
+use crate::manifest_contract::{
+    AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord, RoutineRecord,
+};
 use crate::manifest_mcp::{
-    AbilityCreateDocument, AbilityDocument, AbilityPromptMutationResult, AbilityUpdateDocument,
-    AgentCreateDocument, AgentDocument, AgentUpdateDocument, ContextBlockCreateDocument,
-    ContextBlockDocument, ContextBlockUpdateDocument, CouncilDocument, CouncilMemberUpdateDocument,
-    CouncilUpdateDocument, DomainCreateDocument, DomainDocument, DomainPromptDocument,
-    DomainPromptMutationResult, DomainUpdateDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
-    KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
-    ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
-    ResourceRef, RoutineCreateDocument, RoutineDocument, RoutineGraphInput, RoutineUpdateDocument,
+    AbilityConfigureDocument, AbilityDocument, AgentConfigureDocument, AgentDocument,
+    ContextBlockConfigureDocument, ContextBlockDocument, CouncilDocument,
+    CouncilMemberUpdateDocument, CouncilUpdateDocument, DomainConfigureDocument, DomainDocument,
+    KnowledgeDocCreateDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
+    KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
+    ModelCreateDocument, ModelDocument, ModelUpdateDocument, ProjectCreateDocument,
+    ProjectDocument, ProjectUpdateDocument, RoutineConfigureDocument, RoutineConfigureMetadata,
+    RoutineGraphInput,
 };
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
 use nenjo::manifest::{
-    CouncilDelegationStrategy, RoutineEdgeCondition, RoutineEdgeManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata, RoutineTrigger,
 };
 
 /// Thin HTTP client for Nenjo platform manifest endpoints.
@@ -30,69 +32,27 @@ pub struct PlatformManifestClient {
     api_key: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct RoutineResponseRow {
-    id: Uuid,
-    name: String,
-    description: Option<String>,
-    trigger: RoutineTrigger,
-    #[serde(default)]
-    metadata: RoutineMetadata,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RoutineResponseDetail {
-    #[serde(flatten)]
-    routine: RoutineResponseRow,
-    #[serde(default)]
-    steps: Vec<RoutineResponseStep>,
-    #[serde(default)]
-    edges: Vec<RoutineResponseEdge>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RoutineResponseStep {
-    id: Uuid,
-    slug: Slug,
-    name: String,
-    step_type: String,
-    #[serde(default)]
-    council: Option<Slug>,
-    #[serde(default)]
-    agent: Option<Slug>,
-    #[serde(default)]
-    config: serde_json::Value,
-    order_index: i32,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RoutineResponseEdge {
-    id: Uuid,
-    source_step: Slug,
-    target_step: Slug,
-    condition: String,
-    #[serde(default)]
-    metadata: serde_json::Value,
+#[derive(Debug, serde::Serialize)]
+struct RoutineConfigureApiBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routine: Option<&'a Slug>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<&'a RoutineConfigureMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_metadata: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_payload: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<ConfigureRoutineGraphApiBody>,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct RoutineCreateApiBody<'a> {
-    name: &'a str,
-    description: Option<&'a str>,
-    trigger: Option<RoutineTrigger>,
-    metadata: Option<&'a RoutineMetadata>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct RoutineUpdateApiBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<Option<&'a str>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger: Option<RoutineTrigger>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<&'a RoutineMetadata>,
+struct ConfigureRoutineGraphApiBody {
+    entry_steps: Vec<Slug>,
+    steps: Vec<SaveRoutineGraphStepBody>,
+    edges: Vec<SaveRoutineGraphEdgeBody>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -102,7 +62,6 @@ struct SaveRoutineGraphStepBody {
     step_type: String,
     council: Option<Slug>,
     agent: Option<Slug>,
-    lambda_id: Option<Uuid>,
     config: serde_json::Value,
     position_x: f64,
     position_y: f64,
@@ -133,93 +92,49 @@ struct SaveRoutineGraphBody<'a> {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct PromptMutationEnvelope<T> {
-    #[serde(default)]
-    prompt_config: Option<T>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ContentMutationEnvelope<T> {
-    #[serde(default)]
-    template: Option<T>,
-}
-
-#[derive(Debug, serde::Deserialize)]
 struct AuthMeResponse {
     org_id: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PlatformKnowledgePackMetadata {
-    pub id: Uuid,
-    pub slug: Slug,
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default = "default_knowledge_pack_status")]
-    pub status: String,
-    #[serde(default = "default_knowledge_pack_source_type")]
-    pub source_type: String,
-    #[serde(default)]
-    pub read_only: bool,
-    #[serde(default)]
-    pub selector: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
+const PLATFORM_CLIENT_429_RETRY_DELAY: Duration = Duration::from_millis(250);
+const PLATFORM_CLIENT_429_MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+trait PlatformRetryRequestBuilderExt {
+    /// Send a platform API request with the one transport-level retry policy.
+    ///
+    /// The platform client retries cloneable requests once when the backend
+    /// returns `429 Too Many Requests`. Keep this as the only retry point for
+    /// platform manifests so endpoints do not grow competing backoff behavior.
+    async fn send_with_platform_retry(self) -> reqwest::Result<reqwest::Response>;
 }
 
-fn default_knowledge_pack_status() -> String {
-    "active".to_string()
-}
+impl PlatformRetryRequestBuilderExt for reqwest::RequestBuilder {
+    async fn send_with_platform_retry(self) -> reqwest::Result<reqwest::Response> {
+        let retry_request = self.try_clone();
+        let response = self.send().await?;
+        if response.status() != StatusCode::TOO_MANY_REQUESTS {
+            return Ok(response);
+        }
 
-fn default_knowledge_pack_source_type() -> String {
-    "uploaded".to_string()
-}
-
-fn routine_document_from_detail(detail: RoutineResponseDetail) -> RoutineDocument {
-    let routine = Slug::derive(&detail.routine.name);
-    RoutineDocument {
-        summary: crate::manifest_mcp::RoutineSummary {
-            id: detail.routine.id,
-            name: detail.routine.name,
-            description: detail.routine.description,
-            trigger: detail.routine.trigger,
-        },
-        metadata: detail.routine.metadata,
-        steps: detail
-            .steps
-            .into_iter()
-            .map(|step| RoutineStepManifest {
-                id: step.id,
-                slug: step.slug,
-                routine: routine.clone(),
-                name: step.name,
-                step_type: match step.step_type.as_str() {
-                    "council" => RoutineStepType::Council,
-                    "gate" => RoutineStepType::Gate,
-                    "terminal" => RoutineStepType::Terminal,
-                    "terminal_fail" => RoutineStepType::TerminalFail,
-                    _ => RoutineStepType::Agent,
-                },
-                council: step.council,
-                agent: step.agent,
-                config: step.config,
-                order_index: step.order_index,
-            })
-            .collect(),
-        edges: detail
-            .edges
-            .into_iter()
-            .map(|edge| RoutineEdgeManifest {
-                id: edge.id,
-                routine: routine.clone(),
-                source_step: edge.source_step,
-                target_step: edge.target_step,
-                condition: RoutineEdgeCondition::from_str_value(&edge.condition),
-                metadata: edge.metadata,
-            })
-            .collect(),
+        let Some(retry_request) = retry_request else {
+            return Ok(response);
+        };
+        let delay = retry_after_delay(response.headers());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        retry_request.send().await
     }
+}
+
+fn retry_after_delay(headers: &header::HeaderMap) -> Duration {
+    headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(PLATFORM_CLIENT_429_RETRY_DELAY)
+        .min(PLATFORM_CLIENT_429_MAX_RETRY_DELAY)
 }
 
 fn routine_graph_body<'a>(
@@ -244,10 +159,6 @@ fn routine_graph_body<'a>(
                 step_type: step.step_type.to_string(),
                 council: step.council.clone(),
                 agent: step.agent.clone(),
-                lambda_id: step
-                    .config
-                    .get("lambda_id")
-                    .and_then(|v| v.as_str().and_then(|value| Uuid::parse_str(value).ok())),
                 config: step.config.clone(),
                 position_x: step
                     .config
@@ -282,6 +193,15 @@ fn routine_graph_body<'a>(
     }
 }
 
+fn routine_configure_graph_body(graph: &RoutineGraphInput) -> ConfigureRoutineGraphApiBody {
+    let body = routine_graph_body(None, None, None, None, graph);
+    ConfigureRoutineGraphApiBody {
+        entry_steps: body.entry_steps,
+        steps: body.steps,
+        edges: body.edges,
+    }
+}
+
 fn response_error_preview(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -292,7 +212,6 @@ fn response_error_preview(body: &str) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct CouncilResponseRow {
-    id: Uuid,
     name: String,
     leader_agent: Slug,
     delegation_strategy: CouncilDelegationStrategy,
@@ -322,7 +241,6 @@ struct CouncilResponseDetail {
 fn council_document_from_detail(detail: CouncilResponseDetail) -> CouncilDocument {
     CouncilDocument {
         summary: crate::manifest_mcp::CouncilSummary {
-            id: detail.council.id,
             name: detail.council.name,
             delegation_strategy: detail.council.delegation_strategy,
             leader_agent: detail.council.leader_agent,
@@ -410,25 +328,9 @@ pub struct ProjectDocumentMetadata {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct KnowledgeDocMetadataResponse {
-    pub id: Uuid,
-    pub pack_id: Uuid,
-    pub slug: Slug,
-    pub filename: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub content_type: String,
-    pub updated_at: String,
-}
+pub use crate::manifest_contract::KnowledgeDocumentEdgeRecord as KnowledgeDocEdgeResponse;
+pub use crate::manifest_contract::KnowledgeDocumentRecord as KnowledgeDocMetadataResponse;
+use crate::manifest_contract::{KnowledgeDocumentRecord, KnowledgePackRecord};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 /// Directed relationship between two library knowledge documents.
@@ -452,20 +354,12 @@ pub struct ProjectDocumentEdge {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Directed relationship between two library knowledge documents.
-pub struct KnowledgeDocEdgeResponse {
-    pub id: Uuid,
-    pub org_id: Uuid,
-    pub source_item_id: Uuid,
-    pub source_doc: Slug,
-    pub target_item_id: Uuid,
-    pub target_doc: Slug,
-    pub edge_type: String,
-    #[serde(default)]
-    pub note: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnowledgeDocEdgeReplaceItem<'a> {
+    pub target_doc: &'a str,
+    pub edge_type: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -599,7 +493,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/manifest", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch manifest bootstrap")?;
 
@@ -618,7 +512,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/agents", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch agents")?;
 
@@ -634,398 +528,200 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/agents/{agent}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch agent {agent}"))?;
 
         match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .map(Some)
-                .context("failed to decode agent"),
+            StatusCode::OK => {
+                let record: AgentRecord =
+                    response.json().await.context("failed to decode agent")?;
+                Ok(Some(record.to_document()))
+            }
             StatusCode::NOT_FOUND => Ok(None),
             status => bail!("agent request failed with status {status}"),
         }
     }
 
-    /// Create an agent document.
-    pub async fn create_agent_document(
+    /// Configure an agent in one backend-owned sequence and return the canonical record.
+    pub async fn configure_agent_record(
         &self,
-        agent: &AgentCreateDocument,
-    ) -> Result<AgentDocument> {
-        let body = serde_json::to_value(agent).context("failed to encode agent create payload")?;
-        let response = self
-            .http
-            .post(format!("{}/api/v1/agents", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("failed to create agent")?;
-
-        match response.status() {
-            StatusCode::CREATED => response
-                .json::<AgentDocument>()
-                .await
-                .context("failed to decode created agent"),
-            status => bail!("agent create failed with status {status}"),
+        agent: &AgentConfigureDocument,
+    ) -> Result<AgentRecord> {
+        if agent.prompt_config.is_some() && agent.encrypted_payload.is_none() {
+            bail!("agent configure requires encrypted_payload for prompt_config");
         }
-    }
-
-    /// Apply a partial metadata update to an agent document.
-    pub async fn update_agent_document(
-        &self,
-        agent_ref: &Slug,
-        agent: &AgentUpdateDocument,
-    ) -> Result<AgentDocument> {
-        let body = serde_json::to_value(agent).context("failed to encode agent update patch")?;
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/agents/{agent_ref}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update agent {agent_ref}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode updated agent"),
-            status => bail!("agent update failed with status {status}"),
-        }
-    }
-
-    /// Update an agent's prompt document and return the canonical prompt config when provided.
-    pub async fn update_agent_prompt_document(
-        &self,
-        agent: &Slug,
-        prompt_config: &serde_json::Value,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<Option<serde_json::Value>> {
-        let mut body = serde_json::json!({
-            "prompt_config": prompt_config,
-        });
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
-        }
-
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/agents/{agent}/prompt", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update agent prompt {agent}"))?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let payload = response
-                    .json::<serde_json::Value>()
-                    .await
-                    .context("failed to decode updated agent prompt")?;
-                Ok(payload.get("prompt_config").cloned())
-            }
-            status => bail!("agent prompt update failed with status {status}"),
-        }
-    }
-
-    /// Delete an agent document by slug.
-    pub async fn delete_agent_document(&self, agent: &Slug) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/api/v1/agents/{agent}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to delete agent {agent}"))?;
-
-        match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("agent delete failed with status {status}"),
-        }
-    }
-
-    /// Create an ability document, optionally sending encrypted prompt payload content.
-    pub async fn create_ability_document(
-        &self,
-        ability: &AbilityCreateDocument,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<AbilityDocument> {
         let mut body =
-            serde_json::to_value(ability).context("failed to encode ability create payload")?;
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
+            serde_json::to_value(agent).context("failed to encode agent configure payload")?;
+        if agent.encrypted_payload.is_some()
+            && let Some(object) = body.as_object_mut()
+        {
+            object.remove("prompt_config");
         }
         let response = self
             .http
-            .post(format!("{}/api/v1/abilities", self.base_url))
+            .post(format!("{}/api/v1/agents/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .context("failed to create ability")?;
+            .context("failed to configure agent")?;
 
         match response.status() {
             StatusCode::OK | StatusCode::CREATED => response
-                .json()
+                .json::<AgentRecord>()
                 .await
-                .context("failed to decode created ability"),
-            status => bail!("ability create failed with status {status}"),
+                .context("failed to decode configured agent"),
+            status => bail!("agent configure failed with status {status}"),
         }
     }
 
-    /// Fetch one ability document by ID.
-    pub async fn fetch_ability_document(
-        &self,
-        ability: &ResourceRef,
-    ) -> Result<Option<AbilityDocument>> {
-        let selector = ability.as_path_segment();
+    /// Fetch one ability document by slug.
+    pub async fn fetch_ability_document(&self, ability: &Slug) -> Result<Option<AbilityDocument>> {
+        let selector = ability.as_str();
         let response = self
             .http
             .get(format!("{}/api/v1/abilities/{selector}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch ability {ability}"))?;
 
         match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .map(Some)
-                .context("failed to decode ability"),
+            StatusCode::OK => {
+                let record: AbilityPromptRecord =
+                    response.json().await.context("failed to decode ability")?;
+                Ok(Some(record.to_document()))
+            }
             StatusCode::NOT_FOUND => Ok(None),
             status => bail!("ability request failed with status {status}"),
         }
     }
 
-    /// Apply a partial metadata update to an ability document.
-    pub async fn update_ability_document(
+    /// Configure an ability in one backend-owned sequence and return the canonical document.
+    pub async fn configure_ability_document(
         &self,
-        ability_ref: &ResourceRef,
-        ability: &AbilityUpdateDocument,
+        ability: &AbilityConfigureDocument,
     ) -> Result<AbilityDocument> {
-        let selector = ability_ref.as_path_segment();
-        let body =
-            serde_json::to_value(ability).context("failed to encode ability update patch")?;
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/abilities/{selector}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update ability {ability_ref}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode updated ability"),
-            status => bail!("ability update failed with status {status}"),
+        if ability.prompt_config.is_some() && ability.encrypted_payload.is_none() {
+            bail!("ability configure requires encrypted_payload for prompt_config");
         }
-    }
-
-    /// Update an ability prompt document and return the canonical prompt config when provided.
-    pub async fn update_ability_prompt_document(
-        &self,
-        ability: &ResourceRef,
-        prompt_config: &nenjo::manifest::AbilityPromptConfig,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<AbilityPromptMutationResult> {
-        let selector = ability.as_path_segment();
-        let mut body = serde_json::json!({ "prompt_config": prompt_config });
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
+        let mut body =
+            serde_json::to_value(ability).context("failed to encode ability configure payload")?;
+        if ability.encrypted_payload.is_some()
+            && let Some(object) = body.as_object_mut()
+        {
+            object.remove("prompt_config");
         }
         let response = self
             .http
-            .patch(format!(
-                "{}/api/v1/abilities/{selector}/prompt",
-                self.base_url
-            ))
+            .post(format!("{}/api/v1/abilities/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .with_context(|| format!("failed to update ability prompt {ability}"))?;
+            .context("failed to configure ability")?;
 
         match response.status() {
-            StatusCode::OK => {
-                let body: PromptMutationEnvelope<nenjo::manifest::AbilityPromptConfig> = response
+            StatusCode::OK | StatusCode::CREATED => {
+                let record: AbilityPromptRecord = response
                     .json()
                     .await
-                    .context("failed to decode updated ability prompt")?;
-                Ok(AbilityPromptMutationResult {
-                    prompt_config: body.prompt_config.unwrap_or_else(|| prompt_config.clone()),
-                })
+                    .context("failed to decode configured ability")?;
+                Ok(record.to_document())
             }
-            status => bail!("ability prompt update failed with status {status}"),
+            status => bail!("ability configure failed with status {status}"),
         }
     }
 
-    /// Delete an ability document by ID.
-    pub async fn delete_ability_document(&self, ability: &ResourceRef) -> Result<()> {
-        let selector = ability.as_path_segment();
-        let response = self
-            .http
-            .delete(format!("{}/api/v1/abilities/{selector}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to delete ability {ability}"))?;
-
-        match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("ability delete failed with status {status}"),
-        }
-    }
-
-    /// Create a domain document, optionally sending encrypted prompt payload content.
-    pub async fn create_domain_document(
+    /// Configure a domain in one backend-owned sequence and return the canonical record.
+    pub async fn configure_domain_record(
         &self,
-        domain: &DomainCreateDocument,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<DomainDocument> {
+        domain: &DomainConfigureDocument,
+    ) -> Result<DomainPromptRecord> {
+        if domain.prompt_config.is_some() && domain.encrypted_payload.is_none() {
+            bail!("domain configure requires encrypted_payload for prompt_config");
+        }
         let mut body =
-            serde_json::to_value(domain).context("failed to encode domain create payload")?;
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
+            serde_json::to_value(domain).context("failed to encode domain configure payload")?;
+        if domain.encrypted_payload.is_some()
+            && let Some(object) = body.as_object_mut()
+        {
+            object.remove("prompt_config");
         }
         let response = self
             .http
-            .post(format!("{}/api/v1/domains", self.base_url))
+            .post(format!("{}/api/v1/domains/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .context("failed to create domain")?;
+            .context("failed to configure domain")?;
 
         match response.status() {
             StatusCode::OK | StatusCode::CREATED => response
-                .json()
+                .json::<DomainPromptRecord>()
                 .await
-                .context("failed to decode created domain"),
-            status => bail!("domain create failed with status {status}"),
+                .context("failed to decode configured domain"),
+            status => bail!("domain configure failed with status {status}"),
         }
     }
 
-    /// Apply a partial metadata update to a domain document.
-    pub async fn update_domain_document(
+    /// Configure a domain in one backend-owned sequence and return the canonical document.
+    pub async fn configure_domain_document(
         &self,
-        domain: &Slug,
-        update: &DomainUpdateDocument,
+        domain: &DomainConfigureDocument,
     ) -> Result<DomainDocument> {
-        let body = serde_json::to_value(update).context("failed to encode domain update patch")?;
+        Ok(self.configure_domain_record(domain).await?.to_document())
+    }
+
+    /// Fetch one domain record by slug.
+    pub async fn fetch_domain_record(&self, domain: &Slug) -> Result<Option<DomainPromptRecord>> {
+        let selector = domain.as_str();
         let response = self
             .http
-            .patch(format!("{}/api/v1/domains/{domain}", self.base_url))
+            .get(format!("{}/api/v1/domains/{selector}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .with_context(|| format!("failed to update domain {domain}"))?;
+            .with_context(|| format!("failed to fetch domain {domain}"))?;
 
         match response.status() {
             StatusCode::OK => response
-                .json()
+                .json::<DomainPromptRecord>()
                 .await
-                .context("failed to decode updated domain"),
-            status => bail!("domain update failed with status {status}"),
+                .map(Some)
+                .context("failed to decode domain"),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => bail!("domain request failed with status {status}"),
         }
     }
 
-    /// Fetch a domain manifest document including prompt configuration.
-    pub async fn get_domain_manifest_document(
-        &self,
-        domain: &Slug,
-    ) -> Result<DomainPromptDocument> {
-        let response = self
-            .http
-            .get(format!("{}/api/v1/domains/{domain}/prompt", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to fetch domain prompt {domain}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode domain prompt"),
-            status => bail!("domain prompt get failed with status {status}"),
-        }
-    }
-
-    /// Update a domain manifest prompt document.
-    pub async fn update_domain_manifest_document(
-        &self,
-        domain: &Slug,
-        prompt_config: nenjo::manifest::DomainPromptConfig,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<DomainPromptMutationResult> {
-        let mut body = serde_json::json!({
-            "prompt_config": prompt_config
-        });
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
-        }
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/domains/{domain}/prompt", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update domain prompt {domain}"))?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let body: PromptMutationEnvelope<nenjo::manifest::DomainPromptConfig> = response
-                    .json()
-                    .await
-                    .context("failed to decode updated domain prompt")?;
-                Ok(DomainPromptMutationResult {
-                    prompt_config: body.prompt_config.unwrap_or(prompt_config),
-                })
-            }
-            status => bail!("domain prompt update failed with status {status}"),
-        }
-    }
-
-    /// Delete a domain document by ID.
-    pub async fn delete_domain_document(&self, domain: &Slug) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/api/v1/domains/{domain}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to delete domain {domain}"))?;
-
-        match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("domain delete failed with status {status}"),
-        }
+    /// Fetch one domain document by slug.
+    pub async fn fetch_domain_document(&self, domain: &Slug) -> Result<Option<DomainDocument>> {
+        Ok(self
+            .fetch_domain_record(domain)
+            .await?
+            .map(|record| record.to_document()))
     }
 
     /// Create a project manifest resource.
     pub async fn create_project_document(
         &self,
         project: &ProjectCreateDocument,
+        id: Option<Uuid>,
     ) -> Result<ProjectDocument> {
-        let body =
+        let mut body =
             serde_json::to_value(project).context("failed to encode project create payload")?;
+        if let Some(id) = id {
+            body["id"] = serde_json::to_value(id)?;
+        }
         let response = self
             .http
             .post(format!("{}/api/v1/projects", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create project")?;
 
@@ -1066,7 +762,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/projects/{project_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&serde_json::Value::Object(body))
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update project {project_ref}"))?;
 
@@ -1085,106 +781,13 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/projects/{project}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete project {project}"))?;
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
             status => bail!("project delete failed with status {status}"),
-        }
-    }
-
-    /// List library knowledge document metadata records for a project.
-    pub async fn list_project_document_metadata(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Vec<ProjectDocumentMetadata>> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to list documents for project {project_id}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document metadata"),
-            status => bail!("library knowledge document list failed with status {status}"),
-        }
-    }
-
-    /// Fetch one library knowledge document metadata record.
-    pub async fn get_project_document_metadata(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<Option<ProjectDocumentMetadata>> {
-        let documents = self.list_project_document_metadata(project_id).await?;
-        Ok(documents
-            .into_iter()
-            .find(|document| document.id == document_id))
-    }
-
-    /// Fetch raw library knowledge document content from the platform.
-    pub async fn fetch_project_document_content(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<KnowledgeDocContentResponse> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}/content",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to fetch content for library knowledge document {document_id}")
-            })?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document content"),
-            status => bail!("library knowledge document content fetch failed with status {status}"),
-        }
-    }
-
-    /// List graph edges connected to a library knowledge document.
-    pub async fn list_project_document_edges(
-        &self,
-        project_id: Uuid,
-        document_id: Uuid,
-    ) -> Result<Vec<ProjectDocumentEdge>> {
-        let response = self
-            .http
-            .get(format!(
-                "{}/api/v1/projects/{project_id}/documents/{document_id}/edges",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to list edges for library knowledge document {document_id}")
-            })?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode library knowledge document edges"),
-            status => bail!("library knowledge document edge list failed with status {status}"),
         }
     }
 
@@ -1196,19 +799,22 @@ impl PlatformManifestClient {
         item: &KnowledgeDocCreateDocument,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<KnowledgeDocSummary> {
+        if encrypted_payload.is_none() {
+            bail!("library knowledge document create requires encrypted_payload for content");
+        }
         let content_type = item
             .content_type
             .clone()
             .unwrap_or_else(|| "text/plain".to_string());
-        let file_part = multipart::Part::bytes(item.content.clone().into_bytes())
+        let mut form = multipart::Form::new();
+        let placeholder = multipart::Part::bytes(vec![0_u8])
             .file_name(item.filename.clone())
             .mime_str(&content_type)
-            .context("failed to encode library knowledge document mime type")?;
-        let mut form = multipart::Form::new().part("file", file_part);
+            .context("failed to build encrypted library knowledge document placeholder file")?;
+        form = form.part("file", placeholder);
         form = form.text("item_id", doc_id.to_string());
-        if let Some(doc) = item.doc.as_ref() {
-            form = form.text("slug", doc.to_string());
-        }
+        form = form.text("filename", item.filename.clone());
+        form = form.text("content_type", content_type);
         if let Some(path) = item.path.as_deref() {
             form = form.text("path", path.to_string());
         }
@@ -1241,7 +847,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/knowledge/{pack}/items", self.base_url))
             .header("X-API-Key", &self.api_key)
             .multipart(form)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!(
@@ -1258,7 +864,22 @@ impl PlatformManifestClient {
                     .context("failed to decode created library knowledge document")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            status => bail!("library knowledge document create failed with status {status}"),
+            StatusCode::CONFLICT => {
+                let body = response.text().await.unwrap_or_default();
+                if body.trim().is_empty() {
+                    bail!(
+                        "library knowledge document create conflicted in pack {pack}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc"
+                    )
+                } else {
+                    bail!(
+                        "library knowledge document create conflicted in pack {pack}: {}; search_knowledge for the filename/title to find the existing document.slug, then call update_knowledge_doc with slug instead of create_knowledge_doc",
+                        body.trim()
+                    )
+                }
+            }
+            _ => Err(self
+                .response_error(response, "library knowledge document create")
+                .await),
         }
     }
 
@@ -1284,7 +905,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to update metadata for library knowledge document {doc}")
@@ -1298,9 +919,9 @@ impl PlatformManifestClient {
                     .context("failed to decode updated library knowledge document metadata")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            status => {
-                bail!("library knowledge document metadata update failed with status {status}")
-            }
+            _ => Err(self
+                .response_error(response, "library knowledge document metadata update")
+                .await),
         }
     }
 
@@ -1309,13 +930,13 @@ impl PlatformManifestClient {
         &self,
         pack: &Slug,
         doc: &Slug,
-        content: &str,
+        _content: &str,
         encrypted_payload: Option<serde_json::Value>,
     ) -> Result<KnowledgeDocSummary> {
-        let mut body = serde_json::json!({ "content": content });
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
-        }
+        let encrypted_payload = encrypted_payload.ok_or_else(|| {
+            anyhow::anyhow!("library knowledge document content update requires encrypted_payload")
+        })?;
+        let body = serde_json::json!({ "encrypted_payload": encrypted_payload });
 
         let response = self
             .http
@@ -1325,7 +946,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to update content for library knowledge document {doc}")
@@ -1339,9 +960,9 @@ impl PlatformManifestClient {
                     .context("failed to decode updated library knowledge document")?;
                 Ok(knowledge_doc_summary(pack, document))
             }
-            status => {
-                bail!("library knowledge document content update failed with status {status}")
-            }
+            _ => Err(self
+                .response_error(response, "library knowledge document content update")
+                .await),
         }
     }
 
@@ -1358,7 +979,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to list edges for library knowledge document {doc}")
@@ -1369,7 +990,9 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode library knowledge document edges"),
-            status => bail!("library knowledge document edge list failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge list")
+                .await),
         }
     }
 
@@ -1394,7 +1017,7 @@ impl PlatformManifestClient {
                 "edge_type": edge_type,
                 "note": note,
             }))
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to create edge for library knowledge document {doc}")
@@ -1405,7 +1028,41 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode created library knowledge document edge"),
-            status => bail!("library knowledge document edge create failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge create")
+                .await),
+        }
+    }
+
+    /// Replace all outbound graph edges for a library knowledge document.
+    pub async fn replace_knowledge_doc_edges(
+        &self,
+        pack: &Slug,
+        doc: &Slug,
+        related: &[KnowledgeDocEdgeReplaceItem<'_>],
+    ) -> Result<Vec<KnowledgeDocEdgeResponse>> {
+        let response = self
+            .http
+            .put(format!(
+                "{}/api/v1/knowledge/{pack}/items/{doc}/edges",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({ "related": related }))
+            .send_with_platform_retry()
+            .await
+            .with_context(|| {
+                format!("failed to replace edges for library knowledge document {doc}")
+            })?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode replaced library knowledge document edges"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge replace")
+                .await),
         }
     }
 
@@ -1423,7 +1080,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to delete edge {edge_id} for library knowledge document {doc}")
@@ -1431,7 +1088,9 @@ impl PlatformManifestClient {
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("library knowledge document edge delete failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document edge delete")
+                .await),
         }
     }
 
@@ -1444,13 +1103,15 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete library knowledge document {doc}"))?;
 
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("library knowledge document delete failed with status {status}"),
+            _ => Err(self
+                .response_error(response, "library knowledge document delete")
+                .await),
         }
     }
 
@@ -1493,7 +1154,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list tasks for project {}", query.project))?;
 
@@ -1512,7 +1173,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/auth/me", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to fetch authenticated org context")?;
 
@@ -1552,7 +1213,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to list notification sessions")?;
 
@@ -1589,7 +1250,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list notification messages for {session_id}"))?;
 
@@ -1608,7 +1269,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch task {task_id}"))?;
 
@@ -1625,7 +1286,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/tasks", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create project task")?;
 
@@ -1648,7 +1309,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/tasks/bulk", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to bulk create project tasks")?;
 
@@ -1672,7 +1333,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update task {task_id}"))?;
 
@@ -1691,7 +1352,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/tasks/{task_id}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete task {task_id}"))?;
 
@@ -1731,7 +1392,7 @@ impl PlatformManifestClient {
             .http
             .get(url)
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!(
@@ -1761,7 +1422,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch execution run {execution_run_id}"))?;
 
@@ -1784,7 +1445,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/executions", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(request)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create execution run")?;
 
@@ -1811,7 +1472,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&ExecutionCommandRequest { command })
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| {
                 format!("failed to send '{command}' command to execution run {execution_run_id}")
@@ -1826,131 +1487,37 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Create a routine document and optional routine graph.
-    pub(crate) async fn create_routine_document(
+    /// Configure a routine in one backend-owned sequence and return the canonical record.
+    pub(crate) async fn configure_routine_record(
         &self,
-        routine: &RoutineCreateDocument,
-    ) -> Result<RoutineDocument> {
-        let body = RoutineCreateApiBody {
-            name: &routine.name,
-            description: routine.description.as_deref(),
-            trigger: routine.trigger,
+        routine: &RoutineConfigureDocument,
+    ) -> Result<RoutineRecord> {
+        let body = RoutineConfigureApiBody {
+            id: routine.id,
+            routine: routine.routine.as_ref(),
             metadata: routine.metadata.as_ref(),
+            runtime_metadata: routine.runtime_metadata.as_ref(),
+            encrypted_payload: routine.encrypted_payload.as_ref(),
+            graph: routine.graph.as_ref().map(routine_configure_graph_body),
         };
         let response = self
             .http
-            .post(format!("{}/api/v1/routines", self.base_url))
+            .post(format!("{}/api/v1/routines/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .context("failed to create routine")?;
+            .context("failed to configure routine")?;
 
         match response.status() {
-            StatusCode::OK | StatusCode::CREATED => {
-                let detail: RoutineResponseDetail = response
-                    .json()
-                    .await
-                    .context("failed to decode created routine")?;
-                let created = routine_document_from_detail(detail);
-                if let Some(graph) = routine.graph.as_ref() {
-                    let routine_ref = Slug::derive(&created.summary.name);
-                    self.save_routine_graph_document(
-                        &routine_ref,
-                        &routine_graph_body(
-                            Some(&routine.name),
-                            Some(routine.description.as_deref()),
-                            routine.trigger,
-                            routine.metadata.as_ref(),
-                            graph,
-                        ),
-                    )
-                    .await
-                } else {
-                    Ok(created)
-                }
-            }
-            status => bail!("routine create failed with status {status}"),
-        }
-    }
-
-    /// Update routine metadata and optional routine graph.
-    pub(crate) async fn update_routine_document(
-        &self,
-        routine_ref: &Slug,
-        routine: &RoutineUpdateDocument,
-    ) -> Result<RoutineDocument> {
-        if let Some(graph) = routine.graph.as_ref() {
-            return self
-                .save_routine_graph_document(
-                    routine_ref,
-                    &routine_graph_body(
-                        routine.name.as_deref(),
-                        routine.description.as_ref().map(|value| value.as_deref()),
-                        routine.trigger,
-                        routine.metadata.as_ref(),
-                        graph,
-                    ),
-                )
-                .await;
-        }
-
-        let body = RoutineUpdateApiBody {
-            name: routine.name.as_deref(),
-            description: routine.description.as_ref().map(|value| value.as_deref()),
-            trigger: routine.trigger,
-            metadata: routine.metadata.as_ref(),
-        };
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/routines/{routine_ref}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update routine {routine_ref}"))?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let detail: RoutineResponseDetail = response
-                    .json()
-                    .await
-                    .context("failed to decode updated routine")?;
-                Ok(routine_document_from_detail(detail))
-            }
-            status => bail!("routine update failed with status {status}"),
-        }
-    }
-
-    async fn save_routine_graph_document(
-        &self,
-        routine_ref: &Slug,
-        body: &SaveRoutineGraphBody<'_>,
-    ) -> Result<RoutineDocument> {
-        let response = self
-            .http
-            .patch(format!(
-                "{}/api/v1/routines/{routine_ref}/graph",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("failed to save routine graph for {routine_ref}"))?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let detail: RoutineResponseDetail = response
-                    .json()
-                    .await
-                    .context("failed to decode updated routine graph")?;
-                Ok(routine_document_from_detail(detail))
-            }
+            StatusCode::OK | StatusCode::CREATED => response
+                .json::<RoutineRecord>()
+                .await
+                .context("failed to decode configured routine"),
             status => {
                 let body = response.text().await.unwrap_or_default();
                 bail!(
-                    "routine graph save failed with status {status}: {}",
+                    "routine configure failed with status {status}: {}",
                     response_error_preview(&body)
                 )
             }
@@ -1963,7 +1530,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/routines/{routine_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete routine {routine_ref}"))?;
 
@@ -1991,7 +1558,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/models", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create model")?;
 
@@ -2016,7 +1583,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/models/{model_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update model {model_ref}"))?;
 
@@ -2035,7 +1602,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/models/{model}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete model {model}"))?;
 
@@ -2056,7 +1623,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch council {council_ref}"))?;
 
@@ -2081,7 +1648,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/councils", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to create council")?;
 
@@ -2110,7 +1677,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update council {council_ref}"))?;
 
@@ -2132,7 +1699,7 @@ impl PlatformManifestClient {
             .http
             .delete(format!("{}/api/v1/councils/{council_ref}", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to delete council {council_ref}"))?;
 
@@ -2158,7 +1725,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to add member to council {council_ref}"))?;
 
@@ -2191,7 +1758,7 @@ impl PlatformManifestClient {
             ))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update member in council {council_ref}"))?;
 
@@ -2220,7 +1787,7 @@ impl PlatformManifestClient {
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to remove member from council {council_ref}"))?;
 
@@ -2230,117 +1797,39 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Create a context block document.
-    pub async fn create_context_block_document(
+    /// Configure a context block in one backend-owned sequence and return the canonical document.
+    pub async fn configure_context_block_document(
         &self,
-        context_block: &ContextBlockCreateDocument,
-        encrypted_payload: Option<serde_json::Value>,
+        context_block: &ContextBlockConfigureDocument,
     ) -> Result<ContextBlockDocument> {
+        if context_block.template.is_some() && context_block.encrypted_payload.is_none() {
+            bail!("context block configure requires encrypted_payload for template");
+        }
         let mut body = serde_json::to_value(context_block)
-            .context("failed to encode context block create payload")?;
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
+            .context("failed to encode context block configure payload")?;
+        if context_block.encrypted_payload.is_some()
+            && let Some(object) = body.as_object_mut()
+        {
+            object.remove("template");
         }
         let response = self
             .http
-            .post(format!("{}/api/v1/context-blocks", self.base_url))
+            .post(format!("{}/api/v1/context-blocks/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(&body)
-            .send()
+            .send_with_platform_retry()
             .await
-            .context("failed to create context block")?;
+            .context("failed to configure context block")?;
 
         match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json()
-                .await
-                .context("failed to decode created context block"),
-            status => bail!("context block create failed with status {status}"),
-        }
-    }
-
-    /// Apply a partial metadata update to a context block document.
-    pub async fn update_context_block_document(
-        &self,
-        context_block_ref: &Slug,
-        context_block: &ContextBlockUpdateDocument,
-    ) -> Result<ContextBlockDocument> {
-        let body = serde_json::to_value(context_block)
-            .context("failed to encode context block update patch")?;
-        let response = self
-            .http
-            .patch(format!(
-                "{}/api/v1/context-blocks/{context_block_ref}",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update context block {context_block_ref}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode updated context block"),
-            status => bail!("context block update failed with status {status}"),
-        }
-    }
-
-    /// Update a context block template document.
-    pub async fn update_context_block_content_document(
-        &self,
-        context_block: &Slug,
-        template: &str,
-        encrypted_payload: Option<serde_json::Value>,
-    ) -> Result<crate::manifest_mcp::ContextBlockContentMutationResult> {
-        let mut body = serde_json::json!({ "template": template });
-        if let Some(encrypted_payload) = encrypted_payload {
-            body["encrypted_payload"] = encrypted_payload;
-        }
-        let response = self
-            .http
-            .patch(format!(
-                "{}/api/v1/context-blocks/{context_block}/content",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("failed to update context block content {context_block}"))?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let body: ContentMutationEnvelope<String> = response
+            StatusCode::OK | StatusCode::CREATED => {
+                let record: ContextBlockContentRecord = response
                     .json()
                     .await
-                    .context("failed to decode updated context block content")?;
-                Ok(crate::manifest_mcp::ContextBlockContentMutationResult {
-                    template: body.template.unwrap_or_else(|| template.to_string()),
-                })
+                    .context("failed to decode configured context block")?;
+                Ok(record.to_document())
             }
-            status => bail!("context block content update failed with status {status}"),
-        }
-    }
-
-    /// Delete a context block document by slug.
-    pub async fn delete_context_block_document(&self, context_block: &Slug) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!(
-                "{}/api/v1/context-blocks/{context_block}",
-                self.base_url
-            ))
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to delete context block {context_block}"))?;
-
-        match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("context block delete failed with status {status}"),
+            status => bail!("context block configure failed with status {status}"),
         }
     }
 
@@ -2359,7 +1848,7 @@ impl PlatformManifestClient {
                 id
             ))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch manifest resource {path}{id}"))?;
 
@@ -2398,12 +1887,30 @@ impl PlatformManifestClient {
         header::HeaderValue::from_str(&self.api_key).context("invalid api key header")
     }
 
-    pub async fn list_knowledge_packs(&self) -> Result<Vec<PlatformKnowledgePackMetadata>> {
+    async fn response_error(
+        &self,
+        response: reqwest::Response,
+        operation: impl AsRef<str>,
+    ) -> anyhow::Error {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if body.trim().is_empty() {
+            anyhow!("{} failed with status {status}", operation.as_ref())
+        } else {
+            anyhow!(
+                "{} failed with status {status}: {}",
+                operation.as_ref(),
+                body.trim()
+            )
+        }
+    }
+
+    pub async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackRecord>> {
         let response = self
             .http
             .get(format!("{}/api/v1/knowledge", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .context("failed to list knowledge packs")?;
 
@@ -2426,7 +1933,7 @@ impl PlatformManifestClient {
             .post(format!("{}/api/v1/knowledge", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(pack)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to create knowledge pack {}", pack.name))?;
 
@@ -2451,7 +1958,7 @@ impl PlatformManifestClient {
             .patch(format!("{}/api/v1/knowledge/{pack}", self.base_url))
             .header("X-API-Key", &self.api_key)
             .json(update)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to update knowledge pack {pack}"))?;
 
@@ -2469,7 +1976,7 @@ impl PlatformManifestClient {
         self.list_knowledge_packs()
             .await?
             .into_iter()
-            .find(|candidate| candidate.slug == *pack)
+            .find(|candidate| Slug::derive(&candidate.slug) == *pack)
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("knowledge pack not found: {pack}"))
     }
@@ -2482,7 +1989,7 @@ impl PlatformManifestClient {
             .http
             .get(format!("{}/api/v1/knowledge/{pack}/items", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .send()
+            .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to list knowledge documents for pack {pack}"))?;
 
@@ -2499,19 +2006,71 @@ impl PlatformManifestClient {
         self.list_knowledge_doc_metadata(pack)
             .await?
             .into_iter()
-            .find(|candidate| candidate.slug == *doc)
+            .find(|candidate| Slug::derive(&candidate.slug) == *doc)
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("knowledge document not found in pack {pack}: {doc}"))
     }
+
+    /// Resolve a document reference from slug, selector, filename, or search metadata path.
+    pub async fn resolve_knowledge_doc_reference(
+        &self,
+        pack: &Slug,
+        reference: &str,
+    ) -> Result<Slug> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            bail!("knowledge document reference cannot be empty");
+        }
+
+        if let Ok(slug) = Slug::parse(reference) {
+            return Ok(slug);
+        }
+
+        let docs = self.list_knowledge_doc_metadata(pack).await?;
+        if let Some(doc) = docs.iter().find(|candidate| candidate.slug == reference) {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        let derived = Slug::derive(reference);
+        if let Some(doc) = docs
+            .iter()
+            .find(|candidate| Slug::derive(&candidate.slug) == derived)
+        {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        let path_candidates = knowledge_doc_reference_paths(reference);
+        if let Some(doc) = docs.iter().find(|candidate| {
+            let relative = candidate.library_doc_relative_path();
+            path_candidates.iter().any(|path| path == &relative)
+                || candidate.filename == reference
+                || candidate.library_selector(pack.as_str()) == reference
+        }) {
+            return Ok(Slug::derive(&doc.slug));
+        }
+
+        bail!("knowledge document not found in pack {pack}: {reference}")
+    }
 }
 
-fn knowledge_doc_summary(
-    pack: &Slug,
-    document: KnowledgeDocMetadataResponse,
-) -> KnowledgeDocSummary {
+fn knowledge_doc_reference_paths(reference: &str) -> Vec<String> {
+    let mut paths = vec![reference.trim_matches('/').to_string()];
+    if reference.contains('.')
+        && !reference.contains('/')
+        && let Some((stem, extension)) = reference.rsplit_once('.')
+        && (extension == "md" || extension == "markdown")
+    {
+        paths.push(format!("{}.md", stem.replace('.', "/")));
+        paths.push(stem.replace('.', "/"));
+    }
+    paths
+}
+
+fn knowledge_doc_summary(pack: &Slug, document: KnowledgeDocumentRecord) -> KnowledgeDocSummary {
+    let updated_at = document.updated_at_rfc3339();
     KnowledgeDocSummary {
         pack: pack.clone(),
-        doc: document.slug,
+        slug: Slug::derive(&document.slug),
         filename: document.filename,
         path: document.path,
         title: document.title,
@@ -2519,17 +2078,15 @@ fn knowledge_doc_summary(
         summary: document.summary,
         tags: document.tags,
         content_type: document.content_type,
-        updated_at: document.updated_at,
+        updated_at,
     }
 }
 
-fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePackDocument {
+fn knowledge_pack_document(pack: KnowledgePackRecord) -> KnowledgePackDocument {
     KnowledgePackDocument {
-        id: pack.id,
-        slug: pack.slug,
+        slug: Slug::derive(&pack.slug),
         name: pack.name,
         description: pack.description,
-        status: pack.status,
         source_type: pack.source_type,
         read_only: pack.read_only,
         selector: pack.selector,
@@ -2541,6 +2098,10 @@ fn knowledge_pack_document(pack: PlatformKnowledgePackMetadata) -> KnowledgePack
 mod tests {
     use super::*;
     use crate::manifest_mcp::{RoutineEdgeInput, RoutineStepInput};
+    use nenjo::manifest::RoutineStepType;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn routine_graph_body_uses_step_slugs_for_platform_refs() {
@@ -2582,5 +2143,56 @@ mod tests {
             Slug::derive("implement_pr_changes")
         );
         assert_eq!(body.edges[0].target_step, Slug::derive("evaluate_result"));
+    }
+
+    #[tokio::test]
+    async fn platform_client_retries_cloneable_request_once_after_429() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read test server address");
+
+        let server = thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept test request");
+                let mut buffer = [0_u8; 4096];
+                let bytes = stream.read(&mut buffer).expect("read test request");
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+
+                let response = if attempt == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let body = r#"[{"id":"00000000-0000-0000-0000-000000000001","slug":"humanizer","name":"Humanizer","description":null,"source_type":"uploaded","read_only":false,"metadata":{},"selector":"lib:humanizer","version":null,"created_at":"2026-06-11T00:00:00Z","updated_at":"2026-06-11T00:00:00Z"}]"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write test response");
+            }
+            request_lines
+        });
+
+        let client = PlatformManifestClient::new(format!("http://{addr}"), "test-key")
+            .expect("build platform client");
+        let packs = client
+            .list_knowledge_packs()
+            .await
+            .expect("list knowledge packs after retry");
+
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].slug, "humanizer");
+
+        let request_lines = server.join().expect("join test server");
+        assert_eq!(
+            request_lines,
+            vec![
+                "GET /api/v1/knowledge HTTP/1.1".to_string(),
+                "GET /api/v1/knowledge HTTP/1.1".to_string()
+            ]
+        );
     }
 }

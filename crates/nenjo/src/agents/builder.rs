@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::async_ops::AsyncOpManager;
 use super::instance::{
     AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
 };
@@ -260,7 +261,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         let model_provider = provider.create_model_provider(&model_manifest).await?;
         let model = AgentModel {
             model_name: model_manifest.model.clone(),
-            id: model_manifest.id,
+            model_slug: model_manifest.slug.clone(),
             temperature: model_manifest.temperature.unwrap_or(0.7),
             model_provider,
         };
@@ -372,6 +373,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 config: self.agent_config,
                 provider_runtime,
                 sub_agent_ctx: self.child_delegation_ctx,
+                async_ops: AsyncOpManager::new(),
                 execution_mode: self.execution_mode,
                 hook_runtime: self.hook_runtime,
             },

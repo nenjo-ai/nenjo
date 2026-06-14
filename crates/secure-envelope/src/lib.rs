@@ -119,12 +119,14 @@ where
 pub struct SecureEnvelopeBus<T: Transport> {
     raw: EventBus<T>,
     codec: Arc<dyn EnvelopeCodec>,
+    org_id: Uuid,
 }
 
 /// Cloneable outbound secure-envelope publisher.
 pub struct SecureEnvelopePublisher<T: Transport> {
     raw: EventBusPublisher<T>,
     codec: Arc<dyn EnvelopeCodec>,
+    org_id: Uuid,
 }
 
 impl<T: Transport> Clone for SecureEnvelopePublisher<T> {
@@ -132,6 +134,7 @@ impl<T: Transport> Clone for SecureEnvelopePublisher<T> {
         Self {
             raw: self.raw.clone(),
             codec: Arc::clone(&self.codec),
+            org_id: self.org_id,
         }
     }
 }
@@ -151,13 +154,14 @@ impl<T: Transport> std::fmt::Debug for SecureEnvelopeBus<T> {
 
 impl<T: Transport> SecureEnvelopeBus<T> {
     /// Wrap a raw [`EventBus`] with the provided secure envelope codec.
-    pub fn new<C>(raw: EventBus<T>, codec: C) -> Self
+    pub fn new<C>(raw: EventBus<T>, codec: C, org_id: Uuid) -> Self
     where
         C: EnvelopeCodec,
     {
         Self {
             raw,
             codec: Arc::new(codec),
+            org_id,
         }
     }
 
@@ -171,6 +175,7 @@ impl<T: Transport> SecureEnvelopeBus<T> {
         SecureEnvelopePublisher {
             raw: self.raw.publisher(),
             codec: Arc::clone(&self.codec),
+            org_id: self.org_id,
         }
     }
 
@@ -289,7 +294,7 @@ impl<T: Transport> SecureEnvelopePublisher<T> {
 
         let payload = serde_json::to_value(&command)?;
         let envelope = Envelope::new(actor_user_id, payload);
-        let subject = nenjo_events::requests_subject(capability);
+        let subject = nenjo_events::requests_subject(self.org_id, capability);
         self.raw.send_envelope(&subject, &envelope).await
     }
 

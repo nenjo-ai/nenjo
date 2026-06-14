@@ -3,65 +3,7 @@ use nenjo::{ToolCategory, ToolSpec};
 fn agent_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "The slug of the target agent."
-    })
-}
-
-fn agent_update_data_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Partial patch for the target agent. Omit any field you do not want to change.",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "The agent's runtime name. Omit to leave the current name unchanged."
-            },
-            "description": {
-                "type": ["string", "null"],
-                "description": "Human-readable description of what the agent is responsible for. Set to null to clear it, or omit to leave it unchanged."
-            },
-            "color": {
-                "type": ["string", "null"],
-                "description": "Hex color used to render the agent in the dashboard. Set to null to clear it, or omit to leave it unchanged."
-            },
-            "model": {
-                "type": ["string", "null"],
-                "description": "Directly assigned model slug for this agent. Use null to clear the current model assignment, or omit to leave it unchanged."
-            },
-            "abilities": {
-                "type": "array",
-                "description": "Full replacement list of ability slugs assigned to this agent. Omit to leave assignments unchanged.",
-                "items": { "type": "string" }
-            },
-            "domains": {
-                "type": "array",
-                "description": "Full replacement list of domain slugs assigned to this agent. Omit to leave assignments unchanged.",
-                "items": { "type": "string" }
-            }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn agent_create_data_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Fields for a new agent. Omit optional fields you do not want to set; do not pass null.",
-        "properties": {
-            "description": {
-                "type": "string",
-                "description": "Optional human-readable description of what the agent is responsible for. Omit if unknown."
-            },
-            "color": {
-                "type": "string",
-                "description": "Optional hex color used to render the agent in the dashboard. Omit if unknown."
-            },
-            "model": {
-                "type": "string",
-                "description": "Optional directly assigned model slug for this agent. Omit if the model should be selected later."
-            }
-        },
-        "additionalProperties": false
+        "description": "Existing agent slug. Use `slug` from list_agents or get_agent. For configure_agent, omit `agent` to create a new agent."
     })
 }
 
@@ -128,12 +70,63 @@ fn prompt_config_schema() -> serde_json::Value {
     })
 }
 
+fn configure_metadata_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Agent metadata patch. Required on create because metadata.name is required when agent is omitted. On update, omitted fields are unchanged. Local manifest backend stores color as optional; platform backend resets color to its default when color is null because platform color is non-null.",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Agent runtime/display name. Required when creating a new agent."
+            },
+            "description": {
+                "type": ["string", "null"],
+                "description": "Human-readable description. Omit to leave unchanged; set null to clear on both platform and local manifest backends."
+            },
+            "color": {
+                "type": ["string", "null"],
+                "description": "Hex dashboard color. Omit to leave unchanged. Set null to clear local manifest color; on the platform backend, null resets to the default dashboard color because platform color is non-null."
+            },
+            "model": {
+                "type": ["string", "null"],
+                "description": "Model slug. Omit to leave unchanged; set null to clear the direct model assignment."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn configure_assignments_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Full replacement assignment lists. Omit a field to leave that assignment type unchanged; pass an empty array to clear it.",
+        "properties": {
+            "abilities": {
+                "type": "array",
+                "description": "Full replacement list of ability names/slugs assigned to this agent.",
+                "items": { "type": "string" }
+            },
+            "domains": {
+                "type": "array",
+                "description": "Full replacement list of domain slugs assigned to this agent.",
+                "items": { "type": "string" }
+            },
+            "mcp_servers": {
+                "type": "array",
+                "description": "Full replacement list of MCP server slugs assigned to this agent.",
+                "items": { "type": "string" }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// Return manifest MCP tool definitions for agent resources.
 pub fn agent_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_agents".to_string(),
-            description: "List agents so you can find an agent slug before reading, updating, or deleting one."
+            description: "List visible agents as prompt-free summaries. Use a returned `slug` as the `agent` value in get_agent or configure_agent. This does not include prompt_config; call get_agent for the full agent document."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -144,7 +137,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_agent".to_string(),
-            description: "Get one agent's name, description, color, model, domains, abilities, scopes, MCP assignments, flags, and heartbeat by slug."
+            description: "Get one agent's full AgentDocument by slug, including prompt_config, assignments, platform_scopes, prompt lock state, and heartbeat."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -157,83 +150,16 @@ pub fn agent_tools() -> Vec<ToolSpec> {
             category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "get_agent_prompt".to_string(),
-            description: "Get one agent's prompt_config, including system_prompt, developer_prompt, templates, and memory_profile, by slug."
+            name: "configure_agent".to_string(),
+            description: "Create or update one agent in a single backend-owned sequence. Omit `agent` to create; include `agent` to update by slug. On create, metadata.name is required. Omitted fields are unchanged on update. prompt_config is a partial merge patch. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `agent: AgentDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["agent"],
-                "properties": {
-                    "agent": agent_ref_schema()
-                },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "create_agent".to_string(),
-            description: "Create one agent with top-level name, description, color, and model slug. Agent platform scopes are managed outside this MCP tool."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The agent's runtime name."
-                    },
-                    "description": agent_create_data_schema()["properties"]["description"].clone(),
-                    "color": agent_create_data_schema()["properties"]["color"].clone(),
-                    "model": agent_create_data_schema()["properties"]["model"].clone()
-                },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_agent".to_string(),
-            description: "Update one agent by slug. Supports top-level name, description, color, model slug, and full replacement ability/domain assignments. Use update_agent_prompt for prompt_config. Agent platform scopes are managed outside this MCP tool."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["agent"],
                 "properties": {
                     "agent": agent_ref_schema(),
-                    "name": agent_update_data_schema()["properties"]["name"].clone(),
-                    "description": agent_update_data_schema()["properties"]["description"].clone(),
-                    "color": agent_update_data_schema()["properties"]["color"].clone(),
-                    "model": agent_update_data_schema()["properties"]["model"].clone(),
-                    "abilities": agent_update_data_schema()["properties"]["abilities"].clone(),
-                    "domains": agent_update_data_schema()["properties"]["domains"].clone()
-                },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_agent_prompt".to_string(),
-            description: "Update one agent's prompt_config by slug using prompt_config.system_prompt, prompt_config.developer_prompt, prompt_config.templates, or prompt_config.memory_profile."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["agent"],
-                "properties": {
-                    "agent": agent_ref_schema(),
-                    "prompt_config": prompt_config_schema()
-                },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "delete_agent".to_string(),
-            description: "Delete one agent by slug when you want it removed from the manifest."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["agent"],
-                "properties": {
-                    "agent": agent_ref_schema()
+                    "metadata": configure_metadata_schema(),
+                    "prompt_config": prompt_config_schema(),
+                    "assignments": configure_assignments_schema()
                 },
                 "additionalProperties": false
             }),
@@ -247,51 +173,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_agent_optional_fields_do_not_accept_null() {
+    fn configure_agent_nullable_fields_clear_values() {
         let tools = agent_tools();
-        let create_agent = tools
+        let configure_agent = tools
             .iter()
-            .find(|tool| tool.name == "create_agent")
-            .expect("create_agent tool should exist");
-        let properties = create_agent
-            .parameters
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .expect("create_agent should define properties");
-
-        for field in ["description", "color", "model"] {
-            assert_eq!(properties[field]["type"], "string");
-            assert!(
-                !properties[field]["description"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("clear")
-            );
-        }
-    }
-
-    #[test]
-    fn update_agent_nullable_fields_still_clear_values() {
-        let tools = agent_tools();
-        let update_agent = tools
-            .iter()
-            .find(|tool| tool.name == "update_agent")
-            .expect("update_agent tool should exist");
-        let properties = update_agent
-            .parameters
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .expect("update_agent should define properties");
+            .find(|tool| tool.name == "configure_agent")
+            .expect("configure_agent tool should exist");
+        let metadata = &configure_agent.parameters["properties"]["metadata"]["properties"];
 
         assert_eq!(
-            properties["description"]["type"],
+            metadata["description"]["type"],
             serde_json::json!(["string", "null"])
         );
         assert!(
-            properties["description"]["description"]
+            metadata["description"]["description"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("clear")
+        );
+    }
+
+    #[test]
+    fn configure_agent_exposes_mcp_server_assignments() {
+        let tools = agent_tools();
+        let configure_agent = tools
+            .iter()
+            .find(|tool| tool.name == "configure_agent")
+            .expect("configure_agent tool should exist");
+
+        assert_eq!(
+            configure_agent.parameters["properties"]["assignments"]["properties"]["mcp_servers"]["description"],
+            serde_json::json!("Full replacement list of MCP server slugs assigned to this agent.")
+        );
+        assert!(
+            configure_agent
+                .description
+                .contains("assignment arrays are full replacements")
         );
     }
 }

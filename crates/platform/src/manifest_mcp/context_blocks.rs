@@ -3,31 +3,27 @@ use nenjo::{ToolCategory, ToolSpec};
 fn context_block_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "The slug of the target context block."
+        "description": "Existing context block slug. Use `slug` from list_context_blocks or get_context_block, not the path-like selector. For configure_context_block, omit `context_block` to create a new context block."
     })
 }
 
-fn context_block_create_schema() -> serde_json::Value {
+fn configure_metadata_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "template"],
+        "description": "Context block metadata patch. Required on create because metadata.name is required when context_block is omitted. On update, omitted fields are unchanged.",
         "properties": {
-            "name": { "type": "string", "description": "Stable runtime name for this context block." },
-            "path": { "type": "string", "description": "Folder path for this context block. Omit for the root folder." },
-            "description": { "type": ["string", "null"], "description": "Optional description of what this context block injects." },
-            "template": { "type": "string", "description": "MiniJinja template content for this context block." }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn context_block_update_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Partial patch for an existing context block. Omit fields you do not want to change. Use `update_context_block_content` for template changes.",
-        "properties": {
-            "name": { "type": "string", "description": "Rename the context block." },
-            "description": { "type": ["string", "null"], "description": "Update or clear the description. Omit to leave unchanged." }
+            "name": {
+                "type": "string",
+                "description": "Context block runtime/display name. Required when creating a new context block."
+            },
+            "path": {
+                "type": "string",
+                "description": "Folder path for this context block. Omit to leave unchanged."
+            },
+            "description": {
+                "type": ["string", "null"],
+                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+            }
         },
         "additionalProperties": false
     })
@@ -38,7 +34,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_context_blocks".to_string(),
-            description: "List context blocks so you can find a context block slug before reading, updating, or deleting one."
+            description: "List visible context blocks as template-free summaries. Use `slug` for context block tool calls; use dotted `selector` when constructing prompt references. This does not include template; call get_context_block for the full context block document."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -49,83 +45,57 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_context_block".to_string(),
-            description: "Get one context block's name, path, and description by slug.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["context_block"],
-                "properties": { "context_block": context_block_ref_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "get_context_block_content".to_string(),
-            description: "Get one context block's template text by slug.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["context_block"],
-                "properties": { "context_block": context_block_ref_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Read,
-        },
-        ToolSpec {
-            name: "create_context_block".to_string(),
-            description: "Create one context block with top-level name, optional path, description, and template."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["name", "template"],
-                "properties": context_block_create_schema()["properties"].clone(),
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
-        ToolSpec {
-            name: "update_context_block".to_string(),
-            description: "Update one context block's name or description by slug; use update_context_block_content to change template."
+            description: "Get one context block's full ContextBlockDocument by slug, including template, selector, name, path, and description."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "required": ["context_block"],
                 "properties": {
-                    "context_block": context_block_ref_schema(),
-                    "name": context_block_update_schema()["properties"]["name"].clone(),
-                    "description": context_block_update_schema()["properties"]["description"].clone()
+                    "context_block": context_block_ref_schema()
                 },
                 "additionalProperties": false
             }),
-            category: ToolCategory::Write,
+            category: ToolCategory::Read,
         },
         ToolSpec {
-            name: "update_context_block_content".to_string(),
-            description: "Update one context block's template text by slug using the top-level template field."
+            name: "configure_context_block".to_string(),
+            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.name and template are required. Omitted fields are unchanged on update. Returns `context_block: ContextBlockDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["context_block"],
                 "properties": {
                     "context_block": context_block_ref_schema(),
+                    "metadata": configure_metadata_schema(),
                     "template": {
                         "type": "string",
-                        "description": "MiniJinja template content for this context block."
+                        "description": "MiniJinja template content for this context block. Omit to leave unchanged on update."
                     }
                 },
                 "additionalProperties": false
             }),
             category: ToolCategory::Write,
         },
-        ToolSpec {
-            name: "delete_context_block".to_string(),
-            description: "Delete one context block by slug when you want it removed from the manifest."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "required": ["context_block"],
-                "properties": { "context_block": context_block_ref_schema() },
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Write,
-        },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_context_block_exposes_template() {
+        let tools = context_block_tools();
+        let configure_context_block = tools
+            .iter()
+            .find(|tool| tool.name == "configure_context_block")
+            .expect("configure_context_block tool should exist");
+
+        assert_eq!(
+            configure_context_block.parameters["properties"]["template"]["description"],
+            serde_json::json!(
+                "MiniJinja template content for this context block. Omit to leave unchanged on update."
+            )
+        );
+        assert!(configure_context_block.description.contains("template"));
+    }
 }

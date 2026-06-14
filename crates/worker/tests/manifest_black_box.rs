@@ -2,11 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig, Manifest,
-    McpServerManifest, ModelManifest, ProjectManifest, PromptConfig, RoutineManifest,
-    RoutineMetadata, RoutineTrigger,
+    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
+    RoutineTrigger,
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
@@ -59,7 +60,8 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
+        _edges: Option<nenjo_worker::handlers::manifest::DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         self.metadata_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -69,7 +71,7 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _client: &nenjo_platform::api_client::ApiClient,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
     ) -> Result<()> {
         self.content_syncs.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -78,7 +80,7 @@ impl ManifestStore for RecordingManifestStore {
     async fn remove_document(
         &self,
         doc: &Slug,
-        _metadata: Option<&nenjo_platform::api_client::DocumentSyncMeta>,
+        _metadata: Option<&nenjo_platform::api_client::KnowledgeDocumentRecord>,
     ) -> Result<()> {
         self.removals.lock().unwrap().push(doc.to_string());
         Ok(())
@@ -177,11 +179,10 @@ impl TestHarness {
     }
 }
 
-fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
+fn agent(_id: Uuid, name: &str, prompt: &str) -> AgentManifest {
     AgentManifest {
-        id,
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("{name} description")),
         prompt_config: PromptConfig {
             developer_prompt: prompt.into(),
@@ -199,9 +200,9 @@ fn agent(id: Uuid, name: &str, prompt: &str) -> AgentManifest {
     }
 }
 
-fn model(id: Uuid, name: &str) -> ModelManifest {
+fn model(_id: Uuid, name: &str) -> ModelManifest {
     ModelManifest {
-        id,
+        slug: Slug::derive(name),
         name: name.into(),
         description: None,
         model: "gpt-test".into(),
@@ -211,10 +212,10 @@ fn model(id: Uuid, name: &str) -> ModelManifest {
     }
 }
 
-fn routine(id: Uuid, name: &str) -> RoutineManifest {
+fn routine(_id: Uuid, name: &str) -> RoutineManifest {
     RoutineManifest {
-        id,
         name: name.into(),
+        slug: Slug::derive(name),
         description: None,
         trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
@@ -223,9 +224,8 @@ fn routine(id: Uuid, name: &str) -> RoutineManifest {
     }
 }
 
-fn project(id: Uuid, name: &str) -> ProjectManifest {
+fn project(_id: Uuid, name: &str) -> ProjectManifest {
     ProjectManifest {
-        id,
         name: name.into(),
         slug: Slug::derive(name),
         description: None,
@@ -233,9 +233,8 @@ fn project(id: Uuid, name: &str) -> ProjectManifest {
     }
 }
 
-fn council(id: Uuid, name: &str) -> CouncilManifest {
+fn council(_id: Uuid, name: &str) -> CouncilManifest {
     CouncilManifest {
-        id,
         name: name.into(),
         delegation_strategy: CouncilDelegationStrategy::Decompose,
         leader_agent: Slug::derive("leader"),
@@ -243,9 +242,8 @@ fn council(id: Uuid, name: &str) -> CouncilManifest {
     }
 }
 
-fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
+fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     AbilityManifest {
-        id,
         name: name.into(),
         path: None,
         description: None,
@@ -262,9 +260,8 @@ fn ability(id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     }
 }
 
-fn context_block(id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
+fn context_block(_id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     ContextBlockManifest {
-        id,
         name: name.into(),
         path: String::new(),
         description: None,
@@ -272,9 +269,8 @@ fn context_block(id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     }
 }
 
-fn mcp_server(id: Uuid, name: &str) -> McpServerManifest {
+fn mcp_server(_id: Uuid, name: &str) -> McpServerManifest {
     McpServerManifest {
-        id,
         name: name.into(),
         display_name: name.into(),
         description: None,
@@ -289,9 +285,8 @@ fn mcp_server(id: Uuid, name: &str) -> McpServerManifest {
     }
 }
 
-fn domain(id: Uuid, name: &str, prompt: &str) -> DomainManifest {
+fn domain(_id: Uuid, name: &str, prompt: &str) -> DomainManifest {
     DomainManifest {
-        id,
         name: name.into(),
         path: String::new(),
         description: None,
@@ -306,6 +301,236 @@ fn domain(id: Uuid, name: &str, prompt: &str) -> DomainManifest {
     }
 }
 
+const INLINE_TS: &str = "2026-05-10T00:00:00Z";
+
+fn inline_org_id() -> Uuid {
+    Uuid::from_u128(42)
+}
+
+fn inline_created_by() -> Uuid {
+    Uuid::from_u128(43)
+}
+
+fn wrap_inline_payload(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "manifest.resource.v1",
+        "data": data,
+    })
+}
+
+fn agent_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "color": null,
+        "model": null,
+        "domains": [],
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "abilities": [],
+        "prompt_locked": false,
+        "heartbeat": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": PromptConfig {
+            developer_prompt: prompt.into(),
+            ..Default::default()
+        },
+    }))
+}
+
+fn agent_metadata_inline_payload(id: Uuid, slug: &str, name: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": name,
+        "description": null,
+        "color": null,
+        "model": null,
+        "domains": [],
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "abilities": [],
+        "prompt_locked": false,
+        "heartbeat": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn model_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "model": "gpt-test",
+        "model_provider": "test",
+        "temperature": 0.1,
+        "base_url": null,
+        "created_by": inline_created_by(),
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn routine_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "project_id": null,
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "trigger": "task",
+        "is_active": true,
+        "is_default": false,
+        "max_retries": 3,
+        "step_count": 0,
+        "metadata": {},
+        "encrypted_payload": null,
+        "steps": [],
+        "edges": [],
+        "last_run_at": null,
+        "next_run_at": null,
+        "created_by": inline_created_by(),
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn project_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "description": null,
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn council_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "delegation_strategy": "decompose",
+        "leader_agent": "leader",
+        "members": [],
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
+fn ability_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "activation_condition": "always",
+        "platform_scopes": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": AbilityPromptConfig {
+            developer_prompt: prompt.into(),
+        },
+    }))
+}
+
+fn context_block_inline_payload(id: Uuid, slug: &str, template: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "template": template,
+    }))
+}
+
+fn domain_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "slug": slug,
+        "name": slug,
+        "path": "",
+        "description": null,
+        "command": slug,
+        "platform_scopes": [],
+        "abilities": [],
+        "mcp_servers": [],
+        "script_tools": [],
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "prompt_config": DomainPromptConfig {
+            developer_prompt_addon: Some(prompt.into()),
+        },
+    }))
+}
+
+fn mcp_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::to_value(mcp_server(id, slug)).expect("mcp manifest"))
+}
+
+fn knowledge_document_payload(
+    id: Uuid,
+    pack_id: Uuid,
+    pack_slug: &str,
+    slug: &str,
+) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "pack_id": pack_id,
+        "pack_slug": pack_slug,
+        "slug": slug,
+        "filename": "guide.md",
+        "path": "docs",
+        "title": "Guide",
+        "kind": "markdown",
+        "summary": null,
+        "tags": [],
+        "content_type": "text/markdown",
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+        "edges": [],
+    }))
+}
+
 #[tokio::test]
 async fn manifest_inline_upserts_each_provider_resource() {
     let id = Uuid::new_v4();
@@ -313,61 +538,48 @@ async fn manifest_inline_upserts_each_provider_resource() {
     let cases = vec![
         (
             ResourceType::Agent,
-            serde_json::to_value(agent(id, "agent", "agent prompt")).unwrap(),
+            agent_inline_payload(id, "agent", "agent prompt"),
         ),
-        (
-            ResourceType::Model,
-            serde_json::to_value(model(id, "model")).unwrap(),
-        ),
-        (
-            ResourceType::Routine,
-            serde_json::to_value(routine(id, "routine")).unwrap(),
-        ),
-        (
-            ResourceType::Project,
-            serde_json::to_value(project(id, "project")).unwrap(),
-        ),
-        (
-            ResourceType::Council,
-            serde_json::to_value(council(id, "council")).unwrap(),
-        ),
+        (ResourceType::Model, model_inline_payload(id, "model")),
+        (ResourceType::Routine, routine_inline_payload(id, "routine")),
+        (ResourceType::Project, project_inline_payload(id, "project")),
+        (ResourceType::Council, council_inline_payload(id, "council")),
         (
             ResourceType::Ability,
-            serde_json::to_value(ability(id, "ability", "ability prompt")).unwrap(),
+            ability_inline_payload(id, "ability", "ability prompt"),
         ),
         (
             ResourceType::ContextBlock,
-            serde_json::to_value(context_block(id, "context", "template")).unwrap(),
+            context_block_inline_payload(id, "context", "template"),
         ),
-        (
-            ResourceType::McpServer,
-            serde_json::to_value(mcp_server(id, "mcp")).unwrap(),
-        ),
+        (ResourceType::McpServer, mcp_inline_payload(id, "mcp")),
         (
             ResourceType::Domain,
-            serde_json::to_value(domain(id, "domain", "domain prompt")).unwrap(),
+            domain_inline_payload(id, "domain", "domain prompt"),
         ),
     ];
 
     for (resource_type, payload) in cases {
+        let resource = Slug::derive(match resource_type {
+            ResourceType::Agent => "agent",
+            ResourceType::Model => "model",
+            ResourceType::Routine => "routine",
+            ResourceType::Project => "project",
+            ResourceType::Council => "council",
+            ResourceType::Ability => "ability",
+            ResourceType::ContextBlock => "context",
+            ResourceType::McpServer => "mcp",
+            ResourceType::Domain => "domain",
+            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+        });
         let env = test_harness(Manifest::default()).await;
         env.harness
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
+                    resource_id: Uuid::nil(),
                     resource_type,
-                    resource: Slug::derive(match resource_type {
-                        ResourceType::Agent => "agent",
-                        ResourceType::Model => "model",
-                        ResourceType::Routine => "routine",
-                        ResourceType::Project => "project",
-                        ResourceType::Council => "council",
-                        ResourceType::Ability => "ability",
-                        ResourceType::ContextBlock => "context",
-                        ResourceType::McpServer => "mcp",
-                        ResourceType::Domain => "domain",
-                        ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
-                    }),
+                    resource: resource.clone(),
                     action: ResourceAction::Created,
                     project: None,
                     payload: Some(payload),
@@ -381,19 +593,31 @@ async fn manifest_inline_upserts_each_provider_resource() {
         let manifest = manifest.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
-                let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
+                let item = manifest
+                    .agents
+                    .iter()
+                    .find(|item| item.slug == resource)
+                    .unwrap();
                 assert_eq!(item.name, "agent");
                 assert_eq!(item.prompt_config.developer_prompt, "agent prompt");
             }
-            ResourceType::Model => assert!(manifest.models.iter().any(|item| item.id == id)),
-            ResourceType::Routine => assert!(manifest.routines.iter().any(|item| item.id == id)),
-            ResourceType::Project => assert!(manifest.projects.iter().any(|item| item.id == id)),
-            ResourceType::Council => assert!(manifest.councils.iter().any(|item| item.id == id)),
+            ResourceType::Model => {
+                assert!(manifest.models.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Routine => {
+                assert!(manifest.routines.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Project => {
+                assert!(manifest.projects.iter().any(|item| item.slug == resource))
+            }
+            ResourceType::Council => {
+                assert!(manifest.councils.iter().any(|item| item.name == "council"))
+            }
             ResourceType::Ability => {
                 let item = manifest
                     .abilities
                     .iter()
-                    .find(|item| item.id == id)
+                    .find(|item| Slug::derive(&item.name) == resource)
                     .unwrap();
                 assert_eq!(item.prompt_config.developer_prompt, "ability prompt");
             }
@@ -401,15 +625,24 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 let item = manifest
                     .context_blocks
                     .iter()
-                    .find(|item| item.id == id)
+                    .find(|item| Slug::derive(&item.name) == resource)
                     .unwrap();
                 assert_eq!(item.template, "template");
             }
             ResourceType::McpServer => {
-                assert!(manifest.mcp_servers.iter().any(|item| item.id == id))
+                assert!(
+                    manifest
+                        .mcp_servers
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Domain => {
-                let item = manifest.domains.iter().find(|item| item.id == id).unwrap();
+                let item = manifest
+                    .domains
+                    .iter()
+                    .find(|item| Slug::derive(&item.name) == resource)
+                    .unwrap();
                 assert_eq!(
                     item.prompt_config.developer_prompt_addon.as_deref(),
                     Some("domain prompt")
@@ -434,26 +667,15 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
         ..Default::default()
     })
     .await;
-    let metadata_payload = serde_json::json!({
-        "id": id,
-        "name": "renamed",
-        "description": null,
-        "color": null,
-        "model": null,
-        "domains": [],
-        "platform_scopes": [],
-        "mcp_servers": [],
-        "abilities": [],
-        "prompt_locked": false,
-        "heartbeat": null
-    });
+    let metadata_payload = agent_metadata_inline_payload(id, "old", "renamed");
 
     env.harness
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: Uuid::nil(),
                 resource_type: ResourceType::Agent,
-                resource: Slug::derive("renamed"),
+                resource: Slug::derive("old"),
                 action: ResourceAction::Updated,
                 project: None,
                 payload: Some(metadata_payload),
@@ -465,7 +687,11 @@ async fn manifest_inline_agent_metadata_update_preserves_cached_prompt() {
 
     let provider = env.harness.provider();
     let manifest = provider.manifest_snapshot();
-    let item = manifest.agents.iter().find(|item| item.id == id).unwrap();
+    let item = manifest
+        .agents
+        .iter()
+        .find(|item| item.slug == Slug::derive("old"))
+        .unwrap();
     assert_eq!(item.name, "renamed");
     assert_eq!(item.prompt_config.developer_prompt, "cached prompt");
 }
@@ -496,7 +722,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         ..Default::default()
     };
 
-    for (resource_type, resource_id) in ids {
+    for (resource_type, _resource_id) in ids {
         let resource = match resource_type {
             ResourceType::Agent => Slug::derive("agent"),
             ResourceType::Model => Slug::derive("model"),
@@ -514,8 +740,9 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             .handle_manifest_changed(
                 &env.manifest_context(),
                 ManifestChangedCommand {
+                    resource_id: Uuid::nil(),
                     resource_type,
-                    resource,
+                    resource: resource.clone(),
                     action: ResourceAction::Deleted,
                     project: None,
                     payload: None,
@@ -529,29 +756,39 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         let manifest = provider.manifest_snapshot();
         match resource_type {
             ResourceType::Agent => {
-                assert!(!manifest.agents.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.agents.iter().any(|item| item.slug == resource))
             }
             ResourceType::Model => {
-                assert!(!manifest.models.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.models.iter().any(|item| item.slug == resource))
             }
             ResourceType::Routine => {
-                assert!(!manifest.routines.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.routines.iter().any(|item| item.slug == resource))
             }
             ResourceType::Project => {
-                assert!(!manifest.projects.iter().any(|item| item.id == resource_id))
+                assert!(!manifest.projects.iter().any(|item| item.slug == resource))
             }
             ResourceType::Council => {
-                assert!(!manifest.councils.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .councils
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Ability => {
-                assert!(!manifest.abilities.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .abilities
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::ContextBlock => {
                 assert!(
                     !manifest
                         .context_blocks
                         .iter()
-                        .any(|item| item.id == resource_id)
+                        .any(|item| Slug::derive(&item.name) == resource)
                 )
             }
             ResourceType::McpServer => {
@@ -559,11 +796,16 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                     !manifest
                         .mcp_servers
                         .iter()
-                        .any(|item| item.id == resource_id)
+                        .any(|item| Slug::derive(&item.name) == resource)
                 )
             }
             ResourceType::Domain => {
-                assert!(!manifest.domains.iter().any(|item| item.id == resource_id))
+                assert!(
+                    !manifest
+                        .domains
+                        .iter()
+                        .any(|item| Slug::derive(&item.name) == resource)
+                )
             }
             ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
         }
@@ -591,22 +833,17 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: document_id,
                 resource_type: ResourceType::Document,
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Updated,
                 project: Some(Slug::derive("project")),
-                payload: Some(serde_json::json!({
-                "id": document_id,
-                "pack_id": pack_id,
-                "pack_slug": "project",
-                "filename": "guide.md",
-                "path": "docs",
-                "title": "Guide",
-                "kind": "markdown",
-                "summary": null,
-                "tags": [],
-                "updated_at": "2026-05-10T00:00:00Z"
-                })),
+                payload: Some(knowledge_document_payload(
+                    document_id,
+                    pack_id,
+                    "project",
+                    "guide",
+                )),
                 encrypted_payload: None,
             },
         )
@@ -617,22 +854,17 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: document_id,
                 resource_type: ResourceType::Document,
                 resource: Slug::derive("guide"),
                 action: ResourceAction::Deleted,
                 project: Some(Slug::derive("project")),
-                payload: Some(serde_json::json!({
-                "id": document_id,
-                "pack_id": pack_id,
-                "pack_slug": "project",
-                "filename": "guide.md",
-                "path": "docs",
-                "title": "Guide",
-                "kind": "markdown",
-                "summary": null,
-                "tags": [],
-                "updated_at": "2026-05-10T00:00:00Z"
-                })),
+                payload: Some(knowledge_document_payload(
+                    document_id,
+                    pack_id,
+                    "project",
+                    "guide",
+                )),
                 encrypted_payload: None,
             },
         )
@@ -640,10 +872,10 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         .unwrap();
 
     assert_eq!(
-        env.store.content_syncs.lock().unwrap().as_slice(),
+        env.store.metadata_syncs.lock().unwrap().as_slice(),
         &["guide".to_string()]
     );
-    assert!(env.store.metadata_syncs.lock().unwrap().is_empty());
+    assert!(env.store.content_syncs.lock().unwrap().is_empty());
     assert_eq!(
         env.store.removals.lock().unwrap().as_slice(),
         &["guide".to_string()]
@@ -667,11 +899,12 @@ async fn manifest_mcp_changes_reconcile_mcp_runtime() {
         .handle_manifest_changed(
             &env.manifest_context(),
             ManifestChangedCommand {
+                resource_id: id,
                 resource_type: ResourceType::McpServer,
                 resource: Slug::derive("mcp"),
                 action: ResourceAction::Created,
                 project: None,
-                payload: Some(serde_json::to_value(mcp_server(id, "mcp")).unwrap()),
+                payload: Some(mcp_inline_payload(id, "mcp")),
                 encrypted_payload: None,
             },
         )

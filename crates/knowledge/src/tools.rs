@@ -291,6 +291,12 @@ impl CompositeKnowledgeRegistry {
         self.library.is_empty() && self.package.is_empty() && self.local.is_empty()
     }
 
+    pub fn from_entries(entries: impl IntoIterator<Item = KnowledgePackEntry>) -> Self {
+        entries
+            .into_iter()
+            .fold(Self::new(), |registry, entry| registry.with_entry(entry))
+    }
+
     fn static_registry_for_selector(&self, selector: &str) -> Result<&StaticKnowledgeRegistry> {
         match KnowledgeRef::from_str(selector)? {
             KnowledgeRef::Library { .. } => Ok(&self.library),
@@ -362,6 +368,24 @@ impl KnowledgePackSummary {
             document_count: manifest.docs().len(),
         }
     }
+
+    pub fn from_parts(
+        selector: impl Into<String>,
+        pack_id: impl Into<String>,
+        version: impl Into<String>,
+        root_uri: impl Into<String>,
+        document_count: usize,
+    ) -> Self {
+        let selector = selector.into();
+        Self {
+            pack: selector.clone(),
+            selector,
+            pack_id: pack_id.into(),
+            version: version.into(),
+            root_uri: root_uri.into(),
+            document_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -399,8 +423,8 @@ pub struct KnowledgeFilterArgs {
 pub struct KnowledgeDocMetadataResult {
     /// Canonical pack selector to pass as the `pack` argument to knowledge tools.
     pub pack: String,
-    /// Stable document identifier within the pack.
-    pub id: String,
+    /// Stable document slug to pass as `slug` to update/delete library document tools.
+    pub slug: String,
     /// Agent-visible selector used for lookup and traversal.
     pub selector: String,
     /// Human-readable title.
@@ -419,8 +443,10 @@ pub struct KnowledgeDocMetadataResult {
 pub struct KnowledgeDocRelatedResult {
     #[serde(rename = "type")]
     pub edge_type: String,
-    /// Target document id or path.
+    /// Target document selector/path used for traversal.
     pub target: String,
+    /// Stable document slug to pass as related.target_doc in library write tools.
+    pub target_doc: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -482,10 +508,11 @@ where
 pub fn knowledge_document_metadata(
     pack: impl Into<String>,
     doc: &KnowledgeDocManifest,
+    pack_source: Option<&dyn KnowledgePack>,
 ) -> KnowledgeDocMetadataResult {
     KnowledgeDocMetadataResult {
         pack: pack.into(),
-        id: doc.id.clone(),
+        slug: doc.id.clone(),
         selector: doc.selector.clone(),
         title: doc.title.clone(),
         summary: doc.summary.clone(),
@@ -497,6 +524,10 @@ pub fn knowledge_document_metadata(
             .map(|edge| KnowledgeDocRelatedResult {
                 edge_type: edge.edge_type.as_str().to_string(),
                 target: edge.target.clone(),
+                target_doc: pack_source
+                    .and_then(|pack| pack.read_manifest(&edge.target))
+                    .map(|target| target.id.clone())
+                    .unwrap_or_else(|| edge.target.clone()),
             })
             .collect(),
     }
@@ -504,10 +535,11 @@ pub fn knowledge_document_metadata(
 
 pub fn knowledge_search_result(
     pack: impl Into<String>,
+    pack_source: &dyn KnowledgePack,
     hit: KnowledgeDocSearchHit,
 ) -> KnowledgeDocSearchResult {
     KnowledgeDocSearchResult {
-        document: knowledge_document_metadata(pack, &hit.document),
+        document: knowledge_document_metadata(pack, &hit.document, Some(pack_source)),
         score: hit.score,
         matched: hit.matched,
     }
@@ -515,16 +547,17 @@ pub fn knowledge_search_result(
 
 pub fn knowledge_neighbors_result(
     pack: impl Into<String> + Clone,
+    pack_source: &dyn KnowledgePack,
     neighbors: KnowledgeDocNeighbor,
 ) -> KnowledgeDocNeighborsResult {
     KnowledgeDocNeighborsResult {
-        document: knowledge_document_metadata(pack.clone(), &neighbors.document),
+        document: knowledge_document_metadata(pack.clone(), &neighbors.document, Some(pack_source)),
         edges: neighbors
             .edges
             .into_iter()
             .map(|edge| KnowledgeDocNeighborEdgeResult {
                 edge_type: edge.edge_type.as_str().to_string(),
-                target: knowledge_document_metadata(pack.clone(), &edge.target),
+                target: knowledge_document_metadata(pack.clone(), &edge.target, Some(pack_source)),
             })
             .collect(),
     }
@@ -544,6 +577,19 @@ pub fn knowledge_document_metadata_vars(
         for key in knowledge_document_alias_var_keys(knowledge_ref, doc) {
             vars.entry(key).or_insert_with(|| metadata.clone());
         }
+    }
+    vars
+}
+
+pub fn knowledge_prompt_vars_from_entries(
+    entries: impl IntoIterator<Item = KnowledgePackEntry>,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    for entry in entries {
+        vars.extend(knowledge_pack_prompt_vars(
+            entry.knowledge_ref(),
+            entry.pack().as_ref(),
+        ));
     }
     vars
 }
@@ -850,13 +896,13 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_knowledge_doc".into(),
-            description: "Read one full document body from a knowledge pack by path.".into(),
+            description: "Read one full document body from a knowledge pack by path, selector, or document slug. The returned document.slug is the stable slug to use with update_knowledge_doc, delete_knowledge_doc, or related.target_doc.".into(),
             parameters: knowledge_lookup_schema(),
             category: ToolCategory::Read,
         },
         ToolSpec {
             name: "search_knowledge".into(),
-            description: "Search a knowledge pack and return candidate document metadata without loading document bodies.".into(),
+            description: "Search a knowledge pack and return candidate document metadata without loading document bodies. Each result includes document.slug, the stable slug to use with update_knowledge_doc, delete_knowledge_doc, or related.target_doc.".into(),
             parameters: knowledge_filter_schema(
                 Some(json!({
                     "query": {
@@ -892,11 +938,35 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
     ]
 }
 
-pub fn knowledge_toolbelt(registry: Arc<dyn KnowledgeRegistry>) -> Vec<Arc<dyn Tool>> {
+fn knowledge_tool_spec(name: &str) -> ToolSpec {
     knowledge_tools()
         .into_iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("missing knowledge tool spec: {name}"))
+}
+
+/// Discovery tool for locally available knowledge packs. Always safe to expose,
+/// including when the registry has no packs yet.
+pub fn knowledge_list_packs_tool(registry: Arc<dyn KnowledgeRegistry>) -> Arc<dyn Tool> {
+    Arc::new(KnowledgeTool::new(
+        knowledge_tool_spec("list_knowledge_packs"),
+        registry,
+    ))
+}
+
+/// Read and traversal tools that require at least one registered knowledge pack.
+pub fn knowledge_traversal_tools(registry: Arc<dyn KnowledgeRegistry>) -> Vec<Arc<dyn Tool>> {
+    knowledge_tools()
+        .into_iter()
+        .filter(|spec| spec.name != "list_knowledge_packs")
         .map(|spec| Arc::new(KnowledgeTool::new(spec, registry.clone())) as Arc<dyn Tool>)
         .collect()
+}
+
+pub fn knowledge_toolbelt(registry: Arc<dyn KnowledgeRegistry>) -> Vec<Arc<dyn Tool>> {
+    let mut tools = vec![knowledge_list_packs_tool(registry.clone())];
+    tools.extend(knowledge_traversal_tools(registry));
+    tools
 }
 
 struct KnowledgeTool {
@@ -946,7 +1016,11 @@ impl Tool for KnowledgeTool {
                     )
                 })?;
                 serde_json::to_value(KnowledgeDocReadResult {
-                    document: knowledge_document_metadata(args.pack, &doc.manifest),
+                    document: knowledge_document_metadata(
+                        args.pack,
+                        &doc.manifest,
+                        Some(pack.as_ref()),
+                    ),
                     content: doc.content,
                 })?
             }
@@ -957,7 +1031,7 @@ impl Tool for KnowledgeTool {
                 let hits = pack
                     .search(&args.query, filter)
                     .into_iter()
-                    .map(|hit| knowledge_search_result(args.pack.clone(), hit))
+                    .map(|hit| knowledge_search_result(args.pack.clone(), pack.as_ref(), hit))
                     .collect::<Vec<_>>();
                 serde_json::to_value(hits)?
             }
@@ -972,7 +1046,11 @@ impl Tool for KnowledgeTool {
                         args.pack
                     )
                 })?;
-                serde_json::to_value(knowledge_neighbors_result(args.pack, neighbors))?
+                serde_json::to_value(knowledge_neighbors_result(
+                    args.pack,
+                    pack.as_ref(),
+                    neighbors,
+                ))?
             }
             name => return Err(anyhow!("unknown knowledge tool '{name}'")),
         };
@@ -993,8 +1071,8 @@ mod tests {
 
     use super::{
         CompositeKnowledgeRegistry, KnowledgeDocReadResult, KnowledgePackEntry, KnowledgeRef,
-        KnowledgeRegistry, knowledge_document_var_key, knowledge_neighbors_result,
-        knowledge_search_result, knowledge_tools,
+        KnowledgeRegistry, knowledge_document_var_key, knowledge_list_packs_tool,
+        knowledge_neighbors_result, knowledge_search_result, knowledge_tools,
     };
     use crate::{
         KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest,
@@ -1112,6 +1190,20 @@ mod tests {
     }
 
     #[test]
+    fn list_knowledge_packs_tool_works_with_empty_registry() {
+        block_on(async {
+            let registry = std::sync::Arc::new(CompositeKnowledgeRegistry::new());
+            let tool = knowledge_list_packs_tool(registry);
+            assert_eq!(tool.name(), "list_knowledge_packs");
+
+            let result = tool.execute(serde_json::json!({})).await.unwrap();
+            assert!(result.success);
+            let packs: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+            assert!(packs.is_empty());
+        });
+    }
+
+    #[test]
     fn default_knowledge_tool_registry_exposes_graph_first_tools_only() {
         let names = knowledge_tools()
             .into_iter()
@@ -1210,22 +1302,27 @@ mod tests {
         let pack = test_pack();
         let result = pack
             .neighbors("root", None)
-            .map(|neighbors| knowledge_neighbors_result("lib:test", neighbors))
+            .map(|neighbors| knowledge_neighbors_result("lib:test", &pack, neighbors))
             .expect("root neighbors");
         let value = serde_json::to_value(result).unwrap();
 
         assert_eq!(value["document"]["selector"], "library://test/root.md");
+        assert_eq!(value["document"]["slug"], "root");
+        assert!(value["document"].get("id").is_none());
+        assert!(value["document"].get("doc").is_none());
         assert_eq!(value["document"]["related"][0]["type"], "depends_on");
         assert_eq!(
             value["document"]["related"][0]["target"],
             "library://test/leaf.md"
         );
+        assert_eq!(value["document"]["related"][0]["target_doc"], "leaf");
         assert_eq!(value["edges"].as_array().unwrap().len(), 1);
         assert_eq!(value["edges"][0]["type"], "depends_on");
         assert_eq!(
             value["edges"][0]["target"]["selector"],
             "library://test/leaf.md"
         );
+        assert_eq!(value["edges"][0]["target"]["slug"], "leaf");
         assert_eq!(value["edges"][0]["target"]["kind"], "routing_guide");
         assert!(value["edges"][0]["target"].get("source_path").is_none());
         assert!(value["edges"][0].get("note").is_none());
@@ -1237,17 +1334,21 @@ mod tests {
         let value = serde_json::to_value(
             pack.search("Leaf", Default::default())
                 .into_iter()
-                .map(|hit| knowledge_search_result("lib:test", hit))
+                .map(|hit| knowledge_search_result("lib:test", &pack, hit))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
 
         assert_eq!(value[0]["document"]["selector"], "library://test/leaf.md");
+        assert_eq!(value[0]["document"]["slug"], "leaf");
+        assert!(value[0]["document"].get("id").is_none());
+        assert!(value[0]["document"].get("doc").is_none());
         assert_eq!(value[0]["document"]["related"][0]["type"], "references");
         assert_eq!(
             value[0]["document"]["related"][0]["target"],
             "library://test/root.md"
         );
+        assert_eq!(value[0]["document"]["related"][0]["target_doc"], "root");
         assert!(
             value[0]["matched"]
                 .as_array()
@@ -1269,17 +1370,21 @@ mod tests {
         let pack = test_pack();
         let doc = pack.read_doc("leaf").expect("leaf doc");
         let value = serde_json::to_value(KnowledgeDocReadResult {
-            document: super::knowledge_document_metadata("lib:test", &doc.manifest),
+            document: super::knowledge_document_metadata("lib:test", &doc.manifest, Some(&pack)),
             content: doc.content,
         })
         .unwrap();
 
         assert_eq!(value["document"]["pack"], "lib:test");
         assert_eq!(value["document"]["selector"], "library://test/leaf.md");
+        assert_eq!(value["document"]["slug"], "leaf");
+        assert!(value["document"].get("id").is_none());
+        assert!(value["document"].get("doc").is_none());
         assert_eq!(
             value["document"]["related"][0]["target"],
             "library://test/root.md"
         );
+        assert_eq!(value["document"]["related"][0]["target_doc"], "root");
         assert_eq!(value["content"], "body for Leaf");
     }
 

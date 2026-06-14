@@ -3,6 +3,7 @@ mod apply;
 mod delete;
 mod fetch;
 mod inline;
+pub mod knowledge;
 mod payload;
 mod services;
 
@@ -11,8 +12,10 @@ use std::sync::Arc;
 use nenjo::Slug;
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
 use nenjo_harness::{Harness, HarnessError, ProviderRuntime, Result};
+use uuid::Uuid;
 
 use apply::{ManifestChange, apply_manifest_change};
+pub use knowledge::DocumentEdgesSource;
 pub use services::{ManifestStore, McpRuntime, NoopManifestStore, NoopMcpRuntime};
 
 use crate::api_client::ApiClient;
@@ -29,6 +32,7 @@ where
 }
 
 pub struct ManifestChangedCommand {
+    pub resource_id: Uuid,
     pub resource_type: ResourceType,
     pub resource: Slug,
     pub action: ResourceAction,
@@ -73,6 +77,7 @@ where
     ) -> Result<()> {
         let ManifestChangedCommand {
             resource_type,
+            resource_id,
             resource,
             action,
             project,
@@ -86,6 +91,7 @@ where
             &self.manifests().snapshot(),
             ManifestChange {
                 resource_type,
+                resource_id,
                 resource,
                 action,
                 project,

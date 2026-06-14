@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::store::ManifestReader;
 use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
@@ -19,27 +19,12 @@ use crate::{
     rest::{notifications::notification_tools, projects::project_rest_tools},
 };
 
-const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent", "get_agent_prompt"];
-const AGENT_WRITE_TOOLS: &[&str] = &[
-    "create_agent",
-    "update_agent",
-    "update_agent_prompt",
-    "delete_agent",
-];
-const ABILITY_READ_TOOLS: &[&str] = &["list_abilities", "get_ability", "get_ability_prompt"];
-const ABILITY_WRITE_TOOLS: &[&str] = &[
-    "create_ability",
-    "update_ability",
-    "update_ability_prompt",
-    "delete_ability",
-];
-const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain", "get_domain_prompt"];
-const DOMAIN_WRITE_TOOLS: &[&str] = &[
-    "create_domain",
-    "update_domain",
-    "update_domain_prompt",
-    "delete_domain",
-];
+const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent"];
+const AGENT_WRITE_TOOLS: &[&str] = &["configure_agent"];
+const ABILITY_READ_TOOLS: &[&str] = &["list_abilities", "get_ability"];
+const ABILITY_WRITE_TOOLS: &[&str] = &["configure_ability"];
+const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain"];
+const DOMAIN_WRITE_TOOLS: &[&str] = &["configure_domain"];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
 const PROJECT_REST_READ_TOOLS: &[&str] = &[
     "list_project_tasks",
@@ -49,12 +34,6 @@ const PROJECT_REST_READ_TOOLS: &[&str] = &[
 ];
 const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
     &["create_project", "update_project", "delete_project"];
-const LIBRARY_MANIFEST_READ_TOOLS: &[&str] = &[
-    "list_knowledge_packs",
-    "read_knowledge_doc",
-    "search_knowledge",
-    "list_knowledge_neighbors",
-];
 const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_knowledge_pack",
     "update_knowledge_pack",
@@ -71,7 +50,7 @@ const PROJECT_REST_WRITE_TOOLS: &[&str] = &[
     "resume_project_execution",
 ];
 const ROUTINE_READ_TOOLS: &[&str] = &["list_routines", "get_routine"];
-const ROUTINE_WRITE_TOOLS: &[&str] = &["create_routine", "update_routine", "delete_routine"];
+const ROUTINE_WRITE_TOOLS: &[&str] = &["configure_routine"];
 const MODEL_READ_TOOLS: &[&str] = &["list_models", "get_model"];
 const MODEL_WRITE_TOOLS: &[&str] = &["create_model", "update_model", "delete_model"];
 const COUNCIL_READ_TOOLS: &[&str] = &["list_councils", "get_council"];
@@ -82,17 +61,8 @@ const COUNCIL_WRITE_TOOLS: &[&str] = &[
     "remove_council_member",
     "delete_council",
 ];
-const CONTEXT_BLOCK_READ_TOOLS: &[&str] = &[
-    "list_context_blocks",
-    "get_context_block",
-    "get_context_block_content",
-];
-const CONTEXT_BLOCK_WRITE_TOOLS: &[&str] = &[
-    "create_context_block",
-    "update_context_block",
-    "update_context_block_content",
-    "delete_context_block",
-];
+const CONTEXT_BLOCK_READ_TOOLS: &[&str] = &["list_context_blocks", "get_context_block"];
+const CONTEXT_BLOCK_WRITE_TOOLS: &[&str] = &["configure_context_block"];
 const NOTIFICATION_READ_TOOLS: &[&str] = &["list_notification_sessions", "list_notifications"];
 const NOTIFICATION_WRITE_TOOLS: &[&str] = &["send_notification"];
 const NOTIFICATION_OBJECT_TYPE: &str = "push.notification";
@@ -124,11 +94,7 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         PROJECT_MANIFEST_READ_TOOLS,
         PROJECT_MANIFEST_WRITE_TOOLS,
     ),
-    (
-        ScopeResource::Library,
-        LIBRARY_MANIFEST_READ_TOOLS,
-        LIBRARY_MANIFEST_WRITE_TOOLS,
-    ),
+    (ScopeResource::Library, &[], LIBRARY_MANIFEST_WRITE_TOOLS),
     (
         ScopeResource::Routines,
         ROUTINE_READ_TOOLS,
@@ -314,16 +280,56 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskContentPayload {
     description: Option<String>,
     acceptance_criteria: Option<String>,
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CurrentTaskState {
     description: Option<String>,
     acceptance_criteria: Option<String>,
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectTaskDocument {
+    slug: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acceptance_criteria: Option<String>,
+    status: String,
+    priority: String,
+    #[serde(rename = "type")]
+    task_type: String,
+    tags: Vec<String>,
+    required_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complexity: Option<i64>,
+    order_index: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assigned_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closed_at: Option<String>,
+}
+
+fn string_array(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect()
 }
 
 impl<S, E> PlatformProjectToolsBackend<S, E>
@@ -364,10 +370,177 @@ where
         task_id: Uuid,
         payload: &TaskContentPayload,
     ) -> Result<Option<serde_json::Value>> {
-        if payload.description.is_none() && payload.acceptance_criteria.is_none() {
+        if payload.description.is_none()
+            && payload.acceptance_criteria.is_none()
+            && payload.metadata.is_none()
+        {
             return Ok(None);
         }
         self.encode_task_payload(task_id, payload).await.map(Some)
+    }
+
+    fn plaintext_task_metadata(task: &serde_json::Value) -> Option<serde_json::Value> {
+        task.get("metadata")
+            .filter(|value| !value.is_null())
+            .cloned()
+    }
+
+    fn plaintext_task_state(task: &serde_json::Value) -> TaskContentPayload {
+        TaskContentPayload {
+            description: task
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            acceptance_criteria: task
+                .get("acceptance_criteria")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            metadata: Self::plaintext_task_metadata(task),
+        }
+    }
+
+    async fn resolve_project_task_id(&self, project: &Slug, task: &Slug) -> Result<Uuid> {
+        let tasks = self
+            .client
+            .list_project_tasks(&ProjectTaskListQuery {
+                project: project.clone(),
+                status: None,
+                priority: None,
+                task_type: None,
+                tags: None,
+                routine: None,
+                assigned_agent: None,
+                limit: Some(500),
+                offset: None,
+            })
+            .await?;
+        let task_rows = tasks
+            .as_array()
+            .context("project task list response was not an array")?;
+        let matches: Vec<_> = task_rows
+            .iter()
+            .filter(|row| row.get("slug").and_then(|value| value.as_str()) == Some(task.as_str()))
+            .collect();
+
+        match matches.as_slice() {
+            [row] => {
+                let task_id = row
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .with_context(|| format!("task {task} did not include an internal id"))?;
+                Uuid::parse_str(task_id).with_context(|| format!("task {task} id was invalid"))
+            }
+            [] => bail!("project task not found: {project}/{task}"),
+            _ => bail!("project task reference is ambiguous: {project}/{task}"),
+        }
+    }
+
+    async fn decode_task_content(&self, task: &serde_json::Value) -> Result<TaskContentPayload> {
+        if let Some(encrypted_payload) = task
+            .get("encrypted_payload")
+            .cloned()
+            .map(serde_json::from_value::<nenjo_events::EncryptedPayload>)
+            .transpose()
+            .context("failed to parse task encrypted payload")?
+        {
+            let decoded_payload = self
+                .payload_encoder
+                .decode_payload(&serde_json::to_value(encrypted_payload)?)
+                .await?
+                .context("task payload encoder did not decode encrypted payload")?;
+            return serde_json::from_value(decoded_payload)
+                .context("failed to decode task encrypted content");
+        }
+
+        Ok(Self::plaintext_task_state(task))
+    }
+
+    async fn task_document(&self, task: serde_json::Value) -> Result<ProjectTaskDocument> {
+        let content = self.decode_task_content(&task).await?;
+        let slug = task
+            .get("slug")
+            .and_then(|value| value.as_str())
+            .context("task response did not include slug")?
+            .to_string();
+        let title = task
+            .get("title")
+            .and_then(|value| value.as_str())
+            .context("task response did not include title")?
+            .to_string();
+        let status = task
+            .get("status")
+            .and_then(|value| value.as_str())
+            .context("task response did not include status")?
+            .to_string();
+        let priority = task
+            .get("priority")
+            .and_then(|value| value.as_str())
+            .unwrap_or("medium")
+            .to_string();
+        let task_type = task
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("task")
+            .to_string();
+        let tags = task
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .map(|values| string_array(values))
+            .unwrap_or_default();
+        let required_tags = task
+            .get("required_tags")
+            .and_then(|value| value.as_array())
+            .map(|values| string_array(values))
+            .unwrap_or_default();
+
+        Ok(ProjectTaskDocument {
+            slug,
+            title,
+            description: content.description,
+            acceptance_criteria: content.acceptance_criteria,
+            status,
+            priority,
+            task_type,
+            tags,
+            required_tags,
+            complexity: task.get("complexity").and_then(|value| value.as_i64()),
+            order_index: task
+                .get("order_index")
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default(),
+            metadata: content.metadata,
+            assigned_agent: task
+                .get("assigned_agent")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            routine: task
+                .get("routine")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            last_error: task
+                .get("last_error")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            resolved_at: task
+                .get("resolved_at")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            closed_at: task
+                .get("closed_at")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        })
+    }
+
+    async fn task_documents(&self, tasks: serde_json::Value) -> Result<Vec<ProjectTaskDocument>> {
+        let task_rows = tasks
+            .as_array()
+            .context("project task list response was not an array")?;
+        let mut documents = Vec::with_capacity(task_rows.len());
+        for task in task_rows {
+            documents.push(self.task_document(task.clone()).await?);
+        }
+        Ok(documents)
     }
 
     async fn create_task_body(
@@ -381,6 +554,7 @@ where
         let payload = TaskContentPayload {
             description: args.description.clone(),
             acceptance_criteria: args.acceptance_criteria.clone(),
+            metadata: args.metadata.clone(),
         };
         let encrypted_payload = self.maybe_encode_task_payload(task_id, &payload).await?;
 
@@ -391,7 +565,6 @@ where
             "status": args.status,
             "priority": args.priority,
             "type": args.task_type,
-            "metadata": args.metadata,
             "tags": args.tags,
             "required_tags": args.required_tags,
             "complexity": args.complexity,
@@ -418,7 +591,11 @@ where
         Ok(json!({ "tasks": tasks }))
     }
 
-    async fn update_task_body(&self, args: &UpdateProjectTaskArgs) -> Result<serde_json::Value> {
+    async fn update_task_body(
+        &self,
+        args: &UpdateProjectTaskArgs,
+        task_id: Uuid,
+    ) -> Result<serde_json::Value> {
         let mut body = serde_json::Map::new();
 
         if let Some(status) = args.status.as_ref() {
@@ -429,9 +606,6 @@ where
         }
         if let Some(task_type) = args.task_type.as_ref() {
             body.insert("type".into(), json!(task_type));
-        }
-        if let Some(metadata) = args.metadata.as_ref() {
-            body.insert("metadata".into(), metadata.clone());
         }
         if let Some(tags) = args.tags.as_ref() {
             body.insert("tags".into(), json!(tags));
@@ -456,15 +630,16 @@ where
             body.insert("title".into(), json!(title));
         }
 
-        let needs_encrypted_payload =
-            args.description.is_some() || args.acceptance_criteria.is_some();
+        let needs_encrypted_payload = args.description.is_some()
+            || args.acceptance_criteria.is_some()
+            || args.metadata.is_some();
 
         if needs_encrypted_payload {
             let current_state = if args.description.is_some() && args.acceptance_criteria.is_some()
             {
                 CurrentTaskState::default()
             } else {
-                let current = self.client.get_project_task(args.task_id).await?;
+                let current = self.client.get_project_task(task_id).await?;
                 let mut current_state: CurrentTaskState =
                     serde_json::from_value(current.clone())
                         .context("failed to decode current task state")?;
@@ -491,10 +666,11 @@ where
                     .acceptance_criteria
                     .clone()
                     .or(current_state.acceptance_criteria),
+                metadata: args.metadata.clone().or(current_state.metadata),
             };
             body.insert(
                 "encrypted_payload".into(),
-                self.encode_task_payload(args.task_id, &payload).await?,
+                self.encode_task_payload(task_id, &payload).await?,
             );
         }
 
@@ -685,7 +861,8 @@ where
                     "list_project_tasks",
                     "Expected {\"project\":\"<project-slug>\"}.",
                 )?;
-                self.backend
+                let tasks = self
+                    .backend
                     .client
                     .list_project_tasks(&ProjectTaskListQuery {
                         project: args.project,
@@ -698,15 +875,25 @@ where
                         limit: args.limit,
                         offset: args.offset,
                     })
-                    .await?
+                    .await?;
+                json!({
+                    "tasks": self.backend.task_documents(tasks).await?
+                })
             }
             ProjectRestToolKind::GetProjectTask => {
                 let args: GetProjectTaskArgs = parse_project_tool_args(
                     args,
                     "get_project_task",
-                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\"}.",
                 )?;
-                self.backend.client.get_project_task(args.task_id).await?
+                let task_id = self
+                    .backend
+                    .resolve_project_task_id(&args.project, &args.task)
+                    .await?;
+                let task = self.backend.client.get_project_task(task_id).await?;
+                json!({
+                    "task": self.backend.task_document(task).await?
+                })
             }
             ProjectRestToolKind::CreateProjectTasks => {
                 let args: CreateProjectTasksArgs = parse_project_tool_args(
@@ -715,31 +902,43 @@ where
                     "Expected {\"project\":\"<project-slug>\",\"tasks\":[{\"title\":\"...\"}]}.",
                 )?;
                 let body = self.backend.create_tasks_body(&args).await?;
-                self.backend.client.bulk_create_project_tasks(&body).await?
+                let created = self.backend.client.bulk_create_project_tasks(&body).await?;
+                json!({
+                    "tasks": self.backend.task_documents(created).await?
+                })
             }
             ProjectRestToolKind::UpdateProjectTask => {
                 let args: UpdateProjectTaskArgs = parse_project_tool_args(
                     args,
                     "update_project_task",
-                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\", ...fields}.",
+                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\", ...fields}.",
                 )?;
-                let body = self.backend.update_task_body(&args).await?;
-                self.backend
+                let task_id = self
+                    .backend
+                    .resolve_project_task_id(&args.project, &args.task)
+                    .await?;
+                let body = self.backend.update_task_body(&args, task_id).await?;
+                let updated = self
+                    .backend
                     .client
-                    .update_project_task(args.task_id, &body)
-                    .await?
+                    .update_project_task(task_id, &body)
+                    .await?;
+                json!({
+                    "task": self.backend.task_document(updated).await?
+                })
             }
             ProjectRestToolKind::DeleteProjectTask => {
                 let args: DeleteProjectTaskArgs = parse_project_tool_args(
                     args,
                     "delete_project_task",
-                    "Expected {\"task_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
+                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\"}.",
                 )?;
-                self.backend
-                    .client
-                    .delete_project_task(args.task_id)
+                let task_id = self
+                    .backend
+                    .resolve_project_task_id(&args.project, &args.task)
                     .await?;
-                json!({ "deleted": true, "task_id": args.task_id })
+                self.backend.client.delete_project_task(task_id).await?;
+                json!({ "deleted": true, "task": args.task })
             }
             ProjectRestToolKind::ListProjectExecutionRuns => {
                 let args: ListProjectExecutionRunsArgs = parse_project_tool_args(
@@ -776,15 +975,27 @@ where
                     "start_project_execution",
                     "Expected {\"project\":\"<project-slug>\"}.",
                 )?;
-                self.backend
+                let created = self
+                    .backend
                     .client
                     .create_execution_run(&CreateExecutionRequest {
                         project: args.project,
                         config: args.config.unwrap_or_else(|| json!({})),
                         model_count: args.model_count,
                         parallel_count: args.parallel_count,
-                        initial_status: Some("running".to_string()),
+                        initial_status: None,
                     })
+                    .await?;
+                let execution_run_id = created
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .context("created execution response did not include id")?
+                    .parse::<Uuid>()
+                    .context("created execution response included invalid id")?;
+
+                self.backend
+                    .client
+                    .command_project_execution_run(execution_run_id, "start")
                     .await?
             }
             ProjectRestToolKind::PauseProjectExecution => {
@@ -944,7 +1155,8 @@ struct ListProjectTasksArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetProjectTaskArgs {
-    task_id: Uuid,
+    project: Slug,
+    task: Slug,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1013,7 +1225,8 @@ struct CreateProjectTaskItemArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateProjectTaskArgs {
-    task_id: Uuid,
+    project: Slug,
+    task: Slug,
     title: Option<String>,
     description: Option<String>,
     acceptance_criteria: Option<String>,
@@ -1033,7 +1246,8 @@ struct UpdateProjectTaskArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeleteProjectTaskArgs {
-    task_id: Uuid,
+    project: Slug,
+    task: Slug,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1154,6 +1368,51 @@ impl Tool for ManifestContractTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use nenjo::manifest::local::LocalManifestStore;
+    use tempfile::tempdir;
+
+    #[derive(Clone, Default)]
+    struct RecordingPayloadEncoder {
+        last_payload: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl SensitivePayloadEncoder for RecordingPayloadEncoder {
+        async fn encode_payload(
+            &self,
+            account_id: Uuid,
+            object_id: Uuid,
+            object_type: &str,
+            payload: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>> {
+            *self.last_payload.lock().unwrap() = Some(payload.clone());
+            Ok(Some(json!({
+                "account_id": account_id,
+                "encryption_scope": "org",
+                "object_id": object_id,
+                "object_type": object_type,
+                "algorithm": "AES-256-GCM",
+                "key_version": 1,
+                "nonce": "nonce",
+                "ciphertext": "encrypted-test-payload"
+            })))
+        }
+    }
+
+    fn project_tools_backend(
+        encoder: RecordingPayloadEncoder,
+    ) -> PlatformProjectToolsBackend<LocalManifestStore, RecordingPayloadEncoder> {
+        let temp = tempdir().unwrap();
+        PlatformProjectToolsBackend {
+            client: Arc::new(PlatformManifestClient::new("http://localhost", "test").unwrap()),
+            manifest_store: Arc::new(LocalManifestStore::new(temp.path().join("manifests"))),
+            payload_encoder: encoder,
+            cached_org_id: Some(Uuid::new_v4()),
+        }
+    }
 
     #[test]
     fn create_project_tasks_args_accept_bulk_and_single_task_shapes() {
@@ -1220,5 +1479,85 @@ mod tests {
         assert!(error.contains("invalid list_project_tasks args"));
         assert!(error.contains("Received:"));
         assert!(error.contains("project_id"));
+    }
+
+    #[tokio::test]
+    async fn create_project_task_body_encrypts_metadata_without_plaintext_body() {
+        let encoder = RecordingPayloadEncoder::default();
+        let backend = project_tools_backend(encoder.clone());
+
+        let body = backend
+            .create_task_body(
+                &Slug::derive("demo-project"),
+                None,
+                None,
+                &CreateProjectTaskItemArgs {
+                    title: "Private task".to_string(),
+                    description: None,
+                    acceptance_criteria: None,
+                    status: None,
+                    priority: None,
+                    task_type: None,
+                    complexity: None,
+                    tags: None,
+                    required_tags: None,
+                    order_index: None,
+                    agent: None,
+                    routine: None,
+                    metadata: Some(json!({ "context": "Sensitive metadata" })),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("encrypted_payload").is_some());
+        assert!(!body.to_string().contains("Sensitive metadata"));
+        assert_eq!(
+            encoder.last_payload.lock().unwrap().as_ref().unwrap()["metadata"]["context"],
+            "Sensitive metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_project_task_body_encrypts_metadata_without_plaintext_body() {
+        let encoder = RecordingPayloadEncoder::default();
+        let backend = project_tools_backend(encoder.clone());
+
+        let body = backend
+            .update_task_body(
+                &UpdateProjectTaskArgs {
+                    project: Slug::derive("demo-project"),
+                    task: Slug::derive("private-task"),
+                    title: None,
+                    description: Some("Sensitive description".to_string()),
+                    acceptance_criteria: Some("Sensitive criteria".to_string()),
+                    status: None,
+                    priority: None,
+                    task_type: None,
+                    complexity: None,
+                    tags: None,
+                    required_tags: None,
+                    order_index: None,
+                    agent: None,
+                    routine: None,
+                    metadata: Some(json!({ "context": "Sensitive metadata" })),
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("encrypted_payload").is_some());
+        let body_text = body.to_string();
+        assert!(!body_text.contains("Sensitive metadata"));
+        assert!(!body_text.contains("Sensitive description"));
+        assert!(!body_text.contains("Sensitive criteria"));
+        let payload = encoder.last_payload.lock().unwrap();
+        let payload = payload.as_ref().unwrap();
+        assert_eq!(payload["metadata"]["context"], "Sensitive metadata");
+        assert_eq!(payload["description"], "Sensitive description");
+        assert_eq!(payload["acceptance_criteria"], "Sensitive criteria");
     }
 }

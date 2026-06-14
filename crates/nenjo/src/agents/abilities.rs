@@ -4,18 +4,23 @@
 //! `list_assigned_abilities` discovers available abilities and `use_ability` invokes
 //! one by its model-facing ability id.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use nenjo_models::ModelProvider;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
+use super::async_ops::{
+    AsyncOpChildHandle, AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, StartAsyncOp,
+    truncate,
+};
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
-use super::runner::types::TurnEvent;
+use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
@@ -23,6 +28,12 @@ use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
+pub const INSPECT_ABILITIES_TOOL_NAME: &str = "inspect_abilities";
+pub const SEND_ABILITIES_TOOL_NAME: &str = "send_abilities";
+pub const STOP_ABILITIES_TOOL_NAME: &str = "stop_abilities";
+pub const WAIT_TOOL_NAME: &str = "wait";
+
+static ABILITY_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct AbilityEntry {
@@ -219,13 +230,361 @@ where
                 error: Some(format!("unknown ability '{ability_name}'")),
             });
         };
-        execute_ability(&self.instance, ability, task_description).await
+        start_ability_operation(&self.instance, ability, ability_name, task_description).await
     }
 }
 
-async fn execute_ability<P>(
+struct InspectAbilitiesTool {
+    async_ops: AsyncOpManager,
+}
+
+struct SendAbilitiesTool {
+    async_ops: AsyncOpManager,
+}
+
+struct StopAbilitiesTool {
+    async_ops: AsyncOpManager,
+}
+
+struct AbilityWaitTool {
+    async_ops: AsyncOpManager,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectAbilitiesArgs {
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    include_transcript: bool,
+    #[serde(default = "default_inspect_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendAbilitiesArgs {
+    #[serde(default)]
+    operations: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StopAbilitiesArgs {
+    #[serde(default)]
+    operations: Vec<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WaitArgs {
+    #[serde(default = "default_wait_seconds")]
+    seconds: u64,
+    reason: Option<String>,
+}
+
+fn default_inspect_limit() -> usize {
+    30
+}
+
+fn default_wait_seconds() -> u64 {
+    10
+}
+
+#[async_trait::async_trait]
+impl Tool for InspectAbilitiesTool {
+    fn name(&self) -> &str {
+        INSPECT_ABILITIES_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Inspect running or recently completed ability operations by operation_id. Include transcript deltas when you need evidence or nested tool activity."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operations": {"type": "array", "items": {"type": "string"}},
+                "include_transcript": {"type": "boolean"},
+                "limit": {"type": "number", "minimum": 1, "maximum": 50}
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: InspectAbilitiesArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "abilities": self.async_ops.inspect(
+                parsed.operations,
+                Some(AsyncOpKind::Ability),
+                parsed.include_transcript,
+                parsed.limit,
+            ).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SendAbilitiesTool {
+    fn name(&self) -> &str {
+        SEND_ABILITIES_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Send input to one or more ability operations that asked the parent agent a question."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operations": {"type": "array", "items": {"type": "string"}},
+                "message": {"type": "string"}
+            },
+            "required": ["operations", "message"],
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: SendAbilitiesArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "sent": self.async_ops.send_input(parsed.operations, parsed.message).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for StopAbilitiesTool {
+    fn name(&self) -> &str {
+        STOP_ABILITIES_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Stop one or more running ability operations."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operations": {"type": "array", "items": {"type": "string"}},
+                "reason": {"type": "string"}
+            },
+            "required": ["operations"],
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: StopAbilitiesArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "stopped": self.async_ops.stop(
+                parsed.operations,
+                Some(AsyncOpKind::Ability),
+                parsed.reason,
+                super::runner::turn_loop::current_events_tx(),
+            ).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for AbilityWaitTool {
+    fn name(&self) -> &str {
+        WAIT_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Yield briefly while async operations continue running, then return queued operation signals."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                "reason": {"type": "string"}
+            },
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: WaitArgs = serde_json::from_value(args)?;
+        let _reason = parsed.reason;
+        Ok(json_tool(serde_json::json!(
+            self.async_ops.wait(parsed.seconds, None).await
+        )))
+    }
+}
+
+struct UpdateAbilityParentTool {
+    handle: AsyncOpChildHandle,
+}
+
+struct AskAbilityParentTool {
+    handle: AsyncOpChildHandle,
+}
+
+#[async_trait::async_trait]
+impl Tool for UpdateAbilityParentTool {
+    fn name(&self) -> &str {
+        "update_parent_agent"
+    }
+
+    fn description(&self) -> &str {
+        "Send a compact ability progress update to the parent agent without waking it immediately."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "details": {"type": "string"}
+            },
+            "required": ["summary"],
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        #[derive(Deserialize)]
+        struct Args {
+            summary: String,
+            details: Option<String>,
+        }
+        let parsed: Args = serde_json::from_value(args)?;
+        if let Some(cancel) = self.handle.cancel_token()
+            && cancel.is_cancelled()
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("ability operation was stopped".into()),
+            });
+        }
+        self.handle
+            .progress(
+                parsed.summary,
+                parsed.details,
+                super::runner::turn_loop::current_events_tx(),
+            )
+            .await;
+        Ok(json_tool(serde_json::json!({ "status": "delivered" })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for AskAbilityParentTool {
+    fn name(&self) -> &str {
+        "ask_parent_agent"
+    }
+
+    fn description(&self) -> &str {
+        "Ask the parent agent for input and wait until it responds with send_abilities."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "context": {"type": "string"}
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        #[derive(Deserialize)]
+        struct Args {
+            question: String,
+            context: Option<String>,
+        }
+        let parsed: Args = serde_json::from_value(args)?;
+        match self
+            .handle
+            .ask(
+                parsed.question,
+                parsed.context,
+                super::runner::turn_loop::current_events_tx(),
+            )
+            .await
+        {
+            Some(message) => Ok(json_tool(serde_json::json!({ "message": message }))),
+            None => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("parent did not provide input before the operation ended".into()),
+            }),
+        }
+    }
+}
+
+fn ability_child_tools(handle: AsyncOpChildHandle) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(UpdateAbilityParentTool {
+            handle: handle.clone(),
+        }),
+        Arc::new(AskAbilityParentTool { handle }),
+    ]
+}
+
+async fn start_ability_operation<P>(
     instance: &Arc<AgentInstance<P>>,
     ability: &AbilityManifest,
+    ability_id: &str,
     task_description: &str,
 ) -> Result<ToolResult>
 where
@@ -237,25 +596,114 @@ where
         "Activating ability"
     );
 
-    // Build the sub-execution instance.
-    let sub_instance = build_ability_instance(instance, ability).await;
-
     let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
+    let parent_events_tx = turn_loop::current_events_tx();
+    let operation_id = next_ability_operation_id(ability_id);
+    let started = instance
+        .runtime
+        .async_ops
+        .start(
+            StartAsyncOp {
+                id: operation_id.clone(),
+                kind: AsyncOpKind::Ability,
+                label: ability.name.clone(),
+                parent_operation_id: None,
+                parent_tool_name: Some(USE_ABILITY_TOOL_NAME.into()),
+                started_summary: task_description.to_string(),
+                model_visible: true,
+            },
+            parent_events_tx.clone(),
+        )
+        .await;
+
+    let instance = instance.clone();
+    let ability = ability.clone();
+    let task_description = task_description.to_string();
+    let child_handle = started.child.clone();
+    let op_handle = started.handle.clone();
+    let join_events_tx = parent_events_tx.clone();
+    let join_instance = instance.clone();
+    let call_id = operation_id.to_string();
+    let join = tokio::spawn(async move {
+        run_ability_operation(AbilityOperation {
+            instance: join_instance,
+            ability,
+            call_id,
+            task_description,
+            caller_history_snapshot,
+            child_handle,
+            op_handle,
+            parent_events_tx: join_events_tx,
+        })
+        .await;
+    });
+    instance
+        .runtime
+        .async_ops
+        .attach_join(&operation_id, join)
+        .await;
+
+    Ok(json_tool(serde_json::json!({
+        "ability": ability_id,
+        "operation_id": operation_id.to_string(),
+        "status": "running",
+        "control_tools": {
+            "inspect": INSPECT_ABILITIES_TOOL_NAME,
+            "send_input": SEND_ABILITIES_TOOL_NAME,
+            "stop": STOP_ABILITIES_TOOL_NAME,
+            "wait": WAIT_TOOL_NAME
+        }
+    })))
+}
+
+struct AbilityOperation<P: ProviderRuntime> {
+    instance: Arc<AgentInstance<P>>,
+    ability: AbilityManifest,
+    call_id: String,
+    task_description: String,
+    caller_history_snapshot: Vec<nenjo_models::ChatMessage>,
+    child_handle: AsyncOpChildHandle,
+    op_handle: super::async_ops::AsyncOpHandle,
+    parent_events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+}
+
+async fn run_ability_operation<P>(operation: AbilityOperation<P>)
+where
+    P: ProviderRuntime,
+{
+    let AbilityOperation {
+        instance,
+        ability,
+        call_id,
+        task_description,
+        caller_history_snapshot,
+        child_handle,
+        op_handle,
+        parent_events_tx,
+    } = operation;
+
+    let mut sub_instance = build_ability_instance(&instance, &ability).await;
+    sub_instance
+        .runtime
+        .tools
+        .extend(ability_child_tools(child_handle.clone()));
+
     let task = AgentRun::chat(ChatInput {
-        message: task_description.to_string(),
+        message: task_description.clone(),
         history: vec![],
         project: None,
     });
-    if let Some(parent_tx) = turn_loop::current_events_tx() {
+    if let Some(parent_tx) = parent_events_tx.clone() {
         debug!(
             ability = ability.name,
             ability_tool_name = USE_ABILITY_TOOL_NAME,
             "Emitting AbilityStarted"
         );
         let _ = parent_tx.send(TurnEvent::AbilityStarted {
+            call_id: call_id.clone(),
             ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
             ability_name: ability.name.clone(),
-            task_input: task_description.to_string(),
+            task_input: task_description.clone(),
             caller_history: caller_history_snapshot,
         });
     }
@@ -290,7 +738,7 @@ where
     }
 
     let user_message = if prompts.user_message.is_empty() {
-        task_description.to_string()
+        task_description.clone()
     } else {
         prompts.user_message
     };
@@ -301,26 +749,33 @@ where
     );
     messages.push(nenjo_models::ChatMessage::user(&user_message));
 
-    let parent_events_tx = turn_loop::current_events_tx();
     let (nested_tx, mut nested_rx) = mpsc::unbounded_channel::<TurnEvent>();
-    let bridge = parent_events_tx.map(|parent_tx| {
+    let bridge_op_handle = op_handle.clone();
+    let bridge_events_tx = parent_events_tx.clone();
+    let bridge_call_id = call_id.clone();
+    let bridge = parent_events_tx.clone().map(|parent_tx| {
         tokio::spawn(async move {
             while let Some(event) = nested_rx.recv().await {
+                bridge_ability_transcript(&bridge_op_handle, &event, bridge_events_tx.clone())
+                    .await;
                 match event {
                     TurnEvent::AbilityStarted { .. } => {
                         let _ = parent_tx.send(event);
                     }
                     TurnEvent::ToolCallStart {
+                        batch_id,
                         parent_tool_name,
                         calls,
                     } => {
                         let _ = parent_tx.send(TurnEvent::ToolCallStart {
+                            batch_id,
                             parent_tool_name: parent_tool_name
-                                .or_else(|| Some(USE_ABILITY_TOOL_NAME.to_string())),
+                                .or_else(|| Some(bridge_call_id.clone())),
                             calls,
                         });
                     }
                     TurnEvent::ToolCallEnd {
+                        batch_id,
                         parent_tool_name,
                         tool_call_id,
                         tool_name,
@@ -328,8 +783,9 @@ where
                         result,
                     } => {
                         let _ = parent_tx.send(TurnEvent::ToolCallEnd {
+                            batch_id,
                             parent_tool_name: parent_tool_name
-                                .or_else(|| Some(USE_ABILITY_TOOL_NAME.to_string())),
+                                .or_else(|| Some(bridge_call_id.clone())),
                             tool_call_id,
                             tool_name,
                             tool_args,
@@ -342,6 +798,35 @@ where
                     TurnEvent::MessageCompacted { .. } => {
                         let _ = parent_tx.send(event);
                     }
+                    TurnEvent::ModelRequestStarted {
+                        request_id,
+                        parent_call_id,
+                        provider,
+                        model,
+                    } => {
+                        let _ = parent_tx.send(TurnEvent::ModelRequestStarted {
+                            request_id,
+                            parent_call_id: parent_call_id.or_else(|| Some(bridge_call_id.clone())),
+                            provider,
+                            model,
+                        });
+                    }
+                    TurnEvent::AssistantTextDelta { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
+                    TurnEvent::ModelRequestCompleted {
+                        request_id,
+                        parent_call_id,
+                    } => {
+                        let _ = parent_tx.send(TurnEvent::ModelRequestCompleted {
+                            request_id,
+                            parent_call_id: parent_call_id.or_else(|| Some(bridge_call_id.clone())),
+                        });
+                    }
+                    TurnEvent::AsyncOperationEvent { .. }
+                    | TurnEvent::AsyncOperationTranscript { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
                     TurnEvent::TranscriptMessage { .. } => {}
                     _ => {}
                 }
@@ -350,7 +835,13 @@ where
     });
 
     // Run the sub turn loop with nested events enabled.
-    let result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None).await;
+    let cancel_token = op_handle.cancel_token();
+    let result = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow::anyhow!("ability operation stopped"))
+        }
+        result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None) => result,
+    };
 
     if let Some(bridge) = bridge {
         let _ = bridge.await;
@@ -359,46 +850,129 @@ where
     match result {
         Ok(output) => {
             turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
-            if let Some(parent_tx) = turn_loop::current_events_tx() {
+            op_handle
+                .complete(
+                    AsyncOpSignal::Completed {
+                        summary: truncate(&output.text, 500),
+                        output: Some(serde_json::json!({
+                            "result_preview": output.text,
+                        })),
+                    },
+                    parent_events_tx.clone(),
+                )
+                .await;
+            if let Some(parent_tx) = parent_events_tx.clone() {
                 debug!(
                     ability = ability.name,
                     ability_tool_name = USE_ABILITY_TOOL_NAME,
                     "Emitting AbilityCompleted success=true"
                 );
                 let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                    call_id: call_id.clone(),
                     ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
                     ability_name: ability.name.clone(),
                     success: true,
                     final_output: output.text.clone(),
                 });
             }
-            Ok(ToolResult {
-                success: true,
-                output: output.text,
-                error: None,
-            })
         }
         Err(e) => {
             let error = format!("ability execution failed: {e}");
-            if let Some(parent_tx) = turn_loop::current_events_tx() {
+            op_handle
+                .complete(
+                    AsyncOpSignal::Failed {
+                        error: truncate(&error, 500),
+                    },
+                    parent_events_tx.clone(),
+                )
+                .await;
+            if let Some(parent_tx) = parent_events_tx {
                 debug!(
                     ability = ability.name,
                     ability_tool_name = USE_ABILITY_TOOL_NAME,
                     "Emitting AbilityCompleted success=false"
                 );
                 let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                    call_id,
                     ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
                     ability_name: ability.name.clone(),
                     success: false,
                     final_output: error.clone(),
                 });
             }
-            Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(error),
-            })
         }
+    }
+}
+
+async fn bridge_ability_transcript(
+    handle: &super::async_ops::AsyncOpHandle,
+    event: &TurnEvent,
+    events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+) {
+    match event {
+        TurnEvent::ToolCallStart { calls, .. } => {
+            for call in calls {
+                handle
+                    .transcript(
+                        AsyncOperationTranscriptEvent::ToolCall {
+                            tool: call.tool_name.clone(),
+                            summary: call
+                                .text_preview
+                                .clone()
+                                .unwrap_or_else(|| truncate(&call.tool_args, 240)),
+                        },
+                        events_tx.clone(),
+                    )
+                    .await;
+            }
+        }
+        TurnEvent::ToolCallEnd {
+            tool_name, result, ..
+        } => {
+            handle
+                .transcript(
+                    AsyncOperationTranscriptEvent::ToolResult {
+                        tool: tool_name.clone(),
+                        success: result.success,
+                        summary: truncate(
+                            result.error.as_deref().unwrap_or(result.output.as_str()),
+                            240,
+                        ),
+                    },
+                    events_tx,
+                )
+                .await;
+        }
+        TurnEvent::TranscriptMessage { message } => {
+            let summary = truncate(&message.content, 240);
+            let transcript = match message.role.as_str() {
+                "user" => AsyncOperationTranscriptEvent::Input { summary },
+                "assistant" => AsyncOperationTranscriptEvent::AssistantMessage { summary },
+                "tool" => AsyncOperationTranscriptEvent::ToolResult {
+                    tool: "tool".into(),
+                    success: true,
+                    summary,
+                },
+                _ => return,
+            };
+            handle.transcript(transcript, events_tx).await;
+        }
+        TurnEvent::AbilityStarted { .. }
+        | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::ModelRequestStarted { .. }
+        | TurnEvent::AssistantTextDelta { .. }
+        | TurnEvent::ModelRequestCompleted { .. }
+        | TurnEvent::HookStarted { .. }
+        | TurnEvent::HookActivated { .. }
+        | TurnEvent::HookCompleted { .. }
+        | TurnEvent::SubAgentEvent { .. }
+        | TurnEvent::SubAgentTranscript { .. }
+        | TurnEvent::AsyncOperationEvent { .. }
+        | TurnEvent::AsyncOperationTranscript { .. }
+        | TurnEvent::MessageCompacted { .. }
+        | TurnEvent::Paused
+        | TurnEvent::Resumed
+        | TurnEvent::Done { .. } => {}
     }
 }
 
@@ -410,21 +984,54 @@ where
     P: ProviderRuntime,
 {
     let registry = Arc::new(AbilityRegistry::new(abilities)?);
-    Ok(vec![
+    let async_ops = instance.runtime.async_ops.clone();
+    let mut tools = vec![
         Arc::new(ListAssignedAbilitiesTool::new(registry.clone())) as Arc<dyn Tool>,
-        Arc::new(UseAbilityTool::new(registry, instance)) as Arc<dyn Tool>,
-    ])
+        Arc::new(UseAbilityTool::new(registry, instance.clone())) as Arc<dyn Tool>,
+        Arc::new(InspectAbilitiesTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+        Arc::new(SendAbilitiesTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+        Arc::new(StopAbilitiesTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+    ];
+    if instance.runtime.config.max_delegation_depth == 0 {
+        tools.push(Arc::new(AbilityWaitTool { async_ops }) as Arc<dyn Tool>);
+    }
+    Ok(tools)
 }
 
 pub(crate) fn is_ability_tool(name: &str) -> bool {
     matches!(
         name,
-        LIST_ASSIGNED_ABILITIES_TOOL_NAME | USE_ABILITY_TOOL_NAME
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME
+            | USE_ABILITY_TOOL_NAME
+            | INSPECT_ABILITIES_TOOL_NAME
+            | SEND_ABILITIES_TOOL_NAME
+            | STOP_ABILITIES_TOOL_NAME
+            | WAIT_TOOL_NAME
     )
 }
 
 fn ability_id(ability: &AbilityManifest) -> String {
     ability.name.clone()
+}
+
+fn next_ability_operation_id(ability_id: &str) -> AsyncOpId {
+    let slug = crate::Slug::derive_with_fallback(ability_id, "ability");
+    let sequence = ABILITY_OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    AsyncOpId::new(format!("ability_{slug}_{sequence}"))
+}
+
+fn json_tool(value: serde_json::Value) -> ToolResult {
+    ToolResult {
+        success: true,
+        output: value.to_string(),
+        error: None,
+    }
 }
 
 /// Build a temporary AgentInstance for the ability sub-execution.
@@ -539,6 +1146,7 @@ where
             config: caller.runtime.config.clone(),
             provider_runtime: caller.runtime.provider_runtime.clone(),
             sub_agent_ctx: caller.runtime.sub_agent_ctx.clone(),
+            async_ops: AsyncOpManager::new(),
             execution_mode: caller.runtime.execution_mode,
             hook_runtime: None,
         },
@@ -715,9 +1323,8 @@ mod tests {
     fn test_instance_with_active_domain() -> AgentInstance {
         AgentInstance {
             manifest: AgentManifest {
-                id: uuid::Uuid::new_v4(),
                 name: "nenji".into(),
-                slug: Some(crate::Slug::derive("nenji")),
+                slug: crate::Slug::derive("nenji"),
                 description: Some("system agent".into()),
                 prompt_config: PromptConfig {
                     system_prompt: "caller system".into(),
@@ -736,8 +1343,8 @@ mod tests {
                 heartbeat: None,
             },
             model_manifest: crate::manifest::ModelManifest {
-                id: uuid::Uuid::new_v4(),
                 name: "mock".into(),
+                slug: crate::Slug::derive("mock"),
                 description: None,
                 model: "mock".into(),
                 model_provider: "mock".into(),
@@ -746,7 +1353,7 @@ mod tests {
             },
             model: AgentModel {
                 model_name: "mock".into(),
-                id: uuid::Uuid::new_v4(),
+                model_slug: crate::Slug::derive("mock"),
                 temperature: 0.2,
                 model_provider: Arc::new(NoopProvider),
             },
@@ -755,7 +1362,6 @@ mod tests {
                     agent_name: "nenji".into(),
                     agent_description: "system agent".into(),
                     current_project: crate::manifest::ProjectManifest {
-                        id: uuid::Uuid::nil(),
                         name: String::new(),
                         slug: crate::Slug::derive("project"),
                         description: None,
@@ -763,10 +1369,9 @@ mod tests {
                     },
                     active_domain: Some(ActiveDomain {
                         session_id: uuid::Uuid::new_v4(),
-                        domain_id: uuid::Uuid::new_v4(),
+                        domain_slug: crate::Slug::derive("creator"),
                         domain_name: "creator".into(),
                         manifest: DomainManifest {
-                            id: uuid::Uuid::new_v4(),
                             name: "creator".into(),
                             path: "nenjo/creator".into(),
                             description: None,
@@ -793,6 +1398,7 @@ mod tests {
                 config: AgentConfig::default(),
                 provider_runtime: Some(test_sdk_provider()),
                 sub_agent_ctx: None,
+                async_ops: AsyncOpManager::new(),
                 execution_mode: AgentExecutionMode::Parent,
                 hook_runtime: None,
             },
@@ -805,7 +1411,6 @@ mod tests {
         caller.manifest.abilities = vec!["caller_ability".into()];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -853,7 +1458,6 @@ mod tests {
         caller.manifest.abilities = vec!["caller_ability".into()];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "isolated".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Runs isolated".into()),
@@ -902,7 +1506,6 @@ mod tests {
             },
         ]);
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -950,7 +1553,6 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -996,7 +1598,6 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1028,7 +1629,6 @@ mod tests {
     #[test]
     fn use_ability_schema_requires_self_contained_input() {
         let ability = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1061,7 +1661,6 @@ mod tests {
     #[tokio::test]
     async fn list_assigned_abilities_returns_all_assigned_ability_metadata() {
         let review = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "Code Review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1077,7 +1676,6 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let docs = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "Search Docs!".into(),
             path: Some("docs".into()),
             description: None,
@@ -1119,7 +1717,6 @@ mod tests {
     #[test]
     fn duplicate_ability_ids_are_rejected() {
         let first = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "code_review".into(),
             path: Some("frontend".into()),
             description: None,
@@ -1135,7 +1732,6 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let second = AbilityManifest {
-            id: uuid::Uuid::new_v4(),
             name: "code_review".into(),
             path: Some("backend".into()),
             description: None,

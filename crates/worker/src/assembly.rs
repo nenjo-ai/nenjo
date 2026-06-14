@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,15 +8,8 @@ use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
-use nenjo_knowledge::tools::KnowledgePackEntry;
-use nenjo_knowledge::{KnowledgePack, PackageKnowledgePack};
-use nenjo_nenpm::{
-    NenpmLock, PackageInstallIndex, PackageSource, package_install_path_in_packages_dir,
-};
-use nenjo_packages::PackageKind;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::api_client::PayloadCodec;
-use nenjo_platform::library_knowledge::LibraryKnowledgePack;
 use nenjo_secure_envelope::SecureEnvelopeCodec;
 use tracing::warn;
 use uuid::Uuid;
@@ -153,7 +146,6 @@ pub(crate) async fn build_provider(
         package_runtime_roots(config),
     );
     let platform_tools = build_platform_tool_services(config, auth_provider);
-    let knowledge_packs = load_provider_knowledge_packs(&config.config_dir);
     let tool_factory = WorkerToolFactory::with_skill_registry(
         security,
         NativeRuntime,
@@ -165,8 +157,9 @@ pub(crate) async fn build_provider(
 
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
+    let live_manifest_reader = loader.clone();
 
-    Provider::builder()
+    let provider = Provider::builder()
         .with_loader(global_package_manifest_loader(config))
         .with_loader(platform_package_manifest_loader(config))
         .with_loader(loader)
@@ -175,10 +168,12 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
-        .with_knowledge_packs(knowledge_packs)
+        .with_live_manifest_reader(live_manifest_reader)
         .build()
         .await
-        .context("Failed to build Provider")
+        .context("Failed to build Provider")?;
+
+    Ok(provider)
 }
 
 pub(crate) async fn load_runtime_manifest(config: &Config) -> Result<Manifest> {
@@ -226,170 +221,6 @@ fn extend_runtime_roots(target: &mut Vec<PathBuf>, roots: Vec<PathBuf>) {
     }
 }
 
-fn load_library_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
-    let mut packs = Vec::new();
-    let library_dir = nenjo_home.join("library");
-    if let Ok(entries) = std::fs::read_dir(&library_dir) {
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let slug = entry.file_name().to_string_lossy().to_string();
-            if let Some(pack) = LibraryKnowledgePack::load(entry.path())
-                && let Ok(entry) = KnowledgePackEntry::library(slug, pack)
-            {
-                packs.push(entry);
-            }
-        }
-    }
-    packs
-}
-
-fn load_package_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
-    let packages_dir = nenjo_home.join("platform_pkgs");
-    let lock_path = packages_dir.join("nenpm.lock.yml");
-    let Ok(lock) = NenpmLock::load_file(&lock_path) else {
-        return Vec::new();
-    };
-    let index = PackageInstallIndex::load_file(packages_dir.join(".nenpm-index.json")).ok();
-    let mut packs = Vec::new();
-
-    for package in lock.packages {
-        let package_root = index
-            .as_ref()
-            .and_then(|index| index.get_package(&package.name, &package.version))
-            .map(|entry| package_root_from_platform_index(nenjo_home, &packages_dir, &entry.root))
-            .unwrap_or_else(|| {
-                package_install_path_in_packages_dir(&packages_dir, &package.name, &package.version)
-            });
-
-        for module in package.modules {
-            if module.kind != PackageKind::Knowledge {
-                continue;
-            }
-            let manifest_path = package_root.join(&module.path);
-            match PackageKnowledgePack::load(&manifest_path, package.version.as_str()) {
-                Ok(pack) => {
-                    let selector = package_knowledge_selector_name(
-                        &package.name,
-                        package.source.as_ref(),
-                        pack.manifest().pack_id(),
-                    );
-                    match KnowledgePackEntry::package(selector, pack) {
-                        Ok(entry) => packs.push(entry),
-                        Err(error) => warn!(
-                            package = %package.name,
-                            error = %error,
-                            "Skipping package knowledge pack with invalid package selector"
-                        ),
-                    }
-                }
-                Err(error) => warn!(
-                    package = %package.name,
-                    module = %module.path,
-                    error = %error,
-                    "Skipping package knowledge pack"
-                ),
-            }
-        }
-    }
-
-    packs
-}
-
-fn package_knowledge_selector_name(
-    package_name: &str,
-    source: Option<&PackageSource>,
-    pack_id: &str,
-) -> String {
-    let mut segments = package_source_selector_segments(source).unwrap_or_else(|| {
-        package_name_scope_segment(package_name)
-            .into_iter()
-            .collect()
-    });
-    segments.push(package_leaf_segment(package_name));
-    segments.push(knowledge_pack_leaf_segment(pack_id));
-    segments
-        .into_iter()
-        .filter(|segment| !segment.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn package_source_selector_segments(source: Option<&PackageSource>) -> Option<Vec<String>> {
-    let PackageSource::Git { url, .. } = source? else {
-        return None;
-    };
-    github_owner_repo_from_url(url).map(|(owner, repo)| vec![owner, repo])
-}
-
-fn github_owner_repo_from_url(url: &str) -> Option<(String, String)> {
-    let trimmed = url.trim().trim_end_matches(".git").trim_end_matches('/');
-    let path = trimmed
-        .strip_prefix("https://github.com/")
-        .or_else(|| trimmed.strip_prefix("http://github.com/"))
-        .or_else(|| trimmed.strip_prefix("git@github.com:"))?;
-    let (owner, repo) = path.split_once('/')?;
-    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
-        return None;
-    }
-    Some((owner.to_string(), repo.to_string()))
-}
-
-fn package_name_scope_segment(package_name: &str) -> Option<String> {
-    package_name
-        .trim()
-        .trim_start_matches('@')
-        .split_once('/')
-        .map(|(scope, _)| scope.to_string())
-        .filter(|scope| !scope.trim().is_empty())
-}
-
-fn package_leaf_segment(package_name: &str) -> String {
-    package_name
-        .trim()
-        .trim_start_matches('@')
-        .rsplit(['/', '.'])
-        .next()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(package_name.trim())
-        .to_string()
-}
-
-fn knowledge_pack_leaf_segment(pack_id: &str) -> String {
-    pack_id
-        .trim()
-        .rsplit(['.', '/'])
-        .next()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("knowledge")
-        .to_string()
-}
-
-fn package_root_from_platform_index(
-    _nenjo_home: &Path,
-    packages_dir: &Path,
-    indexed_root: &str,
-) -> PathBuf {
-    let indexed = Path::new(indexed_root);
-    if indexed.is_absolute() {
-        indexed.to_path_buf()
-    } else if let Ok(relative_to_platform_pkgs) = indexed.strip_prefix("platform_pkgs") {
-        packages_dir.join(relative_to_platform_pkgs)
-    } else {
-        packages_dir.join(indexed)
-    }
-}
-
-fn load_provider_knowledge_packs(nenjo_home: &Path) -> Vec<KnowledgePackEntry> {
-    let mut packs = load_library_knowledge_packs(nenjo_home);
-    packs.extend(load_package_knowledge_packs(nenjo_home));
-    packs
-}
-
 fn build_platform_tool_services(
     config: &Config,
     auth_provider: Arc<WorkerAuthProvider>,
@@ -412,7 +243,8 @@ fn build_platform_tool_services(
         platform_client,
         payload_encoder,
         cached_org_id,
-        config.config_dir.clone(),
+        config.workspace_dir.clone(),
+        config.config_dir.join("library"),
     )
 }
 
@@ -420,50 +252,14 @@ fn build_platform_tool_services(
 mod tests {
     use super::*;
 
-    fn write_library_pack(root: &Path) {
-        let pack_dir = root.join("library").join("demo");
-        let docs_dir = pack_dir.join("docs");
-        std::fs::create_dir_all(&docs_dir).unwrap();
-        std::fs::write(docs_dir.join("intro.md"), "# Intro").unwrap();
-        std::fs::write(
-            pack_dir.join(LibraryKnowledgePack::MANIFEST_FILENAME),
-            r#"{
-              "pack_id": "demo",
-              "version": "1",
-              "schema_version": 1,
-              "root_uri": "library://demo/",
-              "content_hash": "",
-              "synced_at": "",
-              "docs": [
-                {
-                  "id": "intro",
-                  "selector": "library://demo/intro.md",
-                  "source_path": "docs/intro.md",
-                  "title": "Intro",
-                  "summary": "Intro doc",
-                  "kind": "reference",
-                  "tags": [],
-                  "related": [],
-                  "updated_at": ""
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn provider_knowledge_packs_include_local_cached_library_and_package_packs() {
+    #[tokio::test]
+    async fn runtime_manifest_loads_platform_package_knowledge_packs() {
         let temp = tempfile::tempdir().unwrap();
-        write_library_pack(temp.path());
-
-        assert_eq!(load_provider_knowledge_packs(temp.path()).len(), 1);
-    }
-
-    #[test]
-    fn package_knowledge_packs_load_from_platform_install() {
-        let temp = tempfile::tempdir().unwrap();
-        let packages_dir = temp.path().join("platform_pkgs");
+        let config = Config {
+            config_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let packages_dir = config.config_dir.join("platform_pkgs");
         let package_root = packages_dir.join("@nenjo-ai/knowledge@0.1.0");
         std::fs::create_dir_all(package_root.join("core/docs/domain")).unwrap();
         std::fs::write(
@@ -514,6 +310,7 @@ schema: nenjo.knowledge.v1
 selector: ignored.authored.selector
 root_uri: pkg://nenjo/knowledge/
 manifest:
+  name: Nenjo Core
   pack_id: nenjo.core
   version: 0.1.0
   schema_version: 1
@@ -533,43 +330,30 @@ manifest:
             "# Nenjo\n\nKnowledge content.",
         )
         .unwrap();
+        std::fs::write(
+            package_root.join("package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo-ai/knowledge"
+version: "0.1.0"
+modules:
+  - core/manifest.yaml
+"#,
+        )
+        .unwrap();
 
-        let packs = load_package_knowledge_packs(temp.path());
+        let manifest = platform_package_manifest_loader(&config)
+            .load()
+            .await
+            .unwrap();
 
-        assert_eq!(packs.len(), 1);
-        assert_eq!(packs[0].selector(), "pkg:nenjo-ai.packages.knowledge.core");
-        assert!(
-            packs[0]
-                .pack()
-                .read_doc("domain.nenjo")
-                .unwrap()
-                .content
-                .contains("Knowledge content")
-        );
-        let vars = nenjo_knowledge::tools::knowledge_pack_prompt_vars(
-            packs[0].knowledge_ref(),
-            packs[0].pack().as_ref(),
-        );
-        assert!(vars.contains_key("pkg.nenjo_ai.packages.knowledge.core.domain.nenjo"));
-    }
-
-    #[test]
-    fn package_knowledge_selector_uses_source_package_and_pack_leaf() {
+        assert_eq!(manifest.knowledge_packs.len(), 1);
+        let pack = &manifest.knowledge_packs[0];
+        assert_eq!(pack.selector, "pkg:nenjo_ai.packages.knowledge.core");
+        assert_eq!(pack.root_uri, "pkg://nenjo/knowledge/");
         assert_eq!(
-            package_knowledge_selector_name(
-                "@nenjo-ai/knowledge",
-                Some(&PackageSource::Git {
-                    url: "https://github.com/nenjo-ai/packages.git".to_string(),
-                    reference: "feat/v2".to_string(),
-                    manifest_path: "packages.yaml".to_string(),
-                }),
-                "nenjo.core",
-            ),
-            "nenjo-ai.packages.knowledge.core"
-        );
-        assert_eq!(
-            package_knowledge_selector_name("@acme/runbook", None, "acme.platform"),
-            "acme.runbook.platform"
+            pack.root_path.as_ref().unwrap(),
+            &package_root.join("core/manifest.yaml")
         );
     }
 

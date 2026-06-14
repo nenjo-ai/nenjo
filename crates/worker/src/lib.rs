@@ -266,6 +266,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .urls(nats.urls.clone())
         .token(&config.api_key)
         .stream_name(nats.stream_name.clone())
+        .org_id(org_id)
         .worker_id(api_key_id)
         .build()
         .await
@@ -280,7 +281,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         .build()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to build event bus: {e}"))?;
-    let secure_bus = SecureEnvelopeBus::new(bus, crypto.codec.clone());
+    let secure_bus = SecureEnvelopeBus::new(bus, crypto.codec.clone(), org_id);
 
     info!("Eventbus transport connected");
     debug!(

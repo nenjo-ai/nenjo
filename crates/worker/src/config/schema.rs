@@ -562,7 +562,7 @@ pub struct GitConfig {
 /// Write an isolated git config for all worker git operations.
 ///
 /// Sets `GIT_CONFIG_GLOBAL` in the process environment so every git command
-/// run by the worker (and any lambda subprocess that inherits the env) uses
+/// run by the worker (and any subprocess that inherits the env) uses
 /// `~/.nenjo/gitconfig` instead of `~/.gitconfig`.  This prevents system
 /// credential helpers (e.g. osxkeychain) from interfering.
 ///
@@ -723,7 +723,7 @@ esac
     }
 
     // Step C: set GIT_CONFIG_GLOBAL so all git commands in this process (and
-    // any subprocess that inherits the environment, including lambda scripts)
+    // any subprocess that inherits the environment)
     // use our isolated config instead of ~/.gitconfig.
     //
     // Also set GIT_CONFIG_NOSYSTEM=1 so git ignores the system-level gitconfig

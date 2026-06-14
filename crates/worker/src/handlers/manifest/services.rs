@@ -4,8 +4,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::Slug;
 use nenjo_events::ResourceType;
-use nenjo_platform::api_client::{ApiClient, DocumentSyncMeta};
+use nenjo_platform::PlatformResourceKind;
+use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use uuid::Uuid;
+
+use super::knowledge::DocumentEdgesSource;
 
 /// Host-owned manifest persistence and document side-effect hooks.
 ///
@@ -55,6 +58,40 @@ pub trait ManifestStore: Send + Sync {
         Ok(())
     }
 
+    /// Persist or remove platform-private resource id metadata for encrypted write paths.
+    async fn update_platform_resource_id(
+        &self,
+        _kind: PlatformResourceKind,
+        _resource: &Slug,
+        _resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove all slug aliases for one platform resource id (e.g. after rename + delete).
+    async fn remove_platform_resource_id_by_id(
+        &self,
+        _kind: PlatformResourceKind,
+        _resource_id: Uuid,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Persist or remove pack-scoped knowledge document platform ids.
+    async fn update_knowledge_document_resource_id(
+        &self,
+        _pack: &Slug,
+        _doc: &Slug,
+        _resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove all pack aliases for one knowledge document platform id.
+    async fn remove_knowledge_document_resource_id_by_id(&self, _resource_id: Uuid) -> Result<()> {
+        Ok(())
+    }
+
     /// Rebuild the full manifest cache from the platform client.
     async fn full_refresh(&self, client: &ApiClient) -> Result<nenjo::Manifest>;
 
@@ -63,7 +100,8 @@ pub trait ManifestStore: Send + Sync {
         &self,
         _client: &ApiClient,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
+        _edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
         Ok(())
     }
@@ -73,7 +111,7 @@ pub trait ManifestStore: Send + Sync {
         &self,
         _client: &ApiClient,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         Ok(())
     }
@@ -82,7 +120,7 @@ pub trait ManifestStore: Send + Sync {
     async fn remove_document(
         &self,
         _doc: &Slug,
-        _metadata: Option<&DocumentSyncMeta>,
+        _metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         Ok(())
     }
@@ -169,25 +207,70 @@ where
         (**self).full_refresh(client).await
     }
 
+    async fn update_platform_resource_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource: &Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        (**self)
+            .update_platform_resource_id(kind, resource, resource_id)
+            .await
+    }
+
+    async fn remove_platform_resource_id_by_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource_id: Uuid,
+    ) -> Result<()> {
+        (**self)
+            .remove_platform_resource_id_by_id(kind, resource_id)
+            .await
+    }
+
+    async fn update_knowledge_document_resource_id(
+        &self,
+        pack: &Slug,
+        doc: &Slug,
+        resource_id: Option<Uuid>,
+    ) -> Result<()> {
+        (**self)
+            .update_knowledge_document_resource_id(pack, doc, resource_id)
+            .await
+    }
+
+    async fn remove_knowledge_document_resource_id_by_id(&self, resource_id: Uuid) -> Result<()> {
+        (**self)
+            .remove_knowledge_document_resource_id_by_id(resource_id)
+            .await
+    }
+
     async fn sync_document_metadata(
         &self,
         client: &ApiClient,
         doc: &Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
+        edges: Option<DocumentEdgesSource<'_>>,
     ) -> Result<()> {
-        (**self).sync_document_metadata(client, doc, metadata).await
+        (**self)
+            .sync_document_metadata(client, doc, metadata, edges)
+            .await
     }
 
     async fn sync_document(
         &self,
         client: &ApiClient,
         doc: &Slug,
-        metadata: Option<&DocumentSyncMeta>,
+        metadata: Option<&KnowledgeDocumentRecord>,
     ) -> Result<()> {
         (**self).sync_document(client, doc, metadata).await
     }
 
-    async fn remove_document(&self, doc: &Slug, metadata: Option<&DocumentSyncMeta>) -> Result<()> {
+    async fn remove_document(
+        &self,
+        doc: &Slug,
+        metadata: Option<&KnowledgeDocumentRecord>,
+    ) -> Result<()> {
         (**self).remove_document(doc, metadata).await
     }
 

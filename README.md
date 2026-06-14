@@ -166,7 +166,7 @@ Platform-connected workers compose several crates:
 - **Turn loop engine** — automatic tool call execution, parallel tool dispatch, context compaction, and streaming
 - **Multi-agent delegation** — agents delegate subtasks to other agents with cycle detection and depth limiting
 - **Persistent memory and artifacts** — project, core, and shared memory scopes plus project/workspace artifact indexes with automatic prompt injection
-- **Routine orchestration** — DAG-based multi-step execution with gates, councils, lambdas, and cron scheduling
+- **Routine orchestration** — DAG-based multi-step execution with gates, councils, terminals, and cron scheduling
 - **Platform worker runtime** — capability-scoped event handling, secure envelopes, manifest sync, and session coordination
 - **Knowledge packs** — built-in, project, and custom documentation packs with metadata-first search and graph traversal tools
 - **Transport-agnostic messaging** — pluggable event bus with a production-ready NATS JetStream implementation

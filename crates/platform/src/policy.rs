@@ -87,10 +87,9 @@ impl ManifestAccessPolicy {
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::ManifestAccessPolicy;
     use crate::scope::{PlatformScope, ScopeResource};
+    use nenjo::Slug;
     use nenjo::manifest::{
         AbilityManifest, AbilityPromptConfig, AgentManifest, DomainManifest, DomainPromptConfig,
         PromptConfig,
@@ -118,9 +117,8 @@ mod tests {
     fn agent_and_ability_scope_checks_use_platform_scopes() {
         let policy = ManifestAccessPolicy::new(vec!["projects:read".into()]);
         let agent = AgentManifest {
-            id: Uuid::new_v4(),
             name: "agent".into(),
-            slug: None,
+            slug: Slug::derive("test-agent"),
             description: None,
             prompt_config: PromptConfig::default(),
             color: None,
@@ -134,7 +132,6 @@ mod tests {
             heartbeat: None,
         };
         let ability = AbilityManifest {
-            id: Uuid::new_v4(),
             name: "ability".into(),
             path: None,
             description: None,
@@ -155,7 +152,6 @@ mod tests {
     fn domains_require_allowed_manifest_scopes() {
         let policy = ManifestAccessPolicy::new(vec!["projects:read".into()]);
         let allowed_domain = DomainManifest {
-            id: Uuid::new_v4(),
             name: "domain".into(),
             path: String::new(),
             description: None,
@@ -167,7 +163,6 @@ mod tests {
             prompt_config: DomainPromptConfig::default(),
         };
         let denied_domain = DomainManifest {
-            id: Uuid::new_v4(),
             name: "domain-2".into(),
             path: String::new(),
             description: None,

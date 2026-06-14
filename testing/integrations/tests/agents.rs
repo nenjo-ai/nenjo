@@ -6,8 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use uuid::Uuid;
-
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
     PromptConfig, PromptTemplates, model_manifest_slug,
@@ -109,7 +107,7 @@ fn is_provider_rate_limit(error: &anyhow::Error) -> bool {
 
 fn make_model() -> ModelManifest {
     ModelManifest {
-        id: Uuid::new_v4(),
+        slug: model_manifest_slug("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"),
         name: "openrouter-nemotron".into(),
         description: None,
         model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
@@ -121,7 +119,6 @@ fn make_model() -> ModelManifest {
 
 fn make_project() -> ProjectManifest {
     ProjectManifest {
-        id: Uuid::new_v4(),
         name: "test-project".into(),
         slug: Slug::derive("test-project"),
         description: None,
@@ -131,9 +128,8 @@ fn make_project() -> ProjectManifest {
 
 fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentManifest {
     AgentManifest {
-        id: Uuid::new_v4(),
         name: name.into(),
-        slug: None,
+        slug: Slug::derive(name),
         description: Some(format!("Test agent: {name}")),
         prompt_config: PromptConfig {
             system_prompt: system_prompt.into(),
@@ -204,8 +200,9 @@ async fn tool_call_round_trip() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].name, "get_weather");
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().any(|spec| spec.name == "get_weather"));
+    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
 
     let output = match skip_on_provider_rate_limit(
         runner
@@ -261,8 +258,6 @@ async fn memory_store_recall_with_real_llm() {
          When asked what you know, use recall_memory first.\n\
          Always respond concisely.",
     );
-
-    let _agent_id = agent.id;
 
     let manifest = Manifest {
         agents: vec![agent],
@@ -412,7 +407,6 @@ async fn assigned_ability_tool_with_real_llm() {
 
     // The ability: code review with specific instructions
     let ability = AbilityManifest {
-        id: Uuid::new_v4(),
         name: "code_review".into(),
         path: None,
         description: Some("Reviews code for bugs, style issues, and improvements".into()),
@@ -541,8 +535,6 @@ async fn domain_expansion_with_real_llm() {
     };
 
     let model = make_model();
-    let prd_domain_id = Uuid::new_v4();
-
     // Agent with a domain assigned
     let mut agent = make_agent(
         "product-manager",
@@ -553,7 +545,6 @@ async fn domain_expansion_with_real_llm() {
 
     // The PRD domain with specific prompt overlay and guidelines
     let domain = DomainManifest {
-        id: prd_domain_id,
         name: "prd".into(),
         path: String::new(),
         description: Some("Write product requirements documents".into()),

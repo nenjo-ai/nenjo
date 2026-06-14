@@ -15,8 +15,8 @@ use uuid::Uuid;
 use super::abilities::{build_ability_tools, is_ability_tool};
 use super::instance::AgentExecutionMode;
 use super::sub_agents::{
-    ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, child_tools,
-    parent_tools,
+    ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
+    child_tools, parent_tools,
 };
 use anyhow::Context;
 use nenjo_models::ModelProvider;
@@ -184,9 +184,9 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.instance.name()
     }
 
-    /// The agent's manifest ID.
-    pub fn agent_id(&self) -> Uuid {
-        self.instance.agent_id()
+    /// The agent's manifest slug.
+    pub fn agent_slug(&self) -> &crate::Slug {
+        self.instance.agent_slug()
     }
 
     /// Create a runner from a pre-built instance.
@@ -256,7 +256,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         // Build the active domain session state.
         let active_domain = ActiveDomain {
             session_id: Uuid::new_v4(),
-            domain_id: domain.id,
+            domain_slug: domain.slug().clone(),
             domain_name: domain.name.clone(),
             manifest: session_manifest.clone(),
         };
@@ -412,14 +412,17 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .collect();
             let runtime = SubAgentRuntime::new(
                 provider,
-                inst.agent_id(),
+                inst.agent_slug().clone(),
                 inst.model_manifest.clone(),
                 inherited_host_tools,
-                SubAgentLimits {
-                    max_depth: inst.runtime.config.max_delegation_depth,
+                SubAgentRuntimeOptions {
+                    limits: SubAgentLimits {
+                        max_depth: inst.runtime.config.max_delegation_depth,
+                    },
+                    delegation_ctx: inst.runtime.sub_agent_ctx.clone(),
+                    async_ops: inst.runtime.async_ops.clone(),
+                    events_tx: Some(events_tx.clone()),
                 },
-                inst.runtime.sub_agent_ctx.clone(),
-                Some(events_tx.clone()),
             );
             inst.runtime.tools.extend(parent_tools(runtime.handle()));
         }

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- KnowledgePackLoader for dynamic pack discovery and always-on `list_knowledge_packs` tool
+- Manifest resource contract for knowledge documents with inline edges in events and worker
+- ProjectDetailRecord for REST settings surface and project settings loading in worker
+- Async operations support for abilities; improved MCP tooling for abilities, domains, and context blocks
+
+### Changed
+
+- Manifest contract wire types: introduced wire module foundation, record types for resources (including KnowledgePackRecord, ContextBlockRecord, ProjectDetailRecord); completed worker/platform sync and API client consumption of records; removed knowledge_contract compatibility shim and legacy knowledge read backend/helpers
+- Library/knowledge alignment: renamed pack_id to pack_slug, reconciled doc UUIDs, centralized discovery and paths, normalized write refs and exposed edge slugs in search, removed pack status from wire types; removed library manifest read tools and `library:read` scope; consolidated wire types in knowledge_contract
+- Platform client: added retry policy; refactored subscribe and respond to use org id
+- Removed uuids completely and tightened backend to worker contracts
+- Moved abilities to async operations; various mcp and manifest tooling improvements
+
+### Fixed
+
+- Worker knowledge sync to only uploaded library knowledge from platform; sync between platform and local cache
+- Project settings load from ProjectDetailRecord; resource id sidecar on slug rename/delete
+- Domain prompt updates; provider knowledge prompt vars refresh from pack loader
+- Agent manifest tooling; manifest tooling fixes
+
 ## [0.14.0](https://github.com/nenjo-ai/nenjo/compare/v0.13.0...v0.14.0) - 2026-06-07
 
 ### Added

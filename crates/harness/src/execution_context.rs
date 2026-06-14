@@ -12,22 +12,35 @@ pub(crate) fn project_slug(project: Option<&nenjo::Slug>) -> String {
 /// Summarize a turn event for trace/session metadata.
 pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
     match event {
+        nenjo::TurnEvent::ModelRequestStarted {
+            request_id, model, ..
+        } => format!("model_request_started(request={request_id}, model={model})"),
+        nenjo::TurnEvent::AssistantTextDelta { request_id, delta } => {
+            format!(
+                "assistant_text_delta(request={request_id}, len={})",
+                delta.len()
+            )
+        }
+        nenjo::TurnEvent::ModelRequestCompleted { request_id, .. } => {
+            format!("model_request_completed(request={request_id})")
+        }
         nenjo::TurnEvent::AbilityStarted {
+            call_id,
             ability_tool_name,
             ability_name,
             task_input,
             caller_history,
         } => format!(
-            "ability_started(tool={ability_tool_name}, ability={ability_name}, task_preview={:?}, task_len={}, caller_messages={})",
-            truncate_preview(task_input, 80),
+            "ability_started(call={call_id}, tool={ability_tool_name}, ability={ability_name}, task_len={}, caller_messages={})",
             task_input.len(),
             caller_history.len()
         ),
         nenjo::TurnEvent::ToolCallStart {
+            batch_id,
             parent_tool_name,
             calls,
         } => format!(
-            "tool_call_start(parent={}, tools=[{}], count={})",
+            "tool_call_start(batch={batch_id}, parent={}, tools=[{}], count={})",
             parent_tool_name.as_deref().unwrap_or("-"),
             calls
                 .iter()
@@ -37,13 +50,14 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             calls.len()
         ),
         nenjo::TurnEvent::ToolCallEnd {
+            batch_id,
             parent_tool_name,
             tool_name,
             tool_args,
             result,
             ..
         } => format!(
-            "tool_call_end(parent={}, tool={tool_name}, args_len={}, success={}, output_len={}, error={})",
+            "tool_call_end(batch={batch_id}, parent={}, tool={tool_name}, args_len={}, success={}, output_len={}, error={})",
             parent_tool_name.as_deref().unwrap_or("-"),
             tool_args.len(),
             result.success,
@@ -55,12 +69,13 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 .unwrap_or_else(|| "-".to_string())
         ),
         nenjo::TurnEvent::AbilityCompleted {
+            call_id,
             ability_tool_name,
             ability_name,
             success,
             final_output,
         } => format!(
-            "ability_completed(tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
+            "ability_completed(call={call_id}, tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
         ),
         nenjo::TurnEvent::HookStarted {
@@ -110,6 +125,25 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             event,
         } => format!(
             "sub_agent_transcript(slug={slug}, agent={agent_name}, kind={}, summary_len={})",
+            event.kind(),
+            event.summary().len()
+        ),
+        nenjo::TurnEvent::AsyncOperationEvent {
+            operation_id,
+            kind,
+            signal,
+            status,
+            ..
+        } => format!(
+            "async_operation_event(id={operation_id}, kind={kind}, signal={signal}, status={status})"
+        ),
+        nenjo::TurnEvent::AsyncOperationTranscript {
+            operation_id,
+            kind,
+            event,
+            ..
+        } => format!(
+            "async_operation_transcript(id={operation_id}, kind={kind}, event={}, summary_len={})",
             event.kind(),
             event.summary().len()
         ),

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo_platform::{
-    PlatformManifestBackend, PlatformManifestClient, tools::PlatformProjectToolsBackend,
+    PlatformManifestBackend, PlatformManifestClient, PlatformResourceIdStore,
+    tools::PlatformProjectToolsBackend,
 };
 use uuid::Uuid;
 
@@ -26,8 +27,10 @@ impl PlatformToolServices {
         payload_encoder: PlatformPayloadEncoder,
         cached_org_id: Option<Uuid>,
         workspace_dir: std::path::PathBuf,
+        library_dir: std::path::PathBuf,
     ) -> Self {
         let manifest_backend = platform_client.as_ref().map(|client| {
+            let resource_ids = Arc::new(PlatformResourceIdStore::new(manifest_store.root()));
             Arc::new(
                 PlatformManifestBackend::new(
                     manifest_store.clone(),
@@ -35,7 +38,9 @@ impl PlatformToolServices {
                     payload_encoder.clone(),
                 )
                 .with_workspace_dir(workspace_dir)
-                .with_cached_org_id(cached_org_id),
+                .with_library_dir(library_dir)
+                .with_cached_org_id(cached_org_id)
+                .with_resource_id_store(resource_ids),
             )
         });
 

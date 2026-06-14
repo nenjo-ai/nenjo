@@ -36,7 +36,7 @@ let key_provider = EnrollmentBackedKeyProvider::new(
 );
 
 let codec = SecureEnvelopeCodec::new(key_provider, org_id);
-let mut secure_bus = SecureEnvelopeBus::new(raw_bus, codec);
+let mut secure_bus = SecureEnvelopeBus::new(raw_bus, codec, org_id);
 
 while let Some(input) = secure_bus.recv_command().await? {
     // route input to the harness

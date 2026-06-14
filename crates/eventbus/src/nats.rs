@@ -46,6 +46,7 @@ pub struct NatsTransport {
     ack_wait: Duration,
     message_buffer: usize,
     worker_id: uuid::Uuid,
+    org_id: uuid::Uuid,
 }
 
 #[async_trait::async_trait]
@@ -128,7 +129,7 @@ impl NatsTransport {
             .copied()
             .filter(Capability::is_work_lane)
         {
-            let subject = requests_subject(capability);
+            let subject = requests_subject(self.org_id, capability);
             spawn_consumer(ConsumerSpawnSpec {
                 jetstream: self.jetstream.clone(),
                 stream_name: self.stream_name.clone(),
@@ -142,7 +143,7 @@ impl NatsTransport {
         }
 
         for capability in capabilities.iter().copied() {
-            let subject = worker_requests_subject(worker_id, capability);
+            let subject = worker_requests_subject(self.org_id, worker_id, capability);
             spawn_consumer(ConsumerSpawnSpec {
                 jetstream: self.jetstream.clone(),
                 stream_name: self.stream_name.clone(),
@@ -164,7 +165,7 @@ impl NatsTransport {
             .copied()
             .filter(Capability::is_broadcast_lane)
         {
-            let subject = broadcast_requests_subject(capability);
+            let subject = broadcast_requests_subject(self.org_id, capability);
             spawn_consumer(ConsumerSpawnSpec {
                 jetstream: self.jetstream.clone(),
                 stream_name: broadcast_stream_name.clone(),
@@ -353,6 +354,7 @@ pub struct NatsTransportBuilder {
     ack_wait: Duration,
     message_buffer: usize,
     worker_id: uuid::Uuid,
+    org_id: uuid::Uuid,
 }
 
 impl NatsTransport {
@@ -376,6 +378,7 @@ impl NatsTransport {
             ack_wait: Duration::from_secs(DEFAULT_ACK_WAIT_SECS),
             message_buffer: DEFAULT_MESSAGE_BUFFER,
             worker_id: uuid::Uuid::new_v4(),
+            org_id: uuid::Uuid::nil(),
         }
     }
 
@@ -404,7 +407,7 @@ impl NatsTransportBuilder {
         self
     }
 
-    /// Override the JetStream stream subjects (default: `["work_requests.*", "worker_requests.*.*"]`).
+    /// Override the JetStream stream subjects (default: `["work_requests.*.*", "worker_requests.*.*.*"]`).
     pub fn stream_subjects(mut self, subjects: Vec<String>) -> Self {
         self.stream_subjects = subjects;
         self
@@ -452,6 +455,12 @@ impl NatsTransportBuilder {
     /// multiple workers share a deliver group.
     pub fn worker_id(mut self, id: uuid::Uuid) -> Self {
         self.worker_id = id;
+        self
+    }
+
+    /// Set the authenticated org ID used in command subjects.
+    pub fn org_id(mut self, id: uuid::Uuid) -> Self {
+        self.org_id = id;
         self
     }
 
@@ -520,7 +529,7 @@ impl NatsTransportBuilder {
             subjects: self.stream_subjects,
             retention: stream::RetentionPolicy::WorkQueue,
             max_age: self.max_age,
-            storage: stream::StorageType::Memory,
+            storage: stream::StorageType::File,
             ..Default::default()
         };
 
@@ -534,7 +543,7 @@ impl NatsTransportBuilder {
                 subjects: self.broadcast_stream_subjects.clone(),
                 retention: stream::RetentionPolicy::Interest,
                 max_age: self.max_age,
-                storage: stream::StorageType::Memory,
+                storage: stream::StorageType::File,
                 ..Default::default()
             };
 
@@ -552,6 +561,7 @@ impl NatsTransportBuilder {
             ack_wait: self.ack_wait,
             message_buffer: self.message_buffer,
             worker_id: self.worker_id,
+            org_id: self.org_id,
         })
     }
 }
@@ -568,17 +578,25 @@ async fn ensure_stream_available(
         })?;
         if info.config.retention != stream_config.retention
             || info.config.max_age != stream_config.max_age
-            || info.config.storage != stream_config.storage
             || !stream_subjects_cover(&info.config.subjects, &stream_config.subjects)
         {
             return Err(EventBusError::Transport(format!(
                 "{label} setup failed for '{stream_name}': existing stream config is incompatible \
-                 (subjects={:?}, retention={:?}, max_age={:?}, storage={:?})",
+                 (subjects={:?}, retention={:?}, max_age={:?}, storage={:?}, desired_storage={:?})",
                 info.config.subjects,
                 info.config.retention,
                 info.config.max_age,
-                info.config.storage
+                info.config.storage,
+                stream_config.storage
             )));
+        }
+        if info.config.storage != stream_config.storage {
+            warn!(
+                stream = %stream_name,
+                current_storage = ?info.config.storage,
+                desired_storage = ?stream_config.storage,
+                "Preserving existing JetStream storage type; recreate the stream to move it to file storage"
+            );
         }
 
         return Ok(());
@@ -644,8 +662,8 @@ mod tests {
             "worker_requests.>".to_string(),
         ];
         let desired = vec![
-            "work_requests.*".to_string(),
-            "worker_requests.*.*".to_string(),
+            "work_requests.*.*".to_string(),
+            "worker_requests.*.*.*".to_string(),
         ];
 
         assert!(stream_subjects_cover(&existing, &desired));
@@ -653,8 +671,8 @@ mod tests {
 
     #[test]
     fn stream_subjects_reject_uncovered_subjects() {
-        let existing = vec!["work_requests.*".to_string()];
-        let desired = vec!["worker_requests.*.*".to_string()];
+        let existing = vec!["work_requests.*.*".to_string()];
+        let desired = vec!["worker_requests.*.*.*".to_string()];
 
         assert!(!stream_subjects_cover(&existing, &desired));
     }

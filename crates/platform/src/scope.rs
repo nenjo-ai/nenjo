@@ -76,7 +76,6 @@ impl PlatformScope {
             "domains:write" => Self::write(ScopeResource::Domains),
             "projects:read" => Self::read(ScopeResource::Projects),
             "projects:write" => Self::write(ScopeResource::Projects),
-            "library:read" => Self::read(ScopeResource::Library),
             "library:write" => Self::write(ScopeResource::Library),
             "routines:read" => Self::read(ScopeResource::Routines),
             "routines:write" => Self::write(ScopeResource::Routines),
