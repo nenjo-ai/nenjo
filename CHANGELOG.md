@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/nenjo-ai/nenjo/compare/v0.15.0...v0.16.0) - 2026-06-16
+
+### Added
+
+- *(secure-bus)* enforce require-secured-commands config flag ([#63](https://github.com/nenjo-ai/nenjo/pull/63))
+
+
 ## [0.15.0](https://github.com/nenjo-ai/nenjo/compare/v0.14.0...v0.15.0) - 2026-06-14
 
 ### Added
