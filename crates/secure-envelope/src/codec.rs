@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, Response,
-    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, ResourceType,
+    Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
 use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    CodecContext, CodecResult, DecodeCommandResult, DecodingError, EnvelopeCodec, decrypt_text,
+    CodecContext, CodecResult, DecodeCommandResult, EnvelopeCodec, decrypt_text,
     encrypt_text_for_scope,
 };
 
@@ -23,6 +23,22 @@ use crate::{
 pub struct SecureEnvelopeCodec {
     key_provider: Arc<dyn EnvelopeKeyProvider>,
     org_id: Uuid,
+    config: SecureEnvelopeCodecConfig,
+}
+
+/// Runtime policy for secure-envelope command decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecureEnvelopeCodecConfig {
+    /// Require sensitive commands to carry encrypted payload fields.
+    pub require_secured_commands: bool,
+}
+
+impl Default for SecureEnvelopeCodecConfig {
+    fn default() -> Self {
+        Self {
+            require_secured_commands: true,
+        }
+    }
 }
 
 impl SecureEnvelopeCodec {
@@ -30,9 +46,21 @@ impl SecureEnvelopeCodec {
     where
         K: EnvelopeKeyProvider,
     {
+        Self::new_with_config(key_provider, org_id, SecureEnvelopeCodecConfig::default())
+    }
+
+    pub fn new_with_config<K>(
+        key_provider: K,
+        org_id: Uuid,
+        config: SecureEnvelopeCodecConfig,
+    ) -> Self
+    where
+        K: EnvelopeKeyProvider,
+    {
         Self {
             key_provider: Arc::new(key_provider),
             org_id,
+            config,
         }
     }
 
@@ -170,6 +198,107 @@ impl SecureEnvelopeCodec {
             );
         }
         Ok(())
+    }
+
+    fn unsecured_command_result(
+        &self,
+        command: Command,
+        command_label: &str,
+        field: &str,
+    ) -> DecodeCommandResult {
+        if !self.config.require_secured_commands {
+            warn!(
+                command = %command_label,
+                %field,
+                "Allowing unsecured sensitive command without encrypted payload"
+            );
+            return DecodeCommandResult::Command(Box::new(command));
+        }
+
+        warn!(
+            command = %command_label,
+            %field,
+            "Dropping unsecured sensitive command without encrypted payload"
+        );
+        DecodeCommandResult::Drop
+    }
+
+    fn drop_command_decode_failure(
+        command: &str,
+        reason: &str,
+        error: impl std::fmt::Display,
+    ) -> DecodeCommandResult {
+        warn!(
+            %command,
+            %reason,
+            error = %error,
+            "Dropping command after secure envelope decode failure"
+        );
+        DecodeCommandResult::Drop
+    }
+
+    fn manifest_inline_payload_requires_encryption(resource_type: ResourceType) -> bool {
+        matches!(
+            resource_type,
+            ResourceType::Agent
+                | ResourceType::Ability
+                | ResourceType::Domain
+                | ResourceType::ContextBlock
+                | ResourceType::Document
+                | ResourceType::Project
+        )
+    }
+
+    fn stream_event_requires_encryption(event: &StreamEvent) -> bool {
+        match event {
+            StreamEvent::RunFailed { payload, .. }
+            | StreamEvent::AssistantTextDelta { payload, .. }
+            | StreamEvent::ToolCallStarted { payload, .. }
+            | StreamEvent::ToolOutputDelta { payload, .. }
+            | StreamEvent::ToolCallCompleted { payload, .. }
+            | StreamEvent::HookStarted { payload, .. }
+            | StreamEvent::HookCompleted { payload, .. }
+            | StreamEvent::AsyncOperationEvent { payload, .. }
+            | StreamEvent::AsyncOperationTranscript { payload, .. }
+            | StreamEvent::Done { payload, .. } => payload.is_some(),
+            StreamEvent::Error { .. } => true,
+            StreamEvent::RunStarted { .. }
+            | StreamEvent::RunCompleted { .. }
+            | StreamEvent::RunCancelled { .. }
+            | StreamEvent::ModelRequestStarted { .. }
+            | StreamEvent::ModelRequestCompleted { .. }
+            | StreamEvent::DomainEntered { .. }
+            | StreamEvent::DomainExited { .. }
+            | StreamEvent::MessageCompacted { .. }
+            | StreamEvent::Paused
+            | StreamEvent::Resumed => false,
+        }
+    }
+
+    async fn decode_task_execute_content(
+        &self,
+        actor_user_id: Uuid,
+        payload: Option<TaskExecuteContent>,
+        encrypted_payload: &EncryptedPayload,
+    ) -> Result<TaskExecuteContent> {
+        Self::validate_sensitive_payload_kind(
+            encrypted_payload,
+            SensitiveContentKind::TaskContent,
+        )?;
+        match payload {
+            Some(mut payload) => {
+                let encrypted = self
+                    .decode_json_payload::<TaskEncryptedContent>(actor_user_id, encrypted_payload)
+                    .await?;
+                payload.description = encrypted.description;
+                payload.acceptance_criteria = encrypted.acceptance_criteria;
+                Ok(payload)
+            }
+            None => {
+                self.decode_json_payload::<TaskExecuteContent>(actor_user_id, encrypted_payload)
+                    .await
+            }
+        }
     }
 
     async fn encrypt_user_payload(
@@ -439,6 +568,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
         command: Command,
     ) -> Result<DecodeCommandResult, crate::CodecError> {
         let actor_user_id = ctx.actor_user_id;
+        let command_label = command.to_string();
         match command {
             Command::ChatMessage {
                 id,
@@ -470,14 +600,16 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         domain_activation,
                     },
                 ))),
-                Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
-                    code: "encrypted_chat_decode_failed",
-                    message: error.to_string(),
-                    session_id: Some(session_id),
-                    project: project.clone(),
-                    agent: agent.clone(),
-                })),
+                Err(error) => Ok(Self::drop_command_decode_failure(
+                    &command_label,
+                    "encrypted_chat_decode_failed",
+                    error,
+                )),
             },
+            command @ Command::ChatMessage {
+                encrypted_content: None,
+                ..
+            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_content")),
             Command::ChatCommand {
                 id,
                 command,
@@ -506,14 +638,16 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         domain_activation,
                     },
                 ))),
-                Err(error) => Ok(DecodeCommandResult::ClientError(DecodingError {
-                    code: "encrypted_chat_decode_failed",
-                    message: error.to_string(),
-                    session_id: Some(session_id),
-                    project: project.clone(),
-                    agent: agent.clone(),
-                })),
+                Err(error) => Ok(Self::drop_command_decode_failure(
+                    &command_label,
+                    "encrypted_chat_decode_failed",
+                    error,
+                )),
             },
+            command @ Command::ChatCommand {
+                encrypted_content: None,
+                ..
+            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_content")),
             Command::TaskExecute {
                 task_id,
                 project,
@@ -522,46 +656,36 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 agent,
                 payload,
                 encrypted_payload: Some(encrypted_payload),
-            } => Ok(DecodeCommandResult::Command(Box::new(
-                Command::TaskExecute {
-                    task_id,
-                    project,
-                    execution_run_id,
-                    routine,
-                    agent,
-                    payload: match payload {
-                        Some(mut payload) => {
-                            Self::validate_sensitive_payload_kind(
-                                &encrypted_payload,
-                                SensitiveContentKind::TaskContent,
-                            )?;
-                            let encrypted = self
-                                .decode_json_payload::<TaskEncryptedContent>(
-                                    actor_user_id,
-                                    &encrypted_payload,
-                                )
-                                .await?;
-                            payload.description = encrypted.description;
-                            payload.acceptance_criteria = encrypted.acceptance_criteria;
-                            Some(payload)
-                        }
-                        None => {
-                            Self::validate_sensitive_payload_kind(
-                                &encrypted_payload,
-                                SensitiveContentKind::TaskContent,
-                            )?;
-                            Some(
-                                self.decode_json_payload::<TaskExecuteContent>(
-                                    actor_user_id,
-                                    &encrypted_payload,
-                                )
-                                .await?,
-                            )
-                        }
+            } => {
+                let payload = match self
+                    .decode_task_execute_content(actor_user_id, payload, &encrypted_payload)
+                    .await
+                {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_task_decode_failed",
+                            error,
+                        ));
+                    }
+                };
+                Ok(DecodeCommandResult::Command(Box::new(
+                    Command::TaskExecute {
+                        task_id,
+                        project,
+                        execution_run_id,
+                        routine,
+                        agent,
+                        payload: Some(payload),
+                        encrypted_payload: None,
                     },
-                    encrypted_payload: None,
-                },
-            ))),
+                )))
+            }
+            command @ Command::TaskExecute {
+                encrypted_payload: None,
+                ..
+            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_payload")),
             Command::CronEnable {
                 routine,
                 project,
@@ -570,13 +694,29 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 task: _,
                 encrypted_task: Some(encrypted_task),
             } => {
-                Self::validate_sensitive_payload_kind(
+                if let Err(error) = Self::validate_sensitive_payload_kind(
                     &encrypted_task,
                     SensitiveContentKind::RoutineCronTask,
-                )?;
-                let task = self
+                ) {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_cron_task_decode_failed",
+                        error,
+                    ));
+                }
+                let task = match self
                     .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
-                    .await?;
+                    .await
+                {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_cron_task_decode_failed",
+                            error,
+                        ));
+                    }
+                };
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::CronEnable {
                         routine,
@@ -588,19 +728,40 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     },
                 )))
             }
+            command @ Command::CronEnable {
+                task: Some(_),
+                encrypted_task: None,
+                ..
+            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_task")),
             Command::CronTrigger {
                 routine,
                 project,
                 task: _,
                 encrypted_task: Some(encrypted_task),
             } => {
-                Self::validate_sensitive_payload_kind(
+                if let Err(error) = Self::validate_sensitive_payload_kind(
                     &encrypted_task,
                     SensitiveContentKind::RoutineCronTask,
-                )?;
-                let task = self
+                ) {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_cron_task_decode_failed",
+                        error,
+                    ));
+                }
+                let task = match self
                     .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
-                    .await?;
+                    .await
+                {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_cron_task_decode_failed",
+                            error,
+                        ));
+                    }
+                };
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::CronTrigger {
                         routine,
@@ -610,6 +771,11 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     },
                 )))
             }
+            command @ Command::CronTrigger {
+                task: Some(_),
+                encrypted_task: None,
+                ..
+            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_task")),
             Command::AgentHeartbeatEnable {
                 agent,
                 interval,
@@ -617,16 +783,32 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 instructions: _,
                 encrypted_instructions: Some(encrypted_instructions),
             } => {
-                Self::validate_sensitive_payload_kind(
+                if let Err(error) = Self::validate_sensitive_payload_kind(
                     &encrypted_instructions,
                     SensitiveContentKind::HeartbeatInstructions,
-                )?;
-                let instructions = self
+                ) {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_heartbeat_instructions_decode_failed",
+                        error,
+                    ));
+                }
+                let instructions = match self
                     .decode_json_payload::<HeartbeatInstructionsContent>(
                         actor_user_id,
                         &encrypted_instructions,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_heartbeat_instructions_decode_failed",
+                            error,
+                        ));
+                    }
+                };
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::AgentHeartbeatEnable {
                         agent,
@@ -637,21 +819,46 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     },
                 )))
             }
+            command @ Command::AgentHeartbeatEnable {
+                instructions: Some(_),
+                encrypted_instructions: None,
+                ..
+            } => Ok(self.unsecured_command_result(
+                command,
+                &command_label,
+                "encrypted_instructions",
+            )),
             Command::AgentHeartbeatTrigger {
                 agent,
                 instructions: _,
                 encrypted_instructions: Some(encrypted_instructions),
             } => {
-                Self::validate_sensitive_payload_kind(
+                if let Err(error) = Self::validate_sensitive_payload_kind(
                     &encrypted_instructions,
                     SensitiveContentKind::HeartbeatInstructions,
-                )?;
-                let instructions = self
+                ) {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_heartbeat_instructions_decode_failed",
+                        error,
+                    ));
+                }
+                let instructions = match self
                     .decode_json_payload::<HeartbeatInstructionsContent>(
                         actor_user_id,
                         &encrypted_instructions,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_heartbeat_instructions_decode_failed",
+                            error,
+                        ));
+                    }
+                };
                 Ok(DecodeCommandResult::Command(Box::new(
                     Command::AgentHeartbeatTrigger {
                         agent,
@@ -660,6 +867,15 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     },
                 )))
             }
+            command @ Command::AgentHeartbeatTrigger {
+                instructions: Some(_),
+                encrypted_instructions: None,
+                ..
+            } => Ok(self.unsecured_command_result(
+                command,
+                &command_label,
+                "encrypted_instructions",
+            )),
             Command::ManifestChanged {
                 schema,
                 resource_id,
@@ -671,6 +887,25 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 encrypted_payload,
             } => {
                 let Some(encrypted_payload) = encrypted_payload else {
+                    if payload.is_some()
+                        && Self::manifest_inline_payload_requires_encryption(resource_type)
+                    {
+                        let command = Command::ManifestChanged {
+                            schema,
+                            resource_id,
+                            resource_type,
+                            resource,
+                            action,
+                            project,
+                            payload,
+                            encrypted_payload: None,
+                        };
+                        return Ok(self.unsecured_command_result(
+                            command,
+                            &command_label,
+                            "encrypted_payload",
+                        ));
+                    }
                     return Ok(DecodeCommandResult::Command(Box::new(
                         Command::ManifestChanged {
                             schema,
@@ -687,6 +922,25 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
 
                 let object_type = encrypted_payload.object_type.clone();
                 let object_id = encrypted_payload.object_id;
+                let Some(content_kind) =
+                    SensitiveContentKind::from_encrypted_object_type(&object_type)
+                else {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_manifest_decode_failed",
+                        format!("unsupported encrypted manifest object_type '{object_type}'"),
+                    ));
+                };
+                if !content_kind.matches_resource_type(resource_type) {
+                    return Ok(Self::drop_command_decode_failure(
+                        &command_label,
+                        "encrypted_manifest_decode_failed",
+                        format!(
+                            "encrypted manifest object_type '{object_type}' did not match \
+                             resource_type '{resource_type}'"
+                        ),
+                    ));
+                }
                 let decrypted = match self
                     .decrypt_enc_payload(actor_user_id, &encrypted_payload)
                     .await
@@ -694,13 +948,11 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     Ok(plaintext) => serde_json::from_str::<Value>(&plaintext)
                         .unwrap_or(Value::String(plaintext)),
                     Err(error) => {
-                        return Ok(DecodeCommandResult::ClientError(DecodingError {
-                            code: "encrypted_manifest_decode_failed",
-                            message: error.to_string(),
-                            session_id: None,
-                            project: project.clone(),
-                            agent: None,
-                        }));
+                        return Ok(Self::drop_command_decode_failure(
+                            &command_label,
+                            "encrypted_manifest_decode_failed",
+                            error,
+                        ));
                     }
                 };
                 info!(
@@ -759,6 +1011,14 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 payload,
             } => {
                 let Some(ack) = self.key_provider.load_user_key(actor_user_id).await? else {
+                    if Self::stream_event_requires_encryption(&payload) {
+                        warn!(
+                            %actor_user_id,
+                            event = %payload,
+                            "Dropping sensitive agent response because actor content key is unavailable"
+                        );
+                        return Ok(None);
+                    }
                     return Ok(Some(Response::AgentResponse {
                         session_id,
                         payload,
@@ -788,6 +1048,14 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 agent,
             } => {
                 let Some(ock) = self.key_provider.load_key(ContentScope::Org).await? else {
+                    if payload.is_some() {
+                        warn!(
+                            %execution_run_id,
+                            event_type = %event_type,
+                            step_name = %step_name,
+                            "Dropping plaintext task step payload because org content key is unavailable"
+                        );
+                    }
                     return Ok(Some(Response::TaskStepEvent {
                         execution_run_id,
                         task_id,
@@ -796,7 +1064,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         step_type,
                         duration_ms,
                         data,
-                        payload,
+                        payload: None,
                         encrypted_payload: None,
                         agent,
                     }));
@@ -872,11 +1140,13 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
-    use nenjo_events::Command;
+    use nenjo_events::{
+        Command, ResourceAction, ResourceType, Response, StreamEvent, TaskExecuteContent,
+    };
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
-    use super::SecureEnvelopeCodec;
+    use super::{SecureEnvelopeCodec, SecureEnvelopeCodecConfig};
     use crate::{CodecContext, DecodeCommandResult, EnvelopeCodec, encrypt_text_for_scope};
 
     #[derive(Clone)]
@@ -973,14 +1243,7 @@ mod tests {
             )
             .await;
         match before_sync.expect("decode result before sync") {
-            DecodeCommandResult::ClientError(error) => {
-                assert_eq!(error.code, "encrypted_chat_decode_failed");
-                assert!(
-                    error.message.contains(
-                        "Encrypted chat content received before sender ACK sync completed"
-                    )
-                );
-            }
+            DecodeCommandResult::Drop => {}
             other => panic!("unexpected decode result before sync: {other:?}"),
         }
 
@@ -1022,6 +1285,253 @@ mod tests {
                 other => panic!("unexpected decoded command payload: {other:?}"),
             },
             other => panic!("unexpected decoded command result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_message_without_encrypted_content_drops() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let result = codec
+            .decode_command(
+                &CodecContext::for_actor(actor_user_id),
+                Command::ChatMessage {
+                    id: Some("plain".into()),
+                    content: "plaintext prompt".into(),
+                    encrypted_content: None,
+                    hidden: false,
+                    project: None,
+                    routine: None,
+                    agent: None,
+                    target_type: None,
+                    target: None,
+                    domain_session_id: None,
+                    domain_activation: None,
+                    session_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("decode should classify plaintext chat");
+
+        assert!(matches!(result, DecodeCommandResult::Drop));
+    }
+
+    #[tokio::test]
+    async fn chat_message_without_encrypted_content_can_be_allowed_by_config() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new_with_config(
+            provider,
+            Uuid::new_v4(),
+            SecureEnvelopeCodecConfig {
+                require_secured_commands: false,
+            },
+        );
+        let result = codec
+            .decode_command(
+                &CodecContext::for_actor(actor_user_id),
+                Command::ChatMessage {
+                    id: Some("plain".into()),
+                    content: "plaintext prompt".into(),
+                    encrypted_content: None,
+                    hidden: false,
+                    project: None,
+                    routine: None,
+                    agent: None,
+                    target_type: None,
+                    target: None,
+                    domain_session_id: None,
+                    domain_activation: None,
+                    session_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("decode should allow plaintext chat when configured");
+
+        match result {
+            DecodeCommandResult::Command(command) => match *command {
+                Command::ChatMessage {
+                    content,
+                    encrypted_content,
+                    ..
+                } => {
+                    assert_eq!(content, "plaintext prompt");
+                    assert!(encrypted_content.is_none());
+                }
+                other => panic!("unexpected decoded command payload: {other:?}"),
+            },
+            other => panic!("unexpected decoded command result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_execute_without_encrypted_payload_drops() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let result = codec
+            .decode_command(
+                &CodecContext::for_actor(actor_user_id),
+                Command::TaskExecute {
+                    task_id: Uuid::new_v4(),
+                    project: "demo".into(),
+                    execution_run_id: Uuid::new_v4(),
+                    routine: None,
+                    agent: None,
+                    payload: Some(TaskExecuteContent {
+                        title: "plaintext task".into(),
+                        description: Some("sensitive description".into()),
+                        slug: None,
+                        acceptance_criteria: Some("sensitive criteria".into()),
+                        tags: Vec::new(),
+                        status: None,
+                        priority: None,
+                        task_type: None,
+                        complexity: None,
+                    }),
+                    encrypted_payload: None,
+                },
+            )
+            .await
+            .expect("decode should classify plaintext task");
+
+        assert!(matches!(result, DecodeCommandResult::Drop));
+    }
+
+    #[tokio::test]
+    async fn manifest_sensitive_inline_payload_without_encryption_drops() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let result = codec
+            .decode_command(
+                &CodecContext::for_actor(actor_user_id),
+                Command::ManifestChanged {
+                    schema: "manifest.changed.v1".into(),
+                    resource_id: Uuid::new_v4(),
+                    resource_type: ResourceType::Agent,
+                    resource: "demo-agent".into(),
+                    action: ResourceAction::Updated,
+                    project: None,
+                    payload: Some(serde_json::json!({
+                        "schema": "manifest.resource.v1",
+                        "data": {
+                            "prompt_config": {
+                                "developer_prompt": "plaintext prompt"
+                            }
+                        }
+                    })),
+                    encrypted_payload: None,
+                },
+            )
+            .await
+            .expect("decode should classify plaintext manifest inline payload");
+
+        assert!(matches!(result, DecodeCommandResult::Drop));
+    }
+
+    #[tokio::test]
+    async fn sensitive_agent_response_without_actor_key_drops() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let response = Response::AgentResponse {
+            session_id: Some(Uuid::new_v4()),
+            payload: StreamEvent::AssistantTextDelta {
+                run_id: "run".into(),
+                request_id: "request".into(),
+                payload: Some(serde_json::json!({ "delta": "plaintext model output" })),
+                encrypted_payload: None,
+            },
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode should classify missing actor key");
+
+        assert!(encoded.is_none());
+    }
+
+    #[tokio::test]
+    async fn nonsensitive_agent_response_without_actor_key_is_kept() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let session_id = Uuid::new_v4();
+        let response = Response::AgentResponse {
+            session_id: Some(session_id),
+            payload: StreamEvent::RunStarted {
+                run_id: "run".into(),
+                session_id: session_id.to_string(),
+                parent_run_id: None,
+                agent_id: None,
+                agent_name: None,
+            },
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode should keep non-sensitive event");
+
+        assert!(matches!(
+            encoded,
+            Some(Response::AgentResponse {
+                payload: StreamEvent::RunStarted { .. },
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_step_payload_without_org_key_is_stripped() {
+        let actor_user_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let response = Response::TaskStepEvent {
+            execution_run_id: Uuid::new_v4().to_string(),
+            task_id: Some(Uuid::new_v4().to_string()),
+            event_type: "step_completed".into(),
+            step_name: "agent_response".into(),
+            step_type: "agent".into(),
+            duration_ms: None,
+            data: serde_json::json!({ "ok": true }),
+            payload: Some(serde_json::json!({ "output_preview": "plaintext output" })),
+            encrypted_payload: None,
+            agent: None,
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode should strip plaintext task step payload");
+
+        match encoded {
+            Some(Response::TaskStepEvent {
+                payload,
+                encrypted_payload,
+                ..
+            }) => {
+                assert!(payload.is_none());
+                assert!(encrypted_payload.is_none());
+            }
+            other => panic!("unexpected encoded response: {other:?}"),
         }
     }
 }

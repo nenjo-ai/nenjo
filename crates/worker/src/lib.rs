@@ -41,7 +41,7 @@ use anyhow::Result;
 use clap::Args;
 use nenjo_eventbus::{EventBus, Subscription};
 use nenjo_events::Capability;
-use nenjo_secure_envelope::SecureEnvelopeBus;
+use nenjo_secure_envelope::{SecureEnvelopeBus, SecureEnvelopeCodecConfig};
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -89,6 +89,10 @@ pub struct RunArgs {
     /// Optional worker labels shown in the platform UI.
     #[arg(long, env = "NENJO_HARNESS_LABELS", value_delimiter = ',')]
     pub harness_labels: Option<Vec<String>>,
+
+    /// Require sensitive inbound commands to include encrypted payload fields.
+    #[arg(long, env = "NENJO_REQUIRE_SECURED_COMMANDS")]
+    pub require_secured_commands: Option<bool>,
 }
 
 /// Initialize tracing, load config, boot the worker, connect NATS, and run.
@@ -120,6 +124,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
     if let Some(ref labels) = args.harness_labels {
         config.harness_labels = labels.clone();
+    }
+    if let Some(require_secured_commands) = args.require_secured_commands {
+        config.security.secure_bus.require_secured_commands = require_secured_commands;
     }
 
     info!(
@@ -222,6 +229,9 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
         &auth,
         auth_provider.clone(),
         bootstrap_api.clone(),
+        SecureEnvelopeCodecConfig {
+            require_secured_commands: config.security.secure_bus.require_secured_commands,
+        },
     )?;
     let api_key_id = crypto.api_key_id;
     debug!(%api_key_id, "Using API key ID as stable worker identifier");

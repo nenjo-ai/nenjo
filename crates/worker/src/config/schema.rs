@@ -51,6 +51,9 @@ pub struct Config {
     pub reliability: ReliabilityConfig,
 
     #[serde(default)]
+    pub security: SecurityConfig,
+
+    #[serde(default)]
     pub agent: AgentConfig,
 
     #[serde(default)]
@@ -427,6 +430,10 @@ impl Default for ReliabilityConfig {
 /// Security configuration for sandboxing and audit logging
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecurityConfig {
+    /// Secure event bus policy.
+    #[serde(default)]
+    pub secure_bus: SecureBusConfig,
+
     /// Sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
@@ -434,6 +441,22 @@ pub struct SecurityConfig {
     /// Audit logging configuration
     #[serde(default)]
     pub audit: AuditConfig,
+}
+
+/// Secure event bus policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureBusConfig {
+    /// Require sensitive inbound commands to include encrypted payload fields.
+    #[serde(default = "default_true")]
+    pub require_secured_commands: bool,
+}
+
+impl Default for SecureBusConfig {
+    fn default() -> Self {
+        Self {
+            require_secured_commands: true,
+        }
+    }
 }
 
 /// Sandbox configuration for OS-level isolation
@@ -768,6 +791,7 @@ impl Default for Config {
             nats_url: None,
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
+            security: SecurityConfig::default(),
             agent: AgentConfig::default(),
             memory: MemoryConfig::default(),
             sessions: SessionConfig::default(),
@@ -933,7 +957,34 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionConfig;
+    use super::{SecureBusConfig, SecurityConfig, SessionConfig};
+
+    #[test]
+    fn secure_bus_config_requires_secured_commands_by_default() {
+        let config = SecureBusConfig::default();
+
+        assert!(config.require_secured_commands);
+    }
+
+    #[test]
+    fn security_config_deserializes_secure_bus_command_requirement() {
+        let config: SecurityConfig = toml::from_str(
+            r#"
+[secure_bus]
+require_secured_commands = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.secure_bus.require_secured_commands);
+    }
+
+    #[test]
+    fn security_config_defaults_missing_secure_bus_command_requirement() {
+        let config: SecurityConfig = toml::from_str("").unwrap();
+
+        assert!(config.secure_bus.require_secured_commands);
+    }
 
     #[test]
     fn session_config_defaults_enable_cleanup() {

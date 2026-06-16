@@ -18,7 +18,7 @@ use nenjo_events::{Command, Envelope, Response};
 use tracing::{trace, warn};
 use uuid::Uuid;
 
-pub use codec::SecureEnvelopeCodec;
+pub use codec::{SecureEnvelopeCodec, SecureEnvelopeCodecConfig};
 pub use content::{decrypt_text, encrypt_text, encrypt_text_for_scope};
 
 pub type CodecError = Box<dyn StdError + Send + Sync + 'static>;

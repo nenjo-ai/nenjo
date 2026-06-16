@@ -10,7 +10,7 @@ use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
 use nenjo_harness::Harness;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::api_client::PayloadCodec;
-use nenjo_secure_envelope::SecureEnvelopeCodec;
+use nenjo_secure_envelope::{SecureEnvelopeCodec, SecureEnvelopeCodecConfig};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -56,6 +56,7 @@ impl WorkerCryptoContext {
         auth: &BootstrapAuth,
         auth_provider: Arc<WorkerAuthProvider>,
         enrollment_api: ApiClient,
+        codec_config: SecureEnvelopeCodecConfig,
     ) -> Result<Self> {
         let api_key_id = auth.api_key_id.ok_or_else(|| {
             anyhow::anyhow!(
@@ -74,7 +75,11 @@ impl WorkerCryptoContext {
             api_key_id,
             actor_user_id: auth.user_id,
             org_id: auth.org_id,
-            codec: Arc::new(SecureEnvelopeCodec::new(key_provider, auth.org_id)),
+            codec: Arc::new(SecureEnvelopeCodec::new_with_config(
+                key_provider,
+                auth.org_id,
+                codec_config,
+            )),
         })
     }
 
