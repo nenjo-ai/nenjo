@@ -505,10 +505,19 @@ impl NatsTransportBuilder {
                         debug!("NATS event: connected");
                     }
                     async_nats::Event::Disconnected => {
-                        warn!("NATS disconnected, will attempt reconnection");
+                        debug!("NATS disconnected, will attempt reconnection");
                     }
                     async_nats::Event::ServerError(e) => {
-                        warn!(error = %e, "NATS server error");
+                        debug!(error = %e, "NATS server error");
+                    }
+                    async_nats::Event::ClientError(e) => {
+                        debug!(error =%e, "NATS Client error")
+                    }
+                    async_nats::Event::SlowConsumer(sid) => {
+                        debug!(sid = %sid, "NATS Slow consumer")
+                    }
+                    async_nats::Event::Closed => {
+                        debug!("NATS Stream closed")
                     }
                     _ => {}
                 }
