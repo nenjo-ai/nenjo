@@ -64,6 +64,17 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::path::PathBuf;
 
+pub mod async_ops;
+
+pub use async_ops::{
+    AsyncOperationKind, AsyncOperationSignalKind, AsyncOperationStatus,
+    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, SEND_OPERATION_INPUT_TOOL_NAME,
+    STOP_OPERATIONS_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs,
+    WAIT_OPERATIONS_TOOL_NAME, WaitOperationsArgs, inspect_operations_parameters_schema,
+    send_operation_input_parameters_schema, stop_operations_parameters_schema,
+    wait_operations_parameters_schema,
+};
+
 /// Classifies a tool's side-effect profile for filtering and model guidance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

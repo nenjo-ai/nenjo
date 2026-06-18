@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::config::MediaProviderConfig;
 use crate::handlers::manifest::ManifestStore;
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -42,6 +43,8 @@ struct BootstrapManifestResponse {
     routines: Vec<BootstrapRoutineManifest>,
     #[serde(default)]
     models: Vec<BootstrapModelManifest>,
+    #[serde(default)]
+    media_providers: Vec<MediaProviderConfig>,
     #[serde(default)]
     agents: Vec<BootstrapAgentManifest>,
     #[serde(default)]
@@ -72,6 +75,7 @@ struct HydratedBootstrap {
     auth: BootstrapAuth,
     manifest: Manifest,
     resource_ids: PlatformResourceIdSnapshot,
+    media_providers: Vec<MediaProviderConfig>,
     nats: BootstrapNatsConfig,
     packages: Option<BootstrapPackages>,
 }
@@ -215,6 +219,8 @@ struct BootstrapAgentManifest {
     mcp_servers: Vec<Slug>,
     #[serde(default)]
     script_tools: Vec<Slug>,
+    #[serde(default)]
+    media: Vec<nenjo::manifest::MediaRequirement>,
     #[serde(default)]
     abilities: Vec<String>,
     #[serde(default)]
@@ -463,6 +469,7 @@ pub async fn sync(
     // Write auth info used for org-scoped transport setup and ACK routing.
     atomic_write_json(manifests_dir, "auth.json", &data.auth)?;
     atomic_write_json(manifests_dir, "nats.json", &data.nats)?;
+    atomic_write_json(manifests_dir, "media_providers.json", &data.media_providers)?;
     PlatformResourceIdStore::new(manifests_dir).replace(&data.resource_ids)?;
     atomic_write_json(manifests_dir, "projects.json", &manifest.projects)?;
     atomic_write_json(manifests_dir, "routines.json", &manifest.routines)?;
@@ -538,6 +545,7 @@ async fn hydrate_bootstrap_manifest(
             platform_scopes: agent.platform_scopes,
             mcp_servers: agent.mcp_servers,
             script_tools: agent.script_tools,
+            media: agent.media,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
@@ -629,6 +637,7 @@ async fn hydrate_bootstrap_manifest(
             knowledge_packs: Vec::new(),
         },
         resource_ids,
+        media_providers: bootstrap.media_providers,
         nats: bootstrap.nats,
         packages: bootstrap.packages,
     })
@@ -710,6 +719,21 @@ pub fn load_cached_nats_config(manifests_dir: &Path) -> Option<BootstrapNatsConf
     }
 }
 
+pub fn load_cached_media_providers(manifests_dir: &Path) -> Vec<MediaProviderConfig> {
+    let path = manifests_dir.join("media_providers.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+    match serde_json::from_str::<Vec<MediaProviderConfig>>(&content) {
+        Ok(providers) => providers,
+        Err(error) => {
+            warn!(file = %path.display(), %error, "Failed to parse cached media provider config");
+            Vec::new()
+        }
+    }
+}
+
 fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_json::Error) {
     let preview = serde_json::to_string(bootstrap)
         .ok()
@@ -746,6 +770,7 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
 
     check_section!("routines", Vec<BootstrapRoutineManifest>);
     check_section!("models", Vec<nenjo::manifest::ModelManifest>);
+    check_section!("media_providers", Vec<MediaProviderConfig>);
     check_section!("agents", Vec<BootstrapAgentManifest>);
     check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
     check_section!("domains", Vec<BootstrapDomainManifest>);

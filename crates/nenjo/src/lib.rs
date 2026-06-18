@@ -35,8 +35,9 @@ pub mod types;
 // Re-export key types at the crate root.
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{
-    AsyncOperationTranscriptEvent, ExecutionHandle, SubAgentTranscriptEvent, TurnEvent,
-    TurnLoopConfig, TurnOutput,
+    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, ExecutionHandle,
+    StartAsyncOperation, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnOutput,
+    current_async_operation_runtime,
 };
 pub use commands::{CommandProvider, LoadedCommand};
 pub use config::AgentConfig;

@@ -50,6 +50,8 @@ impl FromStr for PackageAdapter {
 #[serde(rename_all = "snake_case")]
 /// Kind of resource a package installs.
 pub enum PackageKind {
+    /// Model provider configuration manifest.
+    Model,
     /// Agent manifest.
     Agent,
     /// Ability/tool manifest.
@@ -217,6 +219,7 @@ impl PackageKind {
 
     fn parse_kind(kind: &str) -> Result<Self> {
         match kind {
+            "model" => Ok(Self::Model),
             "agent" => Ok(Self::Agent),
             "ability" => Ok(Self::Ability),
             "domain" => Ok(Self::Domain),
@@ -239,6 +242,7 @@ impl PackageKind {
     /// Return the stable package kind identifier.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Model => "model",
             Self::Agent => "agent",
             Self::Ability => "ability",
             Self::Domain => "domain",

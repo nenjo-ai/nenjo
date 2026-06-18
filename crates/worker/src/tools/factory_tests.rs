@@ -6,13 +6,14 @@ use crate::tools::NativeRuntime;
 use crate::tools::platform_payload::PlatformPayloadEncoder;
 use crate::tools::platform_services::PlatformToolServices;
 use nenjo::agents::prompts::PromptConfig;
-use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
     AbilityManifest, DomainManifest, Manifest, McpServerManifest, SkillManifest,
 };
+use nenjo::manifest::{AgentManifest, MediaRequirement};
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_events::EncryptedPayload;
+use nenjo_models::NativeOperation;
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
     DomainManifestBackend, DomainsGetParams, ManifestAccessPolicy, PlatformManifestBackend,
@@ -80,7 +81,8 @@ async fn worker_factory_always_exposes_use_skill_tool() {
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -100,6 +102,55 @@ async fn worker_factory_always_exposes_use_skill_tool() {
     assert!(
         names.iter().any(|name| name == "call_skill_mcp_tool"),
         "worker tool belt should always include call_skill_mcp_tool, got: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_agent_native_media_tools() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        media_providers: vec![crate::config::MediaProviderConfig {
+            slug: Slug::derive("openai_image"),
+            provider: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            capabilities: vec![NativeOperation::GenerateImage],
+        }],
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+
+    let agent = AgentManifest {
+        name: "image tester".into(),
+        slug: Slug::derive("image-tester"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: vec![MediaRequirement::Capability(NativeOperation::GenerateImage)],
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let tools = factory.create_tools(&agent).await;
+
+    assert!(
+        tools.iter().any(|tool| tool.name() == "generate_image"),
+        "agent media requirements should add native media tools"
     );
 }
 
@@ -196,7 +247,8 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -287,7 +339,8 @@ async fn scoped_backend(
         domains: vec![],
         platform_scopes: vec!["projects:read".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -302,7 +355,8 @@ async fn scoped_backend(
         domains: vec![],
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -318,7 +372,8 @@ async fn scoped_backend(
         },
         platform_scopes: vec!["projects:read".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -333,7 +388,8 @@ async fn scoped_backend(
         },
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -347,7 +403,8 @@ async fn scoped_backend(
         platform_scopes: vec!["projects:read".into()],
         abilities: vec![],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
     let hidden_domain = DomainManifest {
@@ -358,7 +415,8 @@ async fn scoped_backend(
         platform_scopes: vec!["projects:write".into()],
         abilities: vec![],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
 
@@ -427,7 +485,8 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
             "projects:read".into(),
         ],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -539,7 +598,8 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
         domains: vec![],
         platform_scopes: vec!["projects:write".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -586,7 +646,8 @@ async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
         domains: vec![],
         platform_scopes: vec!["notify:read".into()],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,

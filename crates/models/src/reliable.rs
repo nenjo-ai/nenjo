@@ -2,6 +2,9 @@
 //! API key rotation, and model failover.
 
 use crate::ModelProvider;
+use crate::native::{
+    NativeMediaJob, NativeMediaRequest, NativeMediaResponse, ProviderNativeCapabilities,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -237,6 +240,94 @@ impl ModelProvider for ReliableProvider {
         )
     }
 
+    async fn chat_stream(
+        &self,
+        request: super::ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        events: tokio::sync::mpsc::UnboundedSender<super::ProviderStreamEvent>,
+    ) -> anyhow::Result<super::ChatResponse> {
+        let models = self.model_chain(model);
+        let mut failures = Vec::new();
+
+        for current_model in &models {
+            for (provider_name, provider) in &self.providers {
+                let mut backoff_ms = self.base_backoff_ms;
+
+                for attempt in 0..=self.max_retries {
+                    match provider
+                        .chat_stream(request, current_model, temperature, events.clone())
+                        .await
+                    {
+                        Ok(resp) => {
+                            if attempt > 0 || *current_model != model {
+                                tracing::info!(
+                                    provider = provider_name,
+                                    model = *current_model,
+                                    attempt,
+                                    original_model = model,
+                                    "Provider streaming call recovered (failover/retry)"
+                                );
+                            }
+                            return Ok(resp);
+                        }
+                        Err(e) => {
+                            let non_retryable = is_non_retryable(&e);
+                            let rate_limited = is_rate_limited(&e);
+
+                            failures.push(format!(
+                                "{provider_name}/{current_model} streaming attempt {}/{}: {e}",
+                                attempt + 1,
+                                self.max_retries + 1
+                            ));
+
+                            if rate_limited && let Some(new_key) = self.rotate_key() {
+                                tracing::info!(
+                                    provider = provider_name,
+                                    "Rate limited, rotated API key (key ending ...{})",
+                                    &new_key[new_key.len().saturating_sub(4)..]
+                                );
+                            }
+
+                            if non_retryable {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = *current_model,
+                                    "Non-retryable streaming error, moving on"
+                                );
+                                break;
+                            }
+
+                            if attempt < self.max_retries {
+                                let wait = self.compute_backoff(backoff_ms, &e);
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = *current_model,
+                                    attempt = attempt + 1,
+                                    backoff_ms = wait,
+                                    "Provider streaming call failed, retrying"
+                                );
+                                tokio::time::sleep(Duration::from_millis(wait)).await;
+                                backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                            }
+                        }
+                    }
+                }
+
+                tracing::warn!(
+                    provider = provider_name,
+                    model = *current_model,
+                    "Exhausted streaming retries, trying next provider/model"
+                );
+            }
+        }
+
+        anyhow::bail!(
+            "All providers/models failed. Attempts:\n{}",
+            failures.join("\n")
+        )
+    }
+
     fn context_window(&self, model: &str) -> Option<usize> {
         self.providers
             .first()
@@ -256,12 +347,52 @@ impl ModelProvider for ReliableProvider {
             .map(|(_, p)| p.supports_developer_role(model))
             .unwrap_or(false)
     }
+
+    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
+        self.providers
+            .first()
+            .and_then(|(_, p)| p.native_capabilities())
+    }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let Some((provider_name, provider)) = self.providers.first() else {
+            anyhow::bail!("no provider configured for native media operation");
+        };
+
+        provider
+            .submit_media(request)
+            .await
+            .map_err(|err| anyhow::anyhow!("{provider_name} native media operation failed: {err}"))
+    }
+
+    async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
+        if let Some((_, provider)) = self
+            .providers
+            .iter()
+            .find(|(provider_name, _)| provider_name == &job.provider)
+        {
+            return provider.poll_media_job(job).await;
+        }
+
+        let Some((provider_name, provider)) = self.providers.first() else {
+            anyhow::bail!("no provider configured for native media job polling");
+        };
+
+        provider
+            .poll_media_job(job)
+            .await
+            .map_err(|err| anyhow::anyhow!("{provider_name} native media job poll failed: {err}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::traits::{ChatMessage, ChatRequest, ChatResponse, TokenUsage, one_shot};
+    use crate::{ProviderStreamEvent, ProviderToolTrace};
     use std::sync::Arc;
 
     struct MockProvider {
@@ -286,6 +417,58 @@ mod tests {
             Ok(ChatResponse {
                 text: Some(self.response.to_string()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    struct StreamingMockProvider {
+        chat_calls: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for StreamingMockProvider {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            self.chat_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                text: Some("non-streaming".to_string()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .send(ProviderStreamEvent::ProviderToolStarted(
+                    ProviderToolTrace {
+                        id: "provider-tool-1".to_string(),
+                        name: "web_search".to_string(),
+                        provider: "xai".to_string(),
+                        input: serde_json::json!({"query": "test"}),
+                        output: None,
+                        citations: vec![],
+                    },
+                ))
+                .ok();
+            Ok(ChatResponse {
+                text: Some("streaming".to_string()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             })
         }
@@ -315,6 +498,7 @@ mod tests {
             Ok(ChatResponse {
                 text: Some(self.response.to_string()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             })
         }
@@ -520,10 +704,54 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text_or_empty(), "history ok");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_forwards_to_wrapped_provider_streaming_impl() {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "xai".into(),
+                Box::new(StreamingMockProvider {
+                    chat_calls: Arc::clone(&chat_calls),
+                    stream_calls: Arc::clone(&stream_calls),
+                }) as Box<dyn ModelProvider>,
+            )],
+            0,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = provider
+            .chat_stream(request, "grok-4.3", 0.0, tx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.text_or_empty(), "streaming");
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+
+        let event = rx.recv().await.expect("provider stream event");
+        match event {
+            ProviderStreamEvent::ProviderToolStarted(trace) => {
+                assert_eq!(trace.name, "web_search");
+                assert_eq!(trace.provider, "xai");
+            }
+            other => panic!("unexpected provider stream event: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -560,6 +788,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text_or_empty(), "fallback ok");

@@ -20,13 +20,14 @@ use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
+use crate::agents::async_ops::{AsyncOperationRuntime, scope_current_async_operation_runtime};
 use crate::agents::instance::AgentInstance;
 use crate::hooks::{
     ActiveHook, ActiveHookScope, HookBlock, HookEvent, HookRuntime, HookRuntimeEvent,
 };
 use crate::provider::ProviderRuntime;
 use crate::tools::{Tool, ToolCategory, ToolResult};
-use nenjo_models::{ChatMessage, ChatRequest};
+use nenjo_models::{ChatMessage, ChatRequest, ProviderStreamEvent, ProviderToolTrace};
 
 fn tool_for_call<'a>(
     tools: &'a [Arc<dyn Tool>],
@@ -38,6 +39,177 @@ fn tool_for_call<'a>(
             || nenjo_models::sanitize_tool_name(name) == tool_call.name
             || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
     })
+}
+
+fn provider_tool_metadata(trace: &ProviderToolTrace) -> serde_json::Value {
+    serde_json::json!({
+        "tool_origin": "provider",
+        "provider_native": true,
+        "provider": trace.provider.clone(),
+        "citations": trace.citations.clone(),
+    })
+}
+
+fn provider_tool_result(trace: &ProviderToolTrace) -> ToolResult {
+    let output = trace
+        .output
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({ "status": "completed" }))
+        .to_string();
+
+    ToolResult {
+        success: true,
+        output,
+        error: None,
+    }
+}
+
+fn emit_provider_tool_start(
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    batch_id: String,
+    trace: &ProviderToolTrace,
+) {
+    let metadata = provider_tool_metadata(trace);
+    emit_event(
+        events_tx,
+        TurnEvent::ToolCallStart {
+            batch_id,
+            parent_tool_name: None,
+            calls: vec![ToolCall {
+                tool_call_id: Some(trace.id.clone()),
+                tool_name: trace.name.clone(),
+                tool_args: trace.input.to_string(),
+                text_preview: None,
+                metadata: Some(metadata),
+            }],
+        },
+    );
+}
+
+fn emit_provider_tool_end(
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    batch_id: String,
+    trace: &ProviderToolTrace,
+) {
+    let metadata = provider_tool_metadata(trace);
+    emit_event(
+        events_tx,
+        TurnEvent::ToolCallEnd {
+            batch_id,
+            parent_tool_name: None,
+            tool_call_id: Some(trace.id.clone()),
+            tool_name: trace.name.clone(),
+            tool_args: trace.input.to_string(),
+            result: provider_tool_result(trace),
+            metadata: Some(metadata),
+        },
+    );
+}
+
+async fn chat_with_provider_stream<P>(
+    provider: &P,
+    request: ChatRequest<'_>,
+    model: &str,
+    temperature: f64,
+    request_id: &str,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+) -> anyhow::Result<(
+    nenjo_models::ChatResponse,
+    HashSet<String>,
+    HashSet<String>,
+    bool,
+)>
+where
+    P: ModelProvider + ?Sized,
+{
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+    let response = provider.chat_stream(request, model, temperature, stream_tx);
+    tokio::pin!(response);
+
+    let mut provider_tool_batches = std::collections::HashMap::<String, String>::new();
+    let mut started_provider_tools = HashSet::new();
+    let mut completed_provider_tools = HashSet::new();
+    let mut emitted_text_delta = false;
+
+    loop {
+        tokio::select! {
+            Some(event) = stream_rx.recv() => {
+                match event {
+                    ProviderStreamEvent::TextDelta(delta) => {
+                        if !delta.is_empty() {
+                            emitted_text_delta = true;
+                            emit_event(
+                                events_tx,
+                                TurnEvent::AssistantTextDelta {
+                                    request_id: request_id.to_string(),
+                                    delta,
+                                },
+                            );
+                        }
+                    }
+                    ProviderStreamEvent::ProviderToolStarted(trace) => {
+                        let batch_id = provider_tool_batches
+                            .entry(trace.id.clone())
+                            .or_insert_with(|| Uuid::new_v4().to_string())
+                            .clone();
+                        emit_provider_tool_start(events_tx, batch_id, &trace);
+                        started_provider_tools.insert(trace.id);
+                    }
+                    ProviderStreamEvent::ProviderToolCompleted(trace) => {
+                        let batch_id = provider_tool_batches
+                            .entry(trace.id.clone())
+                            .or_insert_with(|| Uuid::new_v4().to_string())
+                            .clone();
+                        emit_provider_tool_end(events_tx, batch_id, &trace);
+                        started_provider_tools.insert(trace.id.clone());
+                        completed_provider_tools.insert(trace.id);
+                    }
+                }
+            }
+            result = &mut response => {
+                let response = result?;
+                while let Ok(event) = stream_rx.try_recv() {
+                    match event {
+                        ProviderStreamEvent::TextDelta(delta) => {
+                            if !delta.is_empty() {
+                                emitted_text_delta = true;
+                                emit_event(
+                                    events_tx,
+                                    TurnEvent::AssistantTextDelta {
+                                        request_id: request_id.to_string(),
+                                        delta,
+                                    },
+                                );
+                            }
+                        }
+                        ProviderStreamEvent::ProviderToolStarted(trace) => {
+                            let batch_id = provider_tool_batches
+                                .entry(trace.id.clone())
+                                .or_insert_with(|| Uuid::new_v4().to_string())
+                                .clone();
+                            emit_provider_tool_start(events_tx, batch_id, &trace);
+                            started_provider_tools.insert(trace.id);
+                        }
+                        ProviderStreamEvent::ProviderToolCompleted(trace) => {
+                            let batch_id = provider_tool_batches
+                                .entry(trace.id.clone())
+                                .or_insert_with(|| Uuid::new_v4().to_string())
+                                .clone();
+                            emit_provider_tool_end(events_tx, batch_id, &trace);
+                            started_provider_tools.insert(trace.id.clone());
+                            completed_provider_tools.insert(trace.id);
+                        }
+                    }
+                }
+                return Ok((
+                    response,
+                    started_provider_tools,
+                    completed_provider_tools,
+                    emitted_text_delta,
+                ));
+            }
+        }
+    }
 }
 
 fn emit_event(events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>, event: TurnEvent) {
@@ -144,8 +316,10 @@ where
     let model = &agent.model.model_name;
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
-    let tool_specs = agent.tool_specs();
-    let tool_specs = tool_specs.as_slice();
+    let visible_tool_specs = agent.tool_specs();
+    let local_tool_specs = agent.local_tool_specs();
+    let visible_tool_specs = visible_tool_specs.as_slice();
+    let local_tool_specs = local_tool_specs.as_slice();
     let hook_runtime = agent.runtime.hook_runtime.clone();
     let config = TurnLoopConfig {
         max_turns: agent.runtime.config.max_turns as u32,
@@ -171,13 +345,16 @@ where
             CURRENT_HOOK_RUNTIME
                 .scope(hook_runtime.clone(), async {
                     CURRENT_EVENTS_TX.scope(events_tx.clone(), async {
-            // Log tool specs being sent to the provider (once, before the loop)
-            if !tool_specs.is_empty() {
-                let tool_names: Vec<&str> = tool_specs.iter().map(|t| t.name.as_str()).collect();
+            // Log the visible tool belt once before the loop.
+            if !visible_tool_specs.is_empty() {
+                let tool_names: Vec<&str> =
+                    visible_tool_specs.iter().map(|t| t.name.as_str()).collect();
                 debug!(
                     agent = agent_name,
                     model,
-                    tool_count = tool_specs.len(),
+                    tool_count = visible_tool_specs.len(),
+                    local_tool_count = local_tool_specs.len(),
+                    native_tool_count = agent.model_manifest.native_tools.len(),
                     tools = ?tool_names,
                     "Turn loop starting with tools"
                 );
@@ -261,15 +438,16 @@ where
                 }
 
                 // Call LLM
-                let tools_ref = if tool_specs.is_empty() {
+                let tools_ref = if local_tool_specs.is_empty() {
                     None
                 } else {
-                    Some(tool_specs)
+                    Some(local_tool_specs)
                 };
 
                 let request = ChatRequest {
                     messages: &messages,
                     tools: tools_ref,
+                    native_tools: Some(&agent.model_manifest.native_tools),
                 };
 
                 let model_request_id = Uuid::new_v4().to_string();
@@ -282,7 +460,21 @@ where
                         model: model.to_string(),
                     },
                 );
-                let mut response = model_provider.chat(request, model, temperature).await?;
+                let (
+                    mut response,
+                    streamed_provider_tool_started_ids,
+                    streamed_provider_tool_completed_ids,
+                    streamed_text_delta,
+                ) =
+                    chat_with_provider_stream(
+                        model_provider,
+                        request,
+                        model,
+                        temperature,
+                        &model_request_id,
+                        events_tx.as_ref(),
+                    )
+                    .await?;
                 let original_tool_call_count = response.tool_calls.len();
                 if response.tool_calls.len() != original_tool_call_count {
                     warn!(
@@ -304,8 +496,27 @@ where
                         Some(stripped)
                     };
                 }
+
+                for provider_tool in response
+                    .provider_tool_calls
+                    .iter()
+                    .filter(|trace| !streamed_provider_tool_completed_ids.contains(&trace.id))
+                {
+                    let batch_id = Uuid::new_v4().to_string();
+                    if !streamed_provider_tool_started_ids.contains(&provider_tool.id) {
+                        emit_provider_tool_start(
+                            events_tx.as_ref(),
+                            batch_id.clone(),
+                            provider_tool,
+                        );
+                    }
+                    emit_provider_tool_end(events_tx.as_ref(), batch_id, provider_tool);
+                }
+                total_tool_calls += response.provider_tool_calls.len() as u32;
+
                 if let Some(text) = response.text.as_deref()
                     && !text.is_empty()
+                    && !streamed_text_delta
                 {
                     emit_event(
                         events_tx.as_ref(),
@@ -436,6 +647,7 @@ where
                                     tool_name: tc.name.clone(),
                                     tool_args: tc.arguments.clone(),
                                     text_preview: tool_text_preview.clone(),
+                                    metadata: None,
                                 })
                                 .collect(),
                         },
@@ -454,6 +666,9 @@ where
                                         tc,
                                         &current_messages,
                                         hook_runtime,
+                                        AsyncOperationRuntime::new(
+                                            agent.runtime.async_ops.clone(),
+                                        ),
                                     )
                                     .await;
                                     (tc, result)
@@ -463,9 +678,15 @@ where
                         } else {
                             let mut results = Vec::with_capacity(response.tool_calls.len());
                             for tc in &response.tool_calls {
-                                let result =
-                                    execute_tool(agent_name, tools, tc, &messages, hook_runtime.clone())
-                                        .await;
+                                let result = execute_tool(
+                                    agent_name,
+                                    tools,
+                                    tc,
+                                    &messages,
+                                    hook_runtime.clone(),
+                                    AsyncOperationRuntime::new(agent.runtime.async_ops.clone()),
+                                )
+                                .await;
                                 results.push((tc, result));
                             }
                             results
@@ -492,6 +713,7 @@ where
                                 tool_name: tool_call.name.clone(),
                                 tool_args: tool_call.arguments.clone(),
                                 result: tool_result.clone(),
+                                metadata: None,
                             },
                         );
 
@@ -713,6 +935,7 @@ async fn execute_tool(
     tool_call: &nenjo_models::ToolCall,
     current_messages: &[ChatMessage],
     hook_runtime: Option<Arc<HookRuntime>>,
+    async_operations: AsyncOperationRuntime,
 ) -> ToolResult {
     info!(
         agent = agent_name,
@@ -790,12 +1013,21 @@ async fn execute_tool(
         CURRENT_EVENTS_TX
             .scope(
                 Some(tx),
-                CURRENT_CHAT_HISTORY.scope(current_history, execute),
+                CURRENT_CHAT_HISTORY.scope(
+                    current_history,
+                    scope_current_async_operation_runtime(async_operations, execute),
+                ),
             )
             .await
     } else {
         CURRENT_EVENTS_TX
-            .scope(None, CURRENT_CHAT_HISTORY.scope(current_history, execute))
+            .scope(
+                None,
+                CURRENT_CHAT_HISTORY.scope(
+                    current_history,
+                    scope_current_async_operation_runtime(async_operations, execute),
+                ),
+            )
             .await
     };
 

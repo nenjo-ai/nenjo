@@ -2155,6 +2155,7 @@ mod tests {
             model_provider: "test".to_string(),
             temperature: Some(0.0),
             base_url: None,
+            native_tools: vec![],
         };
         let model_slug = model_manifest_slug(&model.model_provider, &model.model);
         Manifest {
@@ -2170,6 +2171,7 @@ mod tests {
                 platform_scopes: Vec::new(),
                 mcp_servers: Vec::new(),
                 script_tools: Vec::new(),
+                media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
                 heartbeat: None,
@@ -2230,6 +2232,7 @@ mod tests {
             model_provider: "test".to_string(),
             temperature: Some(0.0),
             base_url: None,
+            native_tools: vec![],
         };
         let model_slug = model_manifest_slug(&model.model_provider, &model.model);
         Manifest {
@@ -2245,6 +2248,7 @@ mod tests {
                 platform_scopes: Vec::new(),
                 mcp_servers: Vec::new(),
                 script_tools: Vec::new(),
+                media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
                 heartbeat: None,
@@ -2370,6 +2374,7 @@ mod tests {
         ChatResponse {
             text: Some(text.into()),
             tool_calls: Vec::new(),
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         }
     }
@@ -2378,6 +2383,7 @@ mod tests {
         ChatResponse {
             text: None,
             tool_calls: vec![tool_call],
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         }
     }

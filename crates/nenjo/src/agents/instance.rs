@@ -1,6 +1,7 @@
 //! Fully configured agent instance ready for task execution.
 
 use crate::context::ContextRenderer;
+use nenjo_models::NativeModelToolId;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -208,7 +209,28 @@ impl<P: ProviderRuntime> AgentInstance<P> {
 
     /// Get tool specs for LLM function calling registration.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.runtime.tools.iter().map(|t| t.spec()).collect()
+        let mut specs = self.local_tool_specs();
+        specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
+        specs
+    }
+
+    /// Get executable local tool specs for provider function-calling registration.
+    ///
+    /// Provider-native tools are intentionally excluded here. They are passed
+    /// through `ChatRequest::native_tools` and executed by the provider, not by
+    /// the local tool runtime.
+    pub(crate) fn local_tool_specs(&self) -> Vec<ToolSpec> {
+        self.runtime
+            .tools
+            .iter()
+            .filter(|tool| {
+                !native_model_tool_shadows_local_tool(
+                    &self.model_manifest.native_tools,
+                    tool.name(),
+                )
+            })
+            .map(|t| t.spec())
+            .collect()
     }
 
     /// Build the system, developer, and user prompts for an execution.
@@ -372,5 +394,74 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             developer,
             user_message,
         }
+    }
+}
+
+fn native_model_tool_shadows_local_tool(
+    native_tools: &[NativeModelToolId],
+    local_tool_name: &str,
+) -> bool {
+    native_tools
+        .iter()
+        .any(|tool| tool.as_str() == "web_search")
+        && local_tool_name == "web_search_tool"
+}
+
+fn native_model_tool_specs(native_tools: &[NativeModelToolId]) -> Vec<ToolSpec> {
+    native_tools
+        .iter()
+        .map(|tool| ToolSpec {
+            name: tool.as_str().to_string(),
+            description: format!(
+                "Provider-native model tool '{}' executed by the configured model provider.",
+                tool.as_str()
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            category: crate::tools::ToolCategory::Read,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xai_native_web_search_shadows_local_web_search_tool() {
+        assert!(native_model_tool_shadows_local_tool(
+            &[NativeModelToolId::from("web_search")],
+            "web_search_tool",
+        ));
+        assert!(!native_model_tool_shadows_local_tool(
+            &[NativeModelToolId::from("x_search")],
+            "web_search_tool",
+        ));
+        assert!(!native_model_tool_shadows_local_tool(
+            &[NativeModelToolId::from("web_search")],
+            "shell",
+        ));
+    }
+
+    #[test]
+    fn native_model_tool_specs_are_visible_tool_belt_entries() {
+        let specs = native_model_tool_specs(&[
+            NativeModelToolId::from("web_search"),
+            NativeModelToolId::from("x_search"),
+        ]);
+        let names = specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["web_search", "x_search"]);
+        assert!(
+            specs
+                .iter()
+                .all(|spec| spec.category == crate::tools::ToolCategory::Read)
+        );
     }
 }

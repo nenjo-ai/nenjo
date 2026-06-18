@@ -83,6 +83,7 @@ impl DomainRecord {
                 .iter()
                 .map(|value| slug_from_str(value))
                 .collect(),
+            media: Vec::new(),
             prompt_config,
         }
     }

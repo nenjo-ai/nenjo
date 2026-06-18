@@ -732,6 +732,7 @@ pub fn trace_events_from_turn_event(
             tool_name,
             tool_args,
             result,
+            ..
         } => vec![trace_event(
             context,
             TracePhase::ToolCompleted,
@@ -1081,6 +1082,7 @@ mod tests {
                     tool_name: "search".to_string(),
                     tool_args: "{\"q\":\"rust\"}".to_string(),
                     text_preview: Some("rust".to_string()),
+                    metadata: None,
                 }],
             },
         )

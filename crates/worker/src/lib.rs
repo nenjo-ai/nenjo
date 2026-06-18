@@ -18,6 +18,7 @@ pub mod event_loop;
 pub mod external_mcp;
 pub mod handlers;
 pub mod local_documents;
+pub mod media;
 pub mod package_manifests;
 pub mod providers;
 pub mod resource_resolver;

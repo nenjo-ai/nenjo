@@ -12,7 +12,7 @@ use nenjo_models::ChatMessage;
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
-use super::abilities::{build_ability_tools, is_ability_tool};
+use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
 use super::instance::AgentExecutionMode;
 use super::sub_agents::{
     ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
@@ -163,6 +163,12 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .tools
                 .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
+        if instance.runtime.execution_mode == AgentExecutionMode::Parent {
+            instance.runtime.tools.extend(build_async_operation_tools(
+                instance.runtime.async_ops.clone(),
+                instance.runtime.config.max_delegation_depth == 0,
+            ));
+        }
 
         let instance = Arc::new(instance);
 
@@ -264,6 +270,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         // Clone the instance and apply domain expansion.
         let mut instance = (*self.instance).clone();
         instance.prompt.context.active_domain = Some(active_domain);
+        for requirement in &session_manifest.media {
+            if !instance.manifest.media.contains(requirement) {
+                instance.manifest.media.push(requirement.clone());
+            }
+        }
 
         let active_abilities = resolve_active_abilities(
             provider,

@@ -22,11 +22,12 @@ use parking_lot::Mutex;
 use tracing::debug;
 
 use nenjo::ModelProviderFactory;
-use nenjo_models::ModelProvider;
 use nenjo_models::ReliableProvider;
+use nenjo_models::{ModelProvider, ProviderNativeCapabilities};
 
 use super::ModelProviders;
 use crate::config::ReliabilityConfig;
+use crate::media::MediaCapabilitySource;
 
 /// Registry that creates LLM provider instances on demand.
 ///
@@ -76,6 +77,21 @@ impl ModelProviderRegistry {
         self.api_keys.get(provider_name).map(|s| s.as_str())
     }
 
+    /// Return a configured provider instance for worker-owned runtime tooling.
+    pub fn provider(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        <Self as nenjo::ModelProviderFactory>::create(self, provider_name)
+    }
+
+    /// Return provider-native capability metadata without requiring runtime
+    /// credentials. Capability discovery is static provider metadata; actual
+    /// calls still go through authenticated provider instances.
+    pub fn native_capabilities(&self, provider_name: &str) -> Option<ProviderNativeCapabilities> {
+        let bare_name = provider_name
+            .strip_prefix("openai-compatible:")
+            .map_or(provider_name, |_| "openai-compatible");
+        Self::create_bare(bare_name, "", None).native_capabilities()
+    }
+
     /// Candidate env var names for a provider, used as a runtime fallback when
     /// the provider isn't in the config map. Providers with non-obvious env var
     /// names get explicit entries; everything else uses `{NAME}_API_KEY`.
@@ -104,6 +120,10 @@ impl ModelProviderRegistry {
         match provider_name {
             "anthropic" => Box::new(nenjo_models::AnthropicProvider::new(key)),
             "openai" => Box::new(nenjo_models::OpenAiProvider::new(key)),
+            "xai" => {
+                let url = base_url.unwrap_or(nenjo_models::XAI_DEFAULT_BASE_URL);
+                Box::new(nenjo_models::XAiProvider::with_base_url(key, url))
+            }
             "openrouter" => Box::new(nenjo_models::OpenRouterProvider::new(key)),
             "google" | "gemini" => Box::new(nenjo_models::GeminiProvider::new(key)),
             "minimax" => {
@@ -204,6 +224,12 @@ impl ModelProviderRegistry {
             .get("openai-compatible")
             .unwrap_or(&no_key)
             .clone()
+    }
+}
+
+impl MediaCapabilitySource for ModelProviderRegistry {
+    fn native_capabilities(&self, provider_name: &str) -> Option<ProviderNativeCapabilities> {
+        ModelProviderRegistry::native_capabilities(self, provider_name)
     }
 }
 
@@ -310,5 +336,19 @@ mod tests {
             .unwrap();
 
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn xai_provider_exposes_native_capabilities_through_registry() {
+        let mut keys = HashMap::new();
+        keys.insert(ModelProviders::XAI, "test-key".to_string());
+        let registry = ModelProviderRegistry::new(&keys, &ReliabilityConfig::default());
+
+        let provider = registry.create("xai").unwrap();
+        let capabilities = provider
+            .native_capabilities()
+            .expect("xai native capabilities");
+
+        assert_eq!(capabilities.provider, "xai");
     }
 }

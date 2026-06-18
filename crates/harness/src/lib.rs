@@ -227,6 +227,7 @@ mod tests {
             Ok(nenjo_models::ChatResponse {
                 text: Some("ok".to_string()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: nenjo_models::TokenUsage::default(),
             })
         }

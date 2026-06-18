@@ -1,10 +1,16 @@
 //! OpenAI provider. Authenticates via Bearer token.
 
 use crate::ToolSpec;
+use crate::native::{
+    MediaOutputAsset, MediaOutputFormat, ModelNativeCapabilities, NativeCapabilitiesProvider,
+    NativeExecutionMode, NativeMediaRequest, NativeMediaResponse, NativeOperation,
+    NativeToolSpec as NativeMediaToolSpec, ProviderNativeCapabilities,
+};
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 pub struct OpenAiProvider {
     api_key: Option<String>,
@@ -91,6 +97,93 @@ struct NativeResponseMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<NativeToolCall>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImageGenerationRequest<'a> {
+    model: &'a str,
+    prompt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_format: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quality: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenerationResponse {
+    data: Vec<ImageGenerationData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenerationData {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    b64_json: Option<String>,
+    #[serde(default)]
+    revised_prompt: Option<String>,
+}
+
+fn provider_option_str<'a>(options: &'a Value, key: &str) -> Option<&'a str> {
+    options.get(key).and_then(Value::as_str)
+}
+
+fn openai_generate_image_tool_spec() -> NativeMediaToolSpec {
+    let capability = NativeOperation::GenerateImage;
+    NativeMediaToolSpec {
+        capability,
+        tool_name: capability.tool_name().unwrap().to_string(),
+        description: "Generate an image with the configured OpenAI image model.".to_string(),
+        execution: NativeExecutionMode::Immediate,
+        parameters_schema: json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "n": {"type": "integer", "minimum": 1},
+                "size": {
+                    "type": "string",
+                    "enum": ["1024x1024", "1024x1536", "1536x1024", "auto"]
+                },
+                "output_format": {"type": "string", "enum": ["url", "base64"]},
+                "provider_options": {
+                    "type": "object",
+                    "properties": {
+                        "background": {
+                            "type": "string",
+                            "enum": ["transparent", "opaque", "auto"]
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["png", "webp", "jpeg"]
+                        },
+                        "quality": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "auto"]
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "required": ["prompt"]
+        }),
+    }
+}
+
+fn image_mime_type(output_format: Option<&str>) -> String {
+    match output_format {
+        Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
+    .to_string()
 }
 
 impl OpenAiProvider {
@@ -211,8 +304,79 @@ impl OpenAiProvider {
         ChatResponse {
             text: message.content,
             tool_calls,
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         }
+    }
+
+    async fn generate_image(
+        &self,
+        request: crate::native::GenerateImageRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml.")
+        })?;
+
+        let response_format = match request.output_format {
+            MediaOutputFormat::Url => None,
+            MediaOutputFormat::Base64 => Some("b64_json"),
+        };
+        let body = ImageGenerationRequest {
+            model: &request.model,
+            prompt: &request.prompt,
+            n: request.n,
+            size: request.size.as_deref(),
+            response_format,
+            background: provider_option_str(&request.provider_options, "background"),
+            output_format: provider_option_str(&request.provider_options, "output_format"),
+            quality: provider_option_str(&request.provider_options, "quality"),
+        };
+        let mime_type = image_mime_type(body.output_format);
+
+        let response = self
+            .client
+            .post("https://api.openai.com/v1/images/generations")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(crate::api_error("OpenAI", response).await);
+        }
+
+        let images: ImageGenerationResponse = response.json().await?;
+        let mut assets = Vec::new();
+        let mut revised_prompts = Vec::new();
+
+        for image in images.data {
+            if let Some(prompt) = image.revised_prompt {
+                revised_prompts.push(prompt);
+            }
+            if let Some(url) = image.url {
+                assets.push(MediaOutputAsset::Url {
+                    url,
+                    mime_type: Some(mime_type.clone()),
+                });
+            } else if let Some(data) = image.b64_json {
+                assets.push(MediaOutputAsset::Base64 {
+                    data,
+                    mime_type: Some(mime_type.clone()),
+                });
+            }
+        }
+
+        if assets.is_empty() {
+            anyhow::bail!("OpenAI image generation returned no assets");
+        }
+
+        let metadata = if revised_prompts.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "revised_prompts": revised_prompts }))
+        };
+
+        Ok(NativeMediaResponse::Assets { assets, metadata })
     }
 }
 
@@ -298,6 +462,53 @@ impl ModelProvider for OpenAiProvider {
     fn supports_developer_role(&self, model: &str) -> bool {
         Self::is_developer_role_model(model)
     }
+
+    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
+        Some(NativeCapabilitiesProvider::native_capabilities(self))
+    }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        NativeCapabilitiesProvider::submit_media(self, request).await
+    }
+}
+
+#[async_trait]
+impl NativeCapabilitiesProvider for OpenAiProvider {
+    fn native_capabilities(&self) -> ProviderNativeCapabilities {
+        ProviderNativeCapabilities {
+            provider: "openai".to_string(),
+            model_tools: Vec::new(),
+            models: vec![ModelNativeCapabilities {
+                model_pattern: "gpt-image-*".to_string(),
+                tools: vec![openai_generate_image_tool_spec()],
+            }],
+        }
+    }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let operation = request.operation();
+        match request {
+            NativeMediaRequest::GenerateImage(request) => self.generate_image(request).await,
+            NativeMediaRequest::EditImage(_)
+            | NativeMediaRequest::GenerateVideo(_)
+            | NativeMediaRequest::EditVideo(_)
+            | NativeMediaRequest::ImageToVideo(_)
+            | NativeMediaRequest::ReferenceToVideo(_)
+            | NativeMediaRequest::ExtendVideo(_)
+            | NativeMediaRequest::GenerateSpeech(_)
+            | NativeMediaRequest::TranscribeAudio(_) => {
+                anyhow::bail!(
+                    "OpenAI native operation {operation:?} is declared but not implemented in this pass"
+                )
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,6 +549,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = p.chat(request, "gpt-4o", 0.7).await;
         assert!(result.is_err());
@@ -354,8 +566,21 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = p.chat(request, "gpt-4o", 0.5).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn native_capabilities_include_image_generation() {
+        let p = OpenAiProvider::new(None);
+        let capabilities = NativeCapabilitiesProvider::native_capabilities(&p);
+        assert_eq!(capabilities.provider, "openai");
+        assert!(capabilities.models.iter().any(|model| {
+            model
+                .operations()
+                .any(|op| op == NativeOperation::GenerateImage)
+        }));
     }
 }

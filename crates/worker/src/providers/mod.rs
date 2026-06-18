@@ -18,7 +18,7 @@ pub use nenjo_models::{
 
 pub use nenjo_models::{
     AnthropicProvider, GeminiProvider, OllamaProvider, OpenAiCompatibleProvider, OpenAiProvider,
-    OpenRouterProvider, ReliableProvider, RouterProvider,
+    OpenRouterProvider, ReliableProvider, RouterProvider, XAiProvider,
 };
 
 pub use nenjo_models::{sanitize_api_error, scrub_secret_patterns};

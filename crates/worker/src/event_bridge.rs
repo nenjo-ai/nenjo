@@ -8,6 +8,24 @@ use uuid::Uuid;
 
 use nenjo_harness::preview::{PREVIEW_MAX_CHARS, summarize_preview, truncate_preview};
 
+fn merge_tool_payload(
+    mut payload: serde_json::Value,
+    metadata: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(metadata) = metadata.and_then(serde_json::Value::as_object) else {
+        return payload;
+    };
+    let Some(payload_object) = payload.as_object_mut() else {
+        return payload;
+    };
+
+    for (key, value) in metadata {
+        payload_object.insert(key.clone(), value.clone());
+    }
+
+    payload
+}
+
 // ---------------------------------------------------------------------------
 // Typed step-event data payloads
 // ---------------------------------------------------------------------------
@@ -95,10 +113,14 @@ pub fn turn_event_to_stream_events(
                     .unwrap_or_else(|| format!("{}:{}", call.tool_name, call.tool_args.len())),
                 parent_call_id: parent_tool_name.clone(),
                 tool_name: call.tool_name.clone(),
-                payload: Some(serde_json::json!({
-                    "tool_args": call.tool_args,
-                    "text_preview": call.text_preview,
-                })),
+                payload: Some(merge_tool_payload(
+                    serde_json::json!({
+                        "tool_name": call.tool_name,
+                        "tool_args": call.tool_args,
+                        "text_preview": call.text_preview,
+                    }),
+                    call.metadata.as_ref(),
+                )),
                 encrypted_payload: None,
             })
             .collect(),
@@ -109,7 +131,7 @@ pub fn turn_event_to_stream_events(
             tool_name,
             tool_args,
             result,
-            ..
+            metadata,
         } => vec![StreamEvent::ToolCallCompleted {
             run_id: run_id.to_string(),
             batch_id: batch_id.clone(),
@@ -118,11 +140,15 @@ pub fn turn_event_to_stream_events(
                 .unwrap_or_else(|| format!("{}:{}", tool_name, tool_args.len())),
             parent_call_id: parent_tool_name.clone(),
             success: result.success,
-            payload: Some(serde_json::json!({
-                "tool_args": tool_args,
-                "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
-                "error_preview": result.error.as_deref().and_then(summarize_preview),
-            })),
+            payload: Some(merge_tool_payload(
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
+                    "error_preview": result.error.as_deref().and_then(summarize_preview),
+                }),
+                metadata.as_ref(),
+            )),
             encrypted_payload: None,
         }],
         nenjo::TurnEvent::HookStarted {
@@ -711,12 +737,23 @@ pub fn turn_event_to_task_step_response(
                         )
                         .unwrap_or_default(),
                     ),
+                    (
+                        "tool_metadata".to_string(),
+                        serde_json::to_value(
+                            calls.iter().map(|c| c.metadata.clone()).collect::<Vec<_>>(),
+                        )
+                        .unwrap_or_default(),
+                    ),
                 ]),
             ),
             payload: calls.first().and_then(|c| {
-                c.text_preview
+                let payload = c
+                    .text_preview
                     .as_ref()
                     .map(|preview| serde_json::json!({ "text_preview": preview }))
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let merged = merge_tool_payload(payload, c.metadata.as_ref());
+                (!merged.as_object().is_some_and(serde_json::Map::is_empty)).then_some(merged)
             }),
             encrypted_payload: None,
             agent,
@@ -728,7 +765,7 @@ pub fn turn_event_to_task_step_response(
             tool_name,
             tool_args,
             result,
-            ..
+            metadata,
         } => Some(Response::TaskStepEvent {
             execution_run_id,
             task_id,
@@ -775,12 +812,19 @@ pub fn turn_event_to_task_step_response(
                             serde_json::Value::Null
                         },
                     ),
+                    (
+                        "tool_metadata".to_string(),
+                        metadata.clone().unwrap_or(serde_json::Value::Null),
+                    ),
                 ]),
             ),
-            payload: Some(serde_json::json!({
-                "output_preview": task_output_preview(&result.output, context.summarize_outputs),
-                "error": result.error,
-            })),
+            payload: Some(merge_tool_payload(
+                serde_json::json!({
+                    "output_preview": task_output_preview(&result.output, context.summarize_outputs),
+                    "error": result.error,
+                }),
+                metadata.as_ref(),
+            )),
             encrypted_payload: None,
             agent,
         }),
@@ -1167,6 +1211,7 @@ mod tests {
                     output: output.clone(),
                     error: None,
                 },
+                metadata: None,
             },
             "agent",
             "run-1",
@@ -1189,6 +1234,145 @@ mod tests {
                 );
             }
             other => panic!("unexpected stream events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_tool_metadata_is_included_in_stream_tool_events() {
+        let metadata = serde_json::json!({
+            "tool_origin": "provider",
+            "provider_native": true,
+            "provider": "xai",
+        });
+
+        let started = turn_event_to_stream_events(
+            &nenjo::TurnEvent::ToolCallStart {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                calls: vec![nenjo::agents::ToolCall {
+                    tool_call_id: Some("call-1".to_string()),
+                    tool_name: "web_search".to_string(),
+                    tool_args: "{}".to_string(),
+                    text_preview: Some("provider web search".to_string()),
+                    metadata: Some(metadata.clone()),
+                }],
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        match started.as_slice() {
+            [StreamEvent::ToolCallStarted { payload, .. }] => {
+                let payload = payload.as_ref().expect("payload");
+                assert_eq!(payload["tool_origin"], "provider");
+                assert_eq!(payload["provider_native"], true);
+                assert_eq!(payload["provider"], "xai");
+                assert_eq!(payload["tool_name"], "web_search");
+            }
+            other => panic!("unexpected stream events: {other:?}"),
+        }
+
+        let completed = turn_event_to_stream_events(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "web_search".to_string(),
+                tool_args: "{}".to_string(),
+                result: nenjo::ToolResult {
+                    success: true,
+                    output: "{\"status\":\"completed\"}".to_string(),
+                    error: None,
+                },
+                metadata: Some(metadata),
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        match completed.as_slice() {
+            [StreamEvent::ToolCallCompleted { payload, .. }] => {
+                let payload = payload.as_ref().expect("payload");
+                assert_eq!(payload["tool_origin"], "provider");
+                assert_eq!(payload["provider_native"], true);
+                assert_eq!(payload["provider"], "xai");
+                assert_eq!(payload["tool_name"], "web_search");
+            }
+            other => panic!("unexpected stream events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_tool_metadata_is_included_in_task_step_events() {
+        let metadata = serde_json::json!({
+            "tool_origin": "provider",
+            "provider_native": true,
+            "provider": "xai",
+        });
+        let context = TaskTurnEventContext {
+            execution_run_id: Uuid::new_v4(),
+            task_id: Some(Uuid::new_v4()),
+            agent: None,
+            routine_step: None,
+            agent_duration_ms: None,
+            emit_done: true,
+            summarize_outputs: false,
+        };
+
+        let started = turn_event_to_task_step_response(
+            &nenjo::TurnEvent::ToolCallStart {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                calls: vec![nenjo::agents::ToolCall {
+                    tool_call_id: Some("call-1".to_string()),
+                    tool_name: "web_search".to_string(),
+                    tool_args: "{}".to_string(),
+                    text_preview: Some("provider web search".to_string()),
+                    metadata: Some(metadata.clone()),
+                }],
+            },
+            &context,
+        )
+        .expect("tool start should bridge");
+
+        match started {
+            Response::TaskStepEvent { data, payload, .. } => {
+                assert_eq!(data["tool_metadata"][0]["tool_origin"], "provider");
+                let payload = payload.expect("payload");
+                assert_eq!(payload["provider_native"], true);
+                assert_eq!(payload["provider"], "xai");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let completed = turn_event_to_task_step_response(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "web_search".to_string(),
+                tool_args: "{}".to_string(),
+                result: nenjo::ToolResult {
+                    success: true,
+                    output: "{\"status\":\"completed\"}".to_string(),
+                    error: None,
+                },
+                metadata: Some(metadata),
+            },
+            &context,
+        )
+        .expect("tool completion should bridge");
+
+        match completed {
+            Response::TaskStepEvent { data, payload, .. } => {
+                assert_eq!(data["tool_metadata"]["tool_origin"], "provider");
+                let payload = payload.expect("payload");
+                assert_eq!(payload["provider_native"], true);
+                assert_eq!(payload["provider"], "xai");
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
     }
 
@@ -1358,6 +1542,7 @@ mod tests {
                     output: output.clone(),
                     error: None,
                 },
+                metadata: None,
             },
             &TaskTurnEventContext {
                 execution_run_id: Uuid::new_v4(),

@@ -16,14 +16,17 @@ use nenjo_platform::{
 
 use crate::config::Config;
 use crate::external_mcp::ExternalMcpPool;
+use crate::media::MediaProviderResolver;
+use crate::providers::ModelProviderRegistry;
 use crate::skills::{LocalSkillProvider, SkillRegistry};
 
+use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
     AutonomyLevel, BrowserOpenTool, ContentSearchTool, FileDeleteTool, FileEditTool, FileReadTool,
     FileWriteTool, GitOperationsTool, GlobSearchTool, HttpRequestTool, ListInstalledSkillsTool,
-    RuntimeAdapter, ScreenshotTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool,
-    WebFetchTool, WebSearchTool,
+    NativeMediaTool, RuntimeAdapter, ScreenshotTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool,
+    UseSkillTool, WebFetchTool, WebSearchTool,
 };
 
 tokio::task_local! {
@@ -51,6 +54,7 @@ where
     security: Arc<SecurityPolicy>,
     runtime: Arc<R>,
     config: Config,
+    provider_registry: Arc<ModelProviderRegistry>,
     external_mcp: Arc<ExternalMcpPool>,
     skill_registry: Arc<SkillRegistry>,
     platform: PlatformToolServices,
@@ -86,12 +90,37 @@ where
         external_mcp: Arc<ExternalMcpPool>,
         skill_registry: Arc<SkillRegistry>,
     ) -> Self {
+        let provider_registry = Arc::new(ModelProviderRegistry::new(
+            &config.model_provider_api_keys,
+            &config.reliability,
+        ));
+        Self::with_skill_registry_and_provider_registry(
+            security,
+            runtime,
+            config,
+            provider_registry,
+            platform,
+            external_mcp,
+            skill_registry,
+        )
+    }
+
+    pub(crate) fn with_skill_registry_and_provider_registry(
+        security: impl Into<Arc<SecurityPolicy>>,
+        runtime: R,
+        config: Config,
+        provider_registry: Arc<ModelProviderRegistry>,
+        platform: PlatformToolServices,
+        external_mcp: Arc<ExternalMcpPool>,
+        skill_registry: Arc<SkillRegistry>,
+    ) -> Self {
         let security = security.into();
         let runtime = Arc::new(runtime);
         Self {
             security,
             runtime,
             config,
+            provider_registry,
             external_mcp,
             skill_registry,
             platform,
@@ -250,7 +279,59 @@ where
             tools.push(Arc::new(ScreenshotTool::new(security.clone())));
         }
 
+        self.add_native_media_tools(agent, &mut tools);
+
         tools
+    }
+
+    fn add_native_media_tools(&self, agent: &AgentManifest, tools: &mut Vec<Arc<dyn Tool>>) {
+        if agent.media.is_empty() {
+            return;
+        }
+
+        let resolver = MediaProviderResolver::new(
+            self.config.media_providers.clone(),
+            self.provider_registry.as_ref(),
+        );
+        let mut tool_names = std::collections::HashSet::new();
+
+        for requirement in &agent.media {
+            let capability = requirement.capability();
+            let Some(name) = tool_name(capability) else {
+                tracing::warn!(
+                    capability = ?capability,
+                    agent = %agent.slug,
+                    "Skipping media capability without a worker tool"
+                );
+                continue;
+            };
+            if !tool_names.insert(name) {
+                tracing::warn!(
+                    capability = ?capability,
+                    agent = %agent.slug,
+                    "Skipping duplicate media capability assignment"
+                );
+                continue;
+            }
+
+            match resolver.resolve(requirement) {
+                Ok(resolved) => {
+                    if let Some(tool) =
+                        NativeMediaTool::new(resolved, self.provider_registry.clone())
+                    {
+                        tools.push(Arc::new(tool));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        capability = ?capability,
+                        agent = %agent.slug,
+                        error = %error,
+                        "Skipping unresolved media capability"
+                    );
+                }
+            }
+        }
     }
 }
 

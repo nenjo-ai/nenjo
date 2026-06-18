@@ -13,7 +13,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
+use crate::tools::{
+    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, STOP_OPERATIONS_TOOL_NAME,
+    StopOperationsArgs, Tool, ToolCategory, ToolOrigin, ToolResult, WAIT_OPERATIONS_TOOL_NAME,
+    WaitOperationsArgs, inspect_operations_parameters_schema, stop_operations_parameters_schema,
+    wait_operations_parameters_schema,
+};
 
 use super::async_ops::{
     AsyncOpChildHandle, AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, StartAsyncOp,
@@ -246,7 +251,19 @@ struct StopAbilitiesTool {
     async_ops: AsyncOpManager,
 }
 
+struct InspectOperationsTool {
+    async_ops: AsyncOpManager,
+}
+
+struct StopOperationsTool {
+    async_ops: AsyncOpManager,
+}
+
 struct AbilityWaitTool {
+    async_ops: AsyncOpManager,
+}
+
+struct WaitOperationsTool {
     async_ops: AsyncOpManager,
 }
 
@@ -414,6 +431,76 @@ impl Tool for StopAbilitiesTool {
 }
 
 #[async_trait::async_trait]
+impl Tool for InspectOperationsTool {
+    fn name(&self) -> &str {
+        INSPECT_OPERATIONS_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Inspect running or recently completed async operations by operation_id. Use this after wait_operations reports completion or failure when you need the final output payload or recent transcript. For media jobs, inspect the existing media operation instead of starting a new generation job for the same user request."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        inspect_operations_parameters_schema()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: InspectOperationsArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "operations": self.async_ops.inspect(
+                parsed.operations,
+                parsed.kind,
+                parsed.include_transcript,
+                parsed.limit,
+            ).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for StopOperationsTool {
+    fn name(&self) -> &str {
+        STOP_OPERATIONS_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Stop one or more running async operations. Filter by kind to avoid stopping unrelated work."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        stop_operations_parameters_schema()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: StopOperationsArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "stopped": self.async_ops.stop(
+                parsed.operations,
+                parsed.kind,
+                parsed.reason,
+                super::runner::turn_loop::current_events_tx(),
+            ).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
 impl Tool for AbilityWaitTool {
     fn name(&self) -> &str {
         WAIT_TOOL_NAME
@@ -447,6 +534,37 @@ impl Tool for AbilityWaitTool {
         let _reason = parsed.reason;
         Ok(json_tool(serde_json::json!(
             self.async_ops.wait(parsed.seconds, None).await
+        )))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for WaitOperationsTool {
+    fn name(&self) -> &str {
+        WAIT_OPERATIONS_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Wait while async operations continue running, then return queued operation signals. For video or other media generation, call this with kind=media after the media tool returns job_started; repeat wait_operations until the media operation completes or fails instead of calling the generation tool again for the same request."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        wait_operations_parameters_schema()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: WaitOperationsArgs = serde_json::from_value(args)?;
+        let _reason = parsed.reason;
+        Ok(json_tool(serde_json::json!(
+            self.async_ops.wait(parsed.seconds, parsed.kind).await
         )))
     }
 }
@@ -781,6 +899,7 @@ where
                         tool_name,
                         tool_args,
                         result,
+                        metadata,
                     } => {
                         let _ = parent_tx.send(TurnEvent::ToolCallEnd {
                             batch_id,
@@ -790,6 +909,7 @@ where
                             tool_name,
                             tool_args,
                             result,
+                            metadata,
                         });
                     }
                     TurnEvent::AbilityCompleted { .. } => {
@@ -1004,6 +1124,24 @@ where
     Ok(tools)
 }
 
+pub(crate) fn build_async_operation_tools(
+    async_ops: AsyncOpManager,
+    include_wait: bool,
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools = vec![
+        Arc::new(InspectOperationsTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+        Arc::new(StopOperationsTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+    ];
+    if include_wait {
+        tools.push(Arc::new(WaitOperationsTool { async_ops }) as Arc<dyn Tool>);
+    }
+    tools
+}
+
 pub(crate) fn is_ability_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1092,6 +1230,7 @@ where
         let mut scoped_agent = caller.manifest.clone();
         scoped_agent.platform_scopes = ability_scopes.clone();
         scoped_agent.mcp_servers = merged_mcp_servers.clone();
+        scoped_agent.media = ability.media.clone();
         scoped_agent.abilities.clear();
         scoped_agent.domains.clear();
         provider
@@ -1127,6 +1266,7 @@ where
     scoped_manifest.prompt_config = prompt_config;
     scoped_manifest.platform_scopes = ability_scopes;
     scoped_manifest.mcp_servers = merged_mcp_servers;
+    scoped_manifest.media = ability.media.clone();
     scoped_manifest.abilities.clear();
     scoped_manifest.domains.clear();
 
@@ -1338,6 +1478,7 @@ mod tests {
                 platform_scopes: vec!["agents:read".into()],
                 mcp_servers: vec![],
                 script_tools: vec![],
+                media: vec![],
                 abilities: vec![],
                 prompt_locked: false,
                 heartbeat: None,
@@ -1350,6 +1491,7 @@ mod tests {
                 model_provider: "mock".into(),
                 temperature: Some(0.2),
                 base_url: None,
+                native_tools: vec![],
             },
             model: AgentModel {
                 model_name: "mock".into(),
@@ -1379,7 +1521,8 @@ mod tests {
                             platform_scopes: vec![],
                             abilities: vec![],
                             mcp_servers: vec![],
-                            script_tools: vec![],
+                            script_tools: Vec::new(),
+                            media: Vec::new(),
                             prompt_config: DomainPromptConfig {
                                 developer_prompt_addon: Some("domain addon".into()),
                             },
@@ -1421,6 +1564,7 @@ mod tests {
             platform_scopes: vec!["agents:write".into()],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1468,6 +1612,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1516,6 +1661,7 @@ mod tests {
             platform_scopes: vec!["agents:write".into()],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1563,6 +1709,7 @@ mod tests {
             platform_scopes: vec!["agents:write".into()],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1608,6 +1755,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1639,6 +1787,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1671,6 +1820,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1686,6 +1836,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1711,7 +1862,20 @@ mod tests {
     fn ability_tool_filter_does_not_match_manifest_resource_list_tool() {
         assert!(is_ability_tool("list_assigned_abilities"));
         assert!(is_ability_tool("use_ability"));
+        assert!(!is_ability_tool("inspect_operations"));
+        assert!(!is_ability_tool("stop_operations"));
+        assert!(!is_ability_tool("wait_operations"));
         assert!(!is_ability_tool("list_abilities"));
+    }
+
+    #[test]
+    fn async_operation_tools_are_generic_harness_tools() {
+        let tools = build_async_operation_tools(AsyncOpManager::new(), true);
+        let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+
+        assert!(names.contains(&"inspect_operations"));
+        assert!(names.contains(&"stop_operations"));
+        assert!(names.contains(&"wait_operations"));
     }
 
     #[test]
@@ -1727,6 +1891,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1742,6 +1907,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,

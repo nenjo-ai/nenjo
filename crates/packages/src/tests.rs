@@ -64,6 +64,7 @@ fn parses_resource_schema_version() {
 #[test]
 fn parses_all_supported_resource_types() {
     let cases = [
+        ("nenjo.model.v1", PackageKind::Model),
         ("nenjo.agent.v1", PackageKind::Agent),
         ("nenjo.ability.v1", PackageKind::Ability),
         ("nenjo.domain.v1", PackageKind::Domain),
@@ -86,6 +87,31 @@ fn parses_all_supported_resource_types() {
             "v1"
         );
     }
+}
+
+#[test]
+fn parses_model_resource_manifest_with_native_tools() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.model.v1
+manifest:
+  name: Grok Search
+  model_provider: xai
+  model: grok-4-0709
+  native_tools:
+    - web_search
+    - x_search
+"#,
+    )
+    .unwrap();
+
+    manifest.validate_wrapper().unwrap();
+    assert_eq!(manifest.kind().unwrap(), PackageKind::Model);
+    assert_eq!(manifest.name().unwrap(), "Grok Search");
+    assert_eq!(
+        manifest.manifest["native_tools"].as_array().unwrap().len(),
+        2
+    );
 }
 
 #[test]
@@ -239,6 +265,71 @@ manifest:
     )
     .unwrap();
     assert_eq!(manifest.version(), Some("1.2.3"));
+}
+
+#[test]
+fn reads_resource_manifest_media_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: media-agent
+  media:
+    - generate_image
+    - capability: reference_to_video
+      provider: xai
+      model: grok-imagine-video
+"#,
+    )
+    .unwrap();
+
+    let media = manifest.media_requirements().unwrap();
+
+    assert_eq!(media.len(), 2);
+    assert_eq!(media[0].capability, "generate_image");
+    assert_eq!(media[0].provider, None);
+    assert_eq!(media[0].model, None);
+    assert_eq!(media[1].capability, "reference_to_video");
+    assert_eq!(media[1].provider.as_deref(), Some("xai"));
+    assert_eq!(media[1].model.as_deref(), Some("grok-imagine-video"));
+}
+
+#[test]
+fn rejects_resource_manifest_media_model_without_provider() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: media-agent
+  media:
+    - capability: generate_video
+      model: grok-imagine-video
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.media_requirements().unwrap_err().to_string();
+
+    assert!(err.contains("model requires a provider"));
+}
+
+#[test]
+fn rejects_duplicate_resource_manifest_media_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: media-agent
+  media:
+    - generate_image
+    - capability: generate_image
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.media_requirements().unwrap_err().to_string();
+
+    assert!(err.contains("duplicate media requirement"));
 }
 
 #[test]

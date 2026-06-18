@@ -29,6 +29,7 @@ impl nenjo_harness::ModelProvider for TestModelProvider {
         Ok(nenjo_models::ChatResponse {
             text: Some("ok".to_string()),
             tool_calls: Vec::new(),
+            provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
         })
     }
@@ -66,6 +67,7 @@ async fn chat_test_provider()
         model_provider: "mock".into(),
         temperature: Some(0.0),
         base_url: None,
+        native_tools: Vec::new(),
     };
     let agent = nenjo::manifest::AgentManifest {
         name: "system".into(),
@@ -82,6 +84,7 @@ async fn chat_test_provider()
         mcp_servers: Vec::new(),
         abilities: Vec::new(),
         script_tools: Vec::new(),
+        media: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
     };

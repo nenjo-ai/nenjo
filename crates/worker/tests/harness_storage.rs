@@ -31,6 +31,7 @@ impl nenjo::ModelProvider for TestModelProvider {
         Ok(ChatResponse {
             text: Some("ok".to_string()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         })
     }

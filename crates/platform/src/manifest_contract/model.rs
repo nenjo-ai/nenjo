@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::{ModelManifest, model_manifest_slug};
+use nenjo_models::NativeModelToolId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,6 +24,8 @@ pub struct ModelRecord {
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_tools: Vec<NativeModelToolId>,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -42,6 +45,7 @@ impl ModelRecord {
             model_provider: self.model_provider.clone(),
             temperature: self.temperature,
             base_url: self.base_url.clone(),
+            native_tools: self.native_tools.clone(),
         }
     }
 

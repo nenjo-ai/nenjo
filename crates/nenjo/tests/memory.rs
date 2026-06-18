@@ -40,6 +40,7 @@ impl ModelProvider for MockProvider {
         Ok(ChatResponse {
             text: Some(self.response_text.clone()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
@@ -75,6 +76,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
 
     let agent = AgentManifest {
@@ -97,6 +99,7 @@ fn test_manifest() -> Manifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -611,6 +614,7 @@ async fn ability_inherits_memory_vars() {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
 
     let ability = AbilityManifest {
@@ -624,6 +628,7 @@ async fn ability_inherits_memory_vars() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -649,6 +654,7 @@ async fn ability_inherits_memory_vars() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![ability.name.clone()],
         prompt_locked: false,
         heartbeat: None,
@@ -734,6 +740,7 @@ async fn domain_expansion_preserves_memory() {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
 
     let domain = DomainManifest {
@@ -745,6 +752,7 @@ async fn domain_expansion_preserves_memory() {
         abilities: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some("PRD mode".into()),
         },
@@ -770,6 +778,7 @@ async fn domain_expansion_preserves_memory() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,

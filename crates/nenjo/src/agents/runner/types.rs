@@ -16,6 +16,7 @@ pub struct ToolCall {
     pub tool_name: String,
     pub tool_args: String,
     pub text_preview: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +131,7 @@ pub enum TurnEvent {
         tool_name: String,
         tool_args: String,
         result: ToolResult,
+        metadata: Option<serde_json::Value>,
     },
     /// A lifecycle hook started.
     HookStarted {

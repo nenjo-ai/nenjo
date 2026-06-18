@@ -25,6 +25,7 @@ fn model(_id: Uuid) -> ModelManifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     }
 }
 
@@ -49,6 +50,7 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -104,6 +106,7 @@ impl ModelProvider for FixedLlm {
         Ok(ChatResponse {
             text: Some(self.response.clone()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -194,6 +197,7 @@ impl ModelProvider for SubAgentScriptLlm {
                         })
                         .to_string(),
                     }],
+                    provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
                 }
             } else {
@@ -203,6 +207,7 @@ impl ModelProvider for SubAgentScriptLlm {
                             .into(),
                     ),
                     tool_calls: vec![],
+                    provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
                 }
             });
@@ -240,6 +245,7 @@ impl ModelProvider for SubAgentScriptLlm {
                     })
                     .to_string(),
                 }],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
             1 => ChatResponse {
@@ -249,11 +255,13 @@ impl ModelProvider for SubAgentScriptLlm {
                     name: "wait".into(),
                     arguments: serde_json::json!({"seconds": 1}).to_string(),
                 }],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
             _ => ChatResponse {
                 text: Some("parent complete".into()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
         })
@@ -355,6 +363,7 @@ impl ModelProvider for AbortObservedLlm {
                         })
                         .to_string(),
                     }],
+                    provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
                 }
             } else {
@@ -365,6 +374,7 @@ impl ModelProvider for AbortObservedLlm {
                         name: "wait".into(),
                         arguments: serde_json::json!({"seconds": 30}).to_string(),
                     }],
+                    provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
                 }
             })
@@ -804,5 +814,13 @@ async fn max_depth_zero_disables_parent_tools() {
 
     runner.chat("work").await.unwrap();
     let first_tools = captured.tool_names().remove(0);
-    assert_eq!(first_tools, vec!["list_knowledge_packs"]);
+    assert_eq!(
+        first_tools,
+        vec![
+            "list_knowledge_packs",
+            "inspect_operations",
+            "stop_operations",
+            "wait_operations"
+        ]
+    );
 }

@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nenjo::Slug;
-use nenjo::manifest::{KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader};
+use nenjo::manifest::{
+    KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader, model_manifest_slug,
+};
 use nenjo_nenpm::{
     LockedModule, NenpmLock, PackageInstallIndex, PackageSource,
     package_install_path_in_packages_dir,
@@ -343,7 +345,8 @@ impl RuntimeResourceManifest {
                     "script_tools",
                 )?;
             }
-            PackageKind::Routine
+            PackageKind::Model
+            | PackageKind::Routine
             | PackageKind::Knowledge
             | PackageKind::Skill
             | PackageKind::Plugin
@@ -515,7 +518,8 @@ fn push_package_resource(
             return Ok(());
         }
         PackageKind::Routine | PackageKind::Plugin => return Ok(()),
-        PackageKind::Agent
+        PackageKind::Model
+        | PackageKind::Agent
         | PackageKind::Ability
         | PackageKind::Domain
         | PackageKind::ContextBlock
@@ -547,6 +551,7 @@ fn push_package_resource(
         },
     );
     match context.kind {
+        PackageKind::Model => manifest.models.push(deserialize_manifest(value)?),
         PackageKind::Agent => manifest.agents.push(deserialize_manifest(value)?),
         PackageKind::Ability => manifest.abilities.push(deserialize_manifest(value)?),
         PackageKind::Domain => manifest.domains.push(deserialize_manifest(value)?),
@@ -675,6 +680,31 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
     });
 
     match defaults.kind {
+        PackageKind::Model => {
+            let model_provider = object
+                .get("model_provider")
+                .or_else(|| object.get("provider"))
+                .and_then(Value::as_str)
+                .unwrap_or("openai")
+                .to_string();
+            let model = object
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            object
+                .entry("model_provider")
+                .or_insert_with(|| Value::String(model_provider.clone()));
+            object
+                .entry("temperature")
+                .or_insert_with(|| serde_json::json!(0.7));
+            object
+                .entry("native_tools")
+                .or_insert_with(|| serde_json::json!([]));
+            object.entry("slug").or_insert_with(|| {
+                Value::String(model_manifest_slug(&model_provider, &model).into_string())
+            });
+        }
         PackageKind::Agent => {
             ensure_agent_prompt_config(object);
             object.entry("color").or_insert(Value::Null);

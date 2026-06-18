@@ -55,6 +55,7 @@ fn local_ability_from_document(ability: AbilityDocument) -> AbilityManifest {
         platform_scopes: ability.platform_scopes,
         mcp_servers: ability.mcp_servers,
         script_tools: ability.script_tools,
+        media: Vec::new(),
         source_type: "native".to_string(),
         read_only: false,
         metadata: serde_json::json!({}),
@@ -71,6 +72,7 @@ fn local_domain_from_document(domain: DomainDocument) -> DomainManifest {
         abilities: domain.abilities,
         mcp_servers: domain.mcp_servers,
         script_tools: domain.script_tools,
+        media: Vec::new(),
         prompt_config: domain.prompt_config,
     }
 }
@@ -436,6 +438,7 @@ where
             platform_scopes: remote.platform_scopes,
             mcp_servers: remote.mcp_servers,
             script_tools: remote.script_tools,
+            media: Vec::new(),
             source_type: "native".to_string(),
             read_only: false,
             metadata: serde_json::json!({}),
@@ -1321,6 +1324,7 @@ where
             model_provider: created.summary.model_provider.clone(),
             temperature: created.temperature,
             base_url: created.base_url.clone(),
+            native_tools: created.native_tools.clone(),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Model(local_model))
@@ -1345,6 +1349,10 @@ where
                 .or_else(|| Some(existing.model_provider.clone())),
             temperature: params.data.temperature.or(existing.temperature),
             base_url: Some(params.data.base_url.unwrap_or(existing.base_url.clone())),
+            native_tools: params
+                .data
+                .native_tools
+                .or_else(|| Some(existing.native_tools.clone())),
         };
         let updated = self
             .platform_client
@@ -1361,6 +1369,7 @@ where
             model_provider: updated.summary.model_provider.clone(),
             temperature: updated.temperature,
             base_url: updated.base_url.clone(),
+            native_tools: updated.native_tools.clone(),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Model(local_model))

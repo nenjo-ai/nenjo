@@ -25,6 +25,7 @@ impl nenjo_models::ModelProvider for MockProvider {
         Ok(nenjo_models::ChatResponse {
             text: Some("mock".into()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
         })
     }
@@ -56,6 +57,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
     let agent = AgentManifest {
         name: "agent".into(),
@@ -71,6 +73,7 @@ fn test_manifest() -> Manifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -178,6 +181,7 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -190,7 +194,8 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         platform_scopes: vec![],
         abilities: vec![],
         mcp_servers: vec![],
-        script_tools: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
         prompt_config: DomainPromptConfig::default(),
     };
     let domain_slug = domain.slug();
@@ -604,6 +609,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
     let original_agent = AgentManifest {
         name: "agent-old".into(),
@@ -619,6 +625,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -637,6 +644,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,

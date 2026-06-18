@@ -298,6 +298,7 @@ mod tests {
             platform_scopes: Vec::new(),
             mcp_servers: Vec::new(),
             script_tools: Vec::new(),
+            media: Vec::new(),
             abilities: Vec::new(),
             prompt_locked: false,
             heartbeat: None,

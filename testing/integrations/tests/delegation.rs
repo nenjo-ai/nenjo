@@ -45,6 +45,7 @@ fn make_model() -> ModelManifest {
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
         base_url: None,
+        native_tools: vec![],
     }
 }
 
@@ -79,6 +80,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         mcp_servers: vec![],
         abilities: vec![],
         script_tools: vec![],
+        media: vec![],
         prompt_locked: false,
         heartbeat: None,
     }

@@ -1552,6 +1552,7 @@ impl PlatformManifestClient {
             "model_provider": model.model_provider.clone().unwrap_or_else(|| "openai".into()),
             "temperature": model.temperature.unwrap_or(0.7),
             "base_url": model.base_url,
+            "native_tools": model.native_tools.clone(),
         });
         let response = self
             .http

@@ -44,7 +44,9 @@ pub use identity::{
 };
 pub(crate) use identity::{validate_relative_module_import_path, validate_resource_name};
 pub use local::LocalPackageResolver;
-pub use module::{ModuleBundle, ModuleImport, ModuleIndexManifest, ResourceManifest};
+pub use module::{
+    ModuleBundle, ModuleImport, ModuleIndexManifest, PackageMediaRequirement, ResourceManifest,
+};
 pub(crate) use module::{
     complete_package_resource_manifest, module_file_schema, module_reference_is_directory,
     normalize_module_reference, parse_module_file,

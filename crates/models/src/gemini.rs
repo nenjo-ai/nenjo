@@ -363,6 +363,7 @@ impl ModelProvider for GeminiProvider {
         Ok(ChatResponse {
             text,
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage,
         })
     }
