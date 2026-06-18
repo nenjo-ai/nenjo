@@ -2,6 +2,11 @@ use async_trait::async_trait;
 pub use nenjo_tool_api::{ToolCall, ToolCategory, ToolResultMessage, ToolSpec};
 use serde::{Deserialize, Serialize};
 
+use crate::native::{
+    NativeMediaJob, NativeMediaRequest, NativeMediaResponse, NativeModelToolId,
+    ProviderNativeCapabilities,
+};
+
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -53,15 +58,43 @@ pub struct TokenUsage {
     pub output_tokens: u64,
 }
 
+/// A provider-executed tool call observed inside a model response.
+///
+/// These traces are informational only. They must not be fed to the local tool
+/// executor because the provider has already executed the tool server-side.
+#[derive(Debug, Clone)]
+pub struct ProviderToolTrace {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub input: serde_json::Value,
+    pub output: Option<serde_json::Value>,
+    pub citations: Vec<serde_json::Value>,
+}
+
 /// An LLM response that may contain text, tool calls, or both.
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     /// Text content of the response (may be empty if only tool calls).
     pub text: Option<String>,
-    /// Tool calls requested by the LLM.
+    /// Tool calls requested by the LLM for the local runtime to execute.
     pub tool_calls: Vec<ToolCall>,
+    /// Provider-executed tool calls observed in the model response.
+    pub provider_tool_calls: Vec<ProviderToolTrace>,
     /// Token usage reported by the provider (zeros when not available).
     pub usage: TokenUsage,
+}
+
+/// Incremental events emitted while a provider-native model request is running.
+///
+/// These events are provider-agnostic and intentionally lossy: they carry the
+/// information the worker needs to update live activity without baking a single
+/// vendor's raw streaming schema into the turn loop.
+#[derive(Debug, Clone)]
+pub enum ProviderStreamEvent {
+    TextDelta(String),
+    ProviderToolStarted(ProviderToolTrace),
+    ProviderToolCompleted(ProviderToolTrace),
 }
 
 impl ChatResponse {
@@ -81,6 +114,7 @@ impl ChatResponse {
 pub struct ChatRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
+    pub native_tools: Option<&'a [NativeModelToolId]>,
 }
 
 /// A message in a multi-turn conversation, including tool interactions.
@@ -111,6 +145,22 @@ pub trait ModelProvider: Send + Sync {
         temperature: f64,
     ) -> anyhow::Result<ChatResponse>;
 
+    /// Optional streaming chat API.
+    ///
+    /// Providers that can surface incremental model or provider-native tool
+    /// progress should override this. The default implementation preserves the
+    /// existing non-streaming behavior.
+    async fn chat_stream(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+    ) -> anyhow::Result<ChatResponse> {
+        let _ = events;
+        self.chat(request, model, temperature).await
+    }
+
     /// Context window size in tokens for the given model.
     ///
     /// Providers return the raw advertised context window. The turn loop
@@ -130,6 +180,31 @@ pub trait ModelProvider: Send + Sync {
     /// When false, they are folded into the provider's system-equivalent role.
     fn supports_developer_role(&self, _model: &str) -> bool {
         false
+    }
+
+    /// Provider-native capabilities outside the chat/tool turn loop.
+    ///
+    /// Examples include direct image generation, async video rendering,
+    /// text-to-speech, and speech-to-text endpoints.
+    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
+        None
+    }
+
+    /// Submit a provider-native media operation.
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        anyhow::bail!(
+            "provider does not support native media operation {:?}",
+            request.operation()
+        )
+    }
+
+    /// Poll an async provider-native media job.
+    async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
+        let _ = job;
+        anyhow::bail!("provider does not support polling native media jobs")
     }
 
     /// Warm up the HTTP connection pool (TLS handshake, DNS, HTTP/2 setup).
@@ -160,6 +235,7 @@ pub async fn one_shot(
     let request = ChatRequest {
         messages: &messages,
         tools: None,
+        native_tools: None,
     };
     let response = provider.chat(request, model, temperature).await?;
     Ok(response.text.unwrap_or_default())
@@ -194,6 +270,7 @@ mod tests {
         let empty = ChatResponse {
             text: None,
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         };
         assert!(!empty.has_tool_calls());
@@ -206,6 +283,7 @@ mod tests {
                 name: "shell".into(),
                 arguments: "{}".into(),
             }],
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         };
         assert!(with_tools.has_tool_calls());

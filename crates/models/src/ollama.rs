@@ -237,6 +237,7 @@ impl ModelProvider for OllamaProvider {
         Ok(ChatResponse {
             text: chat_response.message.content,
             tool_calls,
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: chat_response.prompt_eval_count.unwrap_or(0),
                 output_tokens: chat_response.eval_count.unwrap_or(0),

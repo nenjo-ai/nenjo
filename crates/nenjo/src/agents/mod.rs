@@ -9,6 +9,10 @@ pub mod prompts;
 pub mod runner;
 pub(crate) mod sub_agents;
 
+pub use async_ops::{
+    AsyncOperationHandle, AsyncOperationRuntime, StartAsyncOperation,
+    current_async_operation_runtime,
+};
 pub use builder::AgentBuilder;
 pub use error::AgentError;
 pub(crate) use instance::AgentExecutionMode;

@@ -114,6 +114,7 @@ fn make_model() -> ModelManifest {
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
         base_url: None,
+        native_tools: vec![],
     }
 }
 
@@ -148,6 +149,7 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         mcp_servers: vec![],
         abilities: vec![],
         script_tools: vec![],
+        media: vec![],
         prompt_locked: false,
         heartbeat: None,
     }
@@ -422,6 +424,7 @@ async fn assigned_ability_tool_with_real_llm() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -553,6 +556,7 @@ async fn domain_expansion_with_real_llm() {
         abilities: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some("You are now in PRD writing mode. Structure your response as a PRD with sections: Problem Statement, Goals, Non-Goals, User Stories, and Success Metrics. Be concise — one sentence per bullet point.".into()),
         },

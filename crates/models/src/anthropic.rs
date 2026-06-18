@@ -293,6 +293,7 @@ impl AnthropicProvider {
                 Some(text_parts.join("\n"))
             },
             tool_calls,
+            provider_tool_calls: vec![],
             usage,
         }
     }
@@ -422,6 +423,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = p.chat(request, "claude-3-opus", 0.7).await;
         assert!(result.is_err());
@@ -448,6 +450,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = p.chat(request, "claude-3-opus", 0.7).await;
         assert!(result.is_err());

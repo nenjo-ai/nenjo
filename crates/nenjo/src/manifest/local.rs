@@ -479,6 +479,7 @@ mod tests {
             model_provider: "openai".into(),
             temperature: Some(0.3),
             base_url: None,
+            native_tools: vec![],
         };
 
         let agent = AgentManifest {
@@ -495,6 +496,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             abilities: vec![],
             prompt_locked: false,
             heartbeat: None,
@@ -511,6 +513,7 @@ mod tests {
             platform_scopes: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,

@@ -2,6 +2,7 @@
 
 use derive_builder::Builder;
 use nenjo::Slug;
+use nenjo_models::NativeModelToolId;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use nenjo::manifest::{
@@ -791,6 +792,8 @@ pub struct ModelDocument {
     pub summary: ModelSummary,
     pub temperature: Option<f64>,
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_tools: Vec<NativeModelToolId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -805,6 +808,8 @@ pub struct ModelCreateDocument {
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_tools: Vec<NativeModelToolId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -822,6 +827,8 @@ pub struct ModelUpdateDocument {
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tools: Option<Vec<NativeModelToolId>>,
 }
 
 impl From<ModelManifest> for ModelDocument {
@@ -836,6 +843,7 @@ impl From<ModelManifest> for ModelDocument {
             },
             temperature: model.temperature,
             base_url: model.base_url,
+            native_tools: model.native_tools,
         }
     }
 }

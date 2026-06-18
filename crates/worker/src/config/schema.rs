@@ -1,8 +1,9 @@
 use crate::providers::ModelProviders;
 use anyhow::{Context, Result};
 use directories::UserDirs;
-use nenjo::AgentConfig;
+use nenjo::{AgentConfig, Slug};
 use nenjo_events::Capability;
+use nenjo_models::NativeOperation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -43,6 +44,10 @@ pub struct Config {
 
     /// Api keys for the llm model providers
     pub model_provider_api_keys: HashMap<ModelProviders, String>,
+
+    /// Provider/model bindings available for native media capabilities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_providers: Vec<MediaProviderConfig>,
 
     #[serde(default)]
     pub autonomy: AutonomyConfig,
@@ -99,6 +104,17 @@ const DEFAULT_NATS_URL: &str = "tls://nats.nenjo.ai";
 
 fn default_true() -> bool {
     true
+}
+
+// ── Native media providers ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaProviderConfig {
+    pub slug: Slug,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub capabilities: Vec<NativeOperation>,
 }
 
 // ── Browser (friendly-service browsing only) ───────────────────
@@ -786,6 +802,7 @@ impl Default for Config {
             state_dir: nenjo_dir.join("state"),
             manifests_dir: nenjo_dir.join("manifests"),
             model_provider_api_keys: HashMap::new(),
+            media_providers: Vec::new(),
             api_key: String::new(),
             backend_api_url: None,
             nats_url: None,
@@ -947,6 +964,24 @@ impl Config {
                 "NENJO_API_KEY is required. Set it via --api-key, NENJO_API_KEY env var, or api_key in ~/.nenjo/config.toml"
             );
         }
+        self.validate_media_providers()?;
+        Ok(())
+    }
+
+    fn validate_media_providers(&self) -> Result<()> {
+        let mut provider_slugs = std::collections::HashSet::new();
+        for provider in &self.media_providers {
+            if provider.capabilities.is_empty() {
+                anyhow::bail!(
+                    "media provider '{}' must declare at least one capability",
+                    provider.slug
+                );
+            }
+            if !provider_slugs.insert(provider.slug.clone()) {
+                anyhow::bail!("duplicate media provider slug '{}'", provider.slug);
+            }
+        }
+
         Ok(())
     }
 
@@ -957,7 +992,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{SecureBusConfig, SecurityConfig, SessionConfig};
+    use super::{Config, MediaProviderConfig, SecureBusConfig, SecurityConfig, SessionConfig};
+    use nenjo::Slug;
+    use nenjo_models::NativeOperation;
 
     #[test]
     fn secure_bus_config_requires_secured_commands_by_default() {
@@ -977,6 +1014,50 @@ require_secured_commands = false
         .unwrap();
 
         assert!(!config.secure_bus.require_secured_commands);
+    }
+
+    #[test]
+    fn media_provider_config_deserializes() {
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[[media_providers]]
+slug = "xai_video"
+provider = "xai"
+model = "grok-imagine-video"
+capabilities = ["generate_video", "reference_to_video"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.media_providers.len(), 1);
+        assert_eq!(config.media_providers[0].slug, Slug::derive("xai_video"));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn media_provider_must_declare_capabilities() {
+        let mut config = Config {
+            api_key: "test".to_string(),
+            media_providers: vec![MediaProviderConfig {
+                slug: Slug::derive("xai_video"),
+                provider: "xai".to_string(),
+                model: "grok-imagine-video".to_string(),
+                capabilities: Vec::new(),
+            }],
+            ..Config::default()
+        };
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("must declare at least one capability"));
+
+        config.media_providers[0]
+            .capabilities
+            .push(NativeOperation::GenerateVideo);
+        config.validate().unwrap();
     }
 
     #[test]

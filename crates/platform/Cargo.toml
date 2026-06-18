@@ -11,6 +11,7 @@ description = "Nenjo platform-backed manifest and REST API operations"
 nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
 nenjo-events = { workspace = true }
+nenjo-models = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

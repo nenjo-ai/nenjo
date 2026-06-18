@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
+use nenjo_models::{NativeModelToolId, NativeOperation};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -638,6 +639,9 @@ pub struct ModelManifest {
     pub temperature: Option<f64>,
     /// Optional provider base URL override.
     pub base_url: Option<String>,
+    /// Provider-native tools enabled for this model configuration.
+    #[serde(default)]
+    pub native_tools: Vec<NativeModelToolId>,
 }
 
 impl HasManifestSlug for ModelManifest {
@@ -652,6 +656,51 @@ pub fn model_manifest_slug(model_provider: &str, model: &str) -> Slug {
         slug_segment(model_provider, "provider"),
         slug_segment(model, "model")
     ))
+}
+
+/// A media capability requirement assigned to an agent or ability.
+///
+/// The compact string form declares a portable capability. The object form can
+/// additionally constrain resolution to a provider and/or model. Request-time
+/// media parameters belong in the media operation call, not in manifests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MediaRequirement {
+    Capability(NativeOperation),
+    Binding(MediaBindingRequirement),
+}
+
+impl MediaRequirement {
+    pub fn capability(&self) -> NativeOperation {
+        match self {
+            Self::Capability(capability) => *capability,
+            Self::Binding(binding) => binding.capability,
+        }
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Capability(_) => None,
+            Self::Binding(binding) => binding.provider.as_deref(),
+        }
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Capability(_) => None,
+            Self::Binding(binding) => binding.model.as_deref(),
+        }
+    }
+}
+
+/// A media capability requirement with optional provider/model constraints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBindingRequirement {
+    pub capability: NativeOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn slug_segment(value: &str, fallback: &str) -> String {
@@ -762,6 +811,10 @@ pub struct AgentManifest {
     #[builder(default)]
     /// Native script tool slugs assigned to this agent.
     pub script_tools: Vec<Slug>,
+    /// Provider-native media capabilities assigned to this agent.
+    #[serde(default)]
+    #[builder(default)]
+    pub media: Vec<MediaRequirement>,
     /// Ability slugs assigned to this agent.
     #[serde(default)]
     #[builder(default)]
@@ -886,6 +939,10 @@ pub struct AbilityManifest {
     #[serde(default)]
     #[builder(default)]
     pub script_tools: Vec<Slug>,
+    /// Provider-native media capabilities available while this ability runs.
+    #[serde(default)]
+    #[builder(default)]
+    pub media: Vec<MediaRequirement>,
     /// Source classification for lifecycle behavior such as native, skill, or package.
     #[serde(default = "default_ability_source_type")]
     #[builder(default = "default_ability_source_type()")]
@@ -1018,6 +1075,9 @@ pub struct DomainManifest {
     pub mcp_servers: Vec<Slug>,
     #[serde(default)]
     pub script_tools: Vec<Slug>,
+    /// Provider-native media capabilities activated by this domain.
+    #[serde(default)]
+    pub media: Vec<MediaRequirement>,
     pub prompt_config: DomainPromptConfig,
 }
 
@@ -1166,6 +1226,27 @@ mod tests {
             model_manifest_slug("openrouter", "anthropic/claude-3.5-sonnet").as_str(),
             "openrouter_anthropic_claude_3_5_sonnet"
         );
+    }
+
+    #[test]
+    fn media_requirement_supports_compact_and_bound_forms() {
+        let requirements: Vec<MediaRequirement> = serde_json::from_value(serde_json::json!([
+            "generate_image",
+            {
+                "capability": "reference_to_video",
+                "provider": "xai",
+                "model": "grok-imagine-video"
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(requirements[0].capability(), NativeOperation::GenerateImage);
+        assert_eq!(
+            requirements[1].capability(),
+            NativeOperation::ReferenceToVideo
+        );
+        assert_eq!(requirements[1].provider(), Some("xai"));
+        assert_eq!(requirements[1].model(), Some("grok-imagine-video"));
     }
 
     #[test]

@@ -101,6 +101,7 @@ impl AgentRecord {
                 .iter()
                 .map(|value| slug_from_str(value))
                 .collect(),
+            media: Vec::new(),
             abilities: self.abilities.clone(),
             prompt_locked: self.prompt_locked,
             heartbeat: self.heartbeat.clone(),

@@ -245,6 +245,7 @@ where
                     platform_scopes: Vec::new(),
                     mcp_servers: Vec::new(),
                     script_tools: Vec::new(),
+                    media: Vec::new(),
                     abilities: Vec::new(),
                     prompt_locked: false,
                     heartbeat: None,
@@ -349,6 +350,7 @@ where
                     platform_scopes: Vec::new(),
                     mcp_servers: Vec::new(),
                     script_tools: Vec::new(),
+                    media: Vec::new(),
                     source_type: "native".to_string(),
                     read_only: false,
                     metadata: serde_json::json!({}),
@@ -450,6 +452,7 @@ where
                     abilities: Vec::new(),
                     mcp_servers: Vec::new(),
                     script_tools: Vec::new(),
+                    media: Vec::new(),
                     prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
                 }
             }
@@ -763,6 +766,7 @@ where
                 .unwrap_or_else(|| "openai".into()),
             temperature: Some(params.data.temperature.unwrap_or(0.7)),
             base_url: params.data.base_url,
+            native_tools: params.data.native_tools,
         };
         self.writer
             .upsert_resource(&ManifestResource::Model(model.clone()))
@@ -792,6 +796,9 @@ where
         }
         if let Some(base_url) = params.data.base_url {
             model.base_url = base_url;
+        }
+        if let Some(native_tools) = params.data.native_tools {
+            model.native_tools = native_tools;
         }
         self.writer
             .upsert_resource(&ManifestResource::Model(model.clone()))
@@ -1092,6 +1099,7 @@ mod tests {
             model_provider: "openai".into(),
             temperature: Some(0.3),
             base_url: None,
+            native_tools: vec![],
         };
 
         let alt_model = ModelManifest {
@@ -1102,6 +1110,7 @@ mod tests {
             model_provider: "openai".into(),
             temperature: Some(0.2),
             base_url: Some("https://api.example.com".into()),
+            native_tools: vec![],
         };
 
         let agent = AgentManifest {
@@ -1125,6 +1134,7 @@ mod tests {
             mcp_servers: vec![],
             abilities: vec![],
             script_tools: vec![],
+            media: Vec::new(),
             prompt_locked: false,
             heartbeat: None,
         };
@@ -1139,7 +1149,8 @@ mod tests {
             },
             platform_scopes: vec!["projects:read".into()],
             mcp_servers: vec![],
-            script_tools: vec![],
+            script_tools: Vec::new(),
+            media: Vec::new(),
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -1154,6 +1165,7 @@ mod tests {
             abilities: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             prompt_config: DomainPromptConfig {
                 developer_prompt_addon: Some("Creator mode".into()),
             },
@@ -2286,6 +2298,7 @@ mod tests {
                     model_provider: None,
                     temperature: Some(0.4),
                     base_url: None,
+                    native_tools: None,
                 },
             })
             .await
@@ -2317,6 +2330,7 @@ mod tests {
                     model_provider: None,
                     temperature: None,
                     base_url: Some(None),
+                    native_tools: None,
                 },
             })
             .await

@@ -121,6 +121,7 @@ impl nenjo::ModelProvider for TestModelProvider {
         Ok(nenjo_models::ChatResponse {
             text: Some("ok".to_string()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
         })
     }
@@ -194,6 +195,7 @@ fn agent(_id: Uuid, name: &str, prompt: &str) -> AgentManifest {
         platform_scopes: Vec::new(),
         mcp_servers: Vec::new(),
         script_tools: Vec::new(),
+        media: Vec::new(),
         abilities: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
@@ -209,6 +211,7 @@ fn model(_id: Uuid, name: &str) -> ModelManifest {
         model_provider: "test".into(),
         temperature: Some(0.1),
         base_url: None,
+        native_tools: vec![],
     }
 }
 
@@ -254,6 +257,7 @@ fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
         platform_scopes: Vec::new(),
         mcp_servers: Vec::new(),
         script_tools: Vec::new(),
+        media: Vec::new(),
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -295,6 +299,7 @@ fn domain(_id: Uuid, name: &str, prompt: &str) -> DomainManifest {
         abilities: Vec::new(),
         mcp_servers: Vec::new(),
         script_tools: Vec::new(),
+        media: Vec::new(),
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: Some(prompt.into()),
         },

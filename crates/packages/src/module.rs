@@ -259,6 +259,19 @@ pub struct ResourceManifest {
     pub manifest: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Provider-native media capability requirement declared by a package resource.
+pub struct PackageMediaRequirement {
+    /// Native media capability name, such as `generate_image` or `reference_to_video`.
+    pub capability: String,
+    /// Optional provider pin, such as `xai` or `openai`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional provider model pin. A model pin requires a provider pin.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 impl ResourceManifest {
     /// Return the parsed resource schema.
     pub fn resource_schema(&self) -> Result<ResourceSchema> {
@@ -319,6 +332,24 @@ impl ResourceManifest {
         extract_module_imports(&self.imports)
     }
 
+    /// Return provider-native media requirements declared by this resource manifest.
+    ///
+    /// Accepts both shorthand capability strings and object entries:
+    ///
+    /// ```yaml
+    /// media:
+    ///   - generate_image
+    ///   - capability: reference_to_video
+    ///     provider: xai
+    ///     model: grok-imagine-video
+    /// ```
+    pub fn media_requirements(&self) -> Result<Vec<PackageMediaRequirement>> {
+        let Some(value) = self.manifest.get("media") else {
+            return Ok(Vec::new());
+        };
+        parse_media_requirements(value)
+    }
+
     /// Validate canonical module wrapper shape.
     pub fn validate_wrapper(&self) -> Result<()> {
         let kind = self.kind()?;
@@ -338,6 +369,7 @@ impl ResourceManifest {
         for import in self.imports() {
             import.validate()?;
         }
+        self.media_requirements()?;
         self.validate_package_authored_manifest_fields(kind)?;
         Ok(())
     }
@@ -354,6 +386,103 @@ impl ResourceManifest {
             );
         }
         Ok(())
+    }
+}
+
+fn parse_media_requirements(value: &serde_json::Value) -> Result<Vec<PackageMediaRequirement>> {
+    let items = value.as_array().ok_or_else(|| {
+        PackageError::invalid_resource_manifest("manifest.media must be an array")
+    })?;
+    let mut seen = BTreeSet::new();
+    let mut requirements = Vec::with_capacity(items.len());
+
+    for (index, item) in items.iter().enumerate() {
+        let requirement = if let Some(capability) = item.as_str() {
+            PackageMediaRequirement {
+                capability: non_empty_media_string(
+                    capability,
+                    &format!("manifest.media[{index}]"),
+                )?
+                .to_string(),
+                provider: None,
+                model: None,
+            }
+        } else if let Some(object) = item.as_object() {
+            let capability = object
+                .get("capability")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    PackageError::invalid_resource_manifest(format!(
+                        "manifest.media[{index}].capability is required"
+                    ))
+                })?;
+            PackageMediaRequirement {
+                capability: non_empty_media_string(
+                    capability,
+                    &format!("manifest.media[{index}].capability"),
+                )?
+                .to_string(),
+                provider: optional_media_string(
+                    object.get("provider"),
+                    &format!("manifest.media[{index}].provider"),
+                )?,
+                model: optional_media_string(
+                    object.get("model"),
+                    &format!("manifest.media[{index}].model"),
+                )?,
+            }
+        } else {
+            return Err(PackageError::invalid_resource_manifest(format!(
+                "manifest.media[{index}] must be a capability string or object"
+            )));
+        };
+
+        if requirement.model.is_some() && requirement.provider.is_none() {
+            return Err(PackageError::invalid_resource_manifest(
+                "pinned media model requires a provider",
+            ));
+        }
+
+        let key = (
+            requirement.capability.clone(),
+            requirement.provider.clone(),
+            requirement.model.clone(),
+        );
+        if !seen.insert(key) {
+            return Err(PackageError::invalid_resource_manifest(format!(
+                "duplicate media requirement '{}'",
+                requirement.capability
+            )));
+        }
+
+        requirements.push(requirement);
+    }
+
+    Ok(requirements)
+}
+
+fn non_empty_media_string<'a>(value: &'a str, field: &str) -> Result<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PackageError::invalid_resource_manifest(format!(
+            "{field} cannot be empty"
+        )));
+    }
+    Ok(trimmed)
+}
+
+fn optional_media_string(value: Option<&serde_json::Value>, field: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or_else(|| {
+        PackageError::invalid_resource_manifest(format!("{field} must be a string"))
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
     }
 }
 

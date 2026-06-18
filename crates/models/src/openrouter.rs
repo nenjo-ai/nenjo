@@ -241,6 +241,7 @@ impl OpenRouterProvider {
         ChatResponse {
             text: message.content,
             tool_calls,
+            provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         }
     }
@@ -611,6 +612,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = provider.chat(request, "openai/gpt-4o", 0.2).await;
 
@@ -628,6 +630,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = provider
             .chat(request, "anthropic/claude-sonnet-4", 0.7)

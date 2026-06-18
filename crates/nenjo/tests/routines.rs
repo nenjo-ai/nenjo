@@ -49,6 +49,7 @@ impl ModelProvider for MockLlm {
         Ok(ChatResponse {
             text: Some(self.response.clone()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -372,6 +373,7 @@ fn model(_id: Uuid) -> ModelManifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     }
 }
 
@@ -398,6 +400,7 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -428,6 +431,7 @@ fn verdict_response(text: &str, verdict: &str, reasoning: &str) -> ChatResponse 
             name: "pass_verdict".into(),
             arguments: format!(r#"{{"verdict":"{}","reasoning":"{}"}}"#, verdict, reasoning),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -531,6 +535,7 @@ fn route_response(
             name: "route_next_steps".into(),
             arguments: arguments.to_string(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -1030,6 +1035,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
         ChatResponse {
             text: Some("Implementation complete.".into()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
@@ -1328,6 +1334,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
                 r#"{"verdict":"fail","reasoning":"Critical acceptance criteria were missed"}"#
                     .into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -1341,6 +1348,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
             ChatResponse {
                 text: Some("This should never run.".into()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -2037,6 +2045,7 @@ async fn council_broadcast() {
             name: "pass_verdict".into(),
             arguments: r#"{"verdict":"pass","reasoning":"Broadcast consensus reached"}"#.into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2138,6 +2147,7 @@ async fn council_round_robin() {
             name: "pass_verdict".into(),
             arguments: r#"{"verdict":"pass","reasoning":"Round robin sequence converged"}"#.into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2235,6 +2245,7 @@ async fn council_vote() {
             name: "pass_verdict".into(),
             arguments: r#"{"verdict":"pass","reasoning":"Majority voted to proceed"}"#.into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2317,6 +2328,7 @@ async fn scheduled_cron_routine_execution() {
             name: "pass_verdict".into(),
             arguments: r#"{"verdict": "pass", "reasoning": "All checks passed"}"#.into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2431,6 +2443,7 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
                 r#"{"verdict":"pass","reasoning":"Workspace inspected","output":"Found files"}"#
                     .into(),
         }],
+        provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,

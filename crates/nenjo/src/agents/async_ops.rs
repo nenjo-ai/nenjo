@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
@@ -11,6 +12,12 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::tools::{AsyncOperationKind, AsyncOperationSignalKind};
+pub(crate) use crate::tools::{
+    AsyncOperationKind as AsyncOpKind, AsyncOperationStatus as AsyncOpStatus,
+};
+
+use super::runner::turn_loop;
 use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 
 const SIGNAL_QUEUE_CAP: usize = 128;
@@ -30,50 +37,6 @@ impl AsyncOpId {
 impl fmt::Display for AsyncOpId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsyncOpKind {
-    Ability,
-    SubAgent,
-    Shell,
-}
-
-impl AsyncOpKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Ability => "ability",
-            Self::SubAgent => "sub_agent",
-            Self::Shell => "shell",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsyncOpStatus {
-    Running,
-    WaitingForInput,
-    Completed,
-    Failed,
-    Stopped,
-}
-
-impl AsyncOpStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::WaitingForInput => "waiting_for_input",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Stopped => "stopped",
-        }
-    }
-
-    pub(crate) fn can_receive_input(self) -> bool {
-        matches!(self, Self::Running | Self::WaitingForInput)
     }
 }
 
@@ -106,13 +69,17 @@ pub(crate) enum AsyncOpSignal {
 
 impl AsyncOpSignal {
     pub(crate) fn kind(&self) -> &'static str {
+        self.signal_kind().as_str()
+    }
+
+    pub(crate) fn signal_kind(&self) -> AsyncOperationSignalKind {
         match self {
-            Self::Started { .. } => "started",
-            Self::Progress { .. } => "progress",
-            Self::NeedsInput { .. } => "needs_input",
-            Self::Completed { .. } => "completed",
-            Self::Failed { .. } => "failed",
-            Self::Stopped { .. } => "stopped",
+            Self::Started { .. } => AsyncOperationSignalKind::Started,
+            Self::Progress { .. } => AsyncOperationSignalKind::Progress,
+            Self::NeedsInput { .. } => AsyncOperationSignalKind::NeedsInput,
+            Self::Completed { .. } => AsyncOperationSignalKind::Completed,
+            Self::Failed { .. } => AsyncOperationSignalKind::Failed,
+            Self::Stopped { .. } => AsyncOperationSignalKind::Stopped,
         }
     }
 
@@ -179,6 +146,8 @@ pub(crate) struct AsyncOpInspection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_signal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_output: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) transcript_delta: Option<Vec<AsyncOperationTranscriptEvent>>,
 }
 
@@ -233,6 +202,7 @@ struct AsyncOperation {
     model_visible: bool,
     status: Mutex<AsyncOpStatus>,
     signals: Mutex<VecDeque<AsyncOpSignal>>,
+    latest_output: Mutex<Option<Value>>,
     transcript: Mutex<TranscriptState>,
     inbox_tx: mpsc::UnboundedSender<String>,
     cancel: CancellationToken,
@@ -264,9 +234,134 @@ pub(crate) struct StartedAsyncOp {
     pub(crate) child: AsyncOpChildHandle,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartAsyncOperation {
+    pub id: String,
+    pub kind: AsyncOperationKind,
+    pub label: String,
+    pub parent_operation_id: Option<String>,
+    pub parent_tool_name: Option<String>,
+    pub started_summary: String,
+    pub model_visible: bool,
+}
+
+#[derive(Clone)]
+pub struct AsyncOperationRuntime {
+    manager: AsyncOpManager,
+}
+
+#[derive(Clone)]
+pub struct AsyncOperationHandle {
+    operation_id: String,
+    manager: AsyncOpManager,
+    handle: AsyncOpHandle,
+    events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+}
+
+tokio::task_local! {
+    static CURRENT_ASYNC_OPERATION_RUNTIME: Option<AsyncOperationRuntime>;
+}
+
 impl Default for AsyncOpManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub fn current_async_operation_runtime() -> Option<AsyncOperationRuntime> {
+    CURRENT_ASYNC_OPERATION_RUNTIME
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+pub(crate) async fn scope_current_async_operation_runtime<F, T>(
+    runtime: AsyncOperationRuntime,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    CURRENT_ASYNC_OPERATION_RUNTIME
+        .scope(Some(runtime), future)
+        .await
+}
+
+impl AsyncOperationRuntime {
+    pub(crate) fn new(manager: AsyncOpManager) -> Self {
+        Self { manager }
+    }
+
+    pub async fn start(&self, request: StartAsyncOperation) -> AsyncOperationHandle {
+        let operation_id = request.id.clone();
+        let events_tx = turn_loop::current_events_tx();
+        let started = self
+            .manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new(request.id),
+                    kind: request.kind,
+                    label: request.label,
+                    parent_operation_id: request.parent_operation_id,
+                    parent_tool_name: request.parent_tool_name,
+                    started_summary: request.started_summary,
+                    model_visible: request.model_visible,
+                },
+                events_tx.clone(),
+            )
+            .await;
+
+        AsyncOperationHandle {
+            operation_id,
+            manager: self.manager.clone(),
+            handle: started.handle,
+            events_tx,
+        }
+    }
+}
+
+impl AsyncOperationHandle {
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.handle.cancel_token()
+    }
+
+    pub async fn attach_join(&self, join: JoinHandle<()>) {
+        self.manager
+            .attach_join(&AsyncOpId::new(self.operation_id.clone()), join)
+            .await;
+    }
+
+    pub async fn progress(&self, summary: impl Into<String>, details: Option<String>) {
+        self.handle
+            .progress(summary.into(), details, self.events_tx.clone())
+            .await;
+    }
+
+    pub async fn complete(&self, summary: impl Into<String>, output: Option<Value>) {
+        self.handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: summary.into(),
+                    output,
+                },
+                self.events_tx.clone(),
+            )
+            .await;
+    }
+
+    pub async fn fail(&self, error: impl Into<String>) {
+        self.handle
+            .complete(
+                AsyncOpSignal::Failed {
+                    error: error.into(),
+                },
+                self.events_tx.clone(),
+            )
+            .await;
     }
 }
 
@@ -295,6 +390,7 @@ impl AsyncOpManager {
             model_visible: request.model_visible,
             status: Mutex::new(AsyncOpStatus::Running),
             signals: Mutex::new(VecDeque::new()),
+            latest_output: Mutex::new(None),
             transcript: Mutex::new(TranscriptState::default()),
             inbox_tx,
             cancel: CancellationToken::new(),
@@ -421,6 +517,7 @@ impl AsyncOpManager {
                 .await
                 .back()
                 .map(AsyncOpSignal::summary);
+            let latest_output = operation.latest_output.lock().await.clone();
             let transcript_delta = if include_transcript {
                 let mut transcript = operation.transcript.lock().await;
                 let start = transcript.inspect_cursor.saturating_sub(
@@ -446,6 +543,7 @@ impl AsyncOpManager {
                 label: operation.label.clone(),
                 status: status.as_str(),
                 latest_signal,
+                latest_output,
                 transcript_delta,
             });
         }
@@ -594,6 +692,9 @@ impl AsyncOpHandle {
         }
         *status = signal.status();
         drop(status);
+        if let AsyncOpSignal::Completed { output, .. } = &signal {
+            *self.operation.latest_output.lock().await = output.clone();
+        }
         self.push_signal(signal, true, events_tx).await;
     }
 
@@ -780,6 +881,60 @@ mod tests {
         assert_eq!(result.updates.len(), 1);
         assert_eq!(result.updates[0].operation_id, "ability_research_1");
         assert_eq!(result.updates[0].events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn inspect_retains_completed_output_after_wait_drains_signals() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("media_generate_video_1"),
+                    kind: AsyncOpKind::Media,
+                    label: "xai generate_video".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("generate_video".into()),
+                    started_summary: "starting video".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+        let output = serde_json::json!({
+            "type": "assets",
+            "assets": [
+                {
+                    "type": "url",
+                    "url": "https://vidgen.x.ai/example/video.mp4",
+                    "mime_type": "video/mp4"
+                }
+            ]
+        });
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "done".into(),
+                    output: Some(output.clone()),
+                },
+                None,
+            )
+            .await;
+
+        let result = manager.wait(1, Some(AsyncOpKind::Media)).await;
+        assert_eq!(result.woken_by, "operation_result");
+
+        let inspected = manager
+            .inspect(
+                vec!["media_generate_video_1".into()],
+                Some(AsyncOpKind::Media),
+                false,
+                10,
+            )
+            .await;
+        assert_eq!(inspected.len(), 1);
+        assert_eq!(inspected[0].status, "completed");
+        assert_eq!(inspected[0].latest_output, Some(output));
     }
 
     #[tokio::test]

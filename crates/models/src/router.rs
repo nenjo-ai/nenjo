@@ -179,6 +179,7 @@ mod tests {
             Ok(ChatResponse {
                 text: Some(self.response.to_string()),
                 tool_calls: vec![],
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             })
         }

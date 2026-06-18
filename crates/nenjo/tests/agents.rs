@@ -41,6 +41,7 @@ impl ModelProvider for MockProvider {
         Ok(ChatResponse {
             text: Some(self.response_text.clone()),
             tool_calls: vec![],
+            provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
@@ -137,6 +138,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
 
     let agent = AgentManifest {
@@ -164,6 +166,7 @@ fn test_manifest() -> Manifest {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -274,9 +277,12 @@ async fn runner_with_custom_tool() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 2);
-    assert!(specs.iter().any(|spec| spec.name == "echo"));
-    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
+    let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
+    assert_eq!(names.len(), 4);
+    assert!(names.contains(&"echo"));
+    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(names.contains(&"inspect_operations"));
+    assert!(names.contains(&"stop_operations"));
 
     let output = runner.chat("Use the echo tool").await.unwrap();
     assert_eq!(output.text, "Done!");
@@ -301,9 +307,12 @@ async fn runner_with_tool_factory() {
         .unwrap();
 
     let specs = runner.instance().tool_specs();
-    assert_eq!(specs.len(), 2);
-    assert!(specs.iter().any(|spec| spec.name == "echo"));
-    assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
+    let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
+    assert_eq!(names.len(), 4);
+    assert!(names.contains(&"echo"));
+    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(names.contains(&"inspect_operations"));
+    assert!(names.contains(&"stop_operations"));
 
     let output = runner.chat("Hello").await.unwrap();
     assert_eq!(output.text, "Tool factory works!");
@@ -464,6 +473,7 @@ fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
         platform_scopes: scopes.into_iter().map(String::from).collect(),
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         source_type: "native".into(),
         read_only: false,
         metadata: serde_json::Value::Null,
@@ -486,6 +496,7 @@ fn domain_manifest_with_config(
         abilities,
         mcp_servers,
         script_tools: vec![],
+        media: vec![],
         prompt_config: DomainPromptConfig {
             developer_prompt_addon: developer_prompt_addon.map(str::to_string),
         },
@@ -507,6 +518,7 @@ fn manifest_with_abilities_and_domains(
         model_provider: "mock".into(),
         temperature: Some(0.5),
         base_url: None,
+        native_tools: vec![],
     };
 
     let agent = AgentManifest {
@@ -530,6 +542,7 @@ fn manifest_with_abilities_and_domains(
         platform_scopes: agent_scopes.into_iter().map(String::from).collect(),
         mcp_servers: vec![],
         script_tools: vec![],
+        media: vec![],
         abilities: agent_abilities,
         prompt_locked: false,
         heartbeat: None,

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use nenjo::Manifest;
 use nenjo::manifest::local::LocalManifestStore;
+use nenjo::manifest::{HasManifestSlug, MediaRequirement};
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
@@ -15,10 +16,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
-use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth};
+use crate::bootstrap::{BootstrapAuth, load_cached_bootstrap_auth, load_cached_media_providers};
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
 use crate::external_mcp::ExternalMcpPool;
+use crate::media::MediaProviderResolver;
 use crate::package_manifests::PackageManifestLoader;
 use crate::providers::registry::ModelProviderRegistry;
 use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
@@ -28,7 +30,7 @@ use crate::tools::platform_services::PlatformToolServices;
 use crate::tools::{NativeRuntime, SecurityPolicy, WorkerToolFactory};
 
 pub type WorkerProvider =
-    Provider<ModelProviderRegistry, WorkerToolFactory<NativeRuntime>, MarkdownMemory>;
+    Provider<Arc<ModelProviderRegistry>, WorkerToolFactory<NativeRuntime>, MarkdownMemory>;
 
 pub type WorkerHarness = Harness<WorkerProvider, WorkerSessionRuntime>;
 
@@ -143,18 +145,22 @@ pub(crate) async fn build_provider(
     external_mcp: Arc<ExternalMcpPool>,
     skill_registry: Arc<SkillRegistry>,
 ) -> Result<WorkerProvider> {
-    let provider_registry =
-        ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+    let provider_registry = Arc::new(ModelProviderRegistry::new(
+        &config.model_provider_api_keys,
+        &config.reliability,
+    ));
     let mut security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
     extend_runtime_roots(
         &mut security.allowed_runtime_roots,
         package_runtime_roots(config),
     );
     let platform_tools = build_platform_tool_services(config, auth_provider);
-    let tool_factory = WorkerToolFactory::with_skill_registry(
+    let effective_config = config_with_cached_media_providers(config);
+    let tool_factory = WorkerToolFactory::with_skill_registry_and_provider_registry(
         security,
         NativeRuntime,
-        config.clone(),
+        effective_config.clone(),
+        provider_registry.clone(),
         platform_tools,
         external_mcp.clone(),
         skill_registry,
@@ -169,7 +175,7 @@ pub(crate) async fn build_provider(
         .with_loader(platform_package_manifest_loader(config))
         .with_loader(loader)
         .with_loader(workspace_package_manifest_loader(config))
-        .with_model_factory(provider_registry)
+        .with_model_factory(provider_registry.clone())
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
@@ -177,6 +183,12 @@ pub(crate) async fn build_provider(
         .build()
         .await
         .context("Failed to build Provider")?;
+
+    validate_runtime_media_requirements(
+        &effective_config,
+        provider_registry.as_ref(),
+        &provider.manifest_snapshot(),
+    )?;
 
     Ok(provider)
 }
@@ -218,6 +230,78 @@ fn package_runtime_roots(config: &Config) -> Vec<PathBuf> {
     ]
 }
 
+fn config_with_cached_media_providers(config: &Config) -> Config {
+    let cached = load_cached_media_providers(&config.manifests_dir);
+    if cached.is_empty() {
+        return config.clone();
+    }
+
+    let mut effective = config.clone();
+    for provider in cached {
+        if effective
+            .media_providers
+            .iter()
+            .all(|existing| existing.slug != provider.slug)
+        {
+            effective.media_providers.push(provider);
+        }
+    }
+    effective
+}
+
+fn validate_runtime_media_requirements(
+    config: &Config,
+    capability_source: &dyn crate::media::MediaCapabilitySource,
+    manifest: &Manifest,
+) -> Result<()> {
+    let resolver = MediaProviderResolver::new(config.media_providers.clone(), capability_source);
+
+    for agent in &manifest.agents {
+        validate_media_requirements(
+            &resolver,
+            "agent",
+            &agent.manifest_slug(),
+            agent.media.as_slice(),
+        )?;
+    }
+    for domain in &manifest.domains {
+        validate_media_requirements(
+            &resolver,
+            "domain",
+            &domain.manifest_slug(),
+            domain.media.as_slice(),
+        )?;
+    }
+    for ability in &manifest.abilities {
+        validate_media_requirements(
+            &resolver,
+            "ability",
+            &ability.manifest_slug(),
+            ability.media.as_slice(),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_media_requirements(
+    resolver: &MediaProviderResolver,
+    resource_kind: &str,
+    resource_slug: &nenjo::Slug,
+    requirements: &[MediaRequirement],
+) -> Result<()> {
+    for requirement in requirements {
+        resolver.resolve(requirement).with_context(|| {
+            format!(
+                "media requirement {:?} for {resource_kind} '{}' is not resolvable",
+                requirement.capability(),
+                resource_slug
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn extend_runtime_roots(target: &mut Vec<PathBuf>, roots: Vec<PathBuf>) {
     for root in roots {
         if !target.iter().any(|existing| existing == &root) {
@@ -256,6 +340,136 @@ fn build_platform_tool_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MediaProviderConfig;
+    use nenjo::Slug;
+    use nenjo::agents::prompts::PromptConfig;
+    use nenjo::manifest::{AgentManifest, MediaRequirement};
+    use nenjo_models::NativeOperation;
+
+    #[test]
+    fn effective_config_merges_cached_media_providers_without_replacing_local_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifests_dir = temp.path().join("manifests");
+        std::fs::create_dir_all(&manifests_dir).unwrap();
+        std::fs::write(
+            manifests_dir.join("media_providers.json"),
+            serde_json::to_string(&vec![
+                MediaProviderConfig {
+                    slug: Slug::derive("local_image"),
+                    provider: "xai".to_string(),
+                    model: "grok-imagine-image-quality".to_string(),
+                    capabilities: vec![NativeOperation::GenerateImage],
+                },
+                MediaProviderConfig {
+                    slug: Slug::derive("xai_video"),
+                    provider: "xai".to_string(),
+                    model: "grok-imagine-video".to_string(),
+                    capabilities: vec![NativeOperation::ReferenceToVideo],
+                },
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let config = Config {
+            manifests_dir,
+            media_providers: vec![MediaProviderConfig {
+                slug: Slug::derive("local_image"),
+                provider: "openai".to_string(),
+                model: "gpt-image-1".to_string(),
+                capabilities: vec![NativeOperation::GenerateImage],
+            }],
+            ..Default::default()
+        };
+
+        let effective = config_with_cached_media_providers(&config);
+
+        assert_eq!(effective.media_providers.len(), 2);
+        let local = effective
+            .media_providers
+            .iter()
+            .find(|provider| provider.slug == Slug::derive("local_image"))
+            .expect("local provider");
+        assert_eq!(local.provider, "openai");
+        assert!(
+            effective
+                .media_providers
+                .iter()
+                .any(|provider| provider.slug == Slug::derive("xai_video"))
+        );
+    }
+
+    #[test]
+    fn runtime_media_validation_rejects_unresolved_agent_requirement() {
+        let manifest = Manifest {
+            agents: vec![AgentManifest {
+                name: "image tester".into(),
+                slug: Slug::derive("image-tester"),
+                description: None,
+                prompt_config: PromptConfig::default(),
+                color: None,
+                model: None,
+                domains: vec![],
+                platform_scopes: vec![],
+                mcp_servers: vec![],
+                script_tools: Vec::new(),
+                media: vec![MediaRequirement::Capability(NativeOperation::GenerateImage)],
+                abilities: vec![],
+                prompt_locked: false,
+                heartbeat: None,
+            }],
+            ..Default::default()
+        };
+
+        let config = Config::default();
+        let provider_registry =
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+        let error = validate_runtime_media_requirements(&config, &provider_registry, &manifest)
+            .expect_err("missing media provider should fail validation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("media requirement GenerateImage for agent 'image-tester'"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_media_validation_accepts_configured_agent_requirement() {
+        let manifest = Manifest {
+            agents: vec![AgentManifest {
+                name: "image tester".into(),
+                slug: Slug::derive("image-tester"),
+                description: None,
+                prompt_config: PromptConfig::default(),
+                color: None,
+                model: None,
+                domains: vec![],
+                platform_scopes: vec![],
+                mcp_servers: vec![],
+                script_tools: Vec::new(),
+                media: vec![MediaRequirement::Capability(NativeOperation::GenerateImage)],
+                abilities: vec![],
+                prompt_locked: false,
+                heartbeat: None,
+            }],
+            ..Default::default()
+        };
+        let config = Config {
+            media_providers: vec![MediaProviderConfig {
+                slug: Slug::derive("openai_image"),
+                provider: "openai".to_string(),
+                model: "gpt-image-1".to_string(),
+                capabilities: vec![NativeOperation::GenerateImage],
+            }],
+            ..Default::default()
+        };
+        let provider_registry =
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+
+        validate_runtime_media_requirements(&config, &provider_registry, &manifest)
+            .expect("configured media provider should satisfy requirement");
+    }
 
     #[tokio::test]
     async fn runtime_manifest_loads_platform_package_knowledge_packs() {

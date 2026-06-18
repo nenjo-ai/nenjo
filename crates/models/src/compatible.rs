@@ -500,6 +500,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     return Ok(ChatResponse {
                         text: Some(text),
                         tool_calls: vec![],
+                        provider_tool_calls: vec![],
                         usage: TokenUsage::default(),
                     });
                 }
@@ -567,6 +568,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         Ok(ChatResponse {
             text: message.content,
             tool_calls,
+            provider_tool_calls: vec![],
             usage,
         })
     }
@@ -661,6 +663,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            native_tools: None,
         };
         let result = p.chat(request, "llama-3.3-70b", 0.7).await;
         assert!(result.is_err());
@@ -762,6 +765,7 @@ mod tests {
             let request = ChatRequest {
                 messages: &messages,
                 tools: None,
+                native_tools: None,
             };
             let result = p.chat(request, "model", 0.7).await;
             assert!(result.is_err(), "{} should fail without key", p.name);

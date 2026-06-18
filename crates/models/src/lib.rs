@@ -12,18 +12,30 @@
 pub mod anthropic;
 pub mod compatible;
 pub mod gemini;
+pub mod native;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod reliable;
 pub mod router;
 pub mod traits;
+pub mod xai;
 
 // Re-export core types at crate root.
+pub use native::{
+    EditImageRequest, EditVideoRequest, ExtendVideoRequest, GenerateImageRequest,
+    GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaInputAsset,
+    MediaOutputAsset, MediaOutputFormat, ModelNativeCapabilities, NativeCapabilitiesProvider,
+    NativeExecutionMode, NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest,
+    NativeMediaResponse, NativeModelToolId, NativeOperation, NativeToolSpec,
+    ProviderNativeCapabilities, ProviderNativeModelToolSpec, ReferenceToVideoRequest,
+    TranscribeAudioRequest,
+};
 pub use nenjo_tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
 pub use traits::{
-    ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
-    ToolCall, ToolCategory, ToolResultMessage, ToolSpec, one_shot,
+    ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider,
+    ProviderStreamEvent, ProviderToolTrace, TokenUsage, ToolCall, ToolCategory, ToolResultMessage,
+    ToolSpec, one_shot,
 };
 
 // Re-export provider implementations.
@@ -35,6 +47,7 @@ pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
 pub use reliable::ReliableProvider;
 pub use router::RouterProvider;
+pub use xai::{XAI_DEFAULT_BASE_URL, XAiProvider};
 
 use std::sync::Arc;
 

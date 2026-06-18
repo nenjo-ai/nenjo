@@ -128,6 +128,7 @@ mod tests {
             mcp_servers: vec![],
             abilities: vec![],
             script_tools: vec![],
+            media: Vec::new(),
             prompt_locked: false,
             heartbeat: None,
         };
@@ -139,7 +140,8 @@ mod tests {
             prompt_config: AbilityPromptConfig::default(),
             platform_scopes: vec!["projects:read".into()],
             mcp_servers: vec![],
-            script_tools: vec![],
+            script_tools: Vec::new(),
+            media: Vec::new(),
             source_type: "native".into(),
             read_only: false,
             metadata: serde_json::Value::Null,
@@ -160,6 +162,7 @@ mod tests {
             abilities: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             prompt_config: DomainPromptConfig::default(),
         };
         let denied_domain = DomainManifest {
@@ -171,6 +174,7 @@ mod tests {
             abilities: vec![],
             mcp_servers: vec![],
             script_tools: vec![],
+            media: vec![],
             prompt_config: DomainPromptConfig::default(),
         };
         assert!(policy.allows_domain(&allowed_domain));

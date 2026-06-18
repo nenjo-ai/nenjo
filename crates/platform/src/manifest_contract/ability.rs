@@ -86,6 +86,7 @@ impl AbilityRecord {
                 .iter()
                 .map(|value| slug_from_str(value))
                 .collect(),
+            media: Vec::new(),
             source_type: self.source_type.clone(),
             read_only: self.read_only,
             metadata: self.metadata.clone(),

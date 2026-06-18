@@ -323,6 +323,7 @@ Conversation:\n{rendered}"
             ChatRequest {
                 messages: &messages,
                 tools: None,
+                native_tools: None,
             },
             model,
             temperature,
@@ -879,6 +880,7 @@ mod tests {
                     "{HISTORY_SUMMARY_MARKER}\n- user asked for the old work to be completed\n- tools already produced the needed changes\n- continue from the latest turn"
                 )),
                 tool_calls: Vec::new(),
+                provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             })
         }
