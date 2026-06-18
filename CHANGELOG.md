@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/nenjo-ai/nenjo/compare/v0.16.0...v0.17.0) - 2026-06-18
+
+### Added
+
+- support model native tools for xai ([#65](https://github.com/nenjo-ai/nenjo/pull/65))
+
 ## [0.16.0](https://github.com/nenjo-ai/nenjo/compare/v0.15.0...v0.16.0) - 2026-06-16
 
 ### Added
