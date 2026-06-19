@@ -1,7 +1,12 @@
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, RwLock};
 
+use crate::config::Config;
+use crate::external_mcp::ExternalMcpPool;
+use crate::media::MediaProviderResolver;
+use crate::providers::ModelProviderRegistry;
+use crate::skills::{LocalSkillProvider, SkillRegistry};
 use async_trait::async_trait;
 use nenjo::manifest::AgentManifest;
 use nenjo::skills::{SkillProvider, SkillRuntimeState};
@@ -14,12 +19,6 @@ use nenjo_platform::{
     },
 };
 
-use crate::config::Config;
-use crate::external_mcp::ExternalMcpPool;
-use crate::media::MediaProviderResolver;
-use crate::providers::ModelProviderRegistry;
-use crate::skills::{LocalSkillProvider, SkillRegistry};
-
 use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
@@ -31,6 +30,50 @@ use super::{
 
 tokio::task_local! {
     static PLATFORM_NOTIFICATION_EMITTER: Arc<dyn PlatformNotificationEmitter>;
+}
+
+static REGISTERED_PLATFORM_NOTIFICATION_EMITTER: LazyLock<
+    RwLock<Option<Arc<dyn PlatformNotificationEmitter>>>,
+> = LazyLock::new(|| RwLock::new(None));
+
+/// Process-local notification transport used when tool construction happens in
+/// a task spawned outside the Tokio task-local notification scope.
+///
+/// This is intentionally transport only. The transcript identity for a
+/// notification comes from `ToolContext::current_session_id`, which routine
+/// execution sets to the stable step run id.
+pub(crate) struct PlatformNotificationEmitterRegistration {
+    emitter: Arc<dyn PlatformNotificationEmitter>,
+}
+
+impl Drop for PlatformNotificationEmitterRegistration {
+    fn drop(&mut self) {
+        let Ok(mut emitter) = REGISTERED_PLATFORM_NOTIFICATION_EMITTER.write() else {
+            return;
+        };
+        let should_remove = emitter
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.emitter));
+        if should_remove {
+            *emitter = None;
+        }
+    }
+}
+
+pub(crate) fn register_platform_notification_emitter(
+    emitter: Arc<dyn PlatformNotificationEmitter>,
+) -> PlatformNotificationEmitterRegistration {
+    if let Ok(mut current) = REGISTERED_PLATFORM_NOTIFICATION_EMITTER.write() {
+        *current = Some(emitter.clone());
+    }
+    PlatformNotificationEmitterRegistration { emitter }
+}
+
+fn registered_platform_notification_emitter() -> Option<Arc<dyn PlatformNotificationEmitter>> {
+    REGISTERED_PLATFORM_NOTIFICATION_EMITTER
+        .read()
+        .ok()
+        .and_then(|emitter| emitter.as_ref().cloned())
 }
 
 pub(crate) async fn with_platform_notification_emitter<F, T>(
@@ -219,7 +262,8 @@ where
 
         let notification_sink = PLATFORM_NOTIFICATION_EMITTER
             .try_with(|emitter| emitter.clone())
-            .ok();
+            .ok()
+            .or_else(registered_platform_notification_emitter);
         let notification_backend = self
             .platform
             .platform_client
@@ -231,6 +275,7 @@ where
                     payload_encoder: payload_encoder.clone(),
                     cached_org_id: self.platform.cached_org_id,
                     agent: agent.slug.clone(),
+                    current_session_id: tool_context.current_session_id,
                     notification_sink,
                 },
             );

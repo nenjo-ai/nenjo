@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::manifest::AgentManifest;
 use crate::tools::{Tool, ToolSecurity};
+use uuid::Uuid;
 
 /// Creates tools for an agent based on its bootstrap configuration.
 ///
@@ -50,6 +51,8 @@ pub trait ToolFactory: Send + Sync {
 pub struct ToolContext {
     /// Slug for the active project, when the agent is running in a project.
     pub project_slug: Option<String>,
+    /// Current transcript session for tool-emitted side effects.
+    pub current_session_id: Option<Uuid>,
 }
 
 /// A no-op tool factory that returns an empty tool set.

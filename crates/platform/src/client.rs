@@ -32,6 +32,15 @@ struct CommandConfigureResponse {
     manifest: CommandManifest,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AgentHeartbeatConfigureApiBody<'a> {
+    pub interval: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<&'a serde_json::Value>,
+}
+
 /// Thin HTTP client for Nenjo platform manifest endpoints.
 #[derive(Debug, Clone)]
 pub struct PlatformManifestClient {
@@ -65,12 +74,16 @@ struct ConfigureRoutineGraphApiBody {
 
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphStepBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Uuid>,
     slug: Slug,
     name: String,
     step_type: String,
     council: Option<Slug>,
     agent: Option<Slug>,
     config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_payload: Option<serde_json::Value>,
     position_x: f64,
     position_y: f64,
     order_index: i32,
@@ -162,12 +175,14 @@ fn routine_graph_body<'a>(
             .steps
             .iter()
             .map(|step| SaveRoutineGraphStepBody {
+                id: step.id,
                 slug: step.slug.clone(),
                 name: step.name.clone(),
                 step_type: step.step_type.to_string(),
                 council: step.council.clone(),
                 agent: step.agent.clone(),
                 config: step.config.clone(),
+                encrypted_payload: step.encrypted_payload.clone(),
                 position_x: step
                     .config
                     .get("position_x")
@@ -435,14 +450,50 @@ pub struct NotificationSessionListQuery {
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
-/// Query parameters for listing notification messages in a session.
-pub struct NotificationMessageListQuery {
+/// Query parameters for listing persisted notifications.
+pub struct NotificationListQuery {
+    /// Optional notification session id filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
     /// Optional maximum number of messages to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
     /// Optional pagination cursor timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NotificationMessagePage {
+    pub messages: Vec<NotificationMessageRecord>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NotificationMessageRecord {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub agent_id: Option<Uuid>,
+    pub user_id: Uuid,
+    pub username: String,
+    pub sender: String,
+    pub content: String,
+    pub session_id: Uuid,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: Option<serde_json::Value>,
+    pub encrypted_payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+/// Query parameters for searching notification recipients.
+pub struct NotificationRecipientSearchQuery {
+    /// Optional handle or display-name query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Optional maximum number of recipients to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -566,6 +617,9 @@ impl PlatformManifestClient {
         {
             object.remove("prompt_config");
         }
+        if let Some(object) = body.as_object_mut() {
+            object.remove("heartbeat");
+        }
         let response = self
             .http
             .post(format!("{}/api/v1/agents/configure", self.base_url))
@@ -581,6 +635,36 @@ impl PlatformManifestClient {
                 .await
                 .context("failed to decode configured agent"),
             status => bail!("agent configure failed with status {status}"),
+        }
+    }
+
+    /// Upsert an agent heartbeat and return the canonical agent record.
+    pub(crate) async fn upsert_agent_heartbeat_record(
+        &self,
+        agent: &Slug,
+        body: &AgentHeartbeatConfigureApiBody<'_>,
+    ) -> Result<AgentRecord> {
+        let response = self
+            .http
+            .put(format!("{}/api/v1/agents/{agent}/heartbeat", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(body)
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to configure heartbeat for agent {agent}"))?;
+
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => response
+                .json::<AgentRecord>()
+                .await
+                .context("failed to decode heartbeat agent"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "agent heartbeat configure failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
         }
     }
 
@@ -1293,19 +1377,18 @@ impl PlatformManifestClient {
         }
     }
 
-    /// List notification messages in one notification session.
-    pub async fn list_notification_messages(
+    /// List persisted notification messages visible to the authenticated account.
+    pub async fn list_notifications(
         &self,
-        session_id: Uuid,
-        query: &NotificationMessageListQuery,
-    ) -> Result<serde_json::Value> {
-        let mut url = Url::parse(&format!(
-            "{}/api/v1/notifications/{session_id}/messages",
-            self.base_url
-        ))
-        .context("failed to build notification message list URL")?;
+        query: &NotificationListQuery,
+    ) -> Result<NotificationMessagePage> {
+        let mut url = Url::parse(&format!("{}/api/v1/notifications", self.base_url))
+            .context("failed to build notification list URL")?;
         {
             let mut pairs = url.query_pairs_mut();
+            if let Some(session_id) = query.session_id {
+                pairs.append_pair("session_id", &session_id.to_string());
+            }
             if let Some(limit) = query.limit {
                 pairs.append_pair("limit", &limit.to_string());
             }
@@ -1319,14 +1402,50 @@ impl PlatformManifestClient {
             .header("X-API-Key", &self.api_key)
             .send_with_platform_retry()
             .await
-            .with_context(|| format!("failed to list notification messages for {session_id}"))?;
+            .context("failed to list notifications")?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<NotificationMessagePage>()
+                .await
+                .context("failed to decode notification list results"),
+            status => bail!("notification list failed with status {status}"),
+        }
+    }
+
+    /// Search notification recipients visible to the authenticated account.
+    pub async fn search_notification_recipients(
+        &self,
+        query: &NotificationRecipientSearchQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!(
+            "{}/api/v1/notifications/recipients",
+            self.base_url
+        ))
+        .context("failed to build notification recipient search URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(query) = query.query.as_ref() {
+                pairs.append_pair("q", query);
+            }
+            if let Some(limit) = query.limit {
+                pairs.append_pair("limit", &limit.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to search notification recipients")?;
 
         match response.status() {
             StatusCode::OK => response
                 .json::<serde_json::Value>()
                 .await
-                .context("failed to decode notification messages"),
-            status => bail!("notification message list failed with status {status}"),
+                .context("failed to decode notification recipients"),
+            status => bail!("notification recipient search failed with status {status}"),
         }
     }
 
@@ -2177,21 +2296,25 @@ mod tests {
             entry_steps: vec![Slug::derive("implement_pr_changes")],
             steps: vec![
                 RoutineStepInput {
+                    id: None,
                     slug: Slug::derive("implement_pr_changes"),
                     name: "Implement PR changes".to_string(),
                     step_type: RoutineStepType::Agent,
                     council: None,
                     agent: Some(Slug::derive("coder")),
                     config: serde_json::json!({}),
+                    encrypted_payload: None,
                     order_index: 0,
                 },
                 RoutineStepInput {
+                    id: None,
                     slug: Slug::derive("evaluate_result"),
                     name: "Evaluate result".to_string(),
                     step_type: RoutineStepType::Gate,
                     council: None,
                     agent: Some(Slug::derive("security")),
                     config: serde_json::json!({}),
+                    encrypted_payload: None,
                     order_index: 1,
                 },
             ],

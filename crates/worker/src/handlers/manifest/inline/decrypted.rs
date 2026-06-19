@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use nenjo::agents::prompts::PromptConfig;
-use nenjo::manifest::CommandManifest;
+use nenjo::manifest::{CommandManifest, RoutineCronTaskManifest};
 use nenjo::{Manifest, Slug};
-use nenjo_events::ResourceType;
+use nenjo_events::{CronTaskContent, HeartbeatInstructionsContent, ResourceType};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -13,7 +13,7 @@ use crate::handlers::manifest::payload::{
 use crate::handlers::manifest::services::ManifestStore;
 use nenjo_platform::SensitiveContentKind;
 use nenjo_platform::manifest_contract::{
-    AbilityRecord, AgentRecord, ContextBlockRecord, DomainRecord,
+    AbilityRecord, AgentRecord, ContextBlockRecord, DomainRecord, RoutineRecord,
 };
 
 use super::plain::{apply_inline_upsert, upsert_by_slug};
@@ -48,8 +48,7 @@ where
         debug!(%rt, %id, object_type, "Encrypted manifest payload not handled inline");
         return false;
     };
-    let handled_inline = content_kind.matches_resource_type(rt) && rt != ResourceType::Routine;
-    if !handled_inline {
+    if !content_kind.matches_resource_type(rt) {
         debug!(%rt, %id, object_type, "Encrypted manifest payload not handled inline");
         return false;
     }
@@ -272,10 +271,197 @@ where
 
             true
         }
-        SensitiveContentKind::TaskContent
-        | SensitiveContentKind::HeartbeatInstructions
-        | SensitiveContentKind::RoutineCronTask => false,
+        SensitiveContentKind::HeartbeatInstructions => {
+            apply_decrypted_heartbeat_instructions(manifest, rt, id, decrypted)
+        }
+        SensitiveContentKind::RoutineCronTask => {
+            apply_decrypted_routine_cron_task(manifest, rt, id, decrypted)
+        }
+        SensitiveContentKind::RoutineStepInstructions => {
+            apply_decrypted_routine_step_instructions(manifest, rt, id, decrypted)
+        }
+        SensitiveContentKind::TaskContent => false,
     }
+}
+
+fn apply_decrypted_heartbeat_instructions(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    id: Uuid,
+    decrypted: DecryptedManifestPayload<'_>,
+) -> bool {
+    if decrypted.object_id != id {
+        warn!(
+            %rt,
+            %id,
+            object_id = %decrypted.object_id,
+            "Encrypted heartbeat instructions object id did not match resource id"
+        );
+        return false;
+    }
+
+    let instructions = match serde_json::from_value::<HeartbeatInstructionsContent>(
+        decrypted.decrypted_payload.clone(),
+    ) {
+        Ok(content) => content.instructions,
+        Err(_) => match decrypted.decrypted_payload {
+            serde_json::Value::String(value) => value.clone(),
+            _ => {
+                warn!(%rt, %id, "Failed to parse decrypted heartbeat instructions payload");
+                return false;
+            }
+        },
+    };
+
+    let Some(agent_payload) = decrypted.inline_payload else {
+        warn!(%rt, %id, "Encrypted heartbeat instructions received without inline agent payload");
+        return false;
+    };
+    let (agent_payload, canonical) = canonical_inline_payload_data(agent_payload);
+    let Some(record) = parse_inline_record::<AgentRecord>(agent_payload.as_ref()) else {
+        if canonical {
+            warn!(%rt, %id, "Failed to deserialize canonical inline agent payload for heartbeat instructions merge");
+        } else {
+            warn!(%rt, %id, "Failed to deserialize inline agent payload for heartbeat instructions merge");
+        }
+        return false;
+    };
+
+    let slug = Slug::derive(&record.slug);
+    let existing_prompt = manifest
+        .agents
+        .iter()
+        .find(|agent| agent.slug == slug)
+        .map(|agent| agent.prompt_config.clone())
+        .unwrap_or_default();
+    let mut next_agent = if record.prompt_config.is_some() {
+        record.to_manifest(record.resolved_prompt_config())
+    } else {
+        record.to_manifest(existing_prompt)
+    };
+    let Some(heartbeat) = next_agent.heartbeat.as_mut() else {
+        warn!(%rt, %id, "Encrypted heartbeat instructions received without heartbeat metadata");
+        return false;
+    };
+    heartbeat.instructions = Some(instructions);
+
+    upsert_by_slug(&mut manifest.agents, next_agent);
+    true
+}
+
+fn apply_decrypted_routine_cron_task(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    id: Uuid,
+    decrypted: DecryptedManifestPayload<'_>,
+) -> bool {
+    if decrypted.object_id != id {
+        warn!(
+            %rt,
+            %id,
+            object_id = %decrypted.object_id,
+            "Encrypted cron task object id did not match resource id"
+        );
+        return false;
+    }
+
+    let cron_task =
+        match serde_json::from_value::<CronTaskContent>(decrypted.decrypted_payload.clone()) {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(%rt, %id, error = %error, "Failed to parse decrypted cron task payload");
+                return false;
+            }
+        };
+
+    let Some(routine_payload) = decrypted.inline_payload else {
+        warn!(%rt, %id, "Encrypted cron task received without inline routine payload");
+        return false;
+    };
+    let (routine_payload, canonical) = canonical_inline_payload_data(routine_payload);
+    let Some(record) = parse_inline_record::<RoutineRecord>(routine_payload.as_ref()) else {
+        if canonical {
+            warn!(%rt, %id, "Failed to deserialize canonical inline routine payload for cron task merge");
+        } else {
+            warn!(%rt, %id, "Failed to deserialize inline routine payload for cron task merge");
+        }
+        return false;
+    };
+
+    let mut next_routine = record.to_manifest();
+    next_routine.metadata.cron_task = Some(RoutineCronTaskManifest {
+        title: cron_task.title,
+        description: cron_task.description,
+        acceptance_criteria: cron_task.acceptance_criteria,
+    });
+
+    upsert_by_slug(&mut manifest.routines, next_routine);
+    true
+}
+
+fn apply_decrypted_routine_step_instructions(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    id: Uuid,
+    decrypted: DecryptedManifestPayload<'_>,
+) -> bool {
+    let instructions =
+        match serde_json::from_value::<serde_json::Value>(decrypted.decrypted_payload.clone()) {
+            Ok(value) => value
+                .get("instructions")
+                .and_then(|instructions| instructions.as_str())
+                .map(str::to_string)
+                .or_else(|| decrypted_string_payload(&value)),
+            Err(_) => decrypted_string_payload(decrypted.decrypted_payload),
+        };
+    let Some(instructions) = instructions else {
+        warn!(%rt, %id, "Failed to parse decrypted routine step instructions payload");
+        return false;
+    };
+
+    let Some(routine_payload) = decrypted.inline_payload else {
+        warn!(%rt, %id, "Encrypted routine step instructions received without inline routine payload");
+        return false;
+    };
+    let (routine_payload, canonical) = canonical_inline_payload_data(routine_payload);
+    let Some(record) = parse_inline_record::<RoutineRecord>(routine_payload.as_ref()) else {
+        if canonical {
+            warn!(%rt, %id, "Failed to deserialize canonical inline routine payload for step instructions merge");
+        } else {
+            warn!(%rt, %id, "Failed to deserialize inline routine payload for step instructions merge");
+        }
+        return false;
+    };
+
+    let step_id = decrypted.object_id;
+    let Some(step_slug) = record
+        .steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .map(|step| Slug::derive(&step.slug))
+    else {
+        warn!(%rt, %id, object_id = %step_id, "Encrypted routine step instructions object id did not match any inline routine step");
+        return false;
+    };
+
+    let mut next_routine = record.to_manifest();
+    let Some(step) = next_routine
+        .steps
+        .iter_mut()
+        .find(|step| step.slug == step_slug)
+    else {
+        warn!(%rt, %id, step = %step_slug, "Decrypted routine step instructions target missing after manifest conversion");
+        return false;
+    };
+    if let Some(config) = step.config.as_object_mut() {
+        config.insert(
+            "instructions".to_string(),
+            serde_json::Value::String(instructions),
+        );
+    }
+
+    upsert_by_slug(&mut manifest.routines, next_routine);
+    true
 }
 
 fn apply_decrypted_project_settings(
@@ -394,6 +580,69 @@ mod tests {
         })
     }
 
+    fn agent_inline_payload(id: Uuid) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "manifest.resource.v1",
+            "data": {
+                "id": id,
+                "org_id": Uuid::new_v4(),
+                "slug": "agent",
+                "name": "Agent",
+                "description": null,
+                "color": null,
+                "model": null,
+                "model_id": null,
+                "model_name": null,
+                "domains": [],
+                "platform_scopes": [],
+                "mcp_servers": [],
+                "script_tools": [],
+                "abilities": [],
+                "prompt_locked": false,
+                "heartbeat": {
+                    "agent": "agent",
+                    "interval": "5m",
+                    "is_active": true,
+                    "last_run_at": null,
+                    "next_run_at": null,
+                    "metadata": { "timezone": "America/Chicago" }
+                },
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "created_at": TS,
+                "updated_at": TS
+            }
+        })
+    }
+
+    fn routine_inline_payload(id: Uuid) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "manifest.resource.v1",
+            "data": {
+                "id": id,
+                "org_id": Uuid::new_v4(),
+                "project_id": null,
+                "slug": "nightly-review",
+                "name": "Nightly Review",
+                "description": null,
+                "trigger": "cron",
+                "is_active": true,
+                "is_default": false,
+                "max_retries": 0,
+                "step_count": 0,
+                "metadata": {
+                    "schedule": "0 0 * * *",
+                    "entry_steps": []
+                },
+                "steps": [],
+                "edges": [],
+                "created_at": TS,
+                "updated_at": TS
+            }
+        })
+    }
+
     #[test]
     fn decrypted_string_payload_accepts_raw_string_values() {
         assert_eq!(
@@ -504,6 +753,84 @@ mod tests {
             "Use the saved project context."
         );
         assert_eq!(manifest.projects[0].settings["notes"][1], "two");
+    }
+
+    #[tokio::test]
+    async fn decrypted_heartbeat_instructions_merge_into_agent_manifest() {
+        let id = Uuid::new_v4();
+        let mut manifest = Manifest::default();
+        let inline_payload = agent_inline_payload(id);
+        let decrypted_payload = serde_json::json!({
+            "instructions": "Review stale work and summarize blockers."
+        });
+
+        assert!(
+            apply_decrypted_manifest_upsert(
+                &mut manifest,
+                &NoopManifestStore,
+                ResourceType::Agent,
+                id,
+                DecryptedManifestPayload {
+                    object_type: "agent.heartbeat.instructions",
+                    object_id: id,
+                    inline_payload: Some(&inline_payload),
+                    decrypted_payload: &decrypted_payload,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(manifest.agents.len(), 1);
+        let heartbeat = manifest.agents[0]
+            .heartbeat
+            .as_ref()
+            .expect("heartbeat should be present");
+        assert_eq!(heartbeat.interval, "5m");
+        assert_eq!(
+            heartbeat.instructions.as_deref(),
+            Some("Review stale work and summarize blockers.")
+        );
+    }
+
+    #[tokio::test]
+    async fn decrypted_routine_cron_task_merges_into_routine_metadata() {
+        let id = Uuid::new_v4();
+        let mut manifest = Manifest::default();
+        let inline_payload = routine_inline_payload(id);
+        let decrypted_payload = serde_json::json!({
+            "title": "Nightly review",
+            "description": "Check queued work.",
+            "acceptance_criteria": "A concise summary is posted."
+        });
+
+        assert!(
+            apply_decrypted_manifest_upsert(
+                &mut manifest,
+                &NoopManifestStore,
+                ResourceType::Routine,
+                id,
+                DecryptedManifestPayload {
+                    object_type: "routine.cron_task",
+                    object_id: id,
+                    inline_payload: Some(&inline_payload),
+                    decrypted_payload: &decrypted_payload,
+                },
+            )
+            .await
+        );
+
+        assert_eq!(manifest.routines.len(), 1);
+        let cron_task = manifest.routines[0]
+            .metadata
+            .cron_task
+            .as_ref()
+            .expect("cron task should be present");
+        assert_eq!(cron_task.title, "Nightly review");
+        assert_eq!(cron_task.description.as_deref(), Some("Check queued work."));
+        assert_eq!(
+            cron_task.acceptance_criteria.as_deref(),
+            Some("A concise summary is posted.")
+        );
     }
 
     #[tokio::test]

@@ -141,6 +141,29 @@ fn routine_graph_field_schema(description: &str) -> Value {
     })
 }
 
+fn cron_task_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["title"],
+        "description": "Cron task input for cron routines. Populates the {{task}} template var for routines.",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Task title for scheduled routine runs."
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional task description for scheduled routine runs."
+            },
+            "acceptance_criteria": {
+                "type": "string",
+                "description": "Optional acceptance criteria for scheduled routine runs."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn configure_metadata_schema() -> Value {
     json!({
         "type": "object",
@@ -200,15 +223,7 @@ fn routine_configure_parameters() -> Value {
         "graph".into(),
         routine_graph_field_schema("Full replacement workflow graph. Omit to leave unchanged."),
     );
-    properties.insert(
-        "encrypted_payload".into(),
-        json!({
-            "type": ["object", "null"],
-            "description": "Optional encrypted routine payload stored by the platform.",
-            "additionalProperties": true
-        }),
-    );
-
+    properties.insert("cron_task".into(), cron_task_schema());
     json!({
         "type": "object",
         "properties": properties,

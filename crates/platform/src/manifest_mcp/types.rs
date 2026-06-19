@@ -76,6 +76,17 @@ pub struct AgentConfigureAssignments {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Heartbeat patch for `configure_agent`.
+pub struct AgentHeartbeatConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Request body for configuring an agent in one backend-owned sequence.
 pub struct AgentConfigureDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +101,8 @@ pub struct AgentConfigureDocument {
     pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments: Option<AgentConfigureAssignments>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<AgentHeartbeatConfigureDocument>,
 }
 
 fn deserialize_optional_slug_field<'de, D>(
@@ -702,6 +715,8 @@ pub struct RoutineGraphInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One step in a routine graph write request.
 pub struct RoutineStepInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
     pub slug: Slug,
     pub name: String,
     pub step_type: RoutineStepType,
@@ -711,6 +726,8 @@ pub struct RoutineStepInput {
     pub agent: Option<Slug>,
     #[serde(default)]
     pub config: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
     pub order_index: i32,
 }
 
@@ -742,6 +759,16 @@ pub struct RoutineConfigureMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Cron task input for `configure_routine`.
+pub struct RoutineCronTaskConfigureDocument {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Request body for configuring a routine in one backend-owned sequence.
 pub struct RoutineConfigureDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -756,6 +783,8 @@ pub struct RoutineConfigureDocument {
     pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<RoutineGraphInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_task: Option<RoutineCronTaskConfigureDocument>,
 }
 
 impl RoutineDocument {
@@ -767,12 +796,14 @@ impl RoutineDocument {
                 .steps
                 .iter()
                 .map(|step| RoutineStepInput {
+                    id: None,
                     slug: step.slug.clone(),
                     name: step.name.clone(),
                     step_type: step.step_type,
                     council: step.council.clone(),
                     agent: step.agent.clone(),
                     config: step.config.clone(),
+                    encrypted_payload: None,
                     order_index: step.order_index,
                 })
                 .collect(),

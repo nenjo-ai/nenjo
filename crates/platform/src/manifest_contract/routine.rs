@@ -47,6 +47,8 @@ pub struct RoutineStepRecord {
     pub lambda_id: Option<Uuid>,
     #[serde(default)]
     pub config: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
     pub position_x: f64,
     pub position_y: f64,
     pub order_index: i32,

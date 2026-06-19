@@ -1,5 +1,6 @@
 //! Task execution handlers — with git worktree lifecycle.
 mod runtime;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,8 +9,9 @@ use chrono::Utc;
 use dashmap::mapref::entry::Entry;
 use nenjo::memory::MemoryScope;
 use nenjo_sessions::{
-    CheckpointQuery, ExecutionPhase, SessionCheckpointUpdate, SessionOwnerKind, SessionStatus,
-    SessionTransition, TaskSessionUpsert, WorktreeSnapshot,
+    CheckpointQuery, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionOwnerKind,
+    SessionRefs, SessionRuntimeEvent, SessionStatus, SessionTransition, SessionUpsert,
+    TaskSessionUpsert, WorktreeSnapshot,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -18,7 +20,7 @@ use uuid::Uuid;
 use nenjo::types::GitContext;
 use nenjo::{ProjectLocation, Slug, TaskInput};
 use nenjo_events::{EncryptedPayload, Response, StepAgent};
-use nenjo_platform::tools::PlatformNotificationEmitter;
+use nenjo_platform::tools::{PlatformNotificationEmitter, PlatformNotificationRecipient};
 use serde_json::json;
 
 use nenjo_harness::events::HarnessEvent;
@@ -34,11 +36,12 @@ use crate::event_bridge::{
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
-use crate::tools::with_platform_notification_emitter;
+use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
 
 struct TaskNotificationEmitter<S> {
     response_sink: S,
+    session_id: Uuid,
 }
 
 impl<S> PlatformNotificationEmitter for TaskNotificationEmitter<S>
@@ -48,10 +51,15 @@ where
     fn send_push_notification(
         &self,
         agent: &str,
+        current_session_id: Option<Uuid>,
         encrypted_payload: EncryptedPayload,
+        recipient: Option<PlatformNotificationRecipient>,
     ) -> Result<()> {
         self.response_sink.send(Response::PushNotification {
             agent: agent.to_string(),
+            session_id: current_session_id.unwrap_or(self.session_id),
+            recipient_user_id: recipient.as_ref().and_then(|target| target.user_id),
+            recipient_handle: recipient.and_then(|target| target.handle),
             encrypted_payload,
         })
     }
@@ -253,27 +261,96 @@ async fn upsert_task_session<P, SessionRt>(
     }
 }
 
-fn record_task_turn_event<P, SessionRt>(
+struct RoutineStepSessionRecord<'a> {
+    parent_task_id: Uuid,
+    step_run_id: Uuid,
+    step_slug: &'a str,
+    step_name: &'a str,
+    project_slug: &'a str,
+    routine_slug: Option<&'a str>,
+    execution_run_id: Uuid,
+    agent_slug: Option<&'a str>,
+    agent_name: Option<&'a str>,
+    memory_namespace: Option<&'a str>,
+}
+
+fn routine_step_session_upsert_event(params: &RoutineStepSessionRecord<'_>) -> SessionRuntimeEvent {
+    SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+        session_id: params.step_run_id,
+        kind: SessionKind::Task,
+        status: SessionStatus::Active,
+        agent: params.agent_slug.map(ToOwned::to_owned),
+        project: Some(params.project_slug.to_string()),
+        task_id: Some(params.parent_task_id),
+        routine: params.routine_slug.map(ToOwned::to_owned),
+        execution_run_id: Some(params.execution_run_id),
+        parent_session_id: Some(params.parent_task_id),
+        lease: None,
+        memory_namespace: params.memory_namespace.map(ToOwned::to_owned),
+        refs: SessionRefs {
+            memory_namespace: params.memory_namespace.map(ToOwned::to_owned),
+            ..Default::default()
+        },
+        metadata: json!({
+            "source": "worker_routine_step",
+            "project_slug": params.project_slug,
+            "routine_slug": params.routine_slug,
+            "parent_task_id": params.parent_task_id,
+            "step_slug": params.step_slug,
+            "step_run_id": params.step_run_id,
+            "step_name": params.step_name,
+            "agent_slug": params.agent_slug,
+            "agent_name": params.agent_name,
+        }),
+    })
+}
+
+fn record_routine_step_turn_event<P, SessionRt>(
     harness: &Harness<P, SessionRt>,
-    task_id: Uuid,
+    params: &RoutineStepSessionRecord<'_>,
     agent_id: Option<Uuid>,
-    agent_name: Option<&str>,
     event: &nenjo::TurnEvent,
+    include_upsert: bool,
 ) where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
     let context = TurnEventContext {
-        session_id: task_id,
+        session_id: params.step_run_id,
         turn_id: None,
         agent_id,
-        agent_name: agent_name.map(ToOwned::to_owned),
+        agent_name: params.agent_name.map(ToOwned::to_owned),
         recorded_at: Utc::now(),
     };
+    let mut events = Vec::new();
+    if include_upsert {
+        events.push(routine_step_session_upsert_event(params));
+    }
+    events.extend(session_runtime_events_from_turn_event(&context, event));
     harness.sessions().record_events_best_effort(
-        task_id,
+        params.step_run_id,
         SessionOwnerKind::Task,
-        session_runtime_events_from_turn_event(&context, event),
+        events,
+    );
+}
+
+fn transition_routine_step_session<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
+    step_run_id: Uuid,
+    status: SessionStatus,
+) where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    harness.sessions().record_events_best_effort(
+        step_run_id,
+        SessionOwnerKind::Task,
+        vec![SessionRuntimeEvent::Transition(SessionTransition {
+            session_id: step_run_id,
+            worker_id: "harness".to_string(),
+            phase: Some(ExecutionPhase::Finalizing),
+            status,
+        })],
     );
 }
 
@@ -1123,10 +1200,21 @@ where
     if request.slug.is_none() {
         request = request.with_slug(task_slug.to_string());
     }
+    let project_slug = request.project.to_string();
+    let routine_slug = request.routine.as_ref().map(ToString::to_string);
+    let step_memory_namespace = harness
+        .sessions()
+        .memory_namespace(task_id)
+        .await
+        .ok()
+        .flatten();
     let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
         Arc::new(TaskNotificationEmitter {
             response_sink: ctx.response_sink.clone(),
+            session_id: task_id,
         });
+    let _notification_registration =
+        register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =
         with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
             .await?;
@@ -1137,8 +1225,9 @@ where
     // Track the current agent_id so step_completed events can carry it.
     let current_agent_id: Option<uuid::Uuid> = None;
     let mut routine_passed = false;
-    let mut step_agents: std::collections::HashMap<uuid::Uuid, String> =
-        std::collections::HashMap::new();
+    let mut step_names: HashMap<uuid::Uuid, String> = HashMap::new();
+    let mut step_sessions_upserted: HashSet<uuid::Uuid> = HashSet::new();
+    let manifest = harness.provider().manifest_snapshot();
 
     loop {
         tokio::select! {
@@ -1147,28 +1236,74 @@ where
                     Some(HarnessEvent::Routine { event: ev, .. }) => {
                         // Track agent identity across step events.
                         if let nenjo::RoutineEvent::StepStarted { step_run_id, step_name, .. } = &ev {
-                            step_agents.insert(*step_run_id, step_name.clone());
+                            step_names.insert(*step_run_id, step_name.clone());
                         }
                         // Track token totals from completed steps
-                        if let nenjo::RoutineEvent::StepCompleted { result, .. } = &ev {
+                        if let nenjo::RoutineEvent::StepCompleted { step_run_id, result, .. } = &ev {
                             total_input_tokens += result.input_tokens;
                             total_output_tokens += result.output_tokens;
+                            if step_sessions_upserted.contains(step_run_id) {
+                                transition_routine_step_session(
+                                    harness,
+                                    *step_run_id,
+                                    SessionStatus::Completed,
+                                );
+                            }
                         }
+                        if let nenjo::RoutineEvent::StepFailed { step_run_id, .. } = &ev
+                            && step_sessions_upserted.contains(step_run_id) {
+                                transition_routine_step_session(
+                                    harness,
+                                    *step_run_id,
+                                    SessionStatus::Failed,
+                                );
+                            }
                         if let nenjo::RoutineEvent::Done { result, .. } = &ev {
                             routine_passed = result.passed;
                         }
                         if let nenjo::RoutineEvent::AgentEvent { step_slug, step_run_id, event } = &ev
-                            && let Some(step_name) = step_agents.get(step_run_id)
+                            && let Some(step_name) = step_names.get(step_run_id)
                         {
-                            record_task_turn_event(
+                            let routine_step = routine_slug.as_deref().and_then(|routine_slug| {
+                                manifest
+                                    .routines
+                                    .iter()
+                                    .find(|routine| routine.slug.as_str() == routine_slug)
+                                    .and_then(|routine| {
+                                        routine.steps.iter().find(|step| step.slug == *step_slug)
+                                    })
+                            });
+                            let agent_slug = routine_step.and_then(|step| step.agent.as_ref());
+                            let agent_name = agent_slug.and_then(|agent_slug| {
+                                manifest
+                                    .agents
+                                    .iter()
+                                    .find(|agent| agent.slug == *agent_slug)
+                                    .map(|agent| agent.name.as_str())
+                            });
+                            let agent_id = agent_slug
+                                .map(|agent_slug| {
+                                    crate::resource_resolver::stable_resource_id("agent", agent_slug)
+                                });
+                            let include_upsert = step_sessions_upserted.insert(*step_run_id);
+                            record_routine_step_turn_event(
                                 harness,
-                                task_id,
-                                None,
-                                None,
+                                &RoutineStepSessionRecord {
+                                    parent_task_id: task_id,
+                                    step_run_id: *step_run_id,
+                                    step_slug: step_slug.as_str(),
+                                    step_name,
+                                    project_slug: &project_slug,
+                                    routine_slug: routine_slug.as_deref(),
+                                    execution_run_id,
+                                    agent_slug: agent_slug.map(|slug| slug.as_str()),
+                                    agent_name,
+                                    memory_namespace: step_memory_namespace.as_deref(),
+                                },
+                                agent_id,
                                 event,
+                                include_upsert,
                             );
-                            let _ = (step_slug, step_name);
-                            let _ = event;
                         }
                         if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, &harness.provider().manifest_snapshot()) {
                             let _ = ctx.response_sink.send(r);
@@ -1230,7 +1365,10 @@ where
     let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
         Arc::new(TaskNotificationEmitter {
             response_sink: ctx.response_sink.clone(),
+            session_id: task_id,
         });
+    let _notification_registration =
+        register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =
         with_platform_notification_emitter(notification_emitter, harness.task_stream(request))
             .await?;
@@ -1346,7 +1484,11 @@ fn evict_git_lock(
 mod tests {
     use std::path::Path;
 
-    use super::worktree_listing_contains;
+    use super::{
+        RoutineStepSessionRecord, routine_step_session_upsert_event, worktree_listing_contains,
+    };
+    use nenjo_sessions::SessionRuntimeEvent;
+    use uuid::Uuid;
 
     #[test]
     fn worktree_listing_contains_registered_branch() {
@@ -1389,5 +1531,41 @@ branch refs/heads/agent/abcd/other
             Path::new("/repo/worktrees/missing"),
             "agent/abcd/other"
         ));
+    }
+
+    #[test]
+    fn routine_step_session_uses_step_run_id_with_parent_task_metadata() {
+        let parent_task_id = Uuid::new_v4();
+        let step_run_id = Uuid::new_v4();
+        let execution_run_id = Uuid::new_v4();
+
+        let event = routine_step_session_upsert_event(&RoutineStepSessionRecord {
+            parent_task_id,
+            step_run_id,
+            step_slug: "agent_step",
+            step_name: "Agent Step",
+            project_slug: "demo",
+            routine_slug: Some("daily_routine"),
+            execution_run_id,
+            agent_slug: Some("nenji"),
+            agent_name: Some("Nenji"),
+            memory_namespace: Some("demo-memory"),
+        });
+
+        let SessionRuntimeEvent::SessionUpsert(upsert) = event else {
+            panic!("expected routine step session upsert");
+        };
+        assert_eq!(upsert.session_id, step_run_id);
+        assert_eq!(upsert.task_id, Some(parent_task_id));
+        assert_eq!(upsert.parent_session_id, Some(parent_task_id));
+        assert_eq!(upsert.execution_run_id, Some(execution_run_id));
+        assert_eq!(upsert.agent.as_deref(), Some("nenji"));
+        assert_eq!(upsert.routine.as_deref(), Some("daily_routine"));
+        assert_eq!(
+            upsert.metadata["parent_task_id"],
+            parent_task_id.to_string()
+        );
+        assert_eq!(upsert.metadata["step_run_id"], step_run_id.to_string());
+        assert_eq!(upsert.metadata["step_slug"], "agent_step");
     }
 }

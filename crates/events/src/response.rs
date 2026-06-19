@@ -175,6 +175,11 @@ pub enum Response {
     #[serde(rename = "push.notification")]
     PushNotification {
         agent: String,
+        session_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient_user_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient_handle: Option<String>,
         encrypted_payload: EncryptedPayload,
     },
 
@@ -297,8 +302,10 @@ impl std::fmt::Display for Response {
                     "repo.sync_complete(project={project}, success={success})"
                 )
             }
-            Self::PushNotification { agent, .. } => {
-                write!(f, "push.notification(agent={agent})")
+            Self::PushNotification {
+                agent, session_id, ..
+            } => {
+                write!(f, "push.notification(agent={agent}, session={session_id})")
             }
             Self::DeliveryReceipt { message_id } => write!(f, "delivery_receipt({message_id})"),
             Self::WorkerPong => write!(f, "worker.pong"),
@@ -955,22 +962,35 @@ mod tests {
             nonce: "bm9uY2U=".into(),
             ciphertext: "Y2lwaGVydGV4dA==".into(),
         };
+        let session_id = Uuid::new_v4();
+        let recipient_user_id = Uuid::new_v4();
         let resp = Response::PushNotification {
             agent: "reviewer".into(),
+            session_id,
+            recipient_user_id: Some(recipient_user_id),
+            recipient_handle: Some("@casey".into()),
             encrypted_payload: payload.clone(),
         };
 
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"push.notification""#));
+        assert!(json.contains(r#""session_id""#));
+        assert!(json.contains(r#""recipient_handle":"@casey""#));
         assert!(json.contains(r#""encrypted_payload""#));
 
         let parsed: Response = serde_json::from_str(&json).unwrap();
         match parsed {
             Response::PushNotification {
                 agent,
+                session_id: parsed_session_id,
+                recipient_user_id: parsed_recipient_user_id,
+                recipient_handle,
                 encrypted_payload,
             } => {
                 assert_eq!(agent, "reviewer");
+                assert_eq!(parsed_session_id, session_id);
+                assert_eq!(parsed_recipient_user_id, Some(recipient_user_id));
+                assert_eq!(recipient_handle.as_deref(), Some("@casey"));
                 assert_eq!(encrypted_payload.account_id, payload.account_id);
                 assert_eq!(encrypted_payload.encryption_scope.as_deref(), Some("org"));
                 assert_eq!(encrypted_payload.object_type, "push.notification");

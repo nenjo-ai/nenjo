@@ -19,6 +19,7 @@ use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest};
 use crate::memory::types::MemoryScope;
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
+use uuid::Uuid;
 
 /// Required parameters for constructing an [`AgentBuilder`].
 pub(crate) struct AgentBuilderParams<P: ProviderRuntime = ErasedProvider> {
@@ -48,6 +49,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     pending_project_context: Option<ProjectManifest>,
     pending_routine_context: Option<RoutineContext>,
     pending_step_context: Option<RoutineStepContext>,
+    tool_current_session_id: Option<Uuid>,
     // For DelegateToTool construction, set when a provider creates the builder.
     provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
@@ -74,6 +76,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_project_context: None,
             pending_routine_context: None,
             pending_step_context: None,
+            tool_current_session_id: None,
             provider_runtime: Some(params.provider_runtime),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -101,6 +104,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_project_context: None,
             pending_routine_context: None,
             pending_step_context: None,
+            tool_current_session_id: None,
             provider_runtime: Some(provider),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -202,6 +206,12 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// `{{ routine.step.instructions }}`, and `{{ routine.step.metadata }}`.
     pub fn with_step_context(mut self, ctx: RoutineStepContext) -> Self {
         self.pending_step_context = Some(ctx);
+        self
+    }
+
+    /// Set the current transcript session id for tool-emitted side effects.
+    pub fn with_tool_current_session_id(mut self, current_session_id: Uuid) -> Self {
+        self.tool_current_session_id = Some(current_session_id);
         self
     }
 
@@ -320,6 +330,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                     security.clone(),
                     ToolContext {
                         project_slug: project_slug.map(str::to_string),
+                        current_session_id: self.tool_current_session_id,
                     },
                 )
                 .await;

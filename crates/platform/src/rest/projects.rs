@@ -92,7 +92,7 @@ pub fn project_rest_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "update_project_task".into(),
-            description: "Update an existing project task. Use this to change task state or content after creation; sensitive task content is re-encrypted automatically when needed.".into(),
+            description: "Update an existing project task. Use this to change task state or content after creation.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

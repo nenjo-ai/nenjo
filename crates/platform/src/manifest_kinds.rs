@@ -96,6 +96,8 @@ pub enum SensitiveContentKind {
     HeartbeatInstructions,
     /// Cron routine task envelope.
     RoutineCronTask,
+    /// Routine step instruction envelope.
+    RoutineStepInstructions,
 }
 
 impl SensitiveContentKind {
@@ -111,6 +113,7 @@ impl SensitiveContentKind {
             Self::ProjectSettings => Some(ResourceType::Project),
             Self::HeartbeatInstructions => Some(ResourceType::Agent),
             Self::RoutineCronTask => Some(ResourceType::Routine),
+            Self::RoutineStepInstructions => Some(ResourceType::Routine),
             Self::TaskContent => None,
         }
     }
@@ -128,6 +131,7 @@ impl SensitiveContentKind {
             Self::ProjectSettings => "project.settings",
             Self::HeartbeatInstructions => "agent.heartbeat.instructions",
             Self::RoutineCronTask => "routine.cron_task",
+            Self::RoutineStepInstructions => "routine.step.instructions",
         }
     }
 
@@ -143,7 +147,8 @@ impl SensitiveContentKind {
             | Self::TaskContent
             | Self::ProjectSettings
             | Self::HeartbeatInstructions
-            | Self::RoutineCronTask => ContentScope::Org,
+            | Self::RoutineCronTask
+            | Self::RoutineStepInstructions => ContentScope::Org,
         }
     }
 
@@ -160,6 +165,7 @@ impl SensitiveContentKind {
             "project.settings" => Some(Self::ProjectSettings),
             "agent.heartbeat.instructions" => Some(Self::HeartbeatInstructions),
             "routine.cron_task" => Some(Self::RoutineCronTask),
+            "routine.step.instructions" => Some(Self::RoutineStepInstructions),
             _ => None,
         }
     }
