@@ -308,7 +308,7 @@ where
         "Executing routine step"
     );
 
-    let step_run_id = Uuid::new_v4();
+    let step_run_id = state.step_run_id_for(&step.slug);
     prepare_step_state(state, &step);
 
     let _ = events_tx.send(RoutineEvent::StepStarted {
@@ -601,7 +601,8 @@ where
     let (routine_ctx, step_ctx) = build_routine_ctx(state);
     builder = builder
         .with_routine_context(routine_ctx)
-        .with_step_context(step_ctx);
+        .with_step_context(step_ctx)
+        .with_tool_current_session_id(step_run_id);
 
     builder = scope_tools_to_work_dir(builder, state);
 
@@ -674,7 +675,8 @@ where
         state.input.session_binding.as_ref(),
     )
     .with_routine_context(routine_ctx)
-    .with_step_context(step_ctx);
+    .with_step_context(step_ctx)
+    .with_tool_current_session_id(step_run_id);
     let builder = scope_tools_to_work_dir(builder, state);
     let runner = super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
         .build()

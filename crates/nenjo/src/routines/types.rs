@@ -266,6 +266,7 @@ impl RoutineInput {
 #[derive(Clone)]
 pub(crate) struct RoutineState {
     pub step_results: HashMap<Slug, StepResult>,
+    pub step_run_ids: HashMap<Slug, Uuid>,
     pub completed_steps: Vec<Slug>,
     pub initial_input: String,
     pub input: RoutineInput,
@@ -283,6 +284,7 @@ impl RoutineState {
         let initial_input = input.description.clone();
         Self {
             step_results: HashMap::new(),
+            step_run_ids: HashMap::new(),
             completed_steps: Vec::new(),
             initial_input,
             input,
@@ -299,6 +301,13 @@ impl RoutineState {
     pub(crate) fn record_step_result(&mut self, step_slug: Slug, result: StepResult) {
         self.completed_steps.push(step_slug.clone());
         self.step_results.insert(step_slug, result);
+    }
+
+    pub(crate) fn step_run_id_for(&mut self, step_slug: &Slug) -> Uuid {
+        *self
+            .step_run_ids
+            .entry(step_slug.clone())
+            .or_insert_with(Uuid::new_v4)
     }
 
     pub(crate) fn last_step_result(&self) -> Option<&StepResult> {
@@ -651,6 +660,20 @@ mod tests {
                 .as_deref()
                 .is_some_and(|metadata| !metadata.is_empty())
         );
+    }
+
+    #[test]
+    fn routine_state_reuses_step_run_id_for_logical_step() {
+        let mut state = RoutineState::new(RoutineInput::new("Title", "Desc"));
+        let step = Slug::derive("agent_step");
+        let other_step = Slug::derive("other_step");
+
+        let first = state.step_run_id_for(&step);
+        let second = state.step_run_id_for(&step);
+        let other = state.step_run_id_for(&other_step);
+
+        assert_eq!(first, second);
+        assert_ne!(first, other);
     }
 
     #[test]

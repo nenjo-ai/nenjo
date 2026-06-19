@@ -325,7 +325,7 @@ where
     {
         builder = builder.with_project_context(&project_manifest);
     }
-    let builder = scope_tools_to_work_dir(builder, state);
+    let builder = scope_tools_to_work_dir(builder, state).with_tool_current_session_id(step_run_id);
     let builder = with_routine_step_max_turns(builder, step);
     let builder = if invocation.requires_pass_verdict() {
         with_agent_step_tools(builder)
