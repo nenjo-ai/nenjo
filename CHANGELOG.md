@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/nenjo-ai/nenjo/compare/v0.17.0...v0.18.0) - 2026-06-19
+
+### Added
+
+- Native Nenjo slash commands, including command manifests, platform MCP tooling, secure command sync, and worker-side command execution ([#67](https://github.com/nenjo-ai/nenjo/pull/67))
+- Platform-backed handling for sensitive manifest instructions, including agent heartbeat instructions, cron routine task content, and routine step instructions ([#68](https://github.com/nenjo-ai/nenjo/pull/68))
+- Stable routine step session ids so repeated routine loops preserve each step's transcript and tool context ([#68](https://github.com/nenjo-ai/nenjo/pull/68))
+- Push notification tooling that supports recipient lookup, notification listing, user-scoped sends, and source session ids for follow-up chat context ([#68](https://github.com/nenjo-ai/nenjo/pull/68))
+
+### Changed
+
+- Routine manifests now retain cron task metadata and step instructions in the local manifest while platform sync keeps the persisted payload shape aligned ([#68](https://github.com/nenjo-ai/nenjo/pull/68))
+- Notification tool descriptions now hide platform implementation details and expose only the agent-facing list, recipient lookup, and send workflows ([#68](https://github.com/nenjo-ai/nenjo/pull/68))
+
 ## [0.17.0](https://github.com/nenjo-ai/nenjo/compare/v0.16.0...v0.17.0) - 2026-06-18
 
 ### Added
