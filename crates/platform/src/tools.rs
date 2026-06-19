@@ -1569,16 +1569,16 @@ mod tests {
         last_account_id: Arc<Mutex<Option<Uuid>>>,
     }
 
+    struct RecordedNotification {
+        agent: String,
+        current_session_id: Option<Uuid>,
+        encrypted_payload: EncryptedPayload,
+        recipient: Option<PlatformNotificationRecipient>,
+    }
+
     #[derive(Default)]
     struct RecordingNotificationSink {
-        last_notification: Mutex<
-            Option<(
-                String,
-                Option<Uuid>,
-                EncryptedPayload,
-                Option<PlatformNotificationRecipient>,
-            )>,
-        >,
+        last_notification: Mutex<Option<RecordedNotification>>,
     }
 
     impl PlatformNotificationEmitter for RecordingNotificationSink {
@@ -1589,12 +1589,12 @@ mod tests {
             encrypted_payload: EncryptedPayload,
             recipient: Option<PlatformNotificationRecipient>,
         ) -> Result<()> {
-            *self.last_notification.lock().unwrap() = Some((
-                agent.to_string(),
+            *self.last_notification.lock().unwrap() = Some(RecordedNotification {
+                agent: agent.to_string(),
                 current_session_id,
                 encrypted_payload,
                 recipient,
-            ));
+            });
             Ok(())
         }
     }
@@ -1858,14 +1858,22 @@ mod tests {
         assert_eq!(*encoder.last_scope.lock().unwrap(), Some(ContentScope::Org));
 
         let notification = sink.last_notification.lock().unwrap();
-        let (agent, current_session_id, encrypted_payload, recipient) =
-            notification.as_ref().expect("notification emitted");
-        assert_eq!(agent, "notify-agent");
-        assert!(current_session_id.is_none());
-        assert!(recipient.is_none());
-        assert_eq!(encrypted_payload.object_type, "push.notification");
-        assert_eq!(encrypted_payload.encryption_scope.as_deref(), Some("org"));
-        assert_eq!(encrypted_payload.ciphertext, "encrypted-test-payload");
+        let notification = notification.as_ref().expect("notification emitted");
+        assert_eq!(notification.agent, "notify-agent");
+        assert!(notification.current_session_id.is_none());
+        assert!(notification.recipient.is_none());
+        assert_eq!(
+            notification.encrypted_payload.object_type,
+            "push.notification"
+        );
+        assert_eq!(
+            notification.encrypted_payload.encryption_scope.as_deref(),
+            Some("org")
+        );
+        assert_eq!(
+            notification.encrypted_payload.ciphertext,
+            "encrypted-test-payload"
+        );
     }
 
     #[tokio::test]
@@ -1901,12 +1909,17 @@ mod tests {
         );
 
         let notification = sink.last_notification.lock().unwrap();
-        let (_agent, _current_session_id, encrypted_payload, recipient) =
-            notification.as_ref().expect("notification emitted");
-        assert_eq!(encrypted_payload.account_id, recipient_user_id);
-        assert_eq!(encrypted_payload.encryption_scope.as_deref(), Some("user"));
+        let notification = notification.as_ref().expect("notification emitted");
+        assert_eq!(notification.encrypted_payload.account_id, recipient_user_id);
         assert_eq!(
-            recipient.as_ref().and_then(|target| target.user_id),
+            notification.encrypted_payload.encryption_scope.as_deref(),
+            Some("user")
+        );
+        assert_eq!(
+            notification
+                .recipient
+                .as_ref()
+                .and_then(|target| target.user_id),
             Some(recipient_user_id)
         );
     }
@@ -1933,9 +1946,8 @@ mod tests {
 
         assert!(result.success);
         let notification = sink.last_notification.lock().unwrap();
-        let (_agent, emitted_current_session_id, _encrypted_payload, _recipient) =
-            notification.as_ref().expect("notification emitted");
-        assert_eq!(*emitted_current_session_id, Some(current_session_id));
+        let notification = notification.as_ref().expect("notification emitted");
+        assert_eq!(notification.current_session_id, Some(current_session_id));
     }
 
     #[tokio::test]
