@@ -44,7 +44,7 @@ pub fn notification_tools() -> Vec<ToolSpec> {
                 "properties": {
                     "body": {
                         "type": "string",
-                        "description": "Notification body shown to users after local decryption."
+                        "description": "Notification body shown to users."
                     },
                     "tag": {
                         "type": "string",

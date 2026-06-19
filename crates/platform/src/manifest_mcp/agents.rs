@@ -124,7 +124,7 @@ fn configure_assignments_schema() -> serde_json::Value {
 fn configure_heartbeat_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Heartbeat schedule patch. instructions is plaintext input to this tool and is encrypted by the backend before it is sent to the platform. interval is required when setting instructions on an agent without an existing heartbeat.",
+        "description": "Heartbeat schedule patch. interval is required when setting instructions on an agent without an existing heartbeat.",
         "properties": {
             "interval": {
                 "type": "string",
@@ -137,7 +137,7 @@ fn configure_heartbeat_schema() -> serde_json::Value {
             },
             "instructions": {
                 "type": "string",
-                "description": "Heartbeat instructions to encrypt into agent.heartbeat.instructions."
+                "description": "Heartbeat instructions for scheduled agent runs."
             }
         },
         "additionalProperties": false

@@ -759,7 +759,7 @@ pub struct RoutineConfigureMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Plaintext cron task input for `configure_routine`; the platform backend encrypts it before write.
+/// Cron task input for `configure_routine`.
 pub struct RoutineCronTaskConfigureDocument {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

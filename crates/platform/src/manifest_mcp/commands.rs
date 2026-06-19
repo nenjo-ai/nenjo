@@ -69,7 +69,7 @@ pub fn command_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_command".to_string(),
-            description: "Create or update one slash command in a single backend-owned sequence. Omit `command_ref` to create; include `command_ref` to update by name or slash command. On create, metadata.command and content are required; metadata.name is optional and derived from the slash command when omitted. Command content is encrypted before it is sent to the platform. Returns `command: CommandManifest`."
+            description: "Create or update one slash command in a single backend-owned sequence. Omit `command_ref` to create; include `command_ref` to update by name or slash command. On create, metadata.command and content are required; metadata.name is optional and derived from the slash command when omitted. Returns `command: CommandManifest`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
