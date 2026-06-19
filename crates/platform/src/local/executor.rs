@@ -1314,6 +1314,7 @@ mod tests {
             metadata: nenjo::manifest::RoutineMetadata {
                 schedule: Some("0 0 * * *".into()),
                 entry_steps: vec![Slug::derive("compile")],
+                cron_task: None,
             },
             steps: vec![RoutineStepManifest {
                 slug: Slug::derive("compile"),
@@ -1471,6 +1472,7 @@ mod tests {
             agent: Slug::derive(&agent.name),
             interval: "5m".into(),
             is_active: true,
+            instructions: None,
             last_run_at: None,
             next_run_at: None,
             metadata: serde_json::Value::Null,
@@ -2276,6 +2278,7 @@ mod tests {
                     runtime_metadata: None,
                     encrypted_payload: None,
                     graph: None,
+                    cron_task: None,
                     id: None,
                 },
             })
@@ -2320,6 +2323,7 @@ mod tests {
                     runtime_metadata: None,
                     encrypted_payload: None,
                     graph: None,
+                    cron_task: None,
                     id: None,
                 },
             })
@@ -2378,25 +2382,30 @@ mod tests {
                     }),
                     runtime_metadata: Some(serde_json::json!({})),
                     encrypted_payload: None,
+                    cron_task: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![
                             RoutineStepInput {
+                                id: None,
                                 slug: Slug::derive("build"),
                                 name: "build".into(),
                                 step_type: RoutineStepType::Agent,
                                 council: None,
                                 agent: None,
                                 config: serde_json::json!({}),
+                                encrypted_payload: None,
                                 order_index: 0,
                             },
                             RoutineStepInput {
+                                id: None,
                                 slug: Slug::derive("done"),
                                 name: "done".into(),
                                 step_type: RoutineStepType::Terminal,
                                 council: None,
                                 agent: None,
                                 config: serde_json::json!({}),
+                                encrypted_payload: None,
                                 order_index: 1,
                             },
                         ],
@@ -2423,15 +2432,18 @@ mod tests {
                     metadata: None,
                     runtime_metadata: None,
                     encrypted_payload: None,
+                    cron_task: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![RoutineStepInput {
+                            id: None,
                             slug: Slug::derive("build"),
                             name: "build".into(),
                             step_type: RoutineStepType::Agent,
                             council: None,
                             agent: None,
                             config: serde_json::json!({ "revised": true }),
+                            encrypted_payload: None,
                             order_index: 0,
                         }],
                         edges: vec![],

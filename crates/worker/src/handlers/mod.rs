@@ -18,7 +18,7 @@ use nenjo::types::GitContext;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use nenjo_events::{Command, EncryptedPayload, Response};
+use nenjo_events::{Command, EncryptedPayload, ResourceType, Response};
 use serde_json::Value;
 
 use crate::crypto::decrypt_text_with_provider;
@@ -485,9 +485,13 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             payload,
             encrypted_payload,
         } => {
-            let payload =
-                materialize_manifest_changed_payload(&ctx, payload, encrypted_payload.as_ref())
-                    .await?;
+            let payload = materialize_manifest_changed_payload(
+                &ctx,
+                resource_type,
+                payload,
+                encrypted_payload.as_ref(),
+            )
+            .await?;
             ctx.harness
                 .handle_manifest_changed(
                     &ctx.manifest_context(),
@@ -513,19 +517,98 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
 async fn materialize_manifest_changed_payload(
     ctx: &CommandContext,
+    resource_type: ResourceType,
     payload: Option<Value>,
     encrypted_payload: Option<&EncryptedPayload>,
 ) -> Result<Option<Value>> {
     let Some(encrypted_payload) = encrypted_payload else {
-        return Ok(payload);
+        return materialize_nested_manifest_payloads(ctx, resource_type, payload).await;
     };
 
     let plaintext = decrypt_text_with_provider(&ctx.auth_provider, encrypted_payload).await?;
+    let payload = materialize_nested_manifest_payloads(ctx, resource_type, payload).await?;
     Ok(Some(decrypted_manifest_payload_value(
         payload,
         encrypted_payload,
         plaintext,
     )))
+}
+
+async fn materialize_nested_manifest_payloads(
+    ctx: &CommandContext,
+    resource_type: ResourceType,
+    payload: Option<Value>,
+) -> Result<Option<Value>> {
+    let Some(mut payload) = payload else {
+        return Ok(None);
+    };
+    if resource_type == ResourceType::Routine {
+        decrypt_nested_routine_step_instructions(ctx, &mut payload).await?;
+    }
+    Ok(Some(payload))
+}
+
+async fn decrypt_nested_routine_step_instructions(
+    ctx: &CommandContext,
+    payload: &mut Value,
+) -> Result<()> {
+    let Some(data) = inline_payload_data_mut(payload) else {
+        return Ok(());
+    };
+    let Some(steps) = data.get_mut("steps").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+
+    for step in steps {
+        let Some(payload_value) = step.get("encrypted_payload").cloned() else {
+            continue;
+        };
+        let Ok(encrypted_payload) = serde_json::from_value::<EncryptedPayload>(payload_value)
+        else {
+            warn!("Failed to parse nested routine step encrypted payload");
+            continue;
+        };
+        if encrypted_payload.object_type != "routine.step.instructions" {
+            continue;
+        }
+        let plaintext = decrypt_text_with_provider(&ctx.auth_provider, &encrypted_payload).await?;
+        let instructions = serde_json::from_str::<Value>(&plaintext)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("instructions")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or(plaintext);
+        let Some(step_object) = step.as_object_mut() else {
+            continue;
+        };
+        let config = step_object
+            .entry("config")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(config_object) = config.as_object_mut() {
+            config_object.insert("instructions".to_string(), Value::String(instructions));
+        }
+    }
+
+    Ok(())
+}
+
+fn inline_payload_data_mut(payload: &mut Value) -> Option<&mut Value> {
+    if payload
+        .get("__nenjo_decrypted_manifest_payload")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return payload
+            .get_mut("inline_payload")
+            .and_then(inline_payload_data_mut);
+    }
+    if payload.get("schema").is_some() && payload.get("data").is_some() {
+        return payload.get_mut("data");
+    }
+    Some(payload)
 }
 
 fn decrypted_manifest_payload_value(

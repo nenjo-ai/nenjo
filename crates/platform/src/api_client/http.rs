@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::types::ActiveAgentHeartbeatState;
+use crate::SensitiveContentKind;
 use crate::manifest_contract::ProjectDetailRecord;
 use async_trait::async_trait;
 use nenjo_events::EncryptedPayload;
@@ -171,8 +172,10 @@ impl ApiClient {
     }
 
     pub async fn fetch_routine(&self, resource: &Slug) -> Result<Option<RoutineRecord>> {
-        self.fetch_resource(&format!("/api/v1/routines/{resource}"))
-            .await
+        let response = self
+            .fetch_resource(&format!("/api/v1/routines/{resource}"))
+            .await?;
+        self.decode_routine_step_instructions(response).await
     }
 
     pub async fn list_active_cron_routines(&self) -> Result<Vec<ActiveCronRoutineState>> {
@@ -606,6 +609,62 @@ impl ApiClient {
         })?);
         content.encrypted_payload = None;
         Ok(content)
+    }
+
+    async fn decode_routine_step_instructions(
+        &self,
+        response: Option<RoutineRecord>,
+    ) -> Result<Option<RoutineRecord>> {
+        let Some(mut response) = response else {
+            return Ok(None);
+        };
+
+        for step in &mut response.steps {
+            let Some(payload_value) = step.encrypted_payload.as_ref() else {
+                continue;
+            };
+            let payload: EncryptedPayload =
+                serde_json::from_value(payload_value.clone()).map_err(|error| {
+                    ApiClientError::Parse(format!(
+                        "Failed to parse routine step encrypted payload: {error}"
+                    ))
+                })?;
+            if payload.object_type
+                != SensitiveContentKind::RoutineStepInstructions.encrypted_object_type()
+            {
+                continue;
+            }
+            let Some(plaintext) =
+                self.payload_codec
+                    .decode_text(&payload)
+                    .await
+                    .map_err(|error| {
+                        ApiClientError::Parse(format!(
+                            "Failed to decrypt routine step instructions: {error}"
+                        ))
+                    })?
+            else {
+                continue;
+            };
+            let instructions = serde_json::from_str::<serde_json::Value>(&plaintext)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("instructions")
+                        .and_then(|instructions| instructions.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or(plaintext);
+            if let Some(config) = step.config.as_object_mut() {
+                config.insert(
+                    "instructions".to_string(),
+                    serde_json::Value::String(instructions),
+                );
+            }
+            step.encrypted_payload = None;
+        }
+
+        Ok(Some(response))
     }
 }
 

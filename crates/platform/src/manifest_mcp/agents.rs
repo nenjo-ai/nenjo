@@ -121,6 +121,29 @@ fn configure_assignments_schema() -> serde_json::Value {
     })
 }
 
+fn configure_heartbeat_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Heartbeat schedule patch. instructions is plaintext input to this tool and is encrypted by the backend before it is sent to the platform. interval is required when setting instructions on an agent without an existing heartbeat.",
+        "properties": {
+            "interval": {
+                "type": "string",
+                "description": "Cron expression or interval string for the heartbeat schedule."
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional heartbeat metadata such as timezone.",
+                "additionalProperties": true
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Heartbeat instructions to encrypt into agent.heartbeat.instructions."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// Return manifest MCP tool definitions for agent resources.
 pub fn agent_tools() -> Vec<ToolSpec> {
     vec![
@@ -159,7 +182,8 @@ pub fn agent_tools() -> Vec<ToolSpec> {
                     "agent": agent_ref_schema(),
                     "metadata": configure_metadata_schema(),
                     "prompt_config": prompt_config_schema(),
-                    "assignments": configure_assignments_schema()
+                    "assignments": configure_assignments_schema(),
+                    "heartbeat": configure_heartbeat_schema()
                 },
                 "additionalProperties": false
             }),

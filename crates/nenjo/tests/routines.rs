@@ -2588,6 +2588,7 @@ async fn agent_step_receives_route_next_steps_not_pass_verdict() {
         metadata: RoutineMetadata {
             schedule: None,
             entry_steps: vec![Slug::derive("work")],
+            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -2671,6 +2672,7 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
         metadata: RoutineMetadata {
             schedule: None,
             entry_steps: vec![Slug::derive("start")],
+            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -2825,6 +2827,7 @@ async fn route_next_steps_fail_verdict_stops_routine() {
         metadata: RoutineMetadata {
             schedule: None,
             entry_steps: vec![Slug::derive("first")],
+            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {

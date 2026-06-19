@@ -531,11 +531,22 @@ pub enum RoutineTrigger {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoutineCronTaskManifest {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_criteria: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutineMetadata {
     #[serde(default)]
     pub schedule: Option<String>,
     #[serde(default)]
     pub entry_steps: Vec<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_task: Option<RoutineCronTaskManifest>,
 }
 
 /// A single step in a routine DAG (agent, gate, council, or terminal).
@@ -880,6 +891,8 @@ pub struct AgentHeartbeatManifest {
     pub agent: Slug,
     pub interval: String,
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     #[serde(default)]
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]

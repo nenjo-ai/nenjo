@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, CouncilManifest,
     DomainManifest, HasManifestSlug, ManifestResource, ManifestResourceKind, ModelManifest,
-    ProjectManifest, RoutineManifest,
+    ProjectManifest, RoutineCronTaskManifest, RoutineManifest, RoutineTrigger,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use uuid::Uuid;
 
 use crate::client::{
-    CouncilCreateApiBody, CouncilCreateMemberApiBody, KnowledgeDocEdgeReplaceItem,
-    KnowledgeDocEdgeResponse, PlatformManifestClient,
+    AgentHeartbeatConfigureApiBody, CouncilCreateApiBody, CouncilCreateMemberApiBody,
+    KnowledgeDocEdgeReplaceItem, KnowledgeDocEdgeResponse, PlatformManifestClient,
 };
 use crate::library_knowledge::{
     LibraryKnowledgePackCacheEntry, ReplaceDocumentEdges, ensure_library_knowledge_pack_cache,
@@ -25,7 +25,7 @@ use crate::library_knowledge::{
 use crate::manifest_contract::{
     AgentRecord, DomainPromptRecord, KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord,
 };
-use crate::manifest_kinds::SensitiveContentKind;
+use crate::manifest_kinds::{ContentScope, SensitiveContentKind};
 use crate::manifest_mcp::*;
 use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
@@ -145,6 +145,20 @@ pub trait SensitivePayloadEncoder: Send + Sync {
         object_type: &str,
         payload: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>>;
+
+    /// Encode a payload with an explicit account-content scope.
+    async fn encode_payload_with_scope(
+        &self,
+        scope: ContentScope,
+        account_id: Uuid,
+        object_id: Uuid,
+        object_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        let _ = scope;
+        self.encode_payload(account_id, object_id, object_type, payload)
+            .await
+    }
 
     /// Decode a payload returned from the platform.
     ///
@@ -677,6 +691,10 @@ where
 
         let old_slug = params.data.agent.clone();
         let mut data = params.data;
+        let heartbeat_patch = data.heartbeat.take();
+        let heartbeat_instructions = heartbeat_patch
+            .as_ref()
+            .and_then(|heartbeat| heartbeat.instructions.clone());
         let agent_object_id = match data.agent.as_ref() {
             Some(agent) => self.platform_object_id(PlatformResourceKind::Agent, agent)?,
             None => {
@@ -707,15 +725,70 @@ where
             data.prompt_config = None;
             resolved_prompt_config = Some(merged_prompt_config);
         }
-        let configured = self.platform_client.configure_agent_record(&data).await?;
+        let mut configured = self.platform_client.configure_agent_record(&data).await?;
         let new_slug = Slug::derive(&configured.slug);
+
+        if let Some(heartbeat) = heartbeat_patch {
+            let interval = heartbeat
+                .interval
+                .as_deref()
+                .or_else(|| {
+                    existing_agent
+                        .as_ref()
+                        .and_then(|agent| agent.heartbeat.as_ref())
+                        .map(|heartbeat| heartbeat.interval.as_str())
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "heartbeat.interval is required when configuring heartbeat for agent {}",
+                        new_slug
+                    )
+                })?;
+            let encrypted_payload = if let Some(instructions) = heartbeat.instructions.as_ref() {
+                Some(
+                    self.sensitive_payload_encoder
+                        .encode_payload(
+                            self.local_manifest_org_id().await?,
+                            configured.id,
+                            SensitiveContentKind::HeartbeatInstructions.encrypted_object_type(),
+                            &serde_json::json!({ "instructions": instructions }),
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow!("agent heartbeat instructions encryption produced no payload")
+                        })?,
+                )
+            } else {
+                None
+            };
+            let body = AgentHeartbeatConfigureApiBody {
+                interval,
+                metadata: heartbeat.metadata.as_ref(),
+                encrypted_payload: encrypted_payload.as_ref(),
+            };
+            configured = self
+                .platform_client
+                .upsert_agent_heartbeat_record(&new_slug, &body)
+                .await?;
+        }
+
         let mut local_agent = local_agent_from_record(configured.clone());
         if let Some(prompt_config) = resolved_prompt_config {
             local_agent.prompt_config = prompt_config;
         } else if configured.prompt_config.is_none()
-            && let Some(existing_agent) = existing_agent
+            && let Some(existing_agent) = existing_agent.as_ref()
         {
-            local_agent.prompt_config = existing_agent.prompt_config;
+            local_agent.prompt_config = existing_agent.prompt_config.clone();
+        }
+        if let Some(heartbeat) = local_agent.heartbeat.as_mut()
+            && heartbeat.instructions.is_none()
+        {
+            heartbeat.instructions = heartbeat_instructions.or_else(|| {
+                existing_agent
+                    .as_ref()
+                    .and_then(|agent| agent.heartbeat.as_ref())
+                    .and_then(|heartbeat| heartbeat.instructions.clone())
+            });
         }
         let agent_document = AgentDocument::from(local_agent.clone());
         self.local_store
@@ -1376,9 +1449,9 @@ where
         &self,
         params: RoutineConfigureParams,
     ) -> Result<RoutineConfigureResult> {
-        if params.data.routine.is_none()
-            && params
-                .data
+        let mut data = params.data;
+        if data.routine.is_none()
+            && data
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata.name.as_ref())
@@ -1386,18 +1459,123 @@ where
         {
             return Err(anyhow!("metadata.name is required when creating a routine"));
         }
-        if let Some(existing_routine) = params.data.routine.as_ref() {
-            let _ = self.cached_routine(existing_routine).await?;
+
+        let existing_routine = if let Some(existing_routine) = data.routine.as_ref() {
+            Some(self.cached_routine(existing_routine).await?)
+        } else {
+            None
+        };
+
+        let mut submitted_step_instructions = Vec::new();
+        if let Some(graph) = data.graph.as_mut() {
+            if data.routine.is_none() && data.id.is_none() {
+                let id = data.id.unwrap_or_else(Uuid::new_v4);
+                data.id = Some(id);
+            }
+            let org_id = self.local_manifest_org_id().await?;
+            for step in &mut graph.steps {
+                let instructions = step
+                    .config
+                    .get("instructions")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let Some(instructions) = instructions else {
+                    continue;
+                };
+                let step_id = step.id.unwrap_or_else(Uuid::new_v4);
+                step.id = Some(step_id);
+                submitted_step_instructions.push((step.slug.clone(), instructions.clone()));
+                if let Some(config) = step.config.as_object_mut() {
+                    config.remove("instructions");
+                    config.remove("description");
+                    config.remove("context");
+                }
+                let encrypted_payload = self
+                    .sensitive_payload_encoder
+                    .encode_payload(
+                        org_id,
+                        step_id,
+                        SensitiveContentKind::RoutineStepInstructions.encrypted_object_type(),
+                        &serde_json::json!({ "instructions": instructions }),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!("routine step instructions encryption produced no payload")
+                    })?;
+                step.encrypted_payload = Some(encrypted_payload);
+            }
         }
-        let configured = self
-            .platform_client
-            .configure_routine_record(&params.data)
-            .await?;
-        let routine_document = configured.to_document();
+
+        let mut submitted_cron_task = None;
+        if let Some(cron_task) = data.cron_task.take() {
+            if data.encrypted_payload.is_some() {
+                return Err(anyhow!(
+                    "routine cron_task and encrypted_payload cannot both be provided"
+                ));
+            }
+            let trigger = data
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.trigger)
+                .or_else(|| existing_routine.as_ref().map(|routine| routine.trigger));
+            if !matches!(trigger, Some(RoutineTrigger::Cron)) {
+                return Err(anyhow!("routine cron_task requires a cron routine trigger"));
+            }
+            let routine_object_id = match data.routine.as_ref() {
+                Some(routine) => self.platform_object_id(PlatformResourceKind::Routine, routine)?,
+                None => {
+                    let id = data.id.unwrap_or_else(Uuid::new_v4);
+                    data.id = Some(id);
+                    id
+                }
+            };
+            submitted_cron_task = Some(RoutineCronTaskManifest {
+                title: cron_task.title.clone(),
+                description: cron_task.description.clone(),
+                acceptance_criteria: cron_task.acceptance_criteria.clone(),
+            });
+            let encrypted_payload = self
+                .sensitive_payload_encoder
+                .encode_payload(
+                    self.local_manifest_org_id().await?,
+                    routine_object_id,
+                    SensitiveContentKind::RoutineCronTask.encrypted_object_type(),
+                    &serde_json::to_value(&cron_task)?,
+                )
+                .await?
+                .ok_or_else(|| anyhow!("routine cron task encryption produced no payload"))?;
+            data.encrypted_payload = Some(encrypted_payload);
+        }
+        let configured = self.platform_client.configure_routine_record(&data).await?;
+        let mut routine_document = configured.to_document();
+        for (step_slug, instructions) in submitted_step_instructions {
+            if let Some(step) = routine_document
+                .steps
+                .iter_mut()
+                .find(|step| step.slug == step_slug)
+                && let Some(config) = step.config.as_object_mut()
+            {
+                config.insert(
+                    "instructions".to_string(),
+                    serde_json::Value::String(instructions),
+                );
+            }
+        }
+        if routine_document.metadata.cron_task.is_none() {
+            routine_document.metadata.cron_task = submitted_cron_task.or_else(|| {
+                existing_routine
+                    .as_ref()
+                    .and_then(|routine| routine.metadata.cron_task.clone())
+            });
+        }
         let local_routine = local_routine_from_document(&routine_document);
         self.local_store
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
+        let new_slug = Slug::derive(&configured.slug);
+        self.record_platform_object_id(PlatformResourceKind::Routine, &new_slug, configured.id)?;
         Ok(RoutineConfigureResult {
             routine: routine_document,
             warnings: Vec::new(),
@@ -2231,6 +2409,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configure_agent_encrypts_heartbeat_instructions_and_preserves_manifest_plaintext() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await?;
+                let request = read_request(&mut stream).await?;
+                let body = match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/api/v1/agents/configure") => response(
+                        "201 Created",
+                        json!({
+                            "id": agent_id,
+                            "org_id": org_id,
+                            "slug": "reviewer",
+                            "name": "Reviewer",
+                            "description": null,
+                            "color": null,
+                            "model": null,
+                            "model_id": null,
+                            "model_name": null,
+                            "domains": [],
+                            "platform_scopes": [],
+                            "mcp_servers": [],
+                            "script_tools": [],
+                            "abilities": [],
+                            "prompt_locked": false,
+                            "source_type": "native",
+                            "read_only": false,
+                            "metadata": {},
+                            "created_by": null,
+                            "created_at": "2026-05-23T00:00:00Z",
+                            "updated_at": "2026-05-23T00:00:00Z"
+                        }),
+                    ),
+                    ("PUT", "/api/v1/agents/reviewer/heartbeat") => response(
+                        "200 OK",
+                        json!({
+                            "id": agent_id,
+                            "org_id": org_id,
+                            "slug": "reviewer",
+                            "name": "Reviewer",
+                            "description": null,
+                            "color": null,
+                            "model": null,
+                            "model_id": null,
+                            "model_name": null,
+                            "domains": [],
+                            "platform_scopes": [],
+                            "mcp_servers": [],
+                            "script_tools": [],
+                            "abilities": [],
+                            "prompt_locked": false,
+                            "heartbeat": {
+                                "agent": "reviewer",
+                                "interval": "5m",
+                                "is_active": false,
+                                "last_run_at": null,
+                                "next_run_at": null,
+                                "metadata": { "timezone": "America/Chicago" }
+                            },
+                            "source_type": "native",
+                            "read_only": false,
+                            "metadata": {},
+                            "created_by": null,
+                            "created_at": "2026-05-23T00:00:00Z",
+                            "updated_at": "2026-05-23T00:00:00Z"
+                        }),
+                    ),
+                    _ => response("404 Not Found", json!({ "error": "not found" })),
+                };
+                stream.write_all(body.as_bytes()).await?;
+                requests.push(request);
+            }
+            Ok::<_, anyhow::Error>(requests)
+        });
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .configure_agent(AgentConfigureParams {
+                data: AgentConfigureDocument {
+                    metadata: Some(AgentConfigureMetadata {
+                        name: Some("Reviewer".to_string()),
+                        description: None,
+                        color: None,
+                        model: None,
+                    }),
+                    heartbeat: Some(AgentHeartbeatConfigureDocument {
+                        interval: Some("5m".to_string()),
+                        metadata: Some(json!({ "timezone": "America/Chicago" })),
+                        instructions: Some("Sensitive heartbeat instructions".to_string()),
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result
+                .agent
+                .heartbeat
+                .as_ref()
+                .and_then(|heartbeat| heartbeat.instructions.as_deref()),
+            Some("Sensitive heartbeat instructions")
+        );
+        let requests = server.await.unwrap().unwrap();
+        let configure_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        let heartbeat_body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert!(configure_body.get("heartbeat").is_none());
+        assert!(heartbeat_body.get("encrypted_payload").is_some());
+        assert_eq!(
+            heartbeat_body["encrypted_payload"]["object_type"],
+            SensitiveContentKind::HeartbeatInstructions.encrypted_object_type()
+        );
+        assert!(
+            !requests[0]
+                .body
+                .contains("Sensitive heartbeat instructions")
+        );
+        assert!(
+            !requests[1]
+                .body
+                .contains("Sensitive heartbeat instructions")
+        );
+    }
+
+    #[tokio::test]
     async fn configure_ability_sends_only_encrypted_prompt_payload() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
@@ -2543,6 +2855,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.context_block.template, "SMOKE_CONTEXT_TEMPLATE_123");
+    }
+
+    #[tokio::test]
+    async fn configure_routine_encrypts_cron_task_and_preserves_manifest_plaintext() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/routines/configure",
+            "201 Created",
+            json!({
+                "id": routine_id,
+                "org_id": org_id,
+                "project_id": null,
+                "slug": "nightly-review",
+                "name": "Nightly Review",
+                "description": null,
+                "trigger": "cron",
+                "is_active": false,
+                "is_default": false,
+                "max_retries": 0,
+                "step_count": 0,
+                "metadata": {
+                    "schedule": "0 0 * * *",
+                    "entry_steps": []
+                },
+                "steps": [],
+                "edges": [],
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .configure_routine(RoutineConfigureParams {
+                data: RoutineConfigureDocument {
+                    metadata: Some(RoutineConfigureMetadata {
+                        name: Some("Nightly Review".to_string()),
+                        description: None,
+                        project_id: None,
+                        trigger: Some(RoutineTrigger::Cron),
+                        is_active: None,
+                        max_retries: None,
+                    }),
+                    runtime_metadata: Some(json!({
+                        "schedule": "0 0 * * *",
+                        "entry_steps": []
+                    })),
+                    cron_task: Some(RoutineCronTaskConfigureDocument {
+                        title: "Sensitive nightly task".to_string(),
+                        description: Some("Sensitive task description".to_string()),
+                        acceptance_criteria: Some("Sensitive acceptance criteria".to_string()),
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let cron_task = result
+            .routine
+            .metadata
+            .cron_task
+            .as_ref()
+            .expect("cron task should be preserved in local manifest");
+        assert_eq!(cron_task.title, "Sensitive nightly task");
+        assert_eq!(
+            cron_task.description.as_deref(),
+            Some("Sensitive task description")
+        );
+        assert_eq!(
+            cron_task.acceptance_criteria.as_deref(),
+            Some("Sensitive acceptance criteria")
+        );
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert!(body.get("cron_task").is_none());
+        assert!(body.get("encrypted_payload").is_some());
+        assert_eq!(
+            body["encrypted_payload"]["object_type"],
+            SensitiveContentKind::RoutineCronTask.encrypted_object_type()
+        );
+        assert!(!requests[0].body.contains("Sensitive nightly task"));
+        assert!(!requests[0].body.contains("Sensitive task description"));
+        assert!(!requests[0].body.contains("Sensitive acceptance criteria"));
     }
 
     async fn spawn_knowledge_create_server(
