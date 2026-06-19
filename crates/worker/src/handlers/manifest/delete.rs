@@ -1,4 +1,4 @@
-use nenjo::manifest::{context_block_slug, domain_slug};
+use nenjo::manifest::{HasManifestSlug, context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, info};
@@ -24,6 +24,7 @@ pub(super) fn apply_delete(
         ResourceType::Ability => manifest
             .abilities
             .retain(|r| Slug::derive(&r.name) != *resource),
+        ResourceType::Command => manifest.commands.retain(|r| r.manifest_slug() != *resource),
         ResourceType::ContextBlock => manifest
             .context_blocks
             .retain(|r| context_block_slug(&r.path, &r.name) != *resource),

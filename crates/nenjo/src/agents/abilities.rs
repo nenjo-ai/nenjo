@@ -810,6 +810,7 @@ where
         message: task_description.clone(),
         history: vec![],
         project: None,
+        template_override: None,
     });
     if let Some(parent_tx) = parent_events_tx.clone() {
         debug!(
@@ -1575,6 +1576,7 @@ mod tests {
             message: "build an agent".into(),
             history: vec![],
             project: None,
+            template_override: None,
         }));
 
         assert_eq!(prompts.system, "caller system");
@@ -1672,6 +1674,7 @@ mod tests {
             message: "build an agent".into(),
             history: vec![],
             project: None,
+            template_override: None,
         }));
 
         assert_eq!(

@@ -1,6 +1,6 @@
 use nenjo::Manifest;
 use nenjo::Slug;
-use nenjo::manifest::{HasManifestSlug, context_block_slug};
+use nenjo::manifest::{CommandManifest, HasManifestSlug, context_block_slug};
 use nenjo_events::ResourceType;
 use nenjo_platform::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, CouncilRecord, DomainPromptRecord,
@@ -25,6 +25,7 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         ResourceType::Project => apply_project_inline(manifest, rt, data),
         ResourceType::Council => apply_council_inline(manifest, rt, data),
         ResourceType::Ability => apply_ability_inline(manifest, rt, data),
+        ResourceType::Command => apply_command_inline(manifest, rt, data),
         ResourceType::ContextBlock => apply_context_block_inline(manifest, rt, data),
         ResourceType::McpServer => apply_mcp_server_inline(manifest, rt, data),
         ResourceType::Domain => apply_domain_inline(manifest, rt, data),
@@ -148,6 +149,21 @@ fn apply_ability_inline(
     };
 
     upsert_by_slug(&mut manifest.abilities, item);
+    debug!(%rt, "Applied inline resource payload");
+    true
+}
+
+fn apply_command_inline(
+    manifest: &mut Manifest,
+    rt: ResourceType,
+    data: &serde_json::Value,
+) -> bool {
+    let Some(record) = parse_inline_record::<CommandManifest>(data) else {
+        warn!(%rt, "Failed to deserialize inline payload, will fetch");
+        return false;
+    };
+
+    upsert_by_slug(&mut manifest.commands, record);
     debug!(%rt, "Applied inline resource payload");
     true
 }

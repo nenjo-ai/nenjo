@@ -36,6 +36,7 @@ pub struct ChatRequest {
     pub project: Option<Slug>,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<ChatDomainActivation>,
+    pub template_override: Option<String>,
     pub hook_scopes: Vec<ActiveHookScope>,
     pub hook_transcript_dir: Option<PathBuf>,
 }
@@ -50,6 +51,7 @@ impl ChatRequest {
             project: None,
             domain_session_id: None,
             domain_activation: None,
+            template_override: None,
             hook_scopes: Vec::new(),
             hook_transcript_dir: None,
         }
@@ -86,6 +88,12 @@ impl ChatRequest {
     /// Attach hooks that are active only for this chat turn.
     pub fn with_hook_scope(mut self, scope: ActiveHookScope) -> Self {
         self.hook_scopes.push(scope);
+        self
+    }
+
+    /// Replace the agent chat template for this turn.
+    pub fn with_template_override(mut self, template: impl Into<String>) -> Self {
+        self.template_override = Some(template.into());
         self
     }
 

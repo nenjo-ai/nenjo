@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, ResourceType,
-    Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, Response,
+    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
 use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
@@ -235,18 +235,6 @@ impl SecureEnvelopeCodec {
             "Dropping command after secure envelope decode failure"
         );
         DecodeCommandResult::Drop
-    }
-
-    fn manifest_inline_payload_requires_encryption(resource_type: ResourceType) -> bool {
-        matches!(
-            resource_type,
-            ResourceType::Agent
-                | ResourceType::Ability
-                | ResourceType::Domain
-                | ResourceType::ContextBlock
-                | ResourceType::Document
-                | ResourceType::Project
-        )
     }
 
     fn stream_event_requires_encryption(event: &StreamEvent) -> bool {
@@ -887,25 +875,6 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 encrypted_payload,
             } => {
                 let Some(encrypted_payload) = encrypted_payload else {
-                    if payload.is_some()
-                        && Self::manifest_inline_payload_requires_encryption(resource_type)
-                    {
-                        let command = Command::ManifestChanged {
-                            schema,
-                            resource_id,
-                            resource_type,
-                            resource,
-                            action,
-                            project,
-                            payload,
-                            encrypted_payload: None,
-                        };
-                        return Ok(self.unsecured_command_result(
-                            command,
-                            &command_label,
-                            "encrypted_payload",
-                        ));
-                    }
                     return Ok(DecodeCommandResult::Command(Box::new(
                         Command::ManifestChanged {
                             schema,
@@ -1406,8 +1375,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manifest_sensitive_inline_payload_without_encryption_drops() {
+    async fn manifest_inline_payload_without_encryption_is_kept() {
         let actor_user_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "schema": "manifest.resource.v1",
+            "data": {
+                "prompt_config": {
+                    "developer_prompt": "plaintext prompt"
+                }
+            }
+        });
         let provider = StubKeyProvider {
             user_keys: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -1417,26 +1395,40 @@ mod tests {
                 &CodecContext::for_actor(actor_user_id),
                 Command::ManifestChanged {
                     schema: "manifest.changed.v1".into(),
-                    resource_id: Uuid::new_v4(),
+                    resource_id,
                     resource_type: ResourceType::Agent,
                     resource: "demo-agent".into(),
                     action: ResourceAction::Updated,
                     project: None,
-                    payload: Some(serde_json::json!({
-                        "schema": "manifest.resource.v1",
-                        "data": {
-                            "prompt_config": {
-                                "developer_prompt": "plaintext prompt"
-                            }
-                        }
-                    })),
+                    payload: Some(payload.clone()),
                     encrypted_payload: None,
                 },
             )
             .await
-            .expect("decode should classify plaintext manifest inline payload");
+            .expect("decode should keep plaintext manifest inline payload");
 
-        assert!(matches!(result, DecodeCommandResult::Drop));
+        match result {
+            DecodeCommandResult::Command(command) => match *command {
+                Command::ManifestChanged {
+                    resource_id: decoded_resource_id,
+                    resource_type,
+                    resource,
+                    action,
+                    payload: decoded_payload,
+                    encrypted_payload,
+                    ..
+                } => {
+                    assert_eq!(decoded_resource_id, resource_id);
+                    assert_eq!(resource_type, ResourceType::Agent);
+                    assert_eq!(resource, "demo-agent");
+                    assert_eq!(action, ResourceAction::Updated);
+                    assert_eq!(decoded_payload, Some(payload));
+                    assert!(encrypted_payload.is_none());
+                }
+                other => panic!("unexpected decoded command payload: {other:?}"),
+            },
+            other => panic!("unexpected decoded command result: {other:?}"),
+        }
     }
 
     #[tokio::test]

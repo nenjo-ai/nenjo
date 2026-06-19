@@ -839,13 +839,9 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Command => {
-            let root_path = command_root_path(object, defaults.source_path);
-            object
-                .entry("root_path")
-                .or_insert_with(|| Value::String(root_path.clone()));
-            object
-                .entry("entry_path")
-                .or_insert_with(|| Value::String("command.md".to_string()));
+            let (root_path, entry_path) = command_content_paths(object, defaults.source_path);
+            object.insert("root_path".to_string(), Value::String(root_path.clone()));
+            object.insert("entry_path".to_string(), Value::String(entry_path));
             let root_dir = skill_root_dir(object, defaults.package_root, &root_path);
             object.insert(
                 "root_dir".to_string(),
@@ -967,6 +963,35 @@ fn command_root_path(object: &serde_json::Map<String, Value>, source_path: &str)
                 .map(|(dir, _)| dir.to_string())
                 .unwrap_or_else(|| ".".to_string())
         })
+}
+
+fn command_content_paths(
+    object: &serde_json::Map<String, Value>,
+    source_path: &str,
+) -> (String, String) {
+    if let Some(content_path) = object
+        .get("content_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        let content_path = content_path
+            .trim()
+            .trim_start_matches("./")
+            .trim_end_matches('/');
+        if let Some((root_path, entry_path)) = content_path.rsplit_once('/') {
+            return (root_path.to_string(), entry_path.to_string());
+        }
+        return (String::new(), content_path.to_string());
+    }
+
+    let root_path = command_root_path(object, source_path);
+    let entry_path = object
+        .get("entry_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("command.md")
+        .to_string();
+    (root_path, entry_path)
 }
 
 fn skill_root_dir(
@@ -1262,8 +1287,8 @@ mod tests {
     use crate::tools::SecurityPolicy;
     use nenjo::hooks::{HookEvent, HookRuntime, HookRuntimeEvent};
     use nenjo::manifest::{
-        AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, McpServerManifest,
-        SkillManifest,
+        AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, DomainManifest,
+        McpServerManifest, SkillManifest,
     };
     use nenjo::skills::SkillProvider;
     use nenjo_models::ChatMessage;
@@ -1443,6 +1468,36 @@ mod tests {
         );
         assert!(skill.read_only);
         assert_eq!(skill.source_type, "package");
+    }
+
+    #[test]
+    fn package_defaults_create_command_runtime_paths_from_content_path() {
+        let value = with_package_defaults(
+            serde_json::json!({
+                "name": "design",
+                "command": "/design",
+                "content_path": "nenjo/nenji/commands/design/command.md"
+            }),
+            PackageDefaults {
+                id: uuid::Uuid::nil(),
+                package_name: "@nenjo/nenji",
+                package_version: "0.1.0",
+                package_source: None,
+                package_root: Path::new("/package-root"),
+                module_path: "nenji/commands/design.yaml",
+                source_path: "nenjo/nenji/commands/design.yaml",
+                kind: PackageKind::Command,
+            },
+        );
+        let command: CommandManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(command.entry_path, "command.md");
+        assert_eq!(command.root_path, "nenjo/nenji/commands/design");
+        assert_eq!(
+            command.root_dir,
+            Path::new("/package-root").join("nenjo/nenji/commands/design")
+        );
+        assert!(command.read_only);
+        assert_eq!(command.source_type, "package");
     }
 
     #[test]

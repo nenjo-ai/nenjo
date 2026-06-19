@@ -326,6 +326,23 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             message: message.to_string(),
             history,
             project: None,
+            template_override: None,
+        }))
+        .await
+    }
+
+    /// Send a chat message with a caller-supplied chat template override.
+    pub async fn chat_with_history_template_stream(
+        &self,
+        message: &str,
+        history: Vec<ChatMessage>,
+        template_override: impl Into<String>,
+    ) -> Result<ExecutionHandle> {
+        self.run_stream(AgentRun::chat(ChatInput {
+            message: message.to_string(),
+            history,
+            project: None,
+            template_override: Some(template_override.into()),
         }))
         .await
     }

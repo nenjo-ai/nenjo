@@ -4,10 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nenjo::commands::{
-    LoadedCommand, find_command_manifest, find_invoked_command_manifest,
-    render_command_invocation as render_loaded_command_invocation,
-};
+use nenjo::commands::{LoadedCommand, find_command_manifest, find_invoked_command_manifest};
 use nenjo::hooks::{ActiveHookScope, ResolvedHook};
 use nenjo::manifest::CommandManifest;
 use nenjo_sessions::{
@@ -48,6 +45,7 @@ pub struct ChatCommandRequest<'a> {
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
+    pub template_override: Option<String>,
     pub hook_scopes: Vec<ActiveHookScope>,
 }
 
@@ -200,16 +198,27 @@ where
         session_id,
         domain_session_id,
         domain_activation,
+        template_override,
         hook_scopes,
     } = request;
 
-    let rendered_command = render_matching_command_invocation(harness, content).await?;
-    let content = rendered_command
+    let command_template = if template_override.is_none() {
+        load_matching_command_template(harness, content).await?
+    } else {
+        None
+    };
+    let template_override = template_override.or_else(|| {
+        command_template
+            .as_ref()
+            .map(|template| template.content.clone())
+    });
+    let effective_content = command_template
         .as_ref()
-        .map(|rendered| rendered.content.as_str())
+        .map(|template| template.user_content.as_str())
         .unwrap_or(content);
 
     if target_type == Some("council") {
+        let content = template_override.as_deref().unwrap_or(content);
         return handle_council_chat(
             harness,
             ctx,
@@ -233,8 +242,11 @@ where
     let manifest = harness.provider().manifest_snapshot();
     let resolver = PlatformResourceResolver::new(&manifest);
     let agent_id = resolver.agent_id(&agent_slug)?;
-    let mut chat =
-        ChatRequest::new(agent_slug.clone(), content.to_string()).with_session(session_id);
+    let mut chat = ChatRequest::new(agent_slug.clone(), effective_content.to_string())
+        .with_session(session_id);
+    if let Some(template_override) = template_override {
+        chat = chat.with_template_override(template_override);
+    }
     chat = chat.with_hook_transcript_dir(
         ctx.state_dir
             .join("sessions")
@@ -254,10 +266,10 @@ where
         );
     }
     let mut hook_scopes = hook_scopes;
-    if let Some(rendered) = rendered_command
-        && !rendered.hooks.is_empty()
+    if let Some(template) = command_template
+        && !template.hooks.is_empty()
     {
-        hook_scopes.push(ActiveHookScope::command(&rendered.command, rendered.hooks));
+        hook_scopes.push(ActiveHookScope::command(&template.command, template.hooks));
     }
     for scope in hook_scopes {
         chat = chat.with_hook_scope(scope);
@@ -360,14 +372,15 @@ where
         vec![ActiveHookScope::command(command_manifest, resolved_hooks)]
     };
     let content =
-        render_command_invocation(command_manifest, request.command, request.content).await?;
+        load_command_chat_template(command_manifest, request.command, request.content).await?;
+    let user_content = command_arguments(request.command, request.content).to_string();
 
     handle_chat_adapter(
         harness,
         ctx,
         ChatCommandRequest {
             message_id: request.message_id,
-            content: &content,
+            content: &user_content,
             project: request.project,
             agent: request.agent,
             target_type: request.target_type,
@@ -375,22 +388,24 @@ where
             session_id: request.session_id,
             domain_session_id: request.domain_session_id,
             domain_activation: request.domain_activation,
+            template_override: Some(content),
             hook_scopes,
         },
     )
     .await
 }
 
-struct RenderedCommandInvocation {
+struct CommandTemplateOverride {
     content: String,
+    user_content: String,
     command: CommandManifest,
     hooks: Vec<ResolvedHook>,
 }
 
-async fn render_matching_command_invocation<P, SessionRt>(
+async fn load_matching_command_template<P, SessionRt>(
     harness: &Harness<P, SessionRt>,
     content: &str,
-) -> Result<Option<RenderedCommandInvocation>>
+) -> Result<Option<CommandTemplateOverride>>
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
@@ -400,20 +415,43 @@ where
     let Some(command) = find_invoked_command_manifest(&manifest.commands, content) else {
         return Ok(None);
     };
-    Ok(Some(RenderedCommandInvocation {
-        content: render_command_invocation(command, &command.command, content).await?,
+    Ok(Some(CommandTemplateOverride {
+        content: load_command_chat_template(command, &command.command, content).await?,
+        user_content: command_arguments(&command.command, content).to_string(),
         command: command.clone(),
         hooks: provider.resolve_hooks_for_command(command),
     }))
 }
 
-async fn render_command_invocation(
+async fn load_command_chat_template(
     command: &CommandManifest,
     requested_command: &str,
     user_content: &str,
 ) -> Result<String> {
+    let loaded = load_command(command).await?;
+    Ok(command_chat_template(
+        command,
+        requested_command,
+        user_content,
+        &loaded,
+    ))
+}
+
+async fn load_command(command: &CommandManifest) -> Result<LoadedCommand> {
+    if !command.content.trim().is_empty() {
+        return Ok(LoadedCommand {
+            markdown: command.content.clone(),
+            source_file: command.entry_path.clone(),
+            command_dir: command.path.clone(),
+            plugin_root: command
+                .plugin_root_path
+                .clone()
+                .unwrap_or_else(|| command.path.clone()),
+        });
+    }
+
     let entry_file = command_entry_file(command)?;
-    let command_markdown = tokio::fs::read_to_string(&entry_file)
+    let markdown = tokio::fs::read_to_string(&entry_file)
         .await
         .with_context(|| format!("Failed to read command file {}", entry_file.display()))?;
     let plugin_root = command
@@ -421,17 +459,48 @@ async fn render_command_invocation(
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| command.root_dir.display().to_string());
-    Ok(render_loaded_command_invocation(
-        command,
-        requested_command,
-        user_content,
-        &LoadedCommand {
-            markdown: command_markdown,
-            source_file: entry_file.display().to_string(),
-            command_dir: command.root_dir.display().to_string(),
-            plugin_root,
-        },
-    ))
+    Ok(LoadedCommand {
+        markdown,
+        source_file: entry_file.display().to_string(),
+        command_dir: command.root_dir.display().to_string(),
+        plugin_root,
+    })
+}
+
+fn command_chat_template(
+    command: &CommandManifest,
+    requested_command: &str,
+    user_content: &str,
+    loaded: &LoadedCommand,
+) -> String {
+    let markdown = if command.source_type == "package" {
+        strip_markdown_frontmatter(&loaded.markdown).unwrap_or(loaded.markdown.as_str())
+    } else {
+        loaded.markdown.as_str()
+    };
+    markdown.replace(
+        "$ARGUMENTS",
+        command_arguments(requested_command, user_content),
+    )
+}
+
+fn strip_markdown_frontmatter(markdown: &str) -> Option<&str> {
+    let rest = markdown.strip_prefix("---")?;
+    let (_frontmatter, body) = rest.split_once("\n---")?;
+    Some(body.trim_start_matches(['\r', '\n']))
+}
+
+fn command_arguments<'a>(requested_command: &str, user_content: &'a str) -> &'a str {
+    let trimmed = user_content.trim();
+    let command = requested_command.trim();
+    let Some(rest) = trimmed.strip_prefix(command) else {
+        return trimmed;
+    };
+    match rest.chars().next() {
+        None => "",
+        Some(ch) if ch.is_whitespace() => rest.trim(),
+        Some(_) => trimmed,
+    }
 }
 
 fn command_entry_file(command: &CommandManifest) -> Result<PathBuf> {
@@ -690,6 +759,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn package_command_template_strips_frontmatter_and_expands_arguments() {
+        let command = CommandManifest {
+            name: "ralph-loop".to_string(),
+            path: "plugins/ralph_loop".to_string(),
+            command: "/ralph-loop".to_string(),
+            display_name: Some("Ralph Loop".to_string()),
+            description: None,
+            entry_path: "command.md".to_string(),
+            content: String::new(),
+            root_path: "commands/ralph-loop".to_string(),
+            root_dir: PathBuf::from("/tmp/commands"),
+            plugin_root_path: Some(".".to_string()),
+            plugin_root_dir: Some(PathBuf::from("/tmp/plugin")),
+            hooks: Vec::new(),
+            source_type: "package".to_string(),
+            read_only: true,
+            metadata: Value::Null,
+        };
+        let loaded = LoadedCommand {
+            markdown: "---\nargument-hint: TASK\n---\nUse $ARGUMENTS with {{ chat.message }}."
+                .to_string(),
+            source_file: "commands/ralph-loop.md".to_string(),
+            command_dir: "/tmp/commands".to_string(),
+            plugin_root: "/tmp/plugin".to_string(),
+        };
+
+        let template = command_chat_template(
+            &command,
+            "/ralph-loop",
+            "/ralph-loop copy the demo repo",
+            &loaded,
+        );
+
+        assert_eq!(template, "Use copy the demo repo with {{ chat.message }}.");
+    }
+
+    #[test]
+    fn native_command_template_keeps_content_unmodified_except_arguments() {
+        let command = CommandManifest {
+            name: "design".to_string(),
+            path: String::new(),
+            command: "/design".to_string(),
+            display_name: None,
+            description: None,
+            entry_path: "command.md".to_string(),
+            content: String::new(),
+            root_path: String::new(),
+            root_dir: PathBuf::new(),
+            plugin_root_path: None,
+            plugin_root_dir: None,
+            hooks: Vec::new(),
+            source_type: "native".to_string(),
+            read_only: false,
+            metadata: Value::Null,
+        };
+        let loaded = LoadedCommand {
+            markdown:
+                "---\nnot-frontmatter-for-native\n---\nUse {{ chat.message }} and $ARGUMENTS."
+                    .to_string(),
+            source_file: "command.md".to_string(),
+            command_dir: String::new(),
+            plugin_root: String::new(),
+        };
+
+        let template = command_chat_template(&command, "/design", "/design a workflow", &loaded);
+
+        assert_eq!(
+            template,
+            "---\nnot-frontmatter-for-native\n---\nUse {{ chat.message }} and a workflow."
+        );
+    }
+
+    #[tokio::test]
+    async fn load_command_prefers_inline_content_over_runtime_file_paths() {
+        let command = CommandManifest {
+            name: "design".to_string(),
+            path: String::new(),
+            command: "/design".to_string(),
+            display_name: None,
+            description: None,
+            entry_path: "command.md".to_string(),
+            content: "Inline command body.".to_string(),
+            root_path: "commands/design".to_string(),
+            root_dir: PathBuf::from("/tmp/does-not-exist"),
+            plugin_root_path: None,
+            plugin_root_dir: None,
+            hooks: Vec::new(),
+            source_type: "package".to_string(),
+            read_only: true,
+            metadata: Value::Null,
+        };
+
+        let loaded = load_command(&command)
+            .await
+            .expect("inline content should not read from root_dir");
+
+        assert_eq!(loaded.markdown, "Inline command body.");
+        assert_eq!(loaded.source_file, "command.md");
+    }
+
     #[tokio::test]
     async fn slash_command_activates_command_hooks_and_uses_state_transcripts() {
         let temp = tempfile::tempdir().unwrap();
@@ -704,7 +874,14 @@ mod tests {
         tokio::fs::create_dir_all(&hooks_dir).await.unwrap();
         tokio::fs::write(
             command_dir.join("command.md"),
-            "Use Ralph's loop discipline and keep iterating until the request is complete.",
+            r#"---
+description: Run the Ralph loop workflow.
+argument-hint: TASK
+---
+
+Use Ralph's loop discipline for $ARGUMENTS.
+Original user message: {{ chat.message }}
+"#,
         )
         .await
         .unwrap();
@@ -807,22 +984,29 @@ mod tests {
         let rendered_user_message = messages
             .iter()
             .find(|message| {
-                message.role == "user"
-                    && message
-                        .content
-                        .contains("Installed slash command invocation")
+                message.role == "user" && message.content.contains("Use Ralph's loop discipline")
             })
             .expect("rendered command should be sent as the user message");
         assert!(
             rendered_user_message
                 .content
-                .contains("Command: /ralph-loop")
+                .contains("for copy the demo repo.")
         );
-        assert!(rendered_user_message.content.contains("copy the demo repo"));
         assert!(
             rendered_user_message
                 .content
-                .contains("BEGIN COMMAND MARKDOWN")
+                .contains("Original user message: copy the demo repo")
+        );
+        assert!(
+            !rendered_user_message
+                .content
+                .contains("Original user message: /ralph-loop")
+        );
+        assert!(!rendered_user_message.content.contains("argument-hint"));
+        assert!(
+            !rendered_user_message
+                .content
+                .contains("Installed slash command invocation")
         );
     }
 
@@ -964,6 +1148,7 @@ mod tests {
                     session_id,
                     domain_session_id: None,
                     domain_activation: None,
+                    template_override: None,
                     hook_scopes: Vec::new(),
                 },
             )
@@ -1197,6 +1382,7 @@ mod tests {
                     session_id,
                     domain_session_id: None,
                     domain_activation: None,
+                    template_override: None,
                     hook_scopes: Vec::new(),
                 },
             )
@@ -1365,6 +1551,7 @@ mod tests {
                     session_id,
                     domain_session_id: None,
                     domain_activation: None,
+                    template_override: None,
                     hook_scopes: Vec::new(),
                 },
             )
@@ -1564,6 +1751,7 @@ mod tests {
                     session_id,
                     domain_session_id: None,
                     domain_activation: None,
+                    template_override: None,
                     hook_scopes: Vec::new(),
                 },
             )
@@ -1734,6 +1922,7 @@ mod tests {
                     session_id: Uuid::new_v4(),
                     domain_session_id: None,
                     domain_activation: None,
+                    template_override: None,
                     hook_scopes: Vec::new(),
                 },
             )
@@ -1888,7 +2077,7 @@ mod tests {
 
         let transcript_path = hook_transcript_dir.join(format!("{session_id}.jsonl"));
         let transcript = tokio::fs::read_to_string(&transcript_path).await.unwrap();
-        assert!(transcript.contains("Installed slash command invocation"));
+        assert!(transcript.contains("Use the submitted task."));
 
         let requests = model_requests.lock().unwrap();
         let messages = requests.first().expect("model should be called");
@@ -2184,10 +2373,12 @@ mod tests {
             }],
             commands: vec![CommandManifest {
                 name: "ralph-loop".to_string(),
+                path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("Ralph Loop".to_string()),
                 description: None,
                 entry_path: "command.md".to_string(),
+                content: String::new(),
                 root_path: "commands/ralph-loop".to_string(),
                 root_dir: command_dir.to_path_buf(),
                 plugin_root_path: Some(".".to_string()),
@@ -2582,7 +2773,7 @@ case "$transcript_path" in
     ;;
 esac
 case "$prompt" in
-  *"Installed slash command invocation"*) ;;
+  *"Use the submitted task."*) ;;
   *)
     echo "unexpected prompt: $prompt" >&2
     exit 1

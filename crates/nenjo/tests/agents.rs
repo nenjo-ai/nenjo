@@ -344,6 +344,7 @@ async fn instance_builds_prompts() {
         message: "Hello!".into(),
         history: vec![],
         project: None,
+        template_override: None,
     });
 
     let prompts = runner.instance().build_prompts(&task);
@@ -435,6 +436,7 @@ async fn instance_renders_self_prompt_var() {
         message: "Hello!".into(),
         history: vec![],
         project: None,
+        template_override: None,
     });
     let prompts = runner.instance().build_prompts(&task);
 
@@ -863,6 +865,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
             message: "Deploy it".into(),
             history: vec![],
             project: None,
+            template_override: None,
         }));
     assert!(
         prompts.developer.contains("Ops mode"),

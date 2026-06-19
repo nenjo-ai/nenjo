@@ -6,9 +6,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
-    AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    HasManifestSlug, ManifestResource, ManifestResourceKind, ModelManifest, ProjectManifest,
-    RoutineManifest,
+    AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, CouncilManifest,
+    DomainManifest, HasManifestSlug, ManifestResource, ManifestResourceKind, ModelManifest,
+    ProjectManifest, RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use uuid::Uuid;
@@ -126,6 +126,12 @@ fn local_routine_from_document(routine: &RoutineDocument) -> RoutineManifest {
             .collect(),
         metadata: routine.metadata.clone(),
     }
+}
+
+fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
+    command.name == command_ref
+        || command.command == command_ref
+        || command.command.trim_start_matches('/') == command_ref
 }
 
 #[async_trait]
@@ -829,6 +835,132 @@ where
 
         Ok(AbilityConfigureResult {
             ability: ability_document,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl<L, E> CommandManifestBackend for PlatformManifestBackend<L, E>
+where
+    L: ManifestReader + ManifestWriter + Send + Sync,
+    E: SensitivePayloadEncoder + Send + Sync,
+{
+    async fn list_commands(&self) -> Result<CommandsListResult> {
+        let commands = self
+            .local_store
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .map(CommandSummary::from)
+            .collect();
+        Ok(CommandsListResult { commands })
+    }
+
+    async fn get_command(&self, params: CommandsGetParams) -> Result<CommandGetResult> {
+        let command_ref = params.command;
+        let command = self
+            .local_store
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .find(|command| command_matches_ref(command, &command_ref))
+            .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?;
+
+        Ok(CommandGetResult { command })
+    }
+
+    async fn configure_command(
+        &self,
+        params: CommandConfigureParams,
+    ) -> Result<CommandConfigureResult> {
+        let existing_command = if let Some(command_ref) = params.data.command_ref.as_deref() {
+            let manifest = self.local_store.load_manifest().await?;
+            Some(
+                manifest
+                    .commands
+                    .into_iter()
+                    .find(|command| command_matches_ref(command, command_ref))
+                    .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(existing) = existing_command.as_ref()
+            && (existing.read_only || existing.source_type != "native")
+        {
+            return Err(anyhow!("package-managed commands cannot be edited locally"));
+        }
+
+        let old_slug = existing_command
+            .as_ref()
+            .map(|command| command.manifest_slug());
+        let mut data = params.data;
+        if data.command_ref.is_none() && data.content.is_none() {
+            return Err(anyhow!("content is required when creating a command"));
+        }
+        if let Some(slug) = old_slug.as_ref() {
+            data.id = Some(self.platform_object_id(PlatformResourceKind::Command, slug)?);
+        }
+
+        let submitted_content = data.content.clone();
+        if let Some(content) = data.content.as_ref() {
+            let command_object_id = match data.id {
+                Some(id) => id,
+                None => {
+                    let id = Uuid::new_v4();
+                    data.id = Some(id);
+                    id
+                }
+            };
+            let encrypted_payload = self
+                .sensitive_payload_encoder
+                .encode_payload(
+                    self.local_manifest_org_id().await?,
+                    command_object_id,
+                    SensitiveContentKind::CommandContent.encrypted_object_type(),
+                    &serde_json::json!(content),
+                )
+                .await?
+                .ok_or_else(|| anyhow!("command content encryption produced no payload"))?;
+            data.encrypted_payload = Some(encrypted_payload);
+            data.content = None;
+        }
+
+        let (configured_id, mut local_command) = self
+            .platform_client
+            .configure_command_document(&data)
+            .await?;
+        if let Some(content) = submitted_content {
+            local_command.content = content;
+        } else if let Some(existing) = existing_command {
+            local_command.content = existing.content;
+        }
+        local_command.source_type = "native".to_string();
+        local_command.read_only = false;
+
+        self.local_store
+            .upsert_resource(&ManifestResource::Command(local_command.clone()))
+            .await?;
+
+        if let Some(old_slug) = old_slug.as_ref() {
+            self.move_platform_object_id(
+                PlatformResourceKind::Command,
+                old_slug,
+                &local_command.manifest_slug(),
+            )?;
+        }
+        self.record_platform_object_id(
+            PlatformResourceKind::Command,
+            &local_command.manifest_slug(),
+            configured_id,
+        )?;
+
+        Ok(CommandConfigureResult {
+            command: local_command,
             warnings: Vec::new(),
         })
     }

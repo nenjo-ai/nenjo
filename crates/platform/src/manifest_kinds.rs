@@ -37,6 +37,8 @@ pub enum ManifestKind {
     Agent,
     /// Ability manifest resource.
     Ability,
+    /// Slash command manifest resource.
+    Command,
     /// Domain manifest resource.
     Domain,
     /// Context block manifest resource.
@@ -59,6 +61,7 @@ impl ManifestKind {
         match self {
             Self::Agent => ResourceType::Agent,
             Self::Ability => ResourceType::Ability,
+            Self::Command => ResourceType::Command,
             Self::Domain => ResourceType::Domain,
             Self::ContextBlock => ResourceType::ContextBlock,
             Self::Document => ResourceType::Document,
@@ -81,6 +84,8 @@ pub enum SensitiveContentKind {
     DomainPrompt,
     /// Context block template content.
     ContextBlockContent,
+    /// Slash command body content.
+    CommandContent,
     /// Library knowledge document body.
     DocumentContent,
     /// Project task description and acceptance criteria.
@@ -101,6 +106,7 @@ impl SensitiveContentKind {
             Self::AbilityPrompt => Some(ResourceType::Ability),
             Self::DomainPrompt => Some(ResourceType::Domain),
             Self::ContextBlockContent => Some(ResourceType::ContextBlock),
+            Self::CommandContent => Some(ResourceType::Command),
             Self::DocumentContent => Some(ResourceType::Document),
             Self::ProjectSettings => Some(ResourceType::Project),
             Self::HeartbeatInstructions => Some(ResourceType::Agent),
@@ -116,6 +122,7 @@ impl SensitiveContentKind {
             Self::AbilityPrompt => "manifest.ability.prompt",
             Self::DomainPrompt => "manifest.domain.prompt",
             Self::ContextBlockContent => "manifest.context_block.content",
+            Self::CommandContent => "manifest.command.content",
             Self::DocumentContent => "manifest.document.content",
             Self::TaskContent => "task_content",
             Self::ProjectSettings => "project.settings",
@@ -131,6 +138,7 @@ impl SensitiveContentKind {
             | Self::AbilityPrompt
             | Self::DomainPrompt
             | Self::ContextBlockContent
+            | Self::CommandContent
             | Self::DocumentContent
             | Self::TaskContent
             | Self::ProjectSettings
@@ -146,6 +154,7 @@ impl SensitiveContentKind {
             "manifest.ability.prompt" => Some(Self::AbilityPrompt),
             "manifest.domain.prompt" => Some(Self::DomainPrompt),
             "manifest.context_block.content" => Some(Self::ContextBlockContent),
+            "manifest.command.content" => Some(Self::CommandContent),
             "manifest.document.content" => Some(Self::DocumentContent),
             "task_content" => Some(Self::TaskContent),
             "project.settings" => Some(Self::ProjectSettings),
@@ -171,6 +180,7 @@ mod tests {
         for (kind, resource_type) in [
             (ManifestKind::Agent, ResourceType::Agent),
             (ManifestKind::Ability, ResourceType::Ability),
+            (ManifestKind::Command, ResourceType::Command),
             (ManifestKind::Domain, ResourceType::Domain),
             (ManifestKind::ContextBlock, ResourceType::ContextBlock),
             (ManifestKind::Document, ResourceType::Document),
@@ -197,6 +207,7 @@ mod tests {
                 SensitiveContentKind::DocumentContent,
                 ResourceType::Document,
             ),
+            (SensitiveContentKind::CommandContent, ResourceType::Command),
             (SensitiveContentKind::ProjectSettings, ResourceType::Project),
             (
                 SensitiveContentKind::HeartbeatInstructions,
@@ -216,14 +227,14 @@ mod tests {
 
     #[test]
     fn task_content_is_org_scoped_without_manifest_resource_type() {
+        let kind = SensitiveContentKind::TaskContent;
+        let object_type = "task_content";
+        assert_eq!(kind.encrypted_object_type(), object_type);
+        assert_eq!(kind.encrypted_scope(), ContentScope::Org);
+        assert_eq!(kind.resource_type(), None);
         assert_eq!(
-            SensitiveContentKind::TaskContent.encrypted_object_type(),
-            "task_content"
+            SensitiveContentKind::from_encrypted_object_type(object_type),
+            Some(kind)
         );
-        assert_eq!(
-            SensitiveContentKind::TaskContent.encrypted_scope(),
-            ContentScope::Org
-        );
-        assert_eq!(SensitiveContentKind::TaskContent.resource_type(), None);
     }
 }

@@ -23,6 +23,8 @@ const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent"];
 const AGENT_WRITE_TOOLS: &[&str] = &["configure_agent"];
 const ABILITY_READ_TOOLS: &[&str] = &["list_abilities", "get_ability"];
 const ABILITY_WRITE_TOOLS: &[&str] = &["configure_ability"];
+const COMMAND_READ_TOOLS: &[&str] = &["list_commands", "get_command"];
+const COMMAND_WRITE_TOOLS: &[&str] = &["configure_command"];
 const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain"];
 const DOMAIN_WRITE_TOOLS: &[&str] = &["configure_domain"];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
@@ -83,6 +85,11 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         ScopeResource::Abilities,
         ABILITY_READ_TOOLS,
         ABILITY_WRITE_TOOLS,
+    ),
+    (
+        ScopeResource::Commands,
+        COMMAND_READ_TOOLS,
+        COMMAND_WRITE_TOOLS,
     ),
     (
         ScopeResource::Domains,

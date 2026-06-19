@@ -18,8 +18,10 @@ use nenjo::types::GitContext;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use nenjo_events::{Command, Response};
+use nenjo_events::{Command, EncryptedPayload, Response};
+use serde_json::Value;
 
+use crate::crypto::decrypt_text_with_provider;
 use crate::event_loop::ResponseSender as EventLoopResponseSender;
 use crate::handlers::chat::{
     ChatCommandContext, ChatCommandRequest, ChatSlashCommandRequest, WorkerChatHarnessExt,
@@ -243,6 +245,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         session_id,
                         domain_session_id,
                         domain_activation,
+                        template_override: None,
                         hook_scopes: Vec::new(),
                     },
                 )
@@ -481,27 +484,63 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             project,
             payload,
             encrypted_payload,
-        } => ctx
-            .harness
-            .handle_manifest_changed(
-                &ctx.manifest_context(),
-                ManifestChangedCommand {
-                    resource_id,
-                    resource_type,
-                    resource: nenjo::Slug::parse(resource)?,
-                    action,
-                    project: project.map(nenjo::Slug::parse).transpose()?,
-                    payload,
-                    encrypted_payload,
-                },
-            )
-            .await
-            .map_err(Into::into),
+        } => {
+            let payload =
+                materialize_manifest_changed_payload(&ctx, payload, encrypted_payload.as_ref())
+                    .await?;
+            ctx.harness
+                .handle_manifest_changed(
+                    &ctx.manifest_context(),
+                    ManifestChangedCommand {
+                        resource_id,
+                        resource_type,
+                        resource: nenjo::Slug::parse(resource)?,
+                        action,
+                        project: project.map(nenjo::Slug::parse).transpose()?,
+                        payload,
+                        encrypted_payload: None,
+                    },
+                )
+                .await
+                .map_err(Into::into)
+        }
 
         Command::PackageGraphChanged { packages } => {
             handle_package_graph_changed(&ctx, packages).await
         }
     }
+}
+
+async fn materialize_manifest_changed_payload(
+    ctx: &CommandContext,
+    payload: Option<Value>,
+    encrypted_payload: Option<&EncryptedPayload>,
+) -> Result<Option<Value>> {
+    let Some(encrypted_payload) = encrypted_payload else {
+        return Ok(payload);
+    };
+
+    let plaintext = decrypt_text_with_provider(&ctx.auth_provider, encrypted_payload).await?;
+    Ok(Some(decrypted_manifest_payload_value(
+        payload,
+        encrypted_payload,
+        plaintext,
+    )))
+}
+
+fn decrypted_manifest_payload_value(
+    inline_payload: Option<Value>,
+    encrypted_payload: &EncryptedPayload,
+    plaintext: String,
+) -> Value {
+    let decrypted_payload = serde_json::from_str(&plaintext).unwrap_or(Value::String(plaintext));
+    serde_json::json!({
+        "__nenjo_decrypted_manifest_payload": true,
+        "object_type": encrypted_payload.object_type,
+        "object_id": encrypted_payload.object_id,
+        "inline_payload": inline_payload,
+        "decrypted_payload": decrypted_payload,
+    })
 }
 
 fn domain_context(ctx: &CommandContext) -> DomainCommandContext {
@@ -583,5 +622,63 @@ fn repo_context(
             workspace_dir: ctx.config.workspace_dir.clone(),
             git_locks: ctx.git_locks.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn encrypted_payload(object_id: Uuid) -> EncryptedPayload {
+        EncryptedPayload {
+            account_id: Uuid::new_v4(),
+            encryption_scope: Some("org".to_string()),
+            object_id,
+            object_type: "manifest.command.content".to_string(),
+            algorithm: "aes-256-gcm".to_string(),
+            key_version: 1,
+            nonce: "nonce".to_string(),
+            ciphertext: "ciphertext".to_string(),
+        }
+    }
+
+    #[test]
+    fn decrypted_manifest_payload_preserves_inline_metadata_and_json_string_content() {
+        let object_id = Uuid::new_v4();
+        let encrypted_payload = encrypted_payload(object_id);
+        let inline_payload = serde_json::json!({
+            "schema": "manifest.resource.v1",
+            "data": {
+                "id": object_id,
+                "name": "design",
+                "command": "/design",
+                "content": ""
+            }
+        });
+
+        let payload = decrypted_manifest_payload_value(
+            Some(inline_payload.clone()),
+            &encrypted_payload,
+            serde_json::json!("Use the design command").to_string(),
+        );
+
+        assert_eq!(payload["__nenjo_decrypted_manifest_payload"], true);
+        assert_eq!(payload["object_type"], "manifest.command.content");
+        assert_eq!(payload["object_id"], serde_json::json!(object_id));
+        assert_eq!(payload["inline_payload"], inline_payload);
+        assert_eq!(payload["decrypted_payload"], "Use the design command");
+    }
+
+    #[test]
+    fn decrypted_manifest_payload_accepts_legacy_raw_text_content() {
+        let object_id = Uuid::new_v4();
+        let encrypted_payload = encrypted_payload(object_id);
+
+        let payload =
+            decrypted_manifest_payload_value(None, &encrypted_payload, "raw command body".into());
+
+        assert!(payload["inline_payload"].is_null());
+        assert_eq!(payload["decrypted_payload"], "raw command body");
     }
 }

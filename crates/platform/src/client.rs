@@ -10,7 +10,7 @@ use crate::manifest_contract::{
 };
 use crate::manifest_mcp::{
     AbilityConfigureDocument, AbilityDocument, AgentConfigureDocument, AgentDocument,
-    ContextBlockConfigureDocument, ContextBlockDocument, CouncilDocument,
+    CommandConfigureDocument, ContextBlockConfigureDocument, ContextBlockDocument, CouncilDocument,
     CouncilMemberUpdateDocument, CouncilUpdateDocument, DomainConfigureDocument, DomainDocument,
     KnowledgeDocCreateDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
     KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
@@ -21,8 +21,16 @@ use crate::manifest_mcp::{
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
 use nenjo::manifest::{
-    CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata, RoutineTrigger,
+    CommandManifest, CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata,
+    RoutineTrigger,
 };
+
+#[derive(Debug, serde::Deserialize)]
+struct CommandConfigureResponse {
+    id: Uuid,
+    #[serde(flatten)]
+    manifest: CommandManifest,
+}
 
 /// Thin HTTP client for Nenjo platform manifest endpoints.
 #[derive(Debug, Clone)]
@@ -631,6 +639,65 @@ impl PlatformManifestClient {
                 Ok(record.to_document())
             }
             status => bail!("ability configure failed with status {status}"),
+        }
+    }
+
+    /// Configure a slash command in one backend-owned sequence and return the canonical manifest.
+    pub async fn configure_command_document(
+        &self,
+        command: &CommandConfigureDocument,
+    ) -> Result<(Uuid, CommandManifest)> {
+        if command.content.is_some() && command.encrypted_payload.is_none() {
+            bail!("command configure requires encrypted_payload for content");
+        }
+
+        let mut body = serde_json::Map::new();
+        if let Some(id) = command.id {
+            body.insert("id".to_string(), serde_json::json!(id));
+        }
+        if let Some(command_ref) = command.command_ref.as_ref() {
+            if command_ref.starts_with('/') {
+                body.insert("command".to_string(), serde_json::json!(command_ref));
+            } else {
+                body.insert("name".to_string(), serde_json::json!(command_ref));
+            }
+        }
+        if let Some(metadata) = command.metadata.as_ref() {
+            if let Some(name) = metadata.name.as_ref() {
+                body.insert("name".to_string(), serde_json::json!(name));
+            }
+            if let Some(path) = metadata.path.as_ref() {
+                body.insert("path".to_string(), serde_json::json!(path));
+            }
+            if let Some(slash_command) = metadata.command.as_ref() {
+                body.insert("command".to_string(), serde_json::json!(slash_command));
+            }
+            if let Some(description) = metadata.description.as_ref() {
+                body.insert("description".to_string(), serde_json::json!(description));
+            }
+        }
+        if let Some(encrypted_payload) = command.encrypted_payload.as_ref() {
+            body.insert("encrypted_payload".to_string(), encrypted_payload.clone());
+        }
+
+        let response = self
+            .http
+            .post(format!("{}/api/v1/chat-commands/configure", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&body)
+            .send_with_platform_retry()
+            .await
+            .context("failed to configure command")?;
+
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => {
+                let record = response
+                    .json::<CommandConfigureResponse>()
+                    .await
+                    .context("failed to decode configured command")?;
+                Ok((record.id, record.manifest))
+            }
+            status => bail!("command configure failed with status {status}"),
         }
     }
 

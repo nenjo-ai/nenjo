@@ -20,7 +20,8 @@ use crate::crypto::decrypt_text_with_provider;
 use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
-    ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader, ManifestResourceKind,
+    CommandManifest, ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader,
+    ManifestResourceKind,
 };
 use nenjo_events::{Capability, EncryptedPayload, ResourceType};
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
@@ -56,7 +57,7 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     mcp_servers: Vec<nenjo::manifest::McpServerManifest>,
     #[serde(default)]
-    commands: Vec<nenjo::manifest::CommandManifest>,
+    commands: Vec<BootstrapCommandManifest>,
     #[serde(default)]
     hooks: Vec<nenjo::manifest::HookManifest>,
     #[serde(default)]
@@ -258,6 +259,15 @@ struct BootstrapContextBlockManifest {
     description: Option<String>,
     #[serde(default)]
     template: String,
+    #[serde(default)]
+    encrypted_payload: Option<EncryptedPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapCommandManifest {
+    id: Uuid,
+    #[serde(flatten)]
+    manifest: CommandManifest,
     #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
 }
@@ -595,6 +605,19 @@ async fn hydrate_bootstrap_manifest(
         context_blocks.push(context_block);
     }
 
+    let mut commands = Vec::with_capacity(bootstrap.commands.len());
+    for command in bootstrap.commands {
+        let content = resolve_bootstrap_command_content(&command, state_dir).await?;
+        let mut manifest = command.manifest;
+        manifest.content = content;
+        resource_ids.insert(
+            PlatformResourceKind::Command,
+            &manifest.manifest_slug(),
+            command.id,
+        );
+        commands.push(manifest);
+    }
+
     let mut projects = Vec::with_capacity(bootstrap.projects.len());
     for project in bootstrap.projects {
         let settings = resolve_bootstrap_project_settings(&project, state_dir).await?;
@@ -631,7 +654,7 @@ async fn hydrate_bootstrap_manifest(
             abilities,
             context_blocks,
             skills: Vec::new(),
-            commands: bootstrap.commands,
+            commands,
             hooks: bootstrap.hooks,
             script_tools: bootstrap.script_tools,
             knowledge_packs: Vec::new(),
@@ -769,13 +792,14 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
     }
 
     check_section!("routines", Vec<BootstrapRoutineManifest>);
-    check_section!("models", Vec<nenjo::manifest::ModelManifest>);
+    check_section!("models", Vec<BootstrapModelManifest>);
     check_section!("media_providers", Vec<MediaProviderConfig>);
     check_section!("agents", Vec<BootstrapAgentManifest>);
     check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
     check_section!("domains", Vec<BootstrapDomainManifest>);
-    check_section!("projects", Vec<nenjo::manifest::ProjectManifest>);
+    check_section!("projects", Vec<BootstrapProjectManifest>);
     check_section!("mcp_servers", Vec<nenjo::manifest::McpServerManifest>);
+    check_section!("commands", Vec<BootstrapCommandManifest>);
     check_section!("abilities", Vec<BootstrapAbilityManifest>);
     check_section!("context_blocks", Vec<BootstrapContextBlockManifest>);
 }
@@ -852,6 +876,9 @@ impl WorkerManifestCache {
             }
             ResourceType::Ability => {
                 sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)
+            }
+            ResourceType::Command => {
+                atomic_write_json(manifests_dir, "commands.json", &manifest.commands)
             }
             ResourceType::ContextBlock => sync_tree(
                 &manifests_dir.join("context_blocks"),
@@ -1259,6 +1286,51 @@ async fn decrypt_context_block_template_payload(
             block_id
         )
     })
+}
+
+async fn resolve_bootstrap_command_content(
+    command: &BootstrapCommandManifest,
+    state_dir: &Path,
+) -> Result<String> {
+    let Some(payload) = command.encrypted_payload.as_ref() else {
+        return Ok(command.manifest.content.clone());
+    };
+
+    decrypt_command_content_payload(payload, state_dir, command.id).await
+}
+
+async fn decrypt_command_content_payload(
+    payload: &EncryptedPayload,
+    state_dir: &Path,
+    command_id: Uuid,
+) -> Result<String> {
+    if payload.object_type != SensitiveContentKind::CommandContent.encrypted_object_type() {
+        anyhow::bail!(
+            "Unsupported encrypted bootstrap payload type '{}' for command {}",
+            payload.object_type,
+            command_id
+        );
+    }
+
+    if payload.object_id != command_id {
+        anyhow::bail!(
+            "Encrypted bootstrap command content object_id {} did not match command {}",
+            payload.object_id,
+            command_id
+        );
+    }
+
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for bootstrap command decrypt")?;
+    let plaintext = decrypt_text_with_provider(&auth_provider, payload)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to decrypt bootstrap command content payload for command {}",
+                command_id
+            )
+        })?;
+    Ok(serde_json::from_str::<String>(&plaintext).unwrap_or(plaintext))
 }
 
 async fn resolve_bootstrap_project_settings(

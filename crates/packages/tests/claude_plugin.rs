@@ -62,6 +62,10 @@ fn adapts_claude_plugin_fixture_to_native_resources() {
         command_resource.manifest.manifest["name"],
         "ralph_loop__ralph_loop"
     );
+    assert_eq!(
+        command_resource.manifest.manifest["path"],
+        "plugins/ralph_loop"
+    );
     assert_eq!(command_resource.manifest.manifest["command"], "/ralph-loop");
     assert_eq!(
         command_resource.manifest.manifest["hooks"],

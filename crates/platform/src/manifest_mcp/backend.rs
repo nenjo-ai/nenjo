@@ -3,10 +3,10 @@ use async_trait::async_trait;
 
 use super::params::{
     AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
-    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
-    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
-    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
-    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    CommandConfigureParams, CommandsGetParams, ContextBlockConfigureParams, ContextBlocksGetParams,
+    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
+    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams,
+    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
     KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
     ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
     ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutineDeleteParams,
@@ -14,12 +14,12 @@ use super::params::{
 };
 use super::results::{
     AbilitiesListResult, AbilityConfigureResult, AbilityGetResult, AgentConfigureResult,
-    AgentGetResult, AgentsListResult, ContextBlockConfigureResult, ContextBlockGetResult,
-    ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
-    DeleteResult, DomainConfigureResult, DomainGetResult, DomainsListResult,
-    KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
-    ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
-    RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
+    AgentGetResult, AgentsListResult, CommandConfigureResult, CommandGetResult, CommandsListResult,
+    ContextBlockConfigureResult, ContextBlockGetResult, ContextBlocksListResult, CouncilGetResult,
+    CouncilMutationResult, CouncilsListResult, DeleteResult, DomainConfigureResult,
+    DomainGetResult, DomainsListResult, KnowledgeDocMutationResult, KnowledgePackMutationResult,
+    ModelGetResult, ModelMutationResult, ModelsListResult, ProjectGetResult, ProjectMutationResult,
+    ProjectsListResult, RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
 };
 
 #[async_trait]
@@ -45,6 +45,20 @@ pub trait AbilityManifestBackend: Send + Sync {
         &self,
         params: AbilityConfigureParams,
     ) -> Result<AbilityConfigureResult>;
+}
+
+#[async_trait]
+/// Backend operations for command manifest resources.
+pub trait CommandManifestBackend: Send + Sync {
+    /// List visible slash commands.
+    async fn list_commands(&self) -> Result<CommandsListResult>;
+    /// Fetch one slash command by name or slash command.
+    async fn get_command(&self, params: CommandsGetParams) -> Result<CommandGetResult>;
+    /// Create or update a slash command in one backend-owned sequence.
+    async fn configure_command(
+        &self,
+        params: CommandConfigureParams,
+    ) -> Result<CommandConfigureResult>;
 }
 
 #[async_trait]
@@ -189,6 +203,7 @@ pub trait ContextBlockManifestBackend: Send + Sync {
 pub trait ManifestMcpBackend:
     AgentManifestBackend
     + AbilityManifestBackend
+    + CommandManifestBackend
     + DomainManifestBackend
     + ProjectManifestBackend
     + LibraryManifestBackend
@@ -204,6 +219,7 @@ pub trait ManifestMcpBackend:
 impl<T> ManifestMcpBackend for T where
     T: AgentManifestBackend
         + AbilityManifestBackend
+        + CommandManifestBackend
         + DomainManifestBackend
         + ProjectManifestBackend
         + LibraryManifestBackend

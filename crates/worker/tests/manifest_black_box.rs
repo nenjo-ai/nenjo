@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
-    AbilityManifest, AbilityPromptConfig, AgentManifest, ContextBlockManifest,
+    AbilityManifest, AbilityPromptConfig, AgentManifest, CommandManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig, Manifest,
     McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
     RoutineTrigger,
@@ -264,6 +264,26 @@ fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     }
 }
 
+fn command(_id: Uuid, name: &str, content: &str) -> CommandManifest {
+    CommandManifest {
+        name: name.into(),
+        path: String::new(),
+        command: format!("/{name}"),
+        display_name: None,
+        description: None,
+        entry_path: "command.md".into(),
+        content: content.into(),
+        root_path: String::new(),
+        root_dir: std::path::PathBuf::new(),
+        plugin_root_path: None,
+        plugin_root_dir: None,
+        hooks: Vec::new(),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
+    }
+}
+
 fn context_block(_id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     ContextBlockManifest {
         name: name.into(),
@@ -466,6 +486,28 @@ fn ability_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Val
     }))
 }
 
+fn command_inline_payload(id: Uuid, slug: &str, content: &str) -> serde_json::Value {
+    wrap_inline_payload(serde_json::json!({
+        "id": id,
+        "org_id": inline_org_id(),
+        "name": slug,
+        "path": "",
+        "command": format!("/{slug}"),
+        "description": null,
+        "content": content,
+        "encrypted_payload": null,
+        "entry_path": "command.md",
+        "root_path": "",
+        "plugin_root_path": null,
+        "hooks": [],
+        "source_type": "native",
+        "read_only": false,
+        "metadata": {},
+        "created_at": INLINE_TS,
+        "updated_at": INLINE_TS,
+    }))
+}
+
 fn context_block_inline_payload(id: Uuid, slug: &str, template: &str) -> serde_json::Value {
     wrap_inline_payload(serde_json::json!({
         "id": id,
@@ -554,6 +596,10 @@ async fn manifest_inline_upserts_each_provider_resource() {
             ability_inline_payload(id, "ability", "ability prompt"),
         ),
         (
+            ResourceType::Command,
+            command_inline_payload(id, "command", "command content"),
+        ),
+        (
             ResourceType::ContextBlock,
             context_block_inline_payload(id, "context", "template"),
         ),
@@ -572,6 +618,7 @@ async fn manifest_inline_upserts_each_provider_resource() {
             ResourceType::Project => "project",
             ResourceType::Council => "council",
             ResourceType::Ability => "ability",
+            ResourceType::Command => "command",
             ResourceType::ContextBlock => "context",
             ResourceType::McpServer => "mcp",
             ResourceType::Domain => "domain",
@@ -625,6 +672,15 @@ async fn manifest_inline_upserts_each_provider_resource() {
                     .find(|item| Slug::derive(&item.name) == resource)
                     .unwrap();
                 assert_eq!(item.prompt_config.developer_prompt, "ability prompt");
+            }
+            ResourceType::Command => {
+                let item = manifest
+                    .commands
+                    .iter()
+                    .find(|item| item.name == "command")
+                    .unwrap();
+                assert_eq!(item.command, "/command");
+                assert_eq!(item.content, "command content");
             }
             ResourceType::ContextBlock => {
                 let item = manifest
@@ -710,6 +766,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         (ResourceType::Project, Uuid::new_v4()),
         (ResourceType::Council, Uuid::new_v4()),
         (ResourceType::Ability, Uuid::new_v4()),
+        (ResourceType::Command, Uuid::new_v4()),
         (ResourceType::ContextBlock, Uuid::new_v4()),
         (ResourceType::McpServer, Uuid::new_v4()),
         (ResourceType::Domain, Uuid::new_v4()),
@@ -721,9 +778,10 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
         projects: vec![project(ids[3].1, "project")],
         councils: vec![council(ids[4].1, "council")],
         abilities: vec![ability(ids[5].1, "ability", "prompt")],
-        context_blocks: vec![context_block(ids[6].1, "context", "template")],
-        mcp_servers: vec![mcp_server(ids[7].1, "mcp")],
-        domains: vec![domain(ids[8].1, "domain", "prompt")],
+        commands: vec![command(ids[6].1, "command", "content")],
+        context_blocks: vec![context_block(ids[7].1, "context", "template")],
+        mcp_servers: vec![mcp_server(ids[8].1, "mcp")],
+        domains: vec![domain(ids[9].1, "domain", "prompt")],
         ..Default::default()
     };
 
@@ -735,6 +793,7 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             ResourceType::Project => Slug::derive("project"),
             ResourceType::Council => Slug::derive("council"),
             ResourceType::Ability => Slug::derive("ability"),
+            ResourceType::Command => Slug::derive("command"),
             ResourceType::ContextBlock => Slug::derive("context"),
             ResourceType::McpServer => Slug::derive("mcp"),
             ResourceType::Domain => Slug::derive("domain"),
@@ -787,6 +846,9 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                         .iter()
                         .any(|item| Slug::derive(&item.name) == resource)
                 )
+            }
+            ResourceType::Command => {
+                assert!(!manifest.commands.iter().any(|item| item.name == "command"))
             }
             ResourceType::ContextBlock => {
                 assert!(

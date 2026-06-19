@@ -6,10 +6,10 @@ use nenjo::ToolSpec;
 use super::backend::ManifestMcpBackend;
 use super::params::{
     AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
-    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
-    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
-    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
-    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    CommandConfigureParams, CommandsGetParams, ContextBlockConfigureParams, ContextBlocksGetParams,
+    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
+    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams,
+    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
     KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
     ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
     ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutinesGetParams,
@@ -65,6 +65,23 @@ impl ManifestMcpContract {
             "configure_ability" => {
                 let args: AbilityConfigureParams = serde_json::from_value(params)?;
                 to_json(backend.configure_ability(args).await?)
+            }
+            "list_commands" => {
+                if !params.is_null() {
+                    let object = params.as_object().cloned().unwrap_or_default();
+                    if !object.is_empty() {
+                        return Err(anyhow!("list_commands does not accept parameters"));
+                    }
+                }
+                to_json(backend.list_commands().await?)
+            }
+            "get_command" => {
+                let args: CommandsGetParams = serde_json::from_value(params)?;
+                to_json(backend.get_command(args).await?)
+            }
+            "configure_command" => {
+                let args: CommandConfigureParams = serde_json::from_value(params)?;
+                to_json(backend.configure_command(args).await?)
             }
             "list_domains" => {
                 if !params.is_null() {

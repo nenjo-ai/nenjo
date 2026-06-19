@@ -484,6 +484,7 @@ pub fn claude_command_resource_manifest(
         imports: BTreeMap::new(),
         manifest: json!({
             "name": internal_name,
+            "path": format!("plugins/{}", plugin.slug.replace('-', "_")),
             "display_name": format!("{}:{}", plugin.slug, command.slug),
             "command": command.command,
             "description": command.description,
@@ -1185,6 +1186,7 @@ Run scripts/ralph-loop.sh.
         assert_eq!(command.name, "ralph-loop");
         assert_eq!(manifest.schema, "nenjo.command.v1");
         assert_eq!(manifest.manifest["name"], "ralph_loop__ralph_loop");
+        assert_eq!(manifest.manifest["path"], "plugins/ralph_loop");
         assert_eq!(manifest.manifest["command"], "/ralph-loop");
         assert_eq!(manifest.manifest["entry_path"], "ralph-loop.md");
         assert_eq!(manifest.manifest["root_path"], "commands");

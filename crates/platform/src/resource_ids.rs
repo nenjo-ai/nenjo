@@ -20,6 +20,7 @@ pub enum PlatformResourceKind {
     Model,
     Council,
     McpServer,
+    Command,
 }
 
 impl PlatformResourceKind {
@@ -34,6 +35,7 @@ impl PlatformResourceKind {
             Self::Model => "model",
             Self::Council => "council",
             Self::McpServer => "mcp_server",
+            Self::Command => "command",
         }
     }
 }

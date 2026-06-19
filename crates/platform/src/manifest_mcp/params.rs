@@ -3,12 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    AbilityConfigureDocument, AgentConfigureDocument, ContextBlockConfigureDocument,
-    CouncilCreateDocument, CouncilCreateMemberDocument, CouncilMemberUpdateDocument,
-    CouncilUpdateDocument, DomainConfigureDocument, KnowledgeDocCreateDocument,
-    KnowledgeDocUpdateDocument, KnowledgePackCreateDocument, KnowledgePackUpdateDocument,
-    ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument, ProjectUpdateDocument,
-    RoutineConfigureDocument,
+    AbilityConfigureDocument, AgentConfigureDocument, CommandConfigureDocument,
+    ContextBlockConfigureDocument, CouncilCreateDocument, CouncilCreateMemberDocument,
+    CouncilMemberUpdateDocument, CouncilUpdateDocument, DomainConfigureDocument,
+    KnowledgeDocCreateDocument, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
+    KnowledgePackUpdateDocument, ModelCreateDocument, ModelUpdateDocument, ProjectCreateDocument,
+    ProjectUpdateDocument, RoutineConfigureDocument,
 };
 use nenjo::Slug;
 
@@ -36,6 +36,19 @@ pub struct AbilitiesGetParams {
 pub struct AbilityConfigureParams {
     #[serde(flatten)]
     pub data: AbilityConfigureDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Parameters for `get_command`.
+pub struct CommandsGetParams {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Parameters for `configure_command`.
+pub struct CommandConfigureParams {
+    #[serde(flatten)]
+    pub data: CommandConfigureDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
