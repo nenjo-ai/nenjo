@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use nenjo_platform::{SensitiveContentKind, SensitivePayloadEncoder};
+use nenjo_platform::{
+    ContentScope as PlatformContentScope, SensitiveContentKind, SensitivePayloadEncoder,
+};
 
 use crate::crypto::ContentScope;
 use crate::crypto::WorkerAuthProvider;
@@ -42,16 +44,24 @@ impl SensitivePayloadEncoder for PlatformPayloadEncoder {
         payload: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>> {
         let scope = payload_scope_for_object_type(object_type);
-        let encrypted_payload = encrypt_text_with_provider(
-            &self.auth_provider,
-            scope,
-            account_id,
-            object_id,
-            object_type,
-            &serde_json::to_string(payload)?,
-        )
-        .await?;
-        Ok(Some(serde_json::to_value(encrypted_payload)?))
+        self.encode_payload_for_worker_scope(scope, account_id, object_id, object_type, payload)
+            .await
+    }
+
+    async fn encode_payload_with_scope(
+        &self,
+        scope: PlatformContentScope,
+        account_id: uuid::Uuid,
+        object_id: uuid::Uuid,
+        object_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        let scope = match scope {
+            PlatformContentScope::User => ContentScope::User,
+            PlatformContentScope::Org => ContentScope::Org,
+        };
+        self.encode_payload_for_worker_scope(scope, account_id, object_id, object_type, payload)
+            .await
     }
 
     async fn decode_payload(
@@ -62,6 +72,28 @@ impl SensitivePayloadEncoder for PlatformPayloadEncoder {
             serde_json::from_value(payload.clone()).context("invalid encrypted payload JSON")?;
         let plaintext = decrypt_text_with_provider(&self.auth_provider, &encrypted_payload).await?;
         Ok(Some(serde_json::from_str(&plaintext)?))
+    }
+}
+
+impl PlatformPayloadEncoder {
+    async fn encode_payload_for_worker_scope(
+        &self,
+        scope: ContentScope,
+        account_id: uuid::Uuid,
+        object_id: uuid::Uuid,
+        object_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        let encrypted_payload = encrypt_text_with_provider(
+            &self.auth_provider,
+            scope,
+            account_id,
+            object_id,
+            object_type,
+            &serde_json::to_string(payload)?,
+        )
+        .await?;
+        Ok(Some(serde_json::to_value(encrypted_payload)?))
     }
 }
 

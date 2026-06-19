@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use nenjo::Slug;
 use nenjo_events::{DomainActivation, EncryptedPayload, Response, StreamEvent};
-use nenjo_platform::tools::PlatformNotificationEmitter;
+use nenjo_platform::tools::{PlatformNotificationEmitter, PlatformNotificationRecipient};
 
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::ExecutionKind;
@@ -26,7 +26,7 @@ use nenjo_harness::{Harness, ProviderRuntime};
 use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_events};
 use crate::handlers::ResponseSender;
 use crate::resource_resolver::PlatformResourceResolver;
-use crate::tools::with_platform_notification_emitter;
+use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 
 #[derive(Clone)]
 pub struct ChatCommandContext<S> {
@@ -64,6 +64,7 @@ pub struct ChatSlashCommandRequest<'a> {
 
 struct ChatNotificationEmitter<S> {
     response_sink: S,
+    session_id: Uuid,
 }
 
 impl<S> PlatformNotificationEmitter for ChatNotificationEmitter<S>
@@ -73,10 +74,15 @@ where
     fn send_push_notification(
         &self,
         agent: &str,
+        current_session_id: Option<Uuid>,
         encrypted_payload: EncryptedPayload,
+        recipient: Option<PlatformNotificationRecipient>,
     ) -> Result<()> {
         self.response_sink.send(Response::PushNotification {
             agent: agent.to_string(),
+            session_id: current_session_id.unwrap_or(self.session_id),
+            recipient_user_id: recipient.as_ref().and_then(|target| target.user_id),
+            recipient_handle: recipient.and_then(|target| target.handle),
             encrypted_payload,
         })
     }
@@ -281,7 +287,10 @@ where
     let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
         Arc::new(ChatNotificationEmitter {
             response_sink: ctx.response_sink.clone(),
+            session_id,
         });
+    let _notification_registration =
+        register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =
         with_platform_notification_emitter(notification_emitter, harness.chat_stream(chat)).await?;
     let run_id = Uuid::new_v4().to_string();

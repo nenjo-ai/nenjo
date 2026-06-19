@@ -27,7 +27,9 @@ impl PlatformNotificationEmitter for TestNotificationSink {
     fn send_push_notification(
         &self,
         _agent: &str,
+        _current_session_id: Option<uuid::Uuid>,
         _encrypted_payload: EncryptedPayload,
+        _recipient: Option<nenjo_platform::tools::PlatformNotificationRecipient>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -658,27 +660,100 @@ async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
     assert!(
         names
             .iter()
-            .any(|name| name == "list_notification_sessions")
+            .any(|name| name == "search_notification_recipients")
     );
     assert!(names.iter().any(|name| name == "list_notifications"));
+    assert!(!names.iter().any(|name| name == "search_notifications"));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "list_notification_sessions")
+    );
     assert!(!names.iter().any(|name| name == "send_notification"));
 
     let writer = AgentManifest {
         platform_scopes: vec!["notify:write".into()],
         ..agent
     };
+    let tools = factory.create_tools(&writer).await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "search_notification_recipients")
+    );
+    assert!(names.iter().any(|name| name == "list_notifications"));
+    assert!(!names.iter().any(|name| name == "search_notifications"));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "list_notification_sessions")
+    );
+    assert!(names.iter().any(|name| name == "send_notification"));
+
     let tools = super::with_platform_notification_emitter(Arc::new(TestNotificationSink), async {
         factory.create_tools(&writer).await
     })
     .await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
-    assert!(
-        names
-            .iter()
-            .any(|name| name == "list_notification_sessions")
-    );
-    assert!(names.iter().any(|name| name == "list_notifications"));
     assert!(names.iter().any(|name| name == "send_notification"));
+}
+
+#[tokio::test]
+async fn worker_factory_resolves_registered_notification_emitter_from_context() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::parse("tester").unwrap(),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec!["notify:write".into()],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let step_session_id = uuid::Uuid::new_v4();
+    let _registration =
+        super::register_platform_notification_emitter(Arc::new(TestNotificationSink));
+    let tools = factory
+        .create_tools_with_context(
+            &agent,
+            Arc::new(nenjo::ToolSecurity::default()),
+            nenjo::ToolContext {
+                project_slug: None,
+                current_session_id: Some(step_session_id),
+            },
+        )
+        .await;
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "send_notification")
+        .expect("send_notification tool should be exposed");
+    assert!(tool.description().contains("notification"));
 }
 
 #[tokio::test]
