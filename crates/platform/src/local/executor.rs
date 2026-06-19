@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use nenjo::{
     ManifestReader, ManifestResource, ManifestResourceKind, ManifestWriter, Slug,
     manifest::{
-        AbilityManifest, AgentManifest, ContextBlockManifest, CouncilDelegationStrategy,
-        CouncilManifest, CouncilMemberManifest, DomainManifest, HasManifestSlug, ModelManifest,
-        ProjectManifest, PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
-        RoutineStepManifest, RoutineTrigger,
+        AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
+        CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, DomainManifest,
+        HasManifestSlug, ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeManifest,
+        RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineTrigger,
     },
 };
 
@@ -18,11 +18,13 @@ use crate::manifest_mcp::{
     AbilitiesGetParams, AbilitiesListResult, AbilityConfigureParams, AbilityConfigureResult,
     AbilityDocument, AbilityGetResult, AbilityManifestBackend, AbilitySummary,
     AgentConfigureParams, AgentConfigureResult, AgentDocument, AgentGetResult,
-    AgentManifestBackend, AgentSummary, AgentsGetParams, AgentsListResult,
-    ContextBlockConfigureParams, ContextBlockConfigureResult, ContextBlockDocument,
-    ContextBlockGetResult, ContextBlockManifestBackend, ContextBlocksGetParams,
-    ContextBlocksListResult, CouncilAddMemberParams, CouncilDeleteParams, CouncilDocument,
-    CouncilGetResult, CouncilManifestBackend, CouncilMutationResult, CouncilRemoveMemberParams,
+    AgentManifestBackend, AgentSummary, AgentsGetParams, AgentsListResult, CommandConfigureParams,
+    CommandConfigureResult, CommandGetResult, CommandManifestBackend, CommandSummary,
+    CommandsGetParams, CommandsListResult, ContextBlockConfigureParams,
+    ContextBlockConfigureResult, ContextBlockDocument, ContextBlockGetResult,
+    ContextBlockManifestBackend, ContextBlocksGetParams, ContextBlocksListResult,
+    CouncilAddMemberParams, CouncilDeleteParams, CouncilDocument, CouncilGetResult,
+    CouncilManifestBackend, CouncilMutationResult, CouncilRemoveMemberParams,
     CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, CouncilsListResult,
     DeleteResult, DomainConfigureParams, DomainConfigureResult, DomainDocument, DomainGetResult,
     DomainManifestBackend, DomainSummary, DomainsGetParams, DomainsListResult,
@@ -82,6 +84,12 @@ fn graph_input_to_manifest_parts(
         .collect();
 
     (steps, edges, metadata)
+}
+
+fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
+    command.name == command_ref
+        || command.command == command_ref
+        || command.command.trim_start_matches('/') == command_ref
 }
 
 async fn local_routine_by_slug<R>(reader: &R, routine: &Slug) -> Result<RoutineManifest>
@@ -392,6 +400,122 @@ where
 
         Ok(AbilityConfigureResult {
             ability: AbilityDocument::from(ability),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl<R, W> CommandManifestBackend for LocalManifestMcpBackend<R, W>
+where
+    R: ManifestReader + Send + Sync,
+    W: ManifestWriter + Send + Sync,
+{
+    async fn list_commands(&self) -> Result<CommandsListResult> {
+        let commands = self
+            .reader
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .map(CommandSummary::from)
+            .collect();
+        Ok(CommandsListResult { commands })
+    }
+
+    async fn get_command(&self, params: CommandsGetParams) -> Result<CommandGetResult> {
+        let command_ref = params.command;
+        let command = self
+            .reader
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .find(|command| command_matches_ref(command, &command_ref))
+            .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?;
+
+        Ok(CommandGetResult { command })
+    }
+
+    async fn configure_command(
+        &self,
+        params: CommandConfigureParams,
+    ) -> Result<CommandConfigureResult> {
+        let mut command = match params.data.command_ref.as_deref() {
+            Some(command_ref) => {
+                let manifest = self.reader.load_manifest().await?;
+                let existing = manifest
+                    .commands
+                    .into_iter()
+                    .find(|command| command_matches_ref(command, command_ref))
+                    .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?;
+                if existing.read_only || existing.source_type != "native" {
+                    return Err(anyhow!("package-managed commands cannot be edited locally"));
+                }
+                existing
+            }
+            None => {
+                let metadata = params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("metadata is required when creating a command"))?;
+                let name = metadata
+                    .name
+                    .clone()
+                    .ok_or_else(|| anyhow!("metadata.name is required when creating a command"))?;
+                let slash_command = metadata.command.clone().ok_or_else(|| {
+                    anyhow!("metadata.command is required when creating a command")
+                })?;
+                let content = params
+                    .data
+                    .content
+                    .clone()
+                    .ok_or_else(|| anyhow!("content is required when creating a command"))?;
+                CommandManifest {
+                    name,
+                    path: metadata.path.clone().unwrap_or_default(),
+                    command: slash_command,
+                    display_name: None,
+                    description: metadata.description.clone().flatten(),
+                    entry_path: "command.md".to_string(),
+                    content,
+                    root_path: String::new(),
+                    root_dir: Default::default(),
+                    plugin_root_path: None,
+                    plugin_root_dir: None,
+                    hooks: Vec::new(),
+                    source_type: "native".to_string(),
+                    read_only: false,
+                    metadata: serde_json::json!({}),
+                }
+            }
+        };
+
+        if let Some(metadata) = params.data.metadata {
+            if let Some(name) = metadata.name {
+                command.name = name;
+            }
+            if let Some(path) = metadata.path {
+                command.path = path;
+            }
+            if let Some(slash_command) = metadata.command {
+                command.command = slash_command;
+            }
+            if let Some(description) = metadata.description {
+                command.description = description;
+            }
+        }
+        if let Some(content) = params.data.content {
+            command.content = content;
+        }
+
+        self.writer
+            .upsert_resource(&ManifestResource::Command(command.clone()))
+            .await?;
+
+        Ok(CommandConfigureResult {
+            command,
             warnings: Vec::new(),
         })
     }
@@ -1075,6 +1199,7 @@ mod tests {
         routine: RoutineManifest,
         model: ModelManifest,
         council: CouncilManifest,
+        command: CommandManifest,
         context_block: ContextBlockManifest,
     }
 
@@ -1087,6 +1212,7 @@ mod tests {
         routine: RoutineManifest,
         model: ModelManifest,
         council: CouncilManifest,
+        command: CommandManifest,
         context_block: ContextBlockManifest,
     }
 
@@ -1218,6 +1344,24 @@ mod tests {
             }],
         };
 
+        let command = CommandManifest {
+            name: "design".into(),
+            path: "build".into(),
+            command: "/design".into(),
+            display_name: Some("Design".into()),
+            description: Some("Design resources".into()),
+            entry_path: "command.md".into(),
+            content: "Design command body".into(),
+            root_path: String::new(),
+            root_dir: Default::default(),
+            plugin_root_path: None,
+            plugin_root_dir: None,
+            hooks: vec![Slug::derive("prepare-design")],
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::json!({ "library": "core" }),
+        };
+
         let context_block = ContextBlockManifest {
             name: "repo_summary".into(),
             path: "team/core".into(),
@@ -1233,6 +1377,7 @@ mod tests {
             projects: vec![project.clone()],
             routines: vec![routine.clone()],
             councils: vec![council.clone()],
+            commands: vec![command.clone()],
             context_blocks: vec![context_block.clone()],
             ..Default::default()
         };
@@ -1248,6 +1393,7 @@ mod tests {
             routine,
             model: alt_model,
             council,
+            command,
             context_block,
         }
     }
@@ -1265,6 +1411,7 @@ mod tests {
             routine,
             model,
             council,
+            command,
             context_block,
         } = sample_manifest();
         store.replace_manifest(&manifest).await.unwrap();
@@ -1277,6 +1424,7 @@ mod tests {
             routine,
             model,
             council,
+            command,
             context_block,
         }
     }
@@ -1732,6 +1880,53 @@ mod tests {
             result.ability.prompt_config.developer_prompt,
             "New review prompt"
         );
+    }
+
+    #[tokio::test]
+    async fn list_commands_is_content_free_and_get_command_includes_content() {
+        let TestContext {
+            backend, command, ..
+        } = backend().await;
+
+        let list = backend.list_commands().await.unwrap();
+        assert_eq!(list.commands.len(), 1);
+        assert_eq!(list.commands[0].name, command.name);
+        assert_eq!(list.commands[0].path, "build");
+        assert_eq!(list.commands[0].command, "/design");
+
+        let list_value = serde_json::to_value(&list).unwrap();
+        assert!(list_value["commands"][0].get("content").is_none());
+        assert!(list_value["commands"][0].get("entry_path").is_none());
+
+        let get = backend
+            .get_command(CommandsGetParams {
+                command: "/design".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(get.command.name, "design");
+        assert_eq!(get.command.content, "Design command body");
+    }
+
+    #[tokio::test]
+    async fn contract_dispatch_lists_and_gets_commands() {
+        let TestContext { backend, .. } = backend().await;
+
+        let list = ManifestMcpContract::dispatch(&backend, "list_commands", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(list["commands"][0]["name"], "design");
+        assert!(list["commands"][0].get("content").is_none());
+
+        let get = ManifestMcpContract::dispatch(
+            &backend,
+            "get_command",
+            serde_json::json!({ "command": "design" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(get["command"]["command"], "/design");
+        assert_eq!(get["command"]["content"], "Design command body");
     }
 
     #[tokio::test]

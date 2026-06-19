@@ -127,6 +127,9 @@ pub(super) async fn apply_upsert(
             fetch_ability,
             |r: &nenjo::manifest::AbilityManifest| { Slug::derive(&r.name) }
         ),
+        ResourceType::Command => {
+            anyhow::bail!("command incremental fetch is not supported")
+        }
         ResourceType::ContextBlock => match client.fetch_context_block_summary(resource).await? {
             Some(summary) => {
                 let block_slug = Slug::derive(&summary.slug);

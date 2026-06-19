@@ -6,10 +6,10 @@ use nenjo_models::NativeModelToolId;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use nenjo::manifest::{
-    AbilityManifest, AgentHeartbeatManifest, AgentManifest, ContextBlockManifest,
-    CouncilDelegationStrategy, CouncilManifest, DomainManifest, ModelManifest, ProjectManifest,
-    PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    AbilityManifest, AgentHeartbeatManifest, AgentManifest, CommandManifest, ContextBlockManifest,
+    CouncilDelegationStrategy, CouncilManifest, DomainManifest, HasManifestSlug, ModelManifest,
+    ProjectManifest, PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
+    RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
 use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 
@@ -202,6 +202,73 @@ impl From<AbilityManifest> for AbilityDocument {
             script_tools: ability.script_tools,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Metadata patch for `configure_command`.
+pub struct CommandConfigureMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Content-free command metadata returned by list operations.
+pub struct CommandSummary {
+    pub name: String,
+    pub slug: Slug,
+    #[serde(default)]
+    pub path: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub hooks: Vec<Slug>,
+    #[serde(default)]
+    pub source_type: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+impl From<CommandManifest> for CommandSummary {
+    fn from(command: CommandManifest) -> Self {
+        Self {
+            slug: command.manifest_slug(),
+            name: command.name,
+            path: command.path,
+            command: command.command,
+            display_name: command.display_name,
+            description: command.description,
+            hooks: command.hooks,
+            source_type: command.source_type,
+            read_only: command.read_only,
+            metadata: command.metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Request body for configuring a command in one backend-owned sequence.
+pub struct CommandConfigureDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub command_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<CommandConfigureMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

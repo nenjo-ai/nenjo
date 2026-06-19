@@ -367,7 +367,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         // 6. Select the user message template based on task type
         let (task_type_name, task_template) = match &run.kind {
             AgentRunKind::Task { .. } => ("Task", prompt_config.templates.task_execution.as_str()),
-            AgentRunKind::Chat { .. } => ("Chat", prompt_config.templates.chat_task.as_str()),
+            AgentRunKind::Chat(chat) => (
+                "Chat",
+                chat.template_override
+                    .as_deref()
+                    .unwrap_or(prompt_config.templates.chat_task.as_str()),
+            ),
             AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
             AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
             AgentRunKind::Heartbeat { .. } => {

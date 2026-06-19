@@ -2,6 +2,7 @@ use nenjo::ToolSpec;
 
 use super::abilities::ability_tools;
 use super::agents::agent_tools;
+use super::commands::command_tools;
 use super::context_blocks::context_block_tools;
 use super::councils::council_tools;
 use super::domains::domain_tools;
@@ -15,6 +16,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
     let mut tools = Vec::new();
     tools.extend(agent_tools());
     tools.extend(ability_tools());
+    tools.extend(command_tools());
     tools.extend(domain_tools());
     tools.extend(project_tools());
     tools.extend(library_tools());
@@ -62,6 +64,9 @@ mod tests {
             "configure_ability",
             "configure_domain",
             "configure_context_block",
+            "list_commands",
+            "get_command",
+            "configure_command",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
@@ -103,6 +108,7 @@ mod tests {
         for tool_name in [
             "list_agents",
             "list_abilities",
+            "list_commands",
             "list_domains",
             "list_projects",
             "list_routines",
@@ -234,6 +240,9 @@ mod tests {
                 ("list_abilities".into(), ToolCategory::Read),
                 ("get_ability".into(), ToolCategory::Read),
                 ("configure_ability".into(), ToolCategory::Write),
+                ("list_commands".into(), ToolCategory::Read),
+                ("get_command".into(), ToolCategory::Read),
+                ("configure_command".into(), ToolCategory::Write),
                 ("list_domains".into(), ToolCategory::Read),
                 ("get_domain".into(), ToolCategory::Read),
                 ("configure_domain".into(), ToolCategory::Write),

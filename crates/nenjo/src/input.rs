@@ -171,6 +171,7 @@ pub struct ChatInput {
     pub project: Option<Slug>,
     pub message: String,
     pub history: Vec<ChatMessage>,
+    pub template_override: Option<String>,
 }
 
 impl ChatInput {
@@ -179,6 +180,7 @@ impl ChatInput {
             project: None,
             message: message.into(),
             history: Vec::new(),
+            template_override: None,
         }
     }
 
@@ -189,6 +191,11 @@ impl ChatInput {
 
     pub fn history(mut self, history: Vec<ChatMessage>) -> Self {
         self.history = history;
+        self
+    }
+
+    pub fn template_override(mut self, template: impl Into<String>) -> Self {
+        self.template_override = Some(template.into());
         self
     }
 }

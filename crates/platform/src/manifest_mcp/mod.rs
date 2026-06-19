@@ -10,6 +10,8 @@ pub mod abilities;
 pub mod agents;
 /// Backend trait implemented by manifest MCP executors.
 pub mod backend;
+/// Tool specs for slash command operations.
+pub mod commands;
 /// Tool specs for context block operations.
 pub mod context_blocks;
 /// Dispatch helpers for the manifest MCP contract.
@@ -36,17 +38,18 @@ pub mod tools;
 mod types;
 
 pub use backend::{
-    AbilityManifestBackend, AgentManifestBackend, ContextBlockManifestBackend,
-    CouncilManifestBackend, DomainManifestBackend, LibraryManifestBackend, ManifestMcpBackend,
-    ModelManifestBackend, ProjectManifestBackend, RoutineManifestBackend,
+    AbilityManifestBackend, AgentManifestBackend, CommandManifestBackend,
+    ContextBlockManifestBackend, CouncilManifestBackend, DomainManifestBackend,
+    LibraryManifestBackend, ManifestMcpBackend, ModelManifestBackend, ProjectManifestBackend,
+    RoutineManifestBackend,
 };
 pub use contract::ManifestMcpContract;
 pub use params::{
     AbilitiesGetParams, AbilityConfigureParams, AgentConfigureParams, AgentsGetParams,
-    ContextBlockConfigureParams, ContextBlocksGetParams, CouncilAddMemberParams,
-    CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams, CouncilUpdateMemberParams,
-    CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams, DomainsGetParams,
-    KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
+    CommandConfigureParams, CommandsGetParams, ContextBlockConfigureParams, ContextBlocksGetParams,
+    CouncilAddMemberParams, CouncilCreateParams, CouncilDeleteParams, CouncilRemoveMemberParams,
+    CouncilUpdateMemberParams, CouncilUpdateParams, CouncilsGetParams, DomainConfigureParams,
+    DomainsGetParams, KnowledgeDocCreateParams, KnowledgeDocDeleteParams, KnowledgeDocUpdateParams,
     KnowledgePackCreateParams, KnowledgePackUpdateParams, ModelCreateParams, ModelDeleteParams,
     ModelUpdateParams, ModelsGetParams, ProjectCreateParams, ProjectDeleteParams,
     ProjectUpdateParams, ProjectsGetParams, RoutineConfigureParams, RoutineDeleteParams,
@@ -54,17 +57,18 @@ pub use params::{
 };
 pub use results::{
     AbilitiesListResult, AbilityConfigureResult, AbilityGetResult, AgentConfigureResult,
-    AgentGetResult, AgentsListResult, ContextBlockConfigureResult, ContextBlockGetResult,
-    ContextBlocksListResult, CouncilGetResult, CouncilMutationResult, CouncilsListResult,
-    DeleteResult, DomainConfigureResult, DomainGetResult, DomainsListResult,
-    KnowledgeDocMutationResult, KnowledgePackMutationResult, ModelGetResult, ModelMutationResult,
-    ModelsListResult, ProjectGetResult, ProjectMutationResult, ProjectsListResult,
-    RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
+    AgentGetResult, AgentsListResult, CommandConfigureResult, CommandGetResult, CommandsListResult,
+    ContextBlockConfigureResult, ContextBlockGetResult, ContextBlocksListResult, CouncilGetResult,
+    CouncilMutationResult, CouncilsListResult, DeleteResult, DomainConfigureResult,
+    DomainGetResult, DomainsListResult, KnowledgeDocMutationResult, KnowledgePackMutationResult,
+    ModelGetResult, ModelMutationResult, ModelsListResult, ProjectGetResult, ProjectMutationResult,
+    ProjectsListResult, RoutineConfigureResult, RoutineGetResult, RoutinesListResult,
 };
 pub use types::{
     AbilityConfigureAssignments, AbilityConfigureDocument, AbilityConfigureMetadata,
     AbilityDocument, AbilitySummary, AgentConfigureAssignments, AgentConfigureDocument,
-    AgentConfigureMetadata, AgentDocument, AgentSummary, ContextBlockConfigureDocument,
+    AgentConfigureMetadata, AgentDocument, AgentSummary, CommandConfigureDocument,
+    CommandConfigureMetadata, CommandSummary, ContextBlockConfigureDocument,
     ContextBlockConfigureMetadata, ContextBlockDocument, ContextBlockSummary,
     CouncilCreateDocument, CouncilCreateMemberDocument, CouncilDocument, CouncilMemberDocument,
     CouncilMemberUpdateDocument, CouncilSummary, CouncilUpdateDocument, DomainConfigureAssignments,

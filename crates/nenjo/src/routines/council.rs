@@ -254,6 +254,7 @@ impl CouncilInvocation {
                 message: instruction.into(),
                 history: history.clone(),
                 project: state.input.project.clone(),
+                template_override: None,
             }),
             CouncilInvocation::Task => {
                 AgentRun::task(task_input_for_instruction(state, instruction.into()))

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::manifest::CommandManifest;
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, warn};
@@ -193,6 +194,40 @@ where
             };
 
             upsert_by_slug(&mut manifest.context_blocks, next_block);
+
+            true
+        }
+        SensitiveContentKind::CommandContent => {
+            let content = match decrypted_string_payload(decrypted.decrypted_payload) {
+                Some(value) => value,
+                None => {
+                    warn!(%rt, %id, "Failed to parse decrypted command content");
+                    return false;
+                }
+            };
+
+            let next_command = if let Some(command_payload) = decrypted.inline_payload {
+                let (command_payload, canonical) = canonical_inline_payload_data(command_payload);
+                match parse_inline_record::<CommandManifest>(command_payload.as_ref()) {
+                    Some(mut record) => {
+                        record.content = content;
+                        record
+                    }
+                    None if canonical => {
+                        warn!(%rt, %id, "Failed to deserialize canonical inline command payload for content merge");
+                        return false;
+                    }
+                    None => {
+                        warn!(%rt, %id, "Failed to deserialize inline command payload for content merge");
+                        return false;
+                    }
+                }
+            } else {
+                warn!(%rt, %id, "Encrypted command content received without inline command metadata");
+                return false;
+            };
+
+            upsert_by_slug(&mut manifest.commands, next_command);
 
             true
         }

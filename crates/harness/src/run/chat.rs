@@ -46,9 +46,22 @@ where
     let mut prepared = prepare_chat_execution(harness, request, events_tx).await?;
     let runner = build_chat_runner(harness, &prepared).await?;
     let history = std::mem::take(&mut prepared.history);
-    let handle = runner
-        .chat_with_history_stream(&prepared.effective_content, history)
-        .await?;
+    let handle = match prepared.template_override.take() {
+        Some(template_override) => {
+            runner
+                .chat_with_history_template_stream(
+                    &prepared.effective_content,
+                    history,
+                    template_override,
+                )
+                .await?
+        }
+        None => {
+            runner
+                .chat_with_history_stream(&prepared.effective_content, history)
+                .await?
+        }
+    };
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
@@ -85,6 +98,7 @@ struct PreparedChatExecution {
     project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
+    template_override: Option<String>,
     effective_domain_session_id: Option<Uuid>,
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
@@ -110,6 +124,7 @@ where
         project,
         domain_session_id,
         domain_activation,
+        template_override,
         hook_scopes,
         hook_transcript_dir,
     } = request;
@@ -285,6 +300,7 @@ where
                 project,
                 project_slug: slug,
                 effective_content,
+                template_override,
                 effective_domain_session_id,
                 hook_scopes,
                 hook_transcript_dir,
@@ -307,6 +323,7 @@ where
             project,
             project_slug: slug,
             effective_content,
+            template_override,
             effective_domain_session_id,
             hook_scopes,
             hook_transcript_dir,
@@ -327,6 +344,7 @@ struct PreparedChatInput {
     project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
+    template_override: Option<String>,
     effective_domain_session_id: Option<Uuid>,
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
@@ -352,6 +370,7 @@ where
         project,
         project_slug,
         effective_content,
+        template_override,
         effective_domain_session_id,
         hook_scopes,
         hook_transcript_dir,
@@ -394,6 +413,7 @@ where
         project,
         project_slug,
         effective_content,
+        template_override,
         effective_domain_session_id,
         hook_scopes,
         hook_transcript_dir,

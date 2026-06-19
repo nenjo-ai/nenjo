@@ -115,6 +115,35 @@ manifest:
 }
 
 #[test]
+fn parses_command_resource_manifest_with_content_sources() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  path: build
+  command: /design
+  description: Design resources.
+  content_path: commands/design/command.md
+  content: |
+    Inline command body.
+"#,
+    )
+    .unwrap();
+
+    manifest.validate_wrapper().unwrap();
+    assert_eq!(manifest.kind().unwrap(), PackageKind::Command);
+    assert_eq!(manifest.name().unwrap(), "design");
+    assert_eq!(manifest.manifest["path"], "build");
+    assert_eq!(manifest.manifest["command"], "/design");
+    assert_eq!(
+        manifest.manifest["content_path"],
+        "commands/design/command.md"
+    );
+    assert_eq!(manifest.manifest["content"], "Inline command body.\n");
+}
+
+#[test]
 fn parses_and_serializes_package_adapters() {
     let cases = [
         ("nenjo_packages", PackageAdapter::NenjoPackages),

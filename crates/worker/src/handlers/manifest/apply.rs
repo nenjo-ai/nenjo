@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nenjo::manifest::{context_block_slug, domain_slug};
+use nenjo::manifest::{HasManifestSlug, context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
 use nenjo_platform::api_client::ApiClient;
@@ -307,6 +307,7 @@ fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourc
     match resource_type {
         ResourceType::Agent => Some(PlatformResourceKind::Agent),
         ResourceType::Ability => Some(PlatformResourceKind::Ability),
+        ResourceType::Command => Some(PlatformResourceKind::Command),
         ResourceType::Domain => Some(PlatformResourceKind::Domain),
         ResourceType::ContextBlock => Some(PlatformResourceKind::ContextBlock),
         ResourceType::Project => Some(PlatformResourceKind::Project),
@@ -472,6 +473,11 @@ fn resource_id_from_manifest(
             .iter()
             .find(|item| Slug::derive(&item.name) == *resource)
             .map(|_| crate::resource_resolver::stable_resource_id("ability", resource)),
+        ResourceType::Command => manifest
+            .commands
+            .iter()
+            .find(|item| item.manifest_slug() == *resource)
+            .map(|_| crate::resource_resolver::stable_resource_id("command", resource)),
         ResourceType::ContextBlock => manifest
             .context_blocks
             .iter()

@@ -3,12 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::manifest_contract::KnowledgeDocumentEdgeRecord;
+use nenjo::manifest::CommandManifest;
 
 use super::types::{
-    AbilityDocument, AbilitySummary, AgentDocument, AgentSummary, ContextBlockDocument,
-    ContextBlockSummary, CouncilDocument, CouncilSummary, DomainDocument, DomainSummary,
-    KnowledgeDocSummary, KnowledgePackDocument, ModelDocument, ModelSummary, ProjectDocument,
-    ProjectSummary, RoutineDocument, RoutineSummary,
+    AbilityDocument, AbilitySummary, AgentDocument, AgentSummary, CommandSummary,
+    ContextBlockDocument, ContextBlockSummary, CouncilDocument, CouncilSummary, DomainDocument,
+    DomainSummary, KnowledgeDocSummary, KnowledgePackDocument, ModelDocument, ModelSummary,
+    ProjectDocument, ProjectSummary, RoutineDocument, RoutineSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,26 @@ pub struct AbilityGetResult {
 /// Result for `configure_ability`.
 pub struct AbilityConfigureResult {
     pub ability: AbilityDocument,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Result for `list_commands`.
+pub struct CommandsListResult {
+    pub commands: Vec<CommandSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Result for `get_command`.
+pub struct CommandGetResult {
+    pub command: CommandManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Result for `configure_command`.
+pub struct CommandConfigureResult {
+    pub command: CommandManifest,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }

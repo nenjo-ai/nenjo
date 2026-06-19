@@ -289,6 +289,8 @@ impl HasManifestSlug for SkillManifest {
 pub struct CommandManifest {
     pub name: String,
     #[serde(default)]
+    pub path: String,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -296,6 +298,8 @@ pub struct CommandManifest {
     pub description: Option<String>,
     #[serde(default = "default_command_entry_path")]
     pub entry_path: String,
+    #[serde(default)]
+    pub content: String,
     #[serde(default)]
     pub root_path: String,
     #[serde(default)]
@@ -1254,10 +1258,12 @@ mod tests {
         let mut manifest = Manifest {
             commands: vec![CommandManifest {
                 name: "ralph_loop__ralph_loop".to_string(),
+                path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("ralph-loop".to_string()),
                 description: Some("local".to_string()),
                 entry_path: "ralph-loop.md".to_string(),
+                content: String::new(),
                 root_path: "commands".to_string(),
                 root_dir: std::path::PathBuf::from("/tmp/platform_pkgs/ralph-loop/commands"),
                 plugin_root_path: Some(".".to_string()),
@@ -1273,10 +1279,12 @@ mod tests {
         manifest.merge(Manifest {
             commands: vec![CommandManifest {
                 name: "ralph_loop__ralph_loop".to_string(),
+                path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
                 display_name: Some("ralph-loop".to_string()),
                 description: Some("platform".to_string()),
                 entry_path: "ralph-loop.md".to_string(),
+                content: String::new(),
                 root_path: String::new(),
                 root_dir: std::path::PathBuf::new(),
                 plugin_root_path: None,
