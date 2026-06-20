@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use anyhow::{Context, anyhow};
 
+use crate::command_content::command_content_path_candidates;
 use crate::identity::local_import_module_path;
 use crate::module::index_child_module_path;
 use crate::{
-    ModuleImport, ModuleIndexManifest, ModulePackageManifest, PackageModule,
-    PackageRegistryManifest, ResolvedModule, ResolvedPackage, ResolvedPackageGraph,
-    complete_package_resource_manifest, module_file_schema, module_reference_is_directory,
-    normalize_module_reference, package_module_source_path, parse_json_or_yaml_as,
-    parse_module_file, sha256_hex, validate_package_name, validate_source_path,
+    ModuleImport, ModuleIndexManifest, ModulePackageManifest, PackageKind, PackageModule,
+    PackageRegistryManifest, ResolvedModule, ResolvedPackage, ResolvedPackageFile,
+    ResolvedPackageGraph, complete_package_resource_manifest, module_file_schema,
+    module_reference_is_directory, normalize_module_reference, package_module_source_path,
+    parse_json_or_yaml_as, parse_module_file, sha256_hex, validate_package_name,
+    validate_source_path,
 };
 
 #[derive(Debug, Clone)]
@@ -156,8 +158,12 @@ impl LocalPackageResolver {
                 if !expanded_modules.insert(module_file.path.clone()) {
                     continue;
                 }
-                let imports: Vec<ModuleImport> =
-                    self.insert_resolved_module_file(&module_file, manifest, modules)?;
+                let imports: Vec<ModuleImport> = self.insert_resolved_module_file(
+                    package_path,
+                    &module_file,
+                    manifest,
+                    modules,
+                )?;
                 for import in imports {
                     if !import.is_local_module_ref() {
                         continue;
@@ -181,6 +187,7 @@ impl LocalPackageResolver {
 
     fn insert_resolved_module_file(
         &self,
+        package_path: &str,
         module: &ExpandedPackageModule,
         package: &ModulePackageManifest,
         modules: &mut BTreeMap<String, ResolvedModule>,
@@ -200,6 +207,11 @@ impl LocalPackageResolver {
                 .expect("resource name was just validated")
                 .to_string();
             let imports = resource_manifest.imports();
+            let files = self
+                .resolved_module_files(package_path, module, kind, &resource_manifest)
+                .with_context(|| {
+                    format!("failed to resolve runtime files for {}", module.source_path)
+                })?;
             all_imports.extend(imports.clone());
             let resolved = ResolvedModule {
                 package_name: package.name.clone(),
@@ -210,6 +222,7 @@ impl LocalPackageResolver {
                 kind,
                 manifest: resource_manifest,
                 imports,
+                files,
             };
             let resource_key = format!("{}#{resource_name}", module.path);
             if modules
@@ -230,6 +243,69 @@ impl LocalPackageResolver {
             }
         }
         Ok(all_imports)
+    }
+
+    fn resolved_module_files(
+        &self,
+        package_path: &str,
+        module: &ExpandedPackageModule,
+        kind: PackageKind,
+        resource_manifest: &crate::ResourceManifest,
+    ) -> Result<Vec<ResolvedPackageFile>> {
+        let mut files = BTreeMap::new();
+        if kind == PackageKind::Command
+            && let Some(content_path) = resource_manifest
+                .manifest
+                .get("content_path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+        {
+            let (path, content) = self.read_command_content_file(
+                package_path,
+                &module.path,
+                &module.source_path,
+                content_path,
+            )?;
+            files.insert(
+                path.clone(),
+                ResolvedPackageFile {
+                    path,
+                    hash: sha256_hex(content.as_bytes()),
+                },
+            );
+        }
+        Ok(files.into_values().collect())
+    }
+
+    fn read_command_content_file(
+        &self,
+        package_path: &str,
+        module_path: &str,
+        module_source_path: &str,
+        content_path: &str,
+    ) -> Result<(String, String)> {
+        let candidates = command_content_path_candidates(
+            package_path,
+            module_path,
+            module_source_path,
+            content_path,
+        )?;
+        let mut last_error = None;
+        for candidate in candidates {
+            match self.read_text(&candidate.read_path) {
+                Ok(content) => return Ok((candidate.package_path, content)),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        if let Some(err) = last_error {
+            return Err(err.context(format!(
+                "command content_path '{content_path}' referenced by {module_source_path} was not found"
+            )));
+        }
+        bail!(
+            "command content_path '{content_path}' referenced by {module_source_path} was not found"
+        );
     }
 
     fn expand_package_module(

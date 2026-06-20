@@ -43,6 +43,17 @@ pub struct ResolvedModule {
     pub manifest: ResourceManifest,
     /// Structured resource imports declared by this module.
     pub imports: Vec<ModuleImport>,
+    /// Additional package files required at runtime by this module.
+    pub files: Vec<ResolvedPackageFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Resolved package sidecar file required by a module.
+pub struct ResolvedPackageFile {
+    /// Package-relative file path.
+    pub path: String,
+    /// SHA-256 hash of the file content.
+    pub hash: String,
 }
 
 impl ResolvedModule {

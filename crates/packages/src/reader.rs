@@ -3,14 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 
+use crate::command_content::command_content_path_candidates;
 use crate::identity::local_import_module_path;
 use crate::module::index_child_module_path;
 use crate::{
-    ModuleImport, ModuleIndexManifest, ModulePackageManifest, PackageModule,
-    PackageRegistryManifest, ResolvedModule, ResolvedPackage, ResolvedPackageGraph,
-    complete_package_resource_manifest, module_file_schema, module_reference_is_directory,
-    normalize_module_reference, package_module_source_path, parse_json_or_yaml_as,
-    parse_module_file, sha256_hex, validate_source_path, version_satisfies,
+    ModuleImport, ModuleIndexManifest, ModulePackageManifest, PackageKind, PackageModule,
+    PackageRegistryManifest, ResolvedModule, ResolvedPackage, ResolvedPackageFile,
+    ResolvedPackageGraph, complete_package_resource_manifest, module_file_schema,
+    module_reference_is_directory, normalize_module_reference, package_module_source_path,
+    parse_json_or_yaml_as, parse_module_file, sha256_hex, validate_source_path, version_satisfies,
 };
 
 #[async_trait]
@@ -173,7 +174,7 @@ where
                 continue;
             }
             let imports =
-                insert_resolved_module_file(&module_file, &package.manifest, &mut modules)?;
+                insert_resolved_module_file(reader, &module_file, &package, &mut modules).await?;
             for import in imports {
                 if !import.is_local_module_ref() {
                     continue;
@@ -310,16 +311,21 @@ where
     anyhow::bail!("directory module '{module_path}/' requires index.yml, index.yaml, or SKILL.md")
 }
 
-fn insert_resolved_module_file(
+async fn insert_resolved_module_file<R>(
+    reader: &R,
     module: &ExpandedPackageModule,
-    package: &ModulePackageManifest,
+    package: &LoadedModulePackage,
     modules: &mut BTreeMap<String, ResolvedModule>,
-) -> anyhow::Result<Vec<ModuleImport>> {
+) -> anyhow::Result<Vec<ModuleImport>>
+where
+    R: PackageFileReader + ?Sized,
+{
     let resources = parse_module_file(&module.content, &module.source_path)?;
     let multiple_resources = resources.len() > 1;
     let mut all_imports = Vec::new();
     for resource_manifest in resources {
-        let resource_manifest = complete_package_resource_manifest(resource_manifest, package)?;
+        let resource_manifest =
+            complete_package_resource_manifest(resource_manifest, &package.manifest)?;
         let kind = resource_manifest.kind()?;
         resource_manifest.name().with_context(|| {
             format!("failed to validate module manifest {}", module.source_path)
@@ -329,16 +335,22 @@ fn insert_resolved_module_file(
             .expect("resource name was just validated")
             .to_string();
         let imports = resource_manifest.imports();
+        let files = resolved_module_files(reader, package, module, kind, &resource_manifest)
+            .await
+            .with_context(|| {
+                format!("failed to resolve runtime files for {}", module.source_path)
+            })?;
         all_imports.extend(imports.clone());
         let resolved = ResolvedModule {
-            package_name: package.name.clone(),
-            package_version: package.version.clone(),
+            package_name: package.manifest.name.clone(),
+            package_version: package.manifest.version.clone(),
             path: module.path.clone(),
             source_path: module.source_path.clone(),
             hash: sha256_hex(module.content.as_bytes()),
             kind,
             manifest: resource_manifest,
             imports,
+            files,
         };
         let resource_key = format!("{}#{resource_name}", module.path);
         if modules
@@ -359,4 +371,77 @@ fn insert_resolved_module_file(
         }
     }
     Ok(all_imports)
+}
+
+async fn resolved_module_files<R>(
+    reader: &R,
+    package: &LoadedModulePackage,
+    module: &ExpandedPackageModule,
+    kind: PackageKind,
+    resource_manifest: &crate::ResourceManifest,
+) -> anyhow::Result<Vec<ResolvedPackageFile>>
+where
+    R: PackageFileReader + ?Sized,
+{
+    let mut files = BTreeMap::new();
+    if kind == PackageKind::Command
+        && let Some(content_path) = resource_manifest
+            .manifest
+            .get("content_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+    {
+        let (path, content) = read_command_content_file(
+            reader,
+            &package.path,
+            &module.path,
+            &module.source_path,
+            content_path,
+        )
+        .await?;
+        files.insert(
+            path.clone(),
+            ResolvedPackageFile {
+                path,
+                hash: sha256_hex(content.as_bytes()),
+            },
+        );
+    }
+    Ok(files.into_values().collect())
+}
+
+async fn read_command_content_file<R>(
+    reader: &R,
+    package_path: &str,
+    module_path: &str,
+    module_source_path: &str,
+    content_path: &str,
+) -> anyhow::Result<(String, String)>
+where
+    R: PackageFileReader + ?Sized,
+{
+    let candidates = command_content_path_candidates(
+        package_path,
+        module_path,
+        module_source_path,
+        content_path,
+    )?;
+    let mut last_error = None;
+    for candidate in candidates {
+        match reader.read_text(&candidate.read_path).await {
+            Ok(content) => return Ok((candidate.package_path, content)),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if let Some(err) = last_error {
+        return Err(err).with_context(|| {
+            format!(
+                "command content_path '{content_path}' referenced by {module_source_path} was not found"
+            )
+        });
+    }
+    anyhow::bail!(
+        "command content_path '{content_path}' referenced by {module_source_path} was not found"
+    );
 }

@@ -11,7 +11,7 @@ use nenjo_nenpm::{
     package_install_path_in_packages_dir,
 };
 use nenjo_packages::{
-    LocalPackageResolver, PackageKind, PackageResourceLogicalKey, ResourceManifest,
+    LocalPackageResolver, PackageKind, PackageResourceLogicalKey, ResolvedPackage, ResourceManifest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -68,15 +68,8 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
             );
             continue;
         }
-        let resolver = LocalPackageResolver::new(&installed_package.root);
-        let resolved = resolver
-            .resolve_package_manifest(&installed_package.manifest_path)
-            .with_context(|| {
-                format!(
-                    "failed to resolve installed package manifest package={} version={} path={}",
-                    package.name, package.version, installed_package.manifest_path
-                )
-            })?;
+        let resolved_install = resolve_installed_package_manifest(&installed_package, &package)?;
+        let resolved = resolved_install.package;
         let locked_source_paths = locked_module_source_paths(&package.modules);
         let locked_modules = locked_module_keys(&package.modules);
         let mut modules_by_key = BTreeMap::new();
@@ -97,7 +90,7 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
                     package_name: &package.name,
                     package_version: package.version.as_str(),
                     package_source: package.source.as_ref(),
-                    package_root: &installed_package.root,
+                    package_root: &resolved_install.package_root,
                     module_path: module.path.as_str(),
                     source_path: module.source_path.as_str(),
                     kind: module.kind,
@@ -192,6 +185,78 @@ fn insert_assignment_target(
 struct MaterializedPackage {
     root: PathBuf,
     manifest_path: String,
+}
+
+struct ResolvedInstalledPackage {
+    package: ResolvedPackage,
+    package_root: PathBuf,
+}
+
+fn resolve_installed_package_manifest(
+    installed_package: &MaterializedPackage,
+    package: &nenjo_nenpm::LockedPackage,
+) -> Result<ResolvedInstalledPackage> {
+    let candidates = installed_package_manifest_candidates(installed_package, package);
+    let resolver = LocalPackageResolver::new(&installed_package.root);
+    let mut attempted = Vec::new();
+
+    for manifest_path in candidates {
+        attempted.push(manifest_path.clone());
+        if !installed_package.root.join(&manifest_path).is_file() {
+            continue;
+        }
+        let resolved = resolver
+            .resolve_package_manifest(&manifest_path)
+            .with_context(|| {
+                format!(
+                    "failed to resolve installed package manifest package={} version={} path={manifest_path}",
+                    package.name, package.version
+                )
+            })?;
+        return Ok(ResolvedInstalledPackage {
+            package: resolved,
+            package_root: package_root_for_manifest(&installed_package.root, &manifest_path),
+        });
+    }
+
+    bail!(
+        "failed to resolve installed package manifest package={} version={} path={} tried={}",
+        package.name,
+        package.version,
+        installed_package.manifest_path,
+        attempted.join(", ")
+    );
+}
+
+fn installed_package_manifest_candidates(
+    installed_package: &MaterializedPackage,
+    package: &nenjo_nenpm::LockedPackage,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_manifest_candidate(&mut candidates, installed_package.manifest_path.clone());
+    push_manifest_candidate(
+        &mut candidates,
+        materialized_manifest_path(&package.manifest_path),
+    );
+    push_manifest_candidate(&mut candidates, package.manifest_path.clone());
+    candidates
+}
+
+fn push_manifest_candidate(candidates: &mut Vec<String>, manifest_path: String) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate == &manifest_path)
+    {
+        candidates.push(manifest_path);
+    }
+}
+
+fn package_root_for_manifest(root: &Path, manifest_path: &str) -> PathBuf {
+    Path::new(manifest_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| root.join(parent))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 fn materialized_package(
@@ -839,7 +904,8 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Command => {
-            let (root_path, entry_path) = command_content_paths(object, defaults.source_path);
+            let (root_path, entry_path) =
+                command_content_paths(object, defaults.module_path, defaults.source_path);
             object.insert("root_path".to_string(), Value::String(root_path.clone()));
             object.insert("entry_path".to_string(), Value::String(entry_path));
             let root_dir = skill_root_dir(object, defaults.package_root, &root_path);
@@ -967,6 +1033,7 @@ fn command_root_path(object: &serde_json::Map<String, Value>, source_path: &str)
 
 fn command_content_paths(
     object: &serde_json::Map<String, Value>,
+    module_path: &str,
     source_path: &str,
 ) -> (String, String) {
     if let Some(content_path) = object
@@ -978,6 +1045,7 @@ fn command_content_paths(
             .trim()
             .trim_start_matches("./")
             .trim_end_matches('/');
+        let content_path = package_relative_content_path(content_path, module_path, source_path);
         if let Some((root_path, entry_path)) = content_path.rsplit_once('/') {
             return (root_path.to_string(), entry_path.to_string());
         }
@@ -992,6 +1060,33 @@ fn command_content_paths(
         .unwrap_or("command.md")
         .to_string();
     (root_path, entry_path)
+}
+
+fn package_relative_content_path(
+    content_path: &str,
+    module_path: &str,
+    source_path: &str,
+) -> String {
+    let source_dir = source_path.rsplit_once('/').map(|(dir, _)| dir);
+    let module_dir = module_path.rsplit_once('/').map(|(dir, _)| dir);
+    match (source_dir, module_dir) {
+        (Some(source_dir), Some(module_dir)) => content_path
+            .strip_prefix(&format!("{source_dir}/"))
+            .map(|suffix| format!("{module_dir}/{suffix}"))
+            .unwrap_or_else(|| module_stem_content_path(module_path, content_path)),
+        _ => content_path.to_string(),
+    }
+}
+
+fn module_stem_content_path(module_path: &str, content_path: &str) -> String {
+    let Some((_, filename)) = content_path.rsplit_once('/') else {
+        return content_path.to_string();
+    };
+    let module_stem = module_path
+        .strip_suffix(".yaml")
+        .or_else(|| module_path.strip_suffix(".yml"))
+        .unwrap_or(module_path);
+    format!("{module_stem}/{filename}")
 }
 
 fn skill_root_dir(
@@ -1484,17 +1579,17 @@ mod tests {
                 package_version: "0.1.0",
                 package_source: None,
                 package_root: Path::new("/package-root"),
-                module_path: "nenji/commands/design.yaml",
+                module_path: "commands/design.yaml",
                 source_path: "nenjo/nenji/commands/design.yaml",
                 kind: PackageKind::Command,
             },
         );
         let command: CommandManifest = serde_json::from_value(value).unwrap();
         assert_eq!(command.entry_path, "command.md");
-        assert_eq!(command.root_path, "nenjo/nenji/commands/design");
+        assert_eq!(command.root_path, "commands/design");
         assert_eq!(
             command.root_dir,
-            Path::new("/package-root").join("nenjo/nenji/commands/design")
+            Path::new("/package-root").join("commands/design")
         );
         assert!(command.read_only);
         assert_eq!(command.source_type, "package");
@@ -2166,6 +2261,171 @@ manifest:
         assert_eq!(manifest.abilities[0].name, "build_agent");
     }
 
+    #[test]
+    fn package_loader_falls_back_to_lock_manifest_path_for_nested_platform_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let packages_dir = root.join("platform_pkgs");
+        let package_root =
+            package_install_path_in_packages_dir(&packages_dir, "@nenjo-ai/nenji", "1.0.0");
+        std::fs::create_dir_all(package_root.join("nenjo/nenji/commands/design")).unwrap();
+        std::fs::write(
+            packages_dir.join("nenpm.lock.yml"),
+            r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "@nenjo-ai/nenji"
+    version: "1.0.0"
+    manifest_path: nenjo/nenji/package.yaml
+    hash: test
+    modules:
+      - path: commands/design.yaml
+        resource: design
+        source_path: nenjo/nenji/commands/design.yaml
+        schema: nenjo.command.v1
+        kind: command
+        name: design
+        hash: test
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            packages_dir.join(".nenpm-index.json"),
+            r#"{
+              "schema": "nenjo.package-index.v1",
+              "packages": {
+                "@nenjo-ai/nenji@1.0.0": {
+                  "name": "@nenjo-ai/nenji",
+                  "version": "1.0.0",
+                  "root": "@nenjo-ai/nenji@1.0.0",
+                  "manifest_path": "package.yaml"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo-ai/nenji"
+version: "1.0.0"
+modules:
+  - commands/design.yaml
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/commands/design.yaml"),
+            r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: nenjo/nenji/commands/design/command.md
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/commands/design/command.md"),
+            "Design the requested artifact.\n",
+        )
+        .unwrap();
+
+        let manifest = load_package_manifest(&packages_dir, &packages_dir).unwrap();
+
+        assert_eq!(manifest.commands.len(), 1);
+        let command = &manifest.commands[0];
+        assert_eq!(command.name, "design");
+        assert_eq!(command.entry_path, "command.md");
+        assert_eq!(command.root_path, "commands/design");
+        assert_eq!(
+            command.root_dir,
+            package_root.join("nenjo/nenji/commands/design")
+        );
+    }
+
+    #[test]
+    fn package_loader_maps_flat_command_content_path_from_repository_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let packages_dir = root.join("platform_pkgs");
+        let package_root =
+            package_install_path_in_packages_dir(&packages_dir, "@nenjo-ai/nenji", "1.0.0");
+        std::fs::create_dir_all(package_root.join("commands/design")).unwrap();
+        std::fs::write(
+            packages_dir.join("nenpm.lock.yml"),
+            r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "@nenjo-ai/nenji"
+    version: "1.0.0"
+    manifest_path: nenjo/nenji/package.yaml
+    hash: test
+    modules:
+      - path: commands/design.yaml
+        resource: design
+        source_path: nenjo/nenji/commands/design.yaml
+        schema: nenjo.command.v1
+        kind: command
+        name: design
+        hash: test
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            packages_dir.join(".nenpm-index.json"),
+            r#"{
+              "schema": "nenjo.package-index.v1",
+              "packages": {
+                "@nenjo-ai/nenji@1.0.0": {
+                  "name": "@nenjo-ai/nenji",
+                  "version": "1.0.0",
+                  "root": "@nenjo-ai/nenji@1.0.0",
+                  "manifest_path": "package.yaml"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo-ai/nenji"
+version: "1.0.0"
+modules:
+  - commands/design.yaml
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("commands/design.yaml"),
+            r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: nenjo/nenji/commands/design/command.md
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("commands/design/command.md"),
+            "Design the requested artifact.\n",
+        )
+        .unwrap();
+
+        let manifest = load_package_manifest(&packages_dir, &packages_dir).unwrap();
+
+        assert_eq!(manifest.commands.len(), 1);
+        let command = &manifest.commands[0];
+        assert_eq!(command.name, "design");
+        assert_eq!(command.entry_path, "command.md");
+        assert_eq!(command.root_path, "commands/design");
+        assert_eq!(command.root_dir, package_root.join("commands/design"));
+    }
+
     const RALPH_LOOP_PLUGIN_JSON: &str = r#"{
       "name": "Ralph Loop",
       "version": "0.1.0",
@@ -2511,6 +2771,7 @@ manifest:
             name: name.to_string(),
             hash: "sha256:test".to_string(),
             imports: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -2535,6 +2796,7 @@ manifest:
                 name: resource.manifest.name().unwrap().to_string(),
                 hash: "sha256:test".to_string(),
                 imports: Vec::new(),
+                files: Vec::new(),
             })
             .collect::<Vec<_>>();
 

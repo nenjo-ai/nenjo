@@ -426,6 +426,94 @@ manifest:
 }
 
 #[test]
+fn install_locks_and_verifies_command_content_sidecars() {
+    let workspace = temp_workspace("command-sidecars");
+    let project = workspace.join("project");
+    let packages = workspace.join("packages");
+    fs::create_dir_all(&project).unwrap();
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "nenji": "^1.0.0"
+
+overrides:
+  "nenji": file:../packages
+"#,
+    );
+    write_file(
+        &packages,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "nenji": nenjo/nenji/package.yaml
+"#,
+    );
+    write_file(
+        &packages,
+        "nenjo/nenji/package.yaml",
+        r#"schema: nenjo.package.v1
+name: "nenji"
+version: "1.0.0"
+modules:
+  - commands/
+"#,
+    );
+    write_file(
+        &packages,
+        "nenjo/nenji/commands/index.yml",
+        r#"schema: nenjo.module_index.v1
+modules:
+  - design.yaml
+"#,
+    );
+    write_file(
+        &packages,
+        "nenjo/nenji/commands/design.yaml",
+        r#"schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: nenjo/nenji/commands/design/command.md
+"#,
+    );
+    write_file(
+        &packages,
+        "nenjo/nenji/commands/design/command.md",
+        "Design the requested artifact.\n",
+    );
+
+    let first = install(InstallOptions::new(&project)).unwrap();
+    let package = first
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "nenji")
+        .unwrap();
+    let command = package
+        .modules
+        .iter()
+        .find(|module| module.kind == nenjo_packages::PackageKind::Command)
+        .unwrap();
+    assert_eq!(command.path, "commands/design.yaml");
+    assert_eq!(command.files[0].path, "commands/design/command.md");
+
+    let install_root = package_install_path(&project, "nenji", "1.0.0");
+    let content_file = install_root.join("commands/design/command.md");
+    assert!(content_file.exists());
+    fs::remove_file(&content_file).unwrap();
+
+    let second = install(InstallOptions::new(&project)).unwrap();
+    assert_eq!(second.materialization.installed, 1);
+    assert_eq!(second.materialization.reused, 0);
+    assert!(content_file.exists());
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn install_resolves_file_repository_manifest_registry() {
     let workspace = temp_workspace("file-repository-registry");
     copy_dir(&fixture("local-workspace"), &workspace);

@@ -13,6 +13,7 @@ macro_rules! bail {
 }
 
 mod claude_plugin;
+mod command_content;
 mod error;
 mod github;
 mod identity;
@@ -60,7 +61,8 @@ pub use reader::{
     resolve_module_package_manifest_from_reader,
 };
 pub use resolved::{
-    ResolvedModule, ResolvedPackage, ResolvedPackageGraph, ResolvedResource, ResolvedResourceGraph,
+    ResolvedModule, ResolvedPackage, ResolvedPackageFile, ResolvedPackageGraph, ResolvedResource,
+    ResolvedResourceGraph,
 };
 pub use schema::{
     ManifestSchemaVersion, PackageAdapter, PackageFileSchema, PackageKind, ResourceSchema,
