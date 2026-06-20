@@ -12,6 +12,7 @@ use nenjo::manifest::{
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo::{Slug, Tool, ToolCategory, ToolResult};
+use nenjo_models::ToolCall;
 use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 
 // ---------------------------------------------------------------------------
@@ -39,8 +40,16 @@ impl ModelProvider for MockProvider {
         _temperature: f64,
     ) -> Result<ChatResponse> {
         Ok(ChatResponse {
-            text: Some(self.response_text.clone()),
-            tool_calls: vec![],
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_respond_to_user".to_string(),
+                name: "respond_to_user".to_string(),
+                arguments: serde_json::json!({
+                    "message": self.response_text.clone(),
+                    "status": "completed",
+                })
+                .to_string(),
+            }],
             provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
@@ -217,7 +226,7 @@ async fn runner_chat() {
     assert_eq!(output.text, "Hello from the mock LLM!");
     assert_eq!(output.input_tokens, 100);
     assert_eq!(output.output_tokens, 50);
-    assert_eq!(output.tool_calls, 0);
+    assert_eq!(output.tool_calls, 1);
     assert!(
         !output.messages.is_empty(),
         "should have conversation messages"
@@ -278,8 +287,9 @@ async fn runner_with_custom_tool() {
 
     let specs = runner.instance().tool_specs();
     let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(names.len(), 4);
+    assert_eq!(names.len(), 5);
     assert!(names.contains(&"echo"));
+    assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect_operations"));
     assert!(names.contains(&"stop_operations"));
@@ -308,8 +318,9 @@ async fn runner_with_tool_factory() {
 
     let specs = runner.instance().tool_specs();
     let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(names.len(), 4);
+    assert_eq!(names.len(), 5);
     assert!(names.contains(&"echo"));
+    assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect_operations"));
     assert!(names.contains(&"stop_operations"));
@@ -608,6 +619,10 @@ async fn ability_agent_has_ability_invoke_tool_only() {
         "base agent should have ability invocation tool, got: {tool_names:?}"
     );
     assert!(
+        tool_names.contains(&"respond_to_user"),
+        "parent chat agent should finalize through respond_to_user, got: {tool_names:?}"
+    );
+    assert!(
         !tool_names.contains(&"writer"),
         "assigned ability name should not be a top-level tool, got: {tool_names:?}"
     );
@@ -698,6 +713,10 @@ async fn agent_without_abilities_has_no_ability_tools() {
     assert!(
         !tool_names.contains(&"list_assigned_abilities") && !tool_names.contains(&"use_ability"),
         "agent without abilities should not have ability broker tools, got: {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"respond_to_user"),
+        "parent chat agents should expose respond_to_user, got: {tool_names:?}"
     );
 }
 

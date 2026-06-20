@@ -42,6 +42,7 @@ where
             execution_run_id: request.execution_run_id,
             cancel: cancel.clone(),
             pause: None,
+            turn_input: None,
         },
     );
 

@@ -22,6 +22,7 @@ pub struct ActiveExecution {
     pub execution_run_id: Option<Uuid>,
     pub cancel: CancellationToken,
     pub pause: Option<nenjo::agents::runner::types::PauseToken>,
+    pub turn_input: Option<nenjo::agents::runner::types::TurnInputSender>,
 }
 
 /// Thread-safe registry of active executions, keyed by a cancel key.

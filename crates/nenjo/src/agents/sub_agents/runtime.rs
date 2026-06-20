@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::Slug;
 use crate::agents::AgentExecutionMode;
 use crate::agents::async_ops::{
-    AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpSignalDigest, StartAsyncOp,
+    AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpSignalDigest, AsyncOpWaitFilter,
+    StartAsyncOp,
 };
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
 use crate::input::TaskInput;
@@ -536,7 +537,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let operations = self
             .inner
             .async_ops
-            .drain_signals(Some(AsyncOpKind::Ability))
+            .drain_signals(AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
             .await;
         let woken_by = classify_wake(&updates, &operations);
         WaitResult {
@@ -848,6 +849,7 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         | TurnEvent::AbilityCompleted { .. }
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
+        | TurnEvent::AssistantResponse { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookActivated { .. }
         | TurnEvent::HookStarted { .. }

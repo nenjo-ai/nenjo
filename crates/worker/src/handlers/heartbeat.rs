@@ -18,7 +18,9 @@ use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
 use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::handlers::ResponseSender;
+use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
+use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 
 #[derive(Clone)]
 pub struct HeartbeatCommandContext<S> {
@@ -264,6 +266,7 @@ where
             execution_run_id: None,
             cancel: cancel.clone(),
             pause: Some(pause.clone()),
+            turn_input: None,
         },
     );
 
@@ -451,7 +454,11 @@ where
                     })
                     .await;
 
-                let result = async {
+                let notification_emitter =
+                    platform_notification_emitter(response_tx.clone(), execution_id);
+                let _notification_registration =
+                    register_platform_notification_emitter(notification_emitter.clone());
+                let result = with_platform_notification_emitter(notification_emitter, async {
                     let task_state = load_heartbeat_task_state(
                         &harness_for_run,
                         agent_id,
@@ -469,6 +476,7 @@ where
                     let builder = provider.agent(&agent).await?;
                     let builder =
                         apply_session_memory_scope(&harness_for_run, builder, agent_id).await;
+                    let builder = builder.with_tool_current_session_id(execution_id);
                     let runner = builder.build().await?;
                     runner
                         .run(AgentRun {
@@ -484,7 +492,7 @@ where
                             execution: Default::default(),
                         })
                         .await
-                }
+                })
                 .await;
 
                 let completed_at = chrono::Utc::now();
@@ -674,7 +682,9 @@ where
         ctx: &HeartbeatCommandContext<S>,
         agent: &str,
         instructions: Option<String>,
-    ) -> Result<()>;
+    ) -> Result<()>
+    where
+        S: Clone + 'static;
 }
 
 #[async_trait::async_trait]
@@ -803,7 +813,10 @@ where
         ctx: &HeartbeatCommandContext<S>,
         agent: &str,
         instructions: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: Clone + 'static,
+    {
         let manifest = self.provider().manifest_snapshot();
         let resolver = PlatformResourceResolver::new(&manifest);
         let agent_id = resolver.agent_id(&Slug::parse(agent)?)?;
@@ -821,7 +834,11 @@ where
             }),
         });
 
-        let result = async {
+        let notification_emitter =
+            platform_notification_emitter(ctx.response_sink.clone(), execution_id);
+        let _notification_registration =
+            register_platform_notification_emitter(notification_emitter.clone());
+        let result = with_platform_notification_emitter(notification_emitter, async {
             let task_state =
                 load_heartbeat_task_state(self, agent_id, HeartbeatTaskState::default()).await;
             let manifest = self.provider().manifest_snapshot();
@@ -829,6 +846,7 @@ where
             let agent = resolver.agent(agent_id)?;
             let builder = self.provider().agent(&agent).await?;
             let builder = apply_session_memory_scope(self, builder, agent_id).await;
+            let builder = builder.with_tool_current_session_id(execution_id);
             let runner = builder.build().await?;
             runner
                 .run(AgentRun {
@@ -844,7 +862,7 @@ where
                     execution: Default::default(),
                 })
                 .await
-        }
+        })
         .await;
 
         let (success, error, total_input_tokens, total_output_tokens) = match result {

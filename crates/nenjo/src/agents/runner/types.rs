@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::tools::ToolResult;
 use nenjo_models::ChatMessage;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify, mpsc};
 use uuid::Uuid;
 
 /// A single tool call with its name and arguments.
@@ -209,12 +209,84 @@ pub enum TurnEvent {
     },
     /// A transcript message was durably relevant to future turns.
     TranscriptMessage { message: ChatMessage },
+    /// A user-visible assistant response emitted by the harness response tool.
+    AssistantResponse { message: String, status: String },
     /// Execution was paused by the caller.
     Paused,
     /// Execution was resumed after a pause.
     Resumed,
     /// Execution finished.
     Done { output: TurnOutput },
+}
+
+#[derive(Debug, Clone)]
+pub struct QueuedUserMessage {
+    pub message_id: Option<Uuid>,
+    pub content: String,
+}
+
+#[derive(Clone)]
+pub struct TurnInputSender {
+    tx: mpsc::UnboundedSender<QueuedUserMessage>,
+    notify: Arc<Notify>,
+}
+
+impl TurnInputSender {
+    pub(crate) fn new(tx: mpsc::UnboundedSender<QueuedUserMessage>, notify: Arc<Notify>) -> Self {
+        Self { tx, notify }
+    }
+
+    pub fn send_user_message(
+        &self,
+        message_id: Option<Uuid>,
+        content: impl Into<String>,
+    ) -> Result<(), mpsc::error::SendError<QueuedUserMessage>> {
+        let result = self.tx.send(QueuedUserMessage {
+            message_id,
+            content: content.into(),
+        });
+        if result.is_ok() {
+            self.notify.notify_waiters();
+        }
+        result
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TurnInputReceiver {
+    rx: Arc<Mutex<mpsc::UnboundedReceiver<QueuedUserMessage>>>,
+    notify: Arc<Notify>,
+}
+
+impl TurnInputReceiver {
+    pub(crate) fn new(rx: mpsc::UnboundedReceiver<QueuedUserMessage>, notify: Arc<Notify>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+            notify,
+        }
+    }
+
+    pub(crate) async fn drain(&self) -> Vec<QueuedUserMessage> {
+        let mut rx = self.rx.lock().await;
+        let mut messages = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            messages.push(message);
+        }
+        messages
+    }
+
+    pub(crate) async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+pub(crate) fn turn_input_channel() -> (TurnInputSender, TurnInputReceiver) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let notify = Arc::new(Notify::new());
+    (
+        TurnInputSender::new(tx, notify.clone()),
+        TurnInputReceiver::new(rx, notify),
+    )
 }
 
 /// Token for pausing and resuming an agent execution.

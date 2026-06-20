@@ -2,7 +2,6 @@
 mod runtime;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -19,8 +18,7 @@ use uuid::Uuid;
 
 use nenjo::types::GitContext;
 use nenjo::{ProjectLocation, Slug, TaskInput};
-use nenjo_events::{EncryptedPayload, Response, StepAgent};
-use nenjo_platform::tools::{PlatformNotificationEmitter, PlatformNotificationRecipient};
+use nenjo_events::{Response, StepAgent};
 use serde_json::json;
 
 use nenjo_harness::events::HarnessEvent;
@@ -34,36 +32,11 @@ use crate::event_bridge::{
     turn_event_to_task_step_response,
 };
 use crate::handlers::ResponseSender;
+use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::runtime::GitLocks;
 use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 pub use runtime::{TaskCommandContext, TaskWorktreeManager};
-
-struct TaskNotificationEmitter<S> {
-    response_sink: S,
-    session_id: Uuid,
-}
-
-impl<S> PlatformNotificationEmitter for TaskNotificationEmitter<S>
-where
-    S: ResponseSender,
-{
-    fn send_push_notification(
-        &self,
-        agent: &str,
-        current_session_id: Option<Uuid>,
-        encrypted_payload: EncryptedPayload,
-        recipient: Option<PlatformNotificationRecipient>,
-    ) -> Result<()> {
-        self.response_sink.send(Response::PushNotification {
-            agent: agent.to_string(),
-            session_id: current_session_id.unwrap_or(self.session_id),
-            recipient_user_id: recipient.as_ref().and_then(|target| target.user_id),
-            recipient_handle: recipient.and_then(|target| target.handle),
-            encrypted_payload,
-        })
-    }
-}
 
 fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
     agent_name.map(|agent_name| {
@@ -621,6 +594,7 @@ where
                 execution_run_id: Some(execution_run_id),
                 cancel: cancel.clone(),
                 pause: Some(pause.clone()),
+                turn_input: None,
             });
         }
     }
@@ -1208,11 +1182,7 @@ where
         .await
         .ok()
         .flatten();
-    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
-        Arc::new(TaskNotificationEmitter {
-            response_sink: ctx.response_sink.clone(),
-            session_id: task_id,
-        });
+    let notification_emitter = platform_notification_emitter(ctx.response_sink.clone(), task_id);
     let _notification_registration =
         register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =
@@ -1362,11 +1332,7 @@ where
         request = request.with_slug(task_slug.to_string());
     }
     let task_started_at = std::time::Instant::now();
-    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
-        Arc::new(TaskNotificationEmitter {
-            response_sink: ctx.response_sink.clone(),
-            session_id: task_id,
-        });
+    let notification_emitter = platform_notification_emitter(ctx.response_sink.clone(), task_id);
     let _notification_registration =
         register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =

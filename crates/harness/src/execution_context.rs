@@ -21,6 +21,9 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 delta.len()
             )
         }
+        nenjo::TurnEvent::AssistantResponse { message, status } => {
+            format!("assistant_response(status={status}, len={})", message.len())
+        }
         nenjo::TurnEvent::ModelRequestCompleted { request_id, .. } => {
             format!("model_request_completed(request={request_id})")
         }

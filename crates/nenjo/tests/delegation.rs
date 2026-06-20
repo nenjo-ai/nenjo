@@ -820,7 +820,8 @@ async fn max_depth_zero_disables_parent_tools() {
             "list_knowledge_packs",
             "inspect_operations",
             "stop_operations",
-            "wait_operations"
+            "wait_operations",
+            "respond_to_user"
         ]
     );
 }

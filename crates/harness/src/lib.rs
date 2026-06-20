@@ -135,6 +135,11 @@ where
         crate::run::chat::chat_stream(self, request).await
     }
 
+    /// Queue a user message into an active chat turn for the same session.
+    pub async fn try_enqueue_chat_message(&self, request: &ChatRequest) -> Result<bool> {
+        crate::run::chat::try_enqueue_chat_message(self, request).await
+    }
+
     /// Execute a task through the harness and wait for the final output.
     pub async fn task(&self, request: TaskRequest) -> Result<nenjo::TurnOutput> {
         self.task_stream(request).await?.output().await

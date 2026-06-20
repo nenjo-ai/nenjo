@@ -87,6 +87,16 @@ pub fn turn_event_to_stream_events(
                 encrypted_payload: None,
             }]
         }
+        nenjo::TurnEvent::AssistantResponse { message, status } => {
+            vec![StreamEvent::AssistantResponse {
+                run_id: run_id.to_string(),
+                payload: Some(serde_json::json!({
+                    "message": message,
+                    "status": status,
+                })),
+                encrypted_payload: None,
+            }]
+        }
         nenjo::TurnEvent::ModelRequestCompleted {
             request_id,
             parent_call_id,
@@ -301,6 +311,9 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 delta.len()
             )
         }
+        nenjo::TurnEvent::AssistantResponse { message, status } => {
+            format!("assistant_response(status={status}, len={})", message.len())
+        }
         nenjo::TurnEvent::ModelRequestCompleted {
             request_id,
             parent_call_id,
@@ -477,6 +490,15 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             encrypted_payload,
         } => format!(
             "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
+            payload.is_some(),
+            encrypted_payload.is_some()
+        ),
+        StreamEvent::AssistantResponse {
+            run_id,
+            payload,
+            encrypted_payload,
+        } => format!(
+            "assistant_response(run={run_id}, payload={}, encrypted={})",
             payload.is_some(),
             encrypted_payload.is_some()
         ),
@@ -928,6 +950,7 @@ pub fn turn_event_to_task_step_response(
         | nenjo::TurnEvent::HookCompleted { .. }
         | nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
+        | nenjo::TurnEvent::AssistantResponse { .. }
         | nenjo::TurnEvent::ModelRequestCompleted { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => Some(Response::TaskStepEvent {
             execution_run_id,
