@@ -1,8 +1,9 @@
 //! Builder for [`Provider`].
 
+use std::any::type_name;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::{
     ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory, ToolFactory,
@@ -90,7 +91,12 @@ where
 {
     async fn load_into(&self, manifest: &mut Manifest) -> Result<()> {
         self.0.load_into(manifest).await?;
-        manifest.merge(self.1.load().await?);
+        manifest.merge(self.1.load().await.with_context(|| {
+            format!(
+                "manifest loader {} failed while building provider",
+                type_name::<Loader>()
+            )
+        })?);
         Ok(())
     }
 }
