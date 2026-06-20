@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/nenjo-ai/nenjo/compare/v0.18.0...v0.19.0) - 2026-06-20
+
+### Added
+
+- Explicit chat response handling and turn input plumbing for runtime and worker chat flows ([#70](https://github.com/nenjo-ai/nenjo/pull/70))
+
+### Fixed
+
+- Preserve command content sidecars through package resolution, lockfiles, installs, and worker assembly ([#70](https://github.com/nenjo-ai/nenjo/pull/70))
+- Reject zero interval routine schedules instead of accepting invalid configs ([#70](https://github.com/nenjo-ai/nenjo/pull/70))
+- Include loader type context in provider manifest load errors ([#70](https://github.com/nenjo-ai/nenjo/pull/70))
+
 ## [0.18.0](https://github.com/nenjo-ai/nenjo/compare/v0.17.0...v0.18.0) - 2026-06-19
 
 ### Added
