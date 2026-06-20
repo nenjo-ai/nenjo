@@ -377,6 +377,15 @@ pub enum StreamEvent {
         encrypted_payload: Option<EncryptedPayload>,
     },
 
+    /// User-visible assistant response emitted by the response tool.
+    AssistantResponse {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
     /// A model provider request completed.
     ModelRequestCompleted {
         run_id: String,
@@ -566,6 +575,16 @@ impl std::fmt::Display for StreamEvent {
             } => write!(
                 f,
                 "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
+                payload.is_some(),
+                encrypted_payload.is_some()
+            ),
+            Self::AssistantResponse {
+                run_id,
+                payload,
+                encrypted_payload,
+            } => write!(
+                f,
+                "assistant_response(run={run_id}, payload={}, encrypted={})",
                 payload.is_some(),
                 encrypted_payload.is_some()
             ),

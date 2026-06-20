@@ -73,6 +73,7 @@ where
             execution_run_id: None,
             cancel: cancel.clone(),
             pause: None,
+            turn_input: Some(handle.turn_input()),
         },
     );
 
@@ -87,6 +88,47 @@ where
     );
 
     Ok(HarnessExecutionHandle::new(events_rx, join, cancel))
+}
+
+pub(crate) async fn try_enqueue_chat_message<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
+    request: &ChatRequest,
+) -> crate::Result<bool>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    let executions = harness.executions();
+    let Some(active) = executions.get(&request.session_id) else {
+        return Ok(false);
+    };
+    if active.kind != ExecutionKind::Chat {
+        return Ok(false);
+    }
+    let Some(turn_input) = active.turn_input.clone() else {
+        return Ok(false);
+    };
+    drop(active);
+
+    let effective_content = if request.message.trim().is_empty() {
+        match &request.domain_activation {
+            Some(activation) => activation.domain_command.clone(),
+            None => request.message.clone(),
+        }
+    } else {
+        request.message.clone()
+    };
+    if effective_content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    turn_input
+        .send_user_message(None, effective_content.clone())
+        .map_err(|error| {
+            crate::HarnessError::Other(anyhow!("failed to queue chat message: {error}"))
+        })?;
+
+    Ok(true)
 }
 
 struct PreparedChatExecution {

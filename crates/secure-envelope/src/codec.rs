@@ -241,6 +241,7 @@ impl SecureEnvelopeCodec {
         match event {
             StreamEvent::RunFailed { payload, .. }
             | StreamEvent::AssistantTextDelta { payload, .. }
+            | StreamEvent::AssistantResponse { payload, .. }
             | StreamEvent::ToolCallStarted { payload, .. }
             | StreamEvent::ToolOutputDelta { payload, .. }
             | StreamEvent::ToolCallCompleted { payload, .. }
@@ -341,6 +342,15 @@ impl SecureEnvelopeCodec {
                 payload: None,
                 encrypted_payload: self
                     .encrypt_user_payload(user_id, ack, "assistant_text_delta", payload)
+                    .await?,
+            })),
+            StreamEvent::AssistantResponse {
+                run_id, payload, ..
+            } => Ok(Some(StreamEvent::AssistantResponse {
+                run_id,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_user_payload(user_id, ack, "assistant_response", payload)
                     .await?,
             })),
             StreamEvent::ToolCallStarted {

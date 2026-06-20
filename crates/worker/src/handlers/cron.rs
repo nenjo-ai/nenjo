@@ -21,7 +21,9 @@ use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::{project_slug, routine_event_to_response};
 use crate::handlers::ResponseSender;
+use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
+use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 
 #[derive(Clone)]
 pub struct CronCommandContext<S> {
@@ -246,7 +248,9 @@ where
         routine: &str,
         project: Option<&str>,
         task_content: Option<CronTaskContent>,
-    ) -> Result<()>;
+    ) -> Result<()>
+    where
+        S: Clone + 'static;
 }
 
 #[async_trait::async_trait]
@@ -305,6 +309,7 @@ where
                 execution_run_id: None,
                 cancel: cancel.clone(),
                 pause: None,
+                turn_input: None,
             },
         );
 
@@ -401,194 +406,205 @@ where
                     }
                 };
                 match provider.routine(&routine_slug) {
-                    Ok(runner) => match runner.run_stream(cron_run.clone()).await {
-                        Ok(mut handle) => {
-                            let mut current_cycle_id: Option<Uuid> = None;
-                            let mut current_cycle: Option<u32> = None;
-                            let current_agent_id: Option<Uuid> = None;
-                            let mut cycle_completed = false;
-                            let mut schedule_cancelled = false;
+                    Ok(runner) => {
+                        let notification_emitter =
+                            platform_notification_emitter(response_sink.clone(), routine_id);
+                        let _notification_registration =
+                            register_platform_notification_emitter(notification_emitter.clone());
+                        let stream_result = with_platform_notification_emitter(
+                            notification_emitter,
+                            runner.run_stream(cron_run.clone()),
+                        )
+                        .await;
+                        match stream_result {
+                            Ok(mut handle) => {
+                                let mut current_cycle_id: Option<Uuid> = None;
+                                let mut current_cycle: Option<u32> = None;
+                                let current_agent_id: Option<Uuid> = None;
+                                let mut cycle_completed = false;
+                                let mut schedule_cancelled = false;
 
-                            loop {
-                                tokio::select! {
-                                    event = handle.recv() => {
-                                        match event {
-                                            Some(event) => {
-                                                let mut response_execution_id =
-                                                    current_cycle_id.unwrap_or(routine_id);
-                                                let response_event = match &event {
-                                                    RoutineEvent::CronCycleStarted { cycle } => {
-                                                        let durable_cycle = persisted_cycle.saturating_add(*cycle);
-                                                        let cycle_id = Uuid::new_v4();
-                                                        current_cycle_id = Some(cycle_id);
-                                                        current_cycle = Some(durable_cycle);
-                                                        response_execution_id = cycle_id;
-                                                        let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
-                                                            session_id: routine_id,
-                                                            phase: ExecutionPhase::ExecutingTools,
-                                                            worktree: None,
-                                                            active_tool_name: None,
-                                                            scheduler_runtime: Some(SchedulerRuntimeSnapshot {
-                                                                active_execution_id: Some(cycle_id),
-                                                                cycle: Some(durable_cycle),
-                                                            }),
-                                                        }).await;
-
-                                                        let _ = response_sink.send(Response::ExecutionStarted {
-                                                            id: cycle_id,
-                                                            project: project_slug_for_response.clone(),
-                                                            routine: Some(routine_slug_for_response.clone()),
-                                                            routine_name: Some(routine_name.clone()),
-                                                            agent: None,
-                                                            config: serde_json::json!({
-                                                                "trigger": "cron",
-                                                                "cycle": durable_cycle,
-                                                                "schedule": schedule_owned,
-                                                                "routine": routine_slug_for_response.clone(),
-                                                            }),
-                                                        });
-                                                        Some(RoutineEvent::CronCycleStarted {
-                                                            cycle: durable_cycle,
-                                                        })
-                                                    }
-                                                    RoutineEvent::CronCycleCompleted {
-                                                        result,
-                                                        total_input_tokens,
-                                                        total_output_tokens,
-                                                        ..
-                                                    } => {
-                                                        cycle_completed = true;
-                                                        let durable_cycle = current_cycle
-                                                            .take()
-                                                            .unwrap_or_else(|| persisted_cycle.saturating_add(1));
-                                                        if let Some(cycle_id) = current_cycle_id.take() {
+                                loop {
+                                    tokio::select! {
+                                        event = handle.recv() => {
+                                            match event {
+                                                Some(event) => {
+                                                    let mut response_execution_id =
+                                                        current_cycle_id.unwrap_or(routine_id);
+                                                    let response_event = match &event {
+                                                        RoutineEvent::CronCycleStarted { cycle } => {
+                                                            let durable_cycle = persisted_cycle.saturating_add(*cycle);
+                                                            let cycle_id = Uuid::new_v4();
+                                                            current_cycle_id = Some(cycle_id);
+                                                            current_cycle = Some(durable_cycle);
                                                             response_execution_id = cycle_id;
-                                                            let completed_at = chrono::Utc::now();
-                                                            last_run_at = Some(completed_at);
-                                                            let _ = response_sink.send(Response::ExecutionCompleted {
-                                                                id: cycle_id,
-                                                                success: result.passed,
-                                                                error: if result.passed {
-                                                                    None
-                                                                } else {
-                                                                    Some(result.output.clone())
-                                                                },
-                                                                total_input_tokens: *total_input_tokens,
-                                                                total_output_tokens: *total_output_tokens,
-                                                                execution_type: Some(nenjo_events::ExecutionType::Cron),
-                                                                routine: Some(routine_slug_for_response.clone()),
-                                                                routine_name: Some(routine_name.clone()),
-                                                                agent: None,
-                                                            });
-                                                            persisted_cycle =
-                                                                persisted_cycle.max(durable_cycle);
-                                                            upsert_cron_session(
-                                                                &harness,
-                                                                &worker_id,
-                                                                CronSessionUpsert {
-                                                                    routine_id,
-                                                                    project_id: opt_project_id,
-                                                                    memory_namespace: cron_memory_namespace.as_deref(),
-                                                                    schedule: &schedule_owned,
-                                                                    timezone: timezone_owned.as_deref(),
-                                                                    task: task_content_for_session.as_ref(),
-                                                                    status: SessionStatus::Active,
-                                                                    last_run_at,
-                                                                    next_run_at: Some(next_run_at),
-                                                                    last_completion: Some(RunCompletion {
-                                                                        success: result.passed,
-                                                                        error_summary: if result.passed {
-                                                                            None
-                                                                        } else {
-                                                                            Some(result.output.clone())
-                                                                        },
-                                                                        completed_at,
-                                                                    }),
-                                                                },
-                                                            )
-                                                            .await;
                                                             let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
                                                                 session_id: routine_id,
-                                                                phase: ExecutionPhase::Waiting,
+                                                                phase: ExecutionPhase::ExecutingTools,
                                                                 worktree: None,
                                                                 active_tool_name: None,
                                                                 scheduler_runtime: Some(SchedulerRuntimeSnapshot {
-                                                                    active_execution_id: None,
+                                                                    active_execution_id: Some(cycle_id),
                                                                     cycle: Some(durable_cycle),
                                                                 }),
                                                             }).await;
-                                                        }
-                                                        Some(RoutineEvent::CronCycleCompleted {
-                                                            cycle: durable_cycle,
-                                                            result: result.clone(),
-                                                            total_input_tokens: *total_input_tokens,
-                                                            total_output_tokens: *total_output_tokens,
-                                                        })
-                                                    }
-                                                    _ => None,
-                                                };
 
-                                                let event_for_response =
-                                                    response_event.as_ref().unwrap_or(&event);
-                                                if let Some(response) = routine_event_to_response(
-                                                    event_for_response,
-                                                    response_execution_id,
-                                                    None,
-                                                    current_agent_id,
-                                                    &provider.manifest_snapshot(),
-                                                ) {
-                                                    let _ = response_sink.send(response);
+                                                            let _ = response_sink.send(Response::ExecutionStarted {
+                                                                id: cycle_id,
+                                                                project: project_slug_for_response.clone(),
+                                                                routine: Some(routine_slug_for_response.clone()),
+                                                                routine_name: Some(routine_name.clone()),
+                                                                agent: None,
+                                                                config: serde_json::json!({
+                                                                    "trigger": "cron",
+                                                                    "cycle": durable_cycle,
+                                                                    "schedule": schedule_owned,
+                                                                    "routine": routine_slug_for_response.clone(),
+                                                                }),
+                                                            });
+                                                            Some(RoutineEvent::CronCycleStarted {
+                                                                cycle: durable_cycle,
+                                                            })
+                                                        }
+                                                        RoutineEvent::CronCycleCompleted {
+                                                            result,
+                                                            total_input_tokens,
+                                                            total_output_tokens,
+                                                            ..
+                                                        } => {
+                                                            cycle_completed = true;
+                                                            let durable_cycle = current_cycle
+                                                                .take()
+                                                                .unwrap_or_else(|| persisted_cycle.saturating_add(1));
+                                                            if let Some(cycle_id) = current_cycle_id.take() {
+                                                                response_execution_id = cycle_id;
+                                                                let completed_at = chrono::Utc::now();
+                                                                last_run_at = Some(completed_at);
+                                                                let _ = response_sink.send(Response::ExecutionCompleted {
+                                                                    id: cycle_id,
+                                                                    success: result.passed,
+                                                                    error: if result.passed {
+                                                                        None
+                                                                    } else {
+                                                                        Some(result.output.clone())
+                                                                    },
+                                                                    total_input_tokens: *total_input_tokens,
+                                                                    total_output_tokens: *total_output_tokens,
+                                                                    execution_type: Some(nenjo_events::ExecutionType::Cron),
+                                                                    routine: Some(routine_slug_for_response.clone()),
+                                                                    routine_name: Some(routine_name.clone()),
+                                                                    agent: None,
+                                                                });
+                                                                persisted_cycle =
+                                                                    persisted_cycle.max(durable_cycle);
+                                                                upsert_cron_session(
+                                                                    &harness,
+                                                                    &worker_id,
+                                                                    CronSessionUpsert {
+                                                                        routine_id,
+                                                                        project_id: opt_project_id,
+                                                                        memory_namespace: cron_memory_namespace.as_deref(),
+                                                                        schedule: &schedule_owned,
+                                                                        timezone: timezone_owned.as_deref(),
+                                                                        task: task_content_for_session.as_ref(),
+                                                                        status: SessionStatus::Active,
+                                                                        last_run_at,
+                                                                        next_run_at: Some(next_run_at),
+                                                                        last_completion: Some(RunCompletion {
+                                                                            success: result.passed,
+                                                                            error_summary: if result.passed {
+                                                                                None
+                                                                            } else {
+                                                                                Some(result.output.clone())
+                                                                            },
+                                                                            completed_at,
+                                                                        }),
+                                                                    },
+                                                                )
+                                                                .await;
+                                                                let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
+                                                                    session_id: routine_id,
+                                                                    phase: ExecutionPhase::Waiting,
+                                                                    worktree: None,
+                                                                    active_tool_name: None,
+                                                                    scheduler_runtime: Some(SchedulerRuntimeSnapshot {
+                                                                        active_execution_id: None,
+                                                                        cycle: Some(durable_cycle),
+                                                                    }),
+                                                                }).await;
+                                                            }
+                                                            Some(RoutineEvent::CronCycleCompleted {
+                                                                cycle: durable_cycle,
+                                                                result: result.clone(),
+                                                                total_input_tokens: *total_input_tokens,
+                                                                total_output_tokens: *total_output_tokens,
+                                                            })
+                                                        }
+                                                        _ => None,
+                                                    };
+
+                                                    let event_for_response =
+                                                        response_event.as_ref().unwrap_or(&event);
+                                                    if let Some(response) = routine_event_to_response(
+                                                        event_for_response,
+                                                        response_execution_id,
+                                                        None,
+                                                        current_agent_id,
+                                                        &provider.manifest_snapshot(),
+                                                    ) {
+                                                        let _ = response_sink.send(response);
+                                                    }
                                                 }
+                                                None => break,
                                             }
-                                            None => break,
                                         }
-                                    }
-                                    _ = cancel.cancelled() => {
-                                        handle.cancel();
-                                        schedule_cancelled = true;
-                                        if let Some(cycle_id) = current_cycle_id.take() {
-                                            if let Some(cycle) = current_cycle.take() {
-                                                persisted_cycle = persisted_cycle.max(cycle);
-                                                let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
-                                                    session_id: routine_id,
-                                                    phase: ExecutionPhase::Waiting,
-                                                    worktree: None,
-                                                    active_tool_name: None,
-                                                    scheduler_runtime: Some(SchedulerRuntimeSnapshot {
-                                                        active_execution_id: None,
-                                                        cycle: Some(cycle),
-                                                    }),
-                                                }).await;
+                                        _ = cancel.cancelled() => {
+                                            handle.cancel();
+                                            schedule_cancelled = true;
+                                            if let Some(cycle_id) = current_cycle_id.take() {
+                                                if let Some(cycle) = current_cycle.take() {
+                                                    persisted_cycle = persisted_cycle.max(cycle);
+                                                    let _ = harness.sessions().update_checkpoint(SessionCheckpointUpdate {
+                                                        session_id: routine_id,
+                                                        phase: ExecutionPhase::Waiting,
+                                                        worktree: None,
+                                                        active_tool_name: None,
+                                                        scheduler_runtime: Some(SchedulerRuntimeSnapshot {
+                                                            active_execution_id: None,
+                                                            cycle: Some(cycle),
+                                                        }),
+                                                    }).await;
+                                                }
+                                                let _ = response_sink.send(Response::ExecutionCompleted {
+                                                    id: cycle_id,
+                                                    success: false,
+                                                    error: Some("Cron schedule disabled".to_string()),
+                                                    total_input_tokens: 0,
+                                                    total_output_tokens: 0,
+                                                    execution_type: Some(nenjo_events::ExecutionType::Cron),
+                                                    routine: Some(routine_slug_for_response.clone()),
+                                                    routine_name: Some(routine_name.clone()),
+                                                    agent: None,
+                                                });
                                             }
-                                            let _ = response_sink.send(Response::ExecutionCompleted {
-                                                id: cycle_id,
-                                                success: false,
-                                                error: Some("Cron schedule disabled".to_string()),
-                                                total_input_tokens: 0,
-                                                total_output_tokens: 0,
-                                                execution_type: Some(nenjo_events::ExecutionType::Cron),
-                                                routine: Some(routine_slug_for_response.clone()),
-                                                routine_name: Some(routine_name.clone()),
-                                                agent: None,
-                                            });
+                                            break;
                                         }
-                                        break;
                                     }
                                 }
-                            }
 
-                            if schedule_cancelled {
-                                break;
-                            }
+                                if schedule_cancelled {
+                                    break;
+                                }
 
-                            if !cycle_completed {
-                                error!(%routine_id, "Cron routine stream ended before cycle completion");
+                                if !cycle_completed {
+                                    error!(%routine_id, "Cron routine stream ended before cycle completion");
+                                }
+                            }
+                            Err(error) => {
+                                error!(%routine_id, error = %error, "Cron routine execution failed");
                             }
                         }
-                        Err(error) => {
-                            error!(%routine_id, error = %error, "Cron routine execution failed");
-                        }
-                    },
+                    }
                     Err(error) => {
                         error!(error = %error, routine_id = %routine_id, "Cron routine not found");
                     }
@@ -670,7 +686,10 @@ where
         routine: &str,
         project: Option<&str>,
         task_content: Option<CronTaskContent>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: Clone + 'static,
+    {
         let manifest = self.provider().manifest_snapshot();
         let resolver = PlatformResourceResolver::new(&manifest);
         let routine_id = resolver.routine_id(&Slug::parse(routine)?)?;
@@ -731,10 +750,14 @@ where
             timeout: Duration::from_secs(0),
         });
 
-        let result = async {
+        let notification_emitter =
+            platform_notification_emitter(ctx.response_sink.clone(), execution_id);
+        let _notification_registration =
+            register_platform_notification_emitter(notification_emitter.clone());
+        let result = with_platform_notification_emitter(notification_emitter, async {
             let routine = resolver.routine(routine_id)?;
             provider.routine(&routine)?.run(cron_run).await
-        }
+        })
         .await;
 
         let (success, error, total_input_tokens, total_output_tokens) = match &result {

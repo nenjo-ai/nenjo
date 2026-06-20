@@ -19,9 +19,14 @@ use uuid::Uuid;
 use super::compaction::{
     compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
 };
-use super::types::{ToolCall, TurnEvent, TurnLoopConfig, TurnOutput};
-use crate::agents::async_ops::{AsyncOperationRuntime, scope_current_async_operation_runtime};
+use super::types::{ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnOutput};
+use crate::agents::async_ops::{
+    AsyncOpWaitFilter, AsyncOperationRuntime, scope_current_async_operation_runtime,
+};
 use crate::agents::instance::AgentInstance;
+use crate::agents::respond::{
+    RESPOND_TO_USER_TOOL_NAME, RespondToUserStatus, TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS,
+};
 use crate::hooks::{
     ActiveHook, ActiveHookScope, HookBlock, HookEvent, HookRuntime, HookRuntimeEvent,
 };
@@ -218,8 +223,73 @@ fn emit_event(events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>, event: TurnE
     }
 }
 
+async fn model_visible_operation_continuation<P>(
+    agent: &AgentInstance<P>,
+    turn_input: Option<&TurnInputReceiver>,
+) -> Result<Option<String>>
+where
+    P: ProviderRuntime,
+{
+    let wait = if let Some(turn_input) = turn_input {
+        tokio::select! {
+            wait = agent.runtime.async_ops.wait(30, AsyncOpWaitFilter::model_visible()) => wait,
+            _ = turn_input.notified() => {
+                return Ok(Some("A new user message arrived while async work was in progress. Read the queued user message before deciding what to do next.".into()));
+            }
+        }
+    } else {
+        agent
+            .runtime
+            .async_ops
+            .wait(30, AsyncOpWaitFilter::model_visible())
+            .await
+    };
+    let has_open = agent.runtime.async_ops.has_open_model_visible().await;
+    if wait.updates.is_empty() && !has_open {
+        return Ok(None);
+    }
+
+    let updates = serde_json::to_string(&wait.updates)?;
+    let instruction = if has_open {
+        "A model-visible async operation is still running or waiting for input. Do not give a final answer yet. Use the async operation tools if input is needed; otherwise continue waiting for completion before summarizing the result."
+    } else {
+        "A model-visible async operation produced terminal updates. Use these updates before giving the final answer."
+    };
+
+    Ok(Some(format!(
+        "{instruction}\n\nAsync operation updates:\n{updates}"
+    )))
+}
+
+async fn drain_queued_user_messages(
+    messages: &mut Vec<ChatMessage>,
+    events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    turn_input: Option<&TurnInputReceiver>,
+) -> bool {
+    let Some(turn_input) = turn_input else {
+        return false;
+    };
+    let queued = turn_input.drain().await;
+    let mut appended = false;
+    for queued_message in queued {
+        let content = queued_message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let message = ChatMessage::user(content.to_string());
+        messages.push(message.clone());
+        emit_event(events_tx, TurnEvent::TranscriptMessage { message });
+        appended = true;
+    }
+    appended
+}
+
 tokio::task_local! {
     static CURRENT_EVENTS_TX: Option<mpsc::UnboundedSender<TurnEvent>>;
+}
+
+tokio::task_local! {
+    static CURRENT_TURN_INPUT: Option<TurnInputReceiver>;
 }
 
 tokio::task_local! {
@@ -243,6 +313,10 @@ tokio::task_local! {
 
 pub(crate) fn current_events_tx() -> Option<mpsc::UnboundedSender<TurnEvent>> {
     CURRENT_EVENTS_TX.try_with(Clone::clone).ok().flatten()
+}
+
+pub(crate) fn current_turn_input() -> Option<TurnInputReceiver> {
+    CURRENT_TURN_INPUT.try_with(Clone::clone).ok().flatten()
 }
 
 pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
@@ -295,6 +369,25 @@ fn sanitize_tool_text_preview(text: &str) -> Option<String> {
     }
 }
 
+fn reject_terminal_respond_to_user_results_while_async_ops_open(
+    tools: &[Arc<dyn Tool>],
+    tool_results: &mut [(&nenjo_models::ToolCall, ToolResult)],
+) {
+    for (tool_call, tool_result) in tool_results {
+        if !tool_result.success || !RespondToUserStatus::from_tool_call(tool_call).is_terminal() {
+            continue;
+        }
+        let is_respond_to_user = tool_for_call(tools, tool_call)
+            .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME);
+        if !is_respond_to_user {
+            continue;
+        }
+        tool_result.success = false;
+        tool_result.output.clear();
+        tool_result.error = Some(TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS.into());
+    }
+}
+
 /// Run the agentic turn loop.
 ///
 /// Takes pre-built messages (caller handles prompt construction) and loops:
@@ -307,6 +400,8 @@ pub async fn run<P>(
     mut messages: Vec<ChatMessage>,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     pause_token: Option<super::types::PauseToken>,
+    turn_input: Option<TurnInputReceiver>,
+    require_respond_to_user: bool,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
@@ -317,9 +412,9 @@ where
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
     let visible_tool_specs = agent.tool_specs();
-    let local_tool_specs = agent.local_tool_specs();
+    let initial_local_tool_specs = agent.local_tool_specs();
     let visible_tool_specs = visible_tool_specs.as_slice();
-    let local_tool_specs = local_tool_specs.as_slice();
+    let initial_local_tool_specs = initial_local_tool_specs.as_slice();
     let hook_runtime = agent.runtime.hook_runtime.clone();
     let config = TurnLoopConfig {
         max_turns: agent.runtime.config.max_turns as u32,
@@ -345,6 +440,7 @@ where
             CURRENT_HOOK_RUNTIME
                 .scope(hook_runtime.clone(), async {
                     CURRENT_EVENTS_TX.scope(events_tx.clone(), async {
+                        CURRENT_TURN_INPUT.scope(turn_input.clone(), async {
             // Log the visible tool belt once before the loop.
             if !visible_tool_specs.is_empty() {
                 let tool_names: Vec<&str> =
@@ -353,7 +449,7 @@ where
                     agent = agent_name,
                     model,
                     tool_count = visible_tool_specs.len(),
-                    local_tool_count = local_tool_specs.len(),
+                    local_tool_count = initial_local_tool_specs.len(),
                     native_tool_count = agent.model_manifest.native_tools.len(),
                     tools = ?tool_names,
                     "Turn loop starting with tools"
@@ -413,6 +509,9 @@ where
                     emit_event(events_tx.as_ref(), TurnEvent::Resumed);
                 }
 
+                drain_queued_user_messages(&mut messages, events_tx.as_ref(), turn_input.as_ref())
+                    .await;
+
                 if let Some(prompt) = latest_user_prompt(&messages) {
                     let prompt = prompt.to_string();
                     let outcome = run_user_prompt_submit_hooks(
@@ -438,10 +537,18 @@ where
                 }
 
                 // Call LLM
+                let hide_final_response_tool = !require_respond_to_user;
+                let local_tool_specs = agent
+                    .local_tool_specs()
+                    .into_iter()
+                    .filter(|spec| {
+                        !(hide_final_response_tool && spec.name == RESPOND_TO_USER_TOOL_NAME)
+                    })
+                    .collect::<Vec<_>>();
                 let tools_ref = if local_tool_specs.is_empty() {
                     None
                 } else {
-                    Some(local_tool_specs)
+                    Some(local_tool_specs.as_slice())
                 };
 
                 let request = ChatRequest {
@@ -653,7 +760,7 @@ where
                         },
                     );
 
-                    let tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
+                    let mut tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
                         if run_parallel {
                             let message_snapshot = messages.clone();
                             let futs = response.tool_calls.iter().map(|tc| {
@@ -694,10 +801,23 @@ where
 
                     total_tool_calls += tool_results.len() as u32;
 
+                    if agent.runtime.async_ops.has_open_model_visible().await {
+                        reject_terminal_respond_to_user_results_while_async_ops_open(
+                            tools,
+                            &mut tool_results,
+                        );
+                    }
+
                     // Check if any executed tool is terminal (e.g. pass_verdict).
                     // Terminal tools signal that the turn loop should stop immediately
                     // without feeding the tool result back to the LLM.
-                    let has_terminal = tool_results.iter().any(|(tc, _)| {
+                    let terminal_result = tool_results.iter().find(|(tc, result)| {
+                        result.success
+                            && tool_for_call(tools, tc).is_some_and(|t| t.is_terminal())
+                            && RespondToUserStatus::from_tool_call(tc).is_terminal()
+                    });
+                    let has_terminal = terminal_result.is_some();
+                    let has_terminal_attempt = tool_results.iter().any(|(tc, _)| {
                         tool_for_call(tools, tc)
                             .is_some_and(|t| t.is_terminal())
                     });
@@ -732,7 +852,32 @@ where
                             );
                         }
 
-                        // Skip pushing tool results when a terminal tool was called —
+                        if tool_result.success
+                            && tool_for_call(tools, tool_call)
+                                .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
+                        {
+                            let status = RespondToUserStatus::from_tool_call(tool_call);
+                            let message = tool_result.output.trim().to_string();
+                            if !message.is_empty() {
+                                let assistant_message = ChatMessage::assistant(message.clone());
+                                messages.push(assistant_message.clone());
+                                emit_event(
+                                    events_tx.as_ref(),
+                                    TurnEvent::AssistantResponse {
+                                        message,
+                                        status: status.to_string(),
+                                    },
+                                );
+                                emit_event(
+                                    events_tx.as_ref(),
+                                    TurnEvent::TranscriptMessage {
+                                        message: assistant_message,
+                                    },
+                                );
+                            }
+                        }
+
+                        // Skip pushing tool results when a terminal tool succeeded —
                         // the structured arguments are already captured in the assistant
                         // message and no further LLM interaction is needed.
                         if has_terminal {
@@ -784,26 +929,27 @@ where
                         );
                         let terminal_tool_text = tool_results
                             .iter()
-                            .find(|(tc, _)| {
-                                tool_for_call(tools, tc).is_some_and(|t| t.is_terminal())
+                            .find(|(tc, result)| {
+                                result.success
+                                    && tool_for_call(tools, tc)
+                                        .is_some_and(|t| t.is_terminal())
                             })
-                            .map(|(_, result)| {
-                                if result.success {
-                                    result.output.clone()
-                                } else {
-                                    result
-                                        .error
-                                        .clone()
-                                        .unwrap_or_else(|| result.output.clone())
-                                }
-                            })
+                            .map(|(_, result)| result.output.clone())
                             .unwrap_or_default();
-                        final_text = response
-                            .text
-                            .as_deref()
-                            .filter(|text| !text.trim().is_empty())
-                            .map(ToOwned::to_owned)
-                            .unwrap_or(terminal_tool_text);
+                        let terminal_tool_name = terminal_result
+                            .and_then(|(tc, _)| tool_for_call(tools, tc))
+                            .map(|tool| tool.name())
+                            .unwrap_or_default();
+                        final_text = if terminal_tool_name == RESPOND_TO_USER_TOOL_NAME {
+                            terminal_tool_text
+                        } else {
+                            response
+                                .text
+                                .as_deref()
+                                .filter(|text| !text.trim().is_empty())
+                                .map(ToOwned::to_owned)
+                                .unwrap_or(terminal_tool_text)
+                        };
                         if let Some(block) = run_stop_hooks(
                             agent_name,
                             hook_runtime.as_ref(),
@@ -822,6 +968,10 @@ where
                             continue;
                         }
                         break;
+                    }
+
+                    if has_terminal_attempt {
+                        continue;
                     }
 
                     continue;
@@ -850,6 +1000,30 @@ where
                 }
 
                 final_text = text.clone();
+                if let Some(message) =
+                    model_visible_operation_continuation(agent, turn_input.as_ref()).await?
+                {
+                    debug!(
+                        agent = agent_name,
+                        model,
+                        iteration,
+                        "Deferring final response until model-visible async operations settle"
+                    );
+                    final_text.clear();
+                    messages.push(ChatMessage::developer(message));
+                    continue;
+                }
+                if agent
+                    .runtime
+                    .tools
+                    .iter()
+                    .any(|tool| require_respond_to_user && tool.name() == RESPOND_TO_USER_TOOL_NAME)
+                {
+                    messages.push(ChatMessage::developer(format!(
+                        "Your previous response was not delivered because this runtime requires the {RESPOND_TO_USER_TOOL_NAME} tool to end the turn. Call {RESPOND_TO_USER_TOOL_NAME} with the final user-facing message when you are ready.\n\nUndelivered response draft:\n{text}"
+                    )));
+                    continue;
+                }
                 let assistant_message = ChatMessage::assistant(text);
                 messages.push(assistant_message.clone());
                 emit_event(
@@ -917,6 +1091,7 @@ where
             );
 
             Ok(output)
+                        }).await
                     })
                     .await
                 })
@@ -1302,4 +1477,72 @@ fn append_hook_block_continuation(
 
 fn active_hook_source(active: &ActiveHook) -> String {
     format!("{}:{}", active.source.kind(), active.source.name())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::async_ops::AsyncOpManager;
+    use crate::agents::respond::RespondToUserTool;
+
+    #[test]
+    fn post_batch_guard_rejects_terminal_respond_to_user_result() {
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(RespondToUserTool::new(AsyncOpManager::new()))];
+        let tool_call = nenjo_models::ToolCall {
+            id: "call_1".into(),
+            name: RESPOND_TO_USER_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "message": "Done",
+                "status": "completed",
+            })
+            .to_string(),
+        };
+        let mut results = vec![(
+            &tool_call,
+            ToolResult {
+                success: true,
+                output: "Done".into(),
+                error: None,
+            },
+        )];
+
+        reject_terminal_respond_to_user_results_while_async_ops_open(&tools, &mut results);
+
+        assert!(!results[0].1.success);
+        assert!(results[0].1.output.is_empty());
+        assert_eq!(
+            results[0].1.error.as_deref(),
+            Some(TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS)
+        );
+    }
+
+    #[test]
+    fn post_batch_guard_keeps_in_progress_respond_to_user_result() {
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(RespondToUserTool::new(AsyncOpManager::new()))];
+        let tool_call = nenjo_models::ToolCall {
+            id: "call_1".into(),
+            name: RESPOND_TO_USER_TOOL_NAME.into(),
+            arguments: serde_json::json!({
+                "message": "Still working",
+                "status": "in_progress",
+            })
+            .to_string(),
+        };
+        let mut results = vec![(
+            &tool_call,
+            ToolResult {
+                success: true,
+                output: "Still working".into(),
+                error: None,
+            },
+        )];
+
+        reject_terminal_respond_to_user_results_while_async_ops_open(&tools, &mut results);
+
+        assert!(results[0].1.success);
+        assert_eq!(results[0].1.output, "Still working");
+        assert_eq!(results[0].1.error, None);
+    }
 }

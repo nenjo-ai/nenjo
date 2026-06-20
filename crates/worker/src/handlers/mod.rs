@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod domain;
 pub mod heartbeat;
 pub mod manifest;
+mod notification;
 pub mod packages;
 pub mod repo;
 pub mod task;

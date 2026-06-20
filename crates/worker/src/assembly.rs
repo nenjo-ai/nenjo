@@ -658,4 +658,94 @@ description: Review code changes.
             package_root.join("skills/review")
         );
     }
+
+    #[tokio::test]
+    async fn runtime_manifest_loads_nested_platform_package_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        let packages_dir = config_dir.join("platform_pkgs");
+        let package_root = packages_dir.join("@nenjo-ai").join("nenji@1.0.0");
+        std::fs::create_dir_all(package_root.join("nenjo/nenji/commands/design")).unwrap();
+        std::fs::write(
+            packages_dir.join("nenpm.lock.yml"),
+            r#"
+schema: nenjo.lock.v1
+packages:
+- name: "@nenjo-ai/nenji"
+  version: "1.0.0"
+  manifest_path: nenjo/nenji/package.yaml
+  hash: sha256:test
+  modules:
+  - path: commands/design.yaml
+    resource: design
+    source_path: nenjo/nenji/commands/design.yaml
+    schema: nenjo.command.v1
+    kind: command
+    name: design
+    hash: sha256:test
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            packages_dir.join(".nenpm-index.json"),
+            r#"{
+              "schema": "nenjo.package-index.v1",
+              "packages": {
+                "@nenjo-ai/nenji@1.0.0": {
+                  "name": "@nenjo-ai/nenji",
+                  "version": "1.0.0",
+                  "root": "@nenjo-ai/nenji@1.0.0",
+                  "manifest_path": "package.yaml"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: "@nenjo-ai/nenji"
+version: "1.0.0"
+modules:
+  - commands/design.yaml
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/commands/design.yaml"),
+            r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: nenjo/nenji/commands/design/command.md
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("nenjo/nenji/commands/design/command.md"),
+            "Design the requested artifact.\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            config_dir,
+            workspace_dir: temp.path().join("workspace"),
+            state_dir: temp.path().join("state"),
+            manifests_dir: temp.path().join("manifests"),
+            ..Default::default()
+        };
+
+        let manifest = load_runtime_manifest(&config).await.unwrap();
+
+        assert_eq!(manifest.commands.len(), 1);
+        let command = &manifest.commands[0];
+        assert_eq!(command.name, "design");
+        assert_eq!(
+            command.root_dir,
+            package_root.join("nenjo/nenji/commands/design")
+        );
+        assert_eq!(command.entry_path, "command.md");
+    }
 }

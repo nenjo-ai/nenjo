@@ -21,8 +21,8 @@ use crate::tools::{
 };
 
 use super::async_ops::{
-    AsyncOpChildHandle, AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, StartAsyncOp,
-    truncate,
+    AsyncOpChildHandle, AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpWaitFilter,
+    StartAsyncOp, truncate,
 };
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
 use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
@@ -532,8 +532,21 @@ impl Tool for AbilityWaitTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: WaitArgs = serde_json::from_value(args)?;
         let _reason = parsed.reason;
+        if let Some(turn_input) = super::runner::turn_loop::current_turn_input() {
+            let result = tokio::select! {
+                result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::all()) => result,
+                _ = turn_input.notified() => super::async_ops::AsyncOpWaitResult {
+                    elapsed_seconds: 0,
+                    woken_by: "user_message",
+                    updates: Vec::new(),
+                },
+            };
+            return Ok(json_tool(serde_json::json!(result)));
+        }
         Ok(json_tool(serde_json::json!(
-            self.async_ops.wait(parsed.seconds, None).await
+            self.async_ops
+                .wait(parsed.seconds, AsyncOpWaitFilter::all())
+                .await
         )))
     }
 }
@@ -563,8 +576,21 @@ impl Tool for WaitOperationsTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: WaitOperationsArgs = serde_json::from_value(args)?;
         let _reason = parsed.reason;
+        if let Some(turn_input) = super::runner::turn_loop::current_turn_input() {
+            let result = tokio::select! {
+                result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::kind(parsed.kind)) => result,
+                _ = turn_input.notified() => super::async_ops::AsyncOpWaitResult {
+                    elapsed_seconds: 0,
+                    woken_by: "user_message",
+                    updates: Vec::new(),
+                },
+            };
+            return Ok(json_tool(serde_json::json!(result)));
+        }
         Ok(json_tool(serde_json::json!(
-            self.async_ops.wait(parsed.seconds, parsed.kind).await
+            self.async_ops
+                .wait(parsed.seconds, AsyncOpWaitFilter::kind(parsed.kind))
+                .await
         )))
     }
 }
@@ -935,6 +961,9 @@ where
                     TurnEvent::AssistantTextDelta { .. } => {
                         let _ = parent_tx.send(event);
                     }
+                    TurnEvent::AssistantResponse { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
                     TurnEvent::ModelRequestCompleted {
                         request_id,
                         parent_call_id,
@@ -961,7 +990,7 @@ where
         _ = cancel_token.cancelled() => {
             Err(anyhow::anyhow!("ability operation stopped"))
         }
-        result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None) => result,
+        result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None, None, false) => result,
     };
 
     if let Some(bridge) = bridge {
@@ -1082,6 +1111,7 @@ async fn bridge_ability_transcript(
         | TurnEvent::AbilityCompleted { .. }
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
+        | TurnEvent::AssistantResponse { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookActivated { .. }

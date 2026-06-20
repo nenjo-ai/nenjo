@@ -760,6 +760,116 @@ manifest:
 }
 
 #[test]
+fn local_resolver_pulls_commands_from_agent_imports() {
+    let root = temp_repo("agent-command-imports");
+    write_file(
+        &root,
+        "packages/nenji/package.yaml",
+        r#"
+schema: nenjo.package.v1
+name: "nenji"
+version: "0.1.0"
+modules:
+  - agent.yaml
+"#,
+    );
+    write_file(
+        &root,
+        "packages/nenji/agent.yaml",
+        r#"
+schema: nenjo.agent.v1
+imports:
+  commands:
+    - ./commands/
+manifest:
+  name: nenji
+"#,
+    );
+    write_file(
+        &root,
+        "packages/nenji/commands/index.yml",
+        r#"
+schema: nenjo.module_index.v1
+modules:
+  - design.yaml
+"#,
+    );
+    write_file(
+        &root,
+        "packages/nenji/commands/design.yaml",
+        r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: packages/nenji/commands/design/command.md
+"#,
+    );
+    write_file(
+        &root,
+        "packages/nenji/commands/design/command.md",
+        "Design the requested artifact.\n",
+    );
+
+    let package = LocalPackageResolver::new(&root)
+        .resolve_package_manifest("packages/nenji/package.yaml")
+        .unwrap();
+
+    assert_eq!(package.modules["agent.yaml"].kind, PackageKind::Agent);
+    assert_eq!(
+        package.modules["commands/design.yaml"].kind,
+        PackageKind::Command
+    );
+    assert_eq!(
+        package.modules["commands/design.yaml"].files[0].path,
+        "commands/design/command.md"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn local_resolver_maps_repository_relative_command_content_path_to_module_stem_file() {
+    let root = temp_repo("flat-command-content-path");
+    write_file(
+        &root,
+        "package.yaml",
+        r#"
+schema: nenjo.package.v1
+name: "nenji"
+version: "1.0.0"
+modules:
+  - commands/design.yaml
+"#,
+    );
+    write_file(
+        &root,
+        "commands/design.yaml",
+        r#"
+schema: nenjo.command.v1
+manifest:
+  name: design
+  command: /design
+  content_path: nenjo/nenji/commands/design/command.md
+"#,
+    );
+    write_file(
+        &root,
+        "commands/design/command.md",
+        "Design the requested artifact.\n",
+    );
+
+    let package = LocalPackageResolver::new(&root)
+        .resolve_package_manifest("package.yaml")
+        .unwrap();
+
+    assert_eq!(
+        package.modules["commands/design.yaml"].files[0].path,
+        "commands/design/command.md"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn local_resolver_expands_directory_module_indexes() {
     let root = temp_repo("module-index");
     write_file(

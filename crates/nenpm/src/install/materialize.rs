@@ -160,6 +160,11 @@ fn package_install_can_be_reused(
         if !file_hash_matches(&package_root.join(&module.path), &module.hash)? {
             return Ok(false);
         }
+        for file in &module.files {
+            if !file_hash_matches(&package_root.join(&file.path), &file.hash)? {
+                return Ok(false);
+            }
+        }
     }
     Ok(true)
 }

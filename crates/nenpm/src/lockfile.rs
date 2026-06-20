@@ -166,6 +166,18 @@ pub struct LockedModule {
     /// Structured runtime imports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<ModuleImport>,
+    /// Additional package files required at runtime by this module.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<LockedPackageFile>,
+}
+
+/// Locked package sidecar file required by a module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedPackageFile {
+    /// Package-relative file path.
+    pub path: String,
+    /// File content hash.
+    pub hash: String,
 }
 
 impl NenpmLock {
@@ -265,6 +277,14 @@ fn lock_module(module: &ResolvedModule) -> LockedModule {
         name: module.name().to_string(),
         hash: module.hash.clone(),
         imports: module.imports.clone(),
+        files: module
+            .files
+            .iter()
+            .map(|file| LockedPackageFile {
+                path: file.path.clone(),
+                hash: file.hash.clone(),
+            })
+            .collect(),
     }
 }
 

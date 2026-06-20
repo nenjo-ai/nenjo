@@ -158,6 +158,32 @@ pub(crate) struct AsyncOpWaitResult {
     pub(crate) updates: Vec<AsyncOpSignalDigest>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AsyncOpWaitFilter {
+    kind: Option<AsyncOpKind>,
+    model_visible_only: bool,
+}
+
+impl AsyncOpWaitFilter {
+    pub(crate) fn all() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn kind(kind: Option<AsyncOpKind>) -> Self {
+        Self {
+            kind,
+            model_visible_only: false,
+        }
+    }
+
+    pub(crate) fn model_visible() -> Self {
+        Self {
+            kind: None,
+            model_visible_only: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StartAsyncOp {
     pub(crate) id: AsyncOpId,
@@ -550,14 +576,18 @@ impl AsyncOpManager {
         inspected
     }
 
-    pub(crate) async fn wait(&self, seconds: u64, kind: Option<AsyncOpKind>) -> AsyncOpWaitResult {
+    pub(crate) async fn wait(&self, seconds: u64, filter: AsyncOpWaitFilter) -> AsyncOpWaitResult {
         let seconds = seconds.clamp(1, 30);
         let started = Instant::now();
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
-            _ = self.inner.notify.notified() => {}
+        let mut updates = self.drain_signals(filter.clone()).await;
+        if updates.is_empty() && (!filter.model_visible_only || self.has_open_model_visible().await)
+        {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
+                _ = self.inner.notify.notified() => {}
+            }
+            updates = self.drain_signals(filter).await;
         }
-        let updates = self.drain_signals(kind).await;
         let woken_by = classify_wake(&updates);
         AsyncOpWaitResult {
             elapsed_seconds: started.elapsed().as_secs(),
@@ -566,17 +596,37 @@ impl AsyncOpManager {
         }
     }
 
+    pub(crate) async fn has_open_model_visible(&self) -> bool {
+        let operations = self.inner.operations.lock().await;
+        for operation in operations.values() {
+            if !operation.model_visible {
+                continue;
+            }
+            let status = *operation.status.lock().await;
+            if !matches!(
+                status,
+                AsyncOpStatus::Completed | AsyncOpStatus::Failed | AsyncOpStatus::Stopped
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) async fn notified(&self) {
         self.inner.notify.notified().await;
     }
 
     pub(crate) async fn drain_signals(
         &self,
-        kind: Option<AsyncOpKind>,
+        filter: AsyncOpWaitFilter,
     ) -> Vec<AsyncOpSignalDigest> {
-        let operations = self.select_operations(Vec::new(), kind).await;
+        let operations = self.select_operations(Vec::new(), filter.kind).await;
         let mut updates = Vec::new();
         for operation in operations {
+            if filter.model_visible_only && !operation.model_visible {
+                continue;
+            }
             let status = *operation.status.lock().await;
             let mut signals = operation.signals.lock().await;
             if signals.is_empty() {
@@ -876,7 +926,9 @@ mod tests {
             )
             .await;
 
-        let result = manager.wait(1, Some(AsyncOpKind::Ability)).await;
+        let result = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .await;
         assert_eq!(result.woken_by, "operation_result");
         assert_eq!(result.updates.len(), 1);
         assert_eq!(result.updates[0].operation_id, "ability_research_1");
@@ -921,7 +973,9 @@ mod tests {
             )
             .await;
 
-        let result = manager.wait(1, Some(AsyncOpKind::Media)).await;
+        let result = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Media)))
+            .await;
         assert_eq!(result.woken_by, "operation_result");
 
         let inspected = manager
@@ -935,6 +989,81 @@ mod tests {
         assert_eq!(inspected.len(), 1);
         assert_eq!(inspected[0].status, "completed");
         assert_eq!(inspected[0].latest_output, Some(output));
+    }
+
+    #[tokio::test]
+    async fn model_visible_wait_drains_only_model_visible_operations() {
+        let manager = AsyncOpManager::new();
+        let _visible = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_build_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "build".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("use_ability".into()),
+                    started_summary: "build library".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+        let _hidden = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("shell_1"),
+                    kind: AsyncOpKind::Shell,
+                    label: "shell".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: None,
+                    started_summary: "hidden shell".into(),
+                    model_visible: false,
+                },
+                None,
+            )
+            .await;
+
+        let result = manager.wait(1, AsyncOpWaitFilter::model_visible()).await;
+
+        assert_eq!(result.updates.len(), 1);
+        assert_eq!(result.updates[0].operation_id, "ability_build_1");
+        assert_eq!(result.updates[0].status, "running");
+        assert!(manager.has_open_model_visible().await);
+    }
+
+    #[tokio::test]
+    async fn model_visible_open_false_after_terminal_signal() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_build_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "build".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("use_ability".into()),
+                    started_summary: "build library".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "done".into(),
+                    output: None,
+                },
+                None,
+            )
+            .await;
+
+        let result = manager.wait(1, AsyncOpWaitFilter::model_visible()).await;
+
+        assert!(!manager.has_open_model_visible().await);
+        assert_eq!(result.woken_by, "operation_result");
+        assert_eq!(result.updates[0].status, "completed");
     }
 
     #[tokio::test]
@@ -961,7 +1090,7 @@ mod tests {
                 .await;
         }
 
-        let updates = manager.drain_signals(None).await;
+        let updates = manager.drain_signals(AsyncOpWaitFilter::all()).await;
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].events.len(), WAIT_EVENTS_PER_OPERATION);
     }
@@ -985,7 +1114,9 @@ mod tests {
             .await;
         let child = started.child.clone();
         let ask = tokio::spawn(async move { child.ask("continue?".into(), None, None).await });
-        let _ = manager.wait(1, Some(AsyncOpKind::Ability)).await;
+        let _ = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .await;
         let sent = manager
             .send_input(vec!["ability_research_1".into()], "yes".into())
             .await;

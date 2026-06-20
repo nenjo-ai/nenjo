@@ -1,8 +1,5 @@
 //! Chat command handlers.
 
-use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use nenjo::commands::{LoadedCommand, find_command_manifest, find_invoked_command_manifest};
 use nenjo::hooks::{ActiveHookScope, ResolvedHook};
@@ -11,12 +8,12 @@ use nenjo_sessions::{
     SessionStatus, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionTransition,
     TranscriptState,
 };
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::Slug;
-use nenjo_events::{DomainActivation, EncryptedPayload, Response, StreamEvent};
-use nenjo_platform::tools::{PlatformNotificationEmitter, PlatformNotificationRecipient};
+use nenjo_events::{DomainActivation, Response, StreamEvent};
 
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::ExecutionKind;
@@ -25,6 +22,7 @@ use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_events};
 use crate::handlers::ResponseSender;
+use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 
@@ -60,32 +58,6 @@ pub struct ChatSlashCommandRequest<'a> {
     pub session_id: Uuid,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
-}
-
-struct ChatNotificationEmitter<S> {
-    response_sink: S,
-    session_id: Uuid,
-}
-
-impl<S> PlatformNotificationEmitter for ChatNotificationEmitter<S>
-where
-    S: ResponseSender,
-{
-    fn send_push_notification(
-        &self,
-        agent: &str,
-        current_session_id: Option<Uuid>,
-        encrypted_payload: EncryptedPayload,
-        recipient: Option<PlatformNotificationRecipient>,
-    ) -> Result<()> {
-        self.response_sink.send(Response::PushNotification {
-            agent: agent.to_string(),
-            session_id: current_session_id.unwrap_or(self.session_id),
-            recipient_user_id: recipient.as_ref().and_then(|target| target.user_id),
-            recipient_handle: recipient.and_then(|target| target.handle),
-            encrypted_payload,
-        })
-    }
 }
 
 /// Worker integration methods for chat platform commands.
@@ -284,11 +256,15 @@ where
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
     let aname = agent_name(&manifest, agent_id);
-    let notification_emitter: Arc<dyn PlatformNotificationEmitter> =
-        Arc::new(ChatNotificationEmitter {
-            response_sink: ctx.response_sink.clone(),
-            session_id,
-        });
+    if harness.try_enqueue_chat_message(&chat).await? {
+        debug!(
+            session = %session_id,
+            agent = %aname,
+            "Queued chat message into active turn"
+        );
+        return Ok(());
+    }
+    let notification_emitter = platform_notification_emitter(ctx.response_sink.clone(), session_id);
     let _notification_registration =
         register_platform_notification_emitter(notification_emitter.clone());
     let mut stream =
@@ -2571,9 +2547,18 @@ Original user message: {{ chat.message }}
     }
 
     fn text_response(text: impl Into<String>) -> ChatResponse {
+        let text = text.into();
         ChatResponse {
-            text: Some(text.into()),
-            tool_calls: Vec::new(),
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_respond_to_user".to_string(),
+                name: "respond_to_user".to_string(),
+                arguments: serde_json::json!({
+                    "message": text,
+                    "status": "completed",
+                })
+                .to_string(),
+            }],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
         }

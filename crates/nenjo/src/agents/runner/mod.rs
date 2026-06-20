@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
 use super::instance::AgentExecutionMode;
+use super::respond::RespondToUserTool;
 use super::sub_agents::{
     ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
     child_tools, parent_tools,
@@ -38,6 +39,7 @@ pub struct ExecutionHandle {
     events_rx: mpsc::UnboundedReceiver<TurnEvent>,
     join: Option<tokio::task::JoinHandle<Result<TurnOutput>>>,
     pause_token: types::PauseToken,
+    turn_input: types::TurnInputSender,
 }
 
 impl ExecutionHandle {
@@ -54,6 +56,10 @@ impl ExecutionHandle {
     /// Get a clone of the pause token for external control (e.g. execution registry).
     pub fn pause_token(&self) -> types::PauseToken {
         self.pause_token.clone()
+    }
+
+    pub fn turn_input(&self) -> types::TurnInputSender {
+        self.turn_input.clone()
     }
 
     /// Abort the running execution. The spawned task is cancelled immediately.
@@ -168,6 +174,13 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 instance.runtime.async_ops.clone(),
                 instance.runtime.config.max_delegation_depth == 0,
             ));
+        }
+        if instance.runtime.execution_mode == AgentExecutionMode::Parent
+            && !instance.runtime.tools.iter().any(|tool| tool.is_terminal())
+        {
+            instance.runtime.tools.push(Arc::new(RespondToUserTool::new(
+                instance.runtime.async_ops.clone(),
+            )));
         }
 
         let instance = Arc::new(instance);
@@ -423,6 +436,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         let (events_tx, events_rx) = mpsc::unbounded_channel::<TurnEvent>();
         let pause_token = types::PauseToken::new();
         let loop_pause = pause_token.clone();
+        let (turn_input, turn_input_rx) = types::turn_input_channel();
 
         let mut inst = (*self.instance).clone();
         if let Some(child_handle) = child_handle {
@@ -525,8 +539,16 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         };
 
         let join = tokio::spawn(async move {
-            let mut output =
-                turn_loop::run(&inst, messages, Some(events_tx), Some(loop_pause)).await?;
+            let require_respond_to_user = matches!(run.kind, AgentRunKind::Chat(_));
+            let mut output = turn_loop::run(
+                &inst,
+                messages,
+                Some(events_tx),
+                Some(loop_pause),
+                Some(turn_input_rx),
+                require_respond_to_user,
+            )
+            .await?;
             output.task_id = task_id;
             Ok(output)
         });
@@ -535,6 +557,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             events_rx,
             join: Some(join),
             pause_token,
+            turn_input,
         })
     }
 }

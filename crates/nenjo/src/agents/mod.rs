@@ -6,6 +6,7 @@ pub mod builder;
 pub mod error;
 pub mod instance;
 pub mod prompts;
+pub(crate) mod respond;
 pub mod runner;
 pub(crate) mod sub_agents;
 

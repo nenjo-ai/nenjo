@@ -53,6 +53,7 @@ where
             execution_run_id: Some(prepared.execution_run_id),
             cancel: cancel.clone(),
             pause: Some(handle.pause_token()),
+            turn_input: None,
         },
     );
 
@@ -144,6 +145,7 @@ where
             execution_run_id: Some(execution_run_id),
             cancel: cancel.clone(),
             pause: None,
+            turn_input: None,
         },
     );
 

@@ -442,6 +442,9 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let value: u64 = num_str
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid duration number: '{}'", num_str))?;
+    if value == 0 {
+        bail!("Schedule duration must be greater than zero");
+    }
 
     let secs = match suffix {
         "s" => value,
@@ -568,6 +571,7 @@ mod tests {
     fn parse_duration_invalid() {
         assert!(parse_duration("10x").is_err());
         assert!(parse_duration("abcs").is_err());
+        assert!(parse_duration("0s").is_err());
         assert!(parse_duration("").is_err());
     }
 
@@ -577,6 +581,12 @@ mod tests {
         assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(30)));
         let s = parse_schedule("5m").unwrap();
         assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_schedule_rejects_zero_interval() {
+        let error = parse_schedule("0s").expect_err("zero interval should be rejected");
+        assert!(error.to_string().contains("greater than zero"));
     }
 
     #[test]
