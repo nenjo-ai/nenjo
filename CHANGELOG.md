@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/nenjo-ai/nenjo/compare/v0.19.0...v0.20.0) - 2026-06-23
+
+### Added
+
+- support agent to agent delegation ([#72](https://github.com/nenjo-ai/nenjo/pull/72))
+
+### Fixed
+
+- update `quinn-proto` to 0.11.15 to address RUSTSEC-2026-0185 ([#72](https://github.com/nenjo-ai/nenjo/pull/72))
+
 ## [0.19.0](https://github.com/nenjo-ai/nenjo/compare/v0.18.0...v0.19.0) - 2026-06-20
 
 ### Added
