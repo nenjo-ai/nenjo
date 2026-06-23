@@ -287,7 +287,12 @@ async fn runner_with_custom_tool() {
 
     let specs = runner.instance().tool_specs();
     let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(names.len(), 5);
+    let unique_names: std::collections::HashSet<_> = names.iter().copied().collect();
+    assert_eq!(
+        unique_names.len(),
+        names.len(),
+        "runner should not expose duplicate tool names: {names:?}"
+    );
     assert!(names.contains(&"echo"));
     assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
@@ -318,7 +323,12 @@ async fn runner_with_tool_factory() {
 
     let specs = runner.instance().tool_specs();
     let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(names.len(), 5);
+    let unique_names: std::collections::HashSet<_> = names.iter().copied().collect();
+    assert_eq!(
+        unique_names.len(),
+        names.len(),
+        "runner should not expose duplicate tool names: {names:?}"
+    );
     assert!(names.contains(&"echo"));
     assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));

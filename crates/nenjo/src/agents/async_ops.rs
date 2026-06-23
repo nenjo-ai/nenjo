@@ -457,11 +457,15 @@ impl AsyncOpManager {
         operation_ids: Vec<String>,
         message: String,
     ) -> Vec<AsyncOpDeliveryResult> {
-        let operations = self
-            .select_operations(operation_ids, Some(AsyncOpKind::Ability))
-            .await;
+        let operations = self.select_operations(operation_ids, None).await;
         let mut results = Vec::with_capacity(operations.len());
         for operation in operations {
+            if !matches!(
+                operation.kind,
+                AsyncOpKind::Ability | AsyncOpKind::Delegation
+            ) {
+                continue;
+            }
             let status = *operation.status.lock().await;
             if !status.can_receive_input() {
                 results.push(AsyncOpDeliveryResult {

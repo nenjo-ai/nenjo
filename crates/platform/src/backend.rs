@@ -7,8 +7,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, CouncilManifest,
-    DomainManifest, HasManifestSlug, ManifestResource, ManifestResourceKind, ModelManifest,
-    ProjectManifest, RoutineCronTaskManifest, RoutineManifest, RoutineTrigger,
+    DomainManifest, HasManifestSlug, Manifest, ManifestResource, ManifestResourceKind,
+    ModelManifest, ProjectManifest, RoutineCronTaskManifest, RoutineManifest, RoutineTrigger,
+    context_block_slug, domain_slug,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use uuid::Uuid;
@@ -134,6 +135,16 @@ fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
         || command.command.trim_start_matches('/') == command_ref
 }
 
+fn ability_matches_ref(ability: &AbilityManifest, ability_ref: &Slug) -> bool {
+    ability.manifest_slug() == *ability_ref || Slug::derive(&ability.name) == *ability_ref
+}
+
+fn configure_name_slug(name: Option<&String>) -> Option<Slug> {
+    name.map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(Slug::derive)
+}
+
 #[async_trait]
 /// Encodes and decodes sensitive manifest payloads that should not be sent in plaintext.
 pub trait SensitivePayloadEncoder: Send + Sync {
@@ -200,6 +211,7 @@ pub struct PlatformManifestBackend<L, E> {
     cached_org_id: Option<Uuid>,
     current_library_slug: Option<String>,
     resource_ids: Option<Arc<PlatformResourceIdStore>>,
+    read_only_manifest: Option<Arc<Manifest>>,
 }
 
 impl<L, E> PlatformManifestBackend<L, E> {
@@ -219,6 +231,7 @@ impl<L, E> PlatformManifestBackend<L, E> {
             cached_org_id: None,
             current_library_slug: None,
             resource_ids: None,
+            read_only_manifest: None,
         }
     }
 
@@ -258,6 +271,13 @@ impl<L, E> PlatformManifestBackend<L, E> {
         self
     }
 
+    /// Attach read-only runtime resources, such as package-installed manifests,
+    /// that should be queryable but never used as the mutable write source.
+    pub fn with_read_only_manifest(mut self, manifest: Arc<Manifest>) -> Self {
+        self.read_only_manifest = Some(manifest);
+        self
+    }
+
     /// Return the local manifest store used for cached reads and write-through updates.
     pub fn local_store(&self) -> &Arc<L> {
         &self.local_store
@@ -286,6 +306,15 @@ where
             .as_ref()
             .map(|policy| policy.allows_ability(ability))
             .unwrap_or(true)
+    }
+
+    fn read_only_ability(&self, ability_ref: &Slug) -> Option<AbilityManifest> {
+        self.read_only_manifest
+            .as_ref()?
+            .abilities
+            .iter()
+            .find(|ability| ability_matches_ref(ability, ability_ref))
+            .cloned()
     }
 
     fn allow_domain(&self, domain: &DomainManifest) -> bool {
@@ -433,8 +462,12 @@ where
             .list_abilities()
             .await?
             .into_iter()
-            .find(|ability| Slug::derive(&ability.name) == *ability_ref);
+            .find(|ability| ability_matches_ref(ability, ability_ref));
         if let Some(ability) = local {
+            return Ok(ability);
+        }
+
+        if let Some(ability) = self.read_only_ability(ability_ref) {
             return Ok(ability);
         }
 
@@ -478,13 +511,31 @@ where
             .ok_or_else(|| anyhow!("agent not found in local manifest: {agent}"))
     }
 
+    async fn cached_local_agent(&self, agent: &Slug) -> Result<Option<AgentManifest>> {
+        Ok(self
+            .local_store
+            .list_agents()
+            .await?
+            .into_iter()
+            .find(|item| item.manifest_slug() == *agent || Slug::derive(&item.name) == *agent))
+    }
+
     async fn cached_routine(&self, routine: &Slug) -> Result<RoutineManifest> {
         self.local_store
             .list_routines()
             .await?
             .into_iter()
-            .find(|item| Slug::derive(&item.name) == *routine)
+            .find(|item| item.manifest_slug() == *routine || Slug::derive(&item.name) == *routine)
             .ok_or_else(|| anyhow!("routine not found in local manifest: {routine}"))
+    }
+
+    async fn cached_local_routine(&self, routine: &Slug) -> Result<Option<RoutineManifest>> {
+        Ok(self
+            .local_store
+            .list_routines()
+            .await?
+            .into_iter()
+            .find(|item| item.manifest_slug() == *routine || Slug::derive(&item.name) == *routine))
     }
 
     async fn cached_council(&self, council: &Slug) -> Result<CouncilManifest> {
@@ -514,6 +565,18 @@ where
             .ok_or_else(|| anyhow!("context block not found in local manifest: {context_block}"))
     }
 
+    async fn cached_local_context_block(
+        &self,
+        context_block: &Slug,
+    ) -> Result<Option<ContextBlockManifest>> {
+        Ok(self
+            .local_store
+            .list_context_blocks()
+            .await?
+            .into_iter()
+            .find(|item| item.slug() == *context_block))
+    }
+
     async fn cached_or_remote_domain(&self, domain_ref: &Slug) -> Result<DomainManifest> {
         let local = self
             .local_store
@@ -541,6 +604,26 @@ where
             .upsert_resource(&ManifestResource::Domain(hydrated.clone()))
             .await?;
         Ok(hydrated)
+    }
+
+    async fn cached_local_domain(&self, domain_ref: &Slug) -> Result<Option<DomainManifest>> {
+        Ok(self
+            .local_store
+            .list_domains()
+            .await?
+            .into_iter()
+            .find(|item| {
+                item.manifest_slug() == *domain_ref || Slug::derive(&item.name) == *domain_ref
+            }))
+    }
+
+    async fn cached_local_ability(&self, ability_ref: &Slug) -> Result<Option<AbilityManifest>> {
+        Ok(self
+            .local_store
+            .list_abilities()
+            .await?
+            .into_iter()
+            .find(|ability| ability_matches_ref(ability, ability_ref)))
     }
 
     async fn cached_project(&self, project: &Slug) -> Result<ProjectManifest> {
@@ -679,32 +762,47 @@ where
     }
 
     async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult> {
-        let existing_agent = if let Some(agent) = params.data.agent.as_ref() {
-            let existing = self.cached_agent(agent).await?;
-            if !self.allow_agent(&existing) {
-                return Err(anyhow!("agent not found in local manifest: {}", agent));
+        let mut data = params.data;
+        if data.agent.is_none()
+            && let Some(agent) = configure_name_slug(
+                data.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref()),
+            )
+            && let Some(existing) = self.cached_local_agent(&agent).await?
+        {
+            data.agent = Some(existing.manifest_slug());
+        }
+
+        let existing_agent = if let Some(agent) = data.agent.as_ref() {
+            match self.cached_local_agent(agent).await? {
+                Some(existing) => {
+                    if !self.allow_agent(&existing) {
+                        return Err(anyhow!("agent not found in local manifest: {}", agent));
+                    }
+                    Some(existing)
+                }
+                None => None,
             }
-            Some(existing)
         } else {
             None
         };
 
-        let old_slug = params.data.agent.clone();
-        let mut data = params.data;
+        let old_slug = data.agent.clone();
         let heartbeat_patch = data.heartbeat.take();
         let heartbeat_instructions = heartbeat_patch
             .as_ref()
             .and_then(|heartbeat| heartbeat.instructions.clone());
-        let agent_object_id = match data.agent.as_ref() {
-            Some(agent) => self.platform_object_id(PlatformResourceKind::Agent, agent)?,
-            None => {
-                let id = Uuid::new_v4();
-                data.id = Some(id);
-                id
-            }
-        };
         let mut resolved_prompt_config = None;
         if let Some(prompt_config) = data.prompt_config.as_ref() {
+            let agent_object_id = match data.agent.as_ref() {
+                Some(agent) => self.platform_object_id(PlatformResourceKind::Agent, agent)?,
+                None => {
+                    let id = data.id.unwrap_or_else(Uuid::new_v4);
+                    data.id = Some(id);
+                    id
+                }
+            };
             let base_prompt_config = existing_agent
                 .as_ref()
                 .map(|agent| agent.prompt_config.clone())
@@ -814,12 +912,26 @@ where
     E: SensitivePayloadEncoder + Send + Sync,
 {
     async fn list_abilities(&self) -> Result<AbilitiesListResult> {
-        let abilities: Vec<AbilitySummary> = self
+        let mut abilities = self
             .local_store
             .list_abilities()
             .await?
             .into_iter()
             .filter(|ability| self.allow_ability(ability))
+            .collect::<Vec<_>>();
+        if let Some(manifest) = self.read_only_manifest.as_ref() {
+            for ability in &manifest.abilities {
+                if self.allow_ability(ability)
+                    && !abilities
+                        .iter()
+                        .any(|existing| existing.manifest_slug() == ability.manifest_slug())
+                {
+                    abilities.push(ability.clone());
+                }
+            }
+        }
+        let abilities = abilities
+            .into_iter()
             .map(|ability| AbilityDocument::from(ability).summary)
             .collect();
         Ok(AbilitiesListResult { abilities })
@@ -842,18 +954,34 @@ where
         &self,
         params: AbilityConfigureParams,
     ) -> Result<AbilityConfigureResult> {
-        let existing_ability = if let Some(ability) = params.data.ability.as_ref() {
-            let existing = self.cached_or_remote_ability(ability).await?;
-            if !self.allow_ability(&existing) {
-                return Err(anyhow!("ability not found in local manifest: {}", ability));
+        let mut data = params.data;
+        if data.ability.is_none()
+            && let Some(ability) = configure_name_slug(
+                data.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref()),
+            )
+            && let Some(existing) = self.cached_local_ability(&ability).await?
+            && self.allow_ability(&existing)
+        {
+            data.ability = Some(existing.manifest_slug());
+        }
+
+        let existing_ability = if let Some(ability) = data.ability.as_ref() {
+            match self.cached_local_ability(ability).await? {
+                Some(existing) => {
+                    if !self.allow_ability(&existing) {
+                        return Err(anyhow!("ability not found in local manifest: {}", ability));
+                    }
+                    Some(existing)
+                }
+                None => None,
             }
-            Some(existing)
         } else {
             None
         };
 
-        let old_slug = params.data.ability.clone();
-        let mut data = params.data;
+        let old_slug = data.ability.clone();
         if data.ability.is_none() {
             data.id = Some(Uuid::new_v4());
         }
@@ -1074,18 +1202,39 @@ where
         &self,
         params: DomainConfigureParams,
     ) -> Result<DomainConfigureResult> {
-        let existing_domain = if let Some(domain) = params.data.domain.as_ref() {
-            let existing = self.cached_or_remote_domain(domain).await?;
-            if !self.allow_domain(&existing) {
-                return Err(anyhow!("domain not found in local manifest: {}", domain));
+        let mut data = params.data;
+        if data.domain.is_none()
+            && let Some(metadata) = data.metadata.as_ref()
+            && let Some(name) = metadata
+                .name
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+        {
+            let path = metadata.path.as_deref().unwrap_or_default();
+            let domain = domain_slug(path, name);
+            if let Some(existing) = self.cached_local_domain(&domain).await?
+                && self.allow_domain(&existing)
+            {
+                data.domain = Some(existing.manifest_slug());
             }
-            Some(existing)
+        }
+
+        let existing_domain = if let Some(domain) = data.domain.as_ref() {
+            match self.cached_local_domain(domain).await? {
+                Some(existing) => {
+                    if !self.allow_domain(&existing) {
+                        return Err(anyhow!("domain not found in local manifest: {}", domain));
+                    }
+                    Some(existing)
+                }
+                None => None,
+            }
         } else {
             None
         };
 
-        let old_slug = params.data.domain.clone();
-        let mut data = params.data;
+        let old_slug = data.domain.clone();
         if data.domain.is_none() {
             data.id = Some(Uuid::new_v4());
         }
@@ -1460,8 +1609,19 @@ where
             return Err(anyhow!("metadata.name is required when creating a routine"));
         }
 
+        if data.routine.is_none()
+            && let Some(routine) = configure_name_slug(
+                data.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.name.as_ref()),
+            )
+            && let Some(existing) = self.cached_local_routine(&routine).await?
+        {
+            data.routine = Some(existing.manifest_slug());
+        }
+
         let existing_routine = if let Some(existing_routine) = data.routine.as_ref() {
-            Some(self.cached_routine(existing_routine).await?)
+            self.cached_local_routine(existing_routine).await?
         } else {
             None
         };
@@ -1476,8 +1636,7 @@ where
             for step in &mut graph.steps {
                 let instructions = step
                     .config
-                    .get("instructions")
-                    .and_then(|value| value.as_str())
+                    .instructions()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
@@ -1487,11 +1646,7 @@ where
                 let step_id = step.id.unwrap_or_else(Uuid::new_v4);
                 step.id = Some(step_id);
                 submitted_step_instructions.push((step.slug.clone(), instructions.clone()));
-                if let Some(config) = step.config.as_object_mut() {
-                    config.remove("instructions");
-                    config.remove("description");
-                    config.remove("context");
-                }
+                step.config.clear_instructions();
                 let encrypted_payload = self
                     .sensitive_payload_encoder
                     .encode_payload(
@@ -1875,27 +2030,37 @@ where
         &self,
         params: ContextBlockConfigureParams,
     ) -> Result<ContextBlockConfigureResult> {
-        let existing_context_block = if let Some(context_block) = params.data.context_block.as_ref()
+        let mut data = params.data;
+        if data.context_block.is_none()
+            && let Some(metadata) = data.metadata.as_ref()
+            && let Some(name) = metadata
+                .name
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
         {
-            Some(self.cached_context_block(context_block).await?)
+            let path = metadata.path.as_deref().unwrap_or_default();
+            let context_block = context_block_slug(path, name);
+            if let Some(existing) = self.cached_local_context_block(&context_block).await? {
+                data.context_block = Some(existing.manifest_slug());
+            }
+        }
+
+        let existing_context_block = if let Some(context_block) = data.context_block.as_ref() {
+            self.cached_local_context_block(context_block).await?
         } else {
             None
         };
 
-        let old_slug = params.data.context_block.clone();
-        let mut data = params.data;
+        let old_slug = data.context_block.clone();
         if data.context_block.is_none() {
             data.id = Some(Uuid::new_v4());
         }
-        let template = data
-            .template
-            .clone()
-            .or_else(|| {
-                existing_context_block
-                    .as_ref()
-                    .map(|item| item.template.clone())
-            })
-            .ok_or_else(|| anyhow!("template is required when creating a context block"))?;
+        let submitted_template = data.template.clone();
+        let fallback_template = existing_context_block
+            .as_ref()
+            .map(|item| item.template.clone())
+            .unwrap_or_default();
         if data.template.is_some() {
             let context_block_object_id = match data.context_block.as_ref() {
                 Some(context_block) => {
@@ -1911,7 +2076,7 @@ where
                     self.local_manifest_org_id().await?,
                     context_block_object_id,
                     SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
-                    &serde_json::json!(template.clone()),
+                    &serde_json::json!(submitted_template.clone().unwrap_or_default()),
                 )
                 .await?
                 .ok_or_else(|| anyhow!("context block template encryption produced no payload"))?;
@@ -1924,6 +2089,13 @@ where
             .configure_context_block_document(&data)
             .await?;
         let new_slug = configured.summary.slug.clone();
+        let template = submitted_template.unwrap_or_else(|| {
+            if configured.template.is_empty() {
+                fallback_template
+            } else {
+                configured.template.clone()
+            }
+        });
         let local_context_block = ContextBlockManifest {
             name: configured.summary.name.clone(),
             path: configured.summary.path.clone(),
@@ -2948,6 +3120,301 @@ mod tests {
         assert!(!requests[0].body.contains("Sensitive nightly task"));
         assert!(!requests[0].body.contains("Sensitive task description"));
         assert!(!requests[0].body.contains("Sensitive acceptance criteria"));
+    }
+
+    #[tokio::test]
+    async fn configure_routine_with_uncached_explicit_ref_calls_platform() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/routines/configure",
+            "201 Created",
+            json!({
+                "id": routine_id,
+                "org_id": org_id,
+                "project_id": null,
+                "slug": "brand-design-workflow",
+                "name": "Brand Design Workflow",
+                "description": "Updated workflow",
+                "trigger": "task",
+                "is_active": true,
+                "is_default": false,
+                "max_retries": 2,
+                "step_count": 0,
+                "metadata": {
+                    "entry_steps": []
+                },
+                "steps": [],
+                "edges": [],
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .configure_routine(RoutineConfigureParams {
+                data: RoutineConfigureDocument {
+                    routine: Some(Slug::derive("brand-design-workflow")),
+                    metadata: Some(RoutineConfigureMetadata {
+                        name: Some("Brand Design Workflow".to_string()),
+                        description: Some(Some("Updated workflow".to_string())),
+                        project_id: None,
+                        trigger: Some(RoutineTrigger::Task),
+                        is_active: Some(true),
+                        max_retries: Some(2),
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.routine.summary.slug,
+            Slug::derive("brand-design-workflow")
+        );
+        let requests = server.await.unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["routine"], "brand-design-workflow");
+        assert_eq!(body["metadata"]["name"], "Brand Design Workflow");
+    }
+
+    #[tokio::test]
+    async fn configure_agent_with_uncached_explicit_ref_calls_platform() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/agents/configure",
+            "200 OK",
+            json!({
+                "id": agent_id,
+                "org_id": org_id,
+                "slug": "brand-designer",
+                "name": "Brand Designer",
+                "description": "Updated agent",
+                "color": null,
+                "model": null,
+                "model_id": null,
+                "model_name": null,
+                "domains": [],
+                "platform_scopes": [],
+                "mcp_servers": [],
+                "script_tools": [],
+                "abilities": [],
+                "prompt_locked": false,
+                "heartbeat": null,
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        backend
+            .configure_agent(AgentConfigureParams {
+                data: AgentConfigureDocument {
+                    agent: Some(Slug::derive("brand-designer")),
+                    metadata: Some(AgentConfigureMetadata {
+                        name: Some("Brand Designer".to_string()),
+                        description: Some(Some("Updated agent".to_string())),
+                        color: None,
+                        model: None,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["agent"], "brand-designer");
+    }
+
+    #[tokio::test]
+    async fn configure_ability_with_uncached_explicit_ref_calls_platform() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let ability_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/abilities/configure",
+            "200 OK",
+            json!({
+                "id": ability_id,
+                "org_id": org_id,
+                "slug": "brand_review",
+                "name": "brand_review",
+                "path": "",
+                "description": "Updated ability",
+                "activation_condition": "",
+                "platform_scopes": [],
+                "mcp_servers": [],
+                "script_tools": [],
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        backend
+            .configure_ability(AbilityConfigureParams {
+                data: AbilityConfigureDocument {
+                    ability: Some(Slug::derive("brand_review")),
+                    metadata: Some(AbilityConfigureMetadata {
+                        name: Some("brand_review".to_string()),
+                        path: None,
+                        description: Some(Some("Updated ability".to_string())),
+                        activation_condition: None,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["ability"], "brand_review");
+    }
+
+    #[tokio::test]
+    async fn configure_domain_with_uncached_explicit_ref_calls_platform() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let domain_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/domains/configure",
+            "200 OK",
+            json!({
+                "id": domain_id,
+                "org_id": org_id,
+                "slug": "brand-domain",
+                "name": "Brand Domain",
+                "path": "",
+                "description": "Updated domain",
+                "command": "#brand",
+                "platform_scopes": [],
+                "abilities": [],
+                "mcp_servers": [],
+                "script_tools": [],
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        backend
+            .configure_domain(DomainConfigureParams {
+                data: DomainConfigureDocument {
+                    domain: Some(Slug::derive("brand-domain")),
+                    metadata: Some(DomainConfigureMetadata {
+                        name: Some("Brand Domain".to_string()),
+                        path: None,
+                        description: Some(Some("Updated domain".to_string())),
+                        command: None,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["domain"], "brand-domain");
+    }
+
+    #[tokio::test]
+    async fn configure_context_block_with_uncached_explicit_ref_calls_platform() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let block_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/context-blocks/configure",
+            "200 OK",
+            json!({
+                "id": block_id,
+                "org_id": org_id,
+                "slug": "brand-guidance",
+                "name": "Brand Guidance",
+                "path": "",
+                "description": "Updated context",
+                "template": "Existing template",
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .configure_context_block(ContextBlockConfigureParams {
+                data: ContextBlockConfigureDocument {
+                    context_block: Some(Slug::derive("brand-guidance")),
+                    metadata: Some(ContextBlockConfigureMetadata {
+                        name: Some("Brand Guidance".to_string()),
+                        path: None,
+                        description: Some(Some("Updated context".to_string())),
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.context_block.template, "Existing template");
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["context_block"], "brand-guidance");
     }
 
     async fn spawn_knowledge_create_server(

@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::Result;
 use nenjo::Slug;
 use nenjo::manifest::{
-    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    model_manifest_slug,
+    AbilityManifest, AbilityPromptConfig, AgentManifest, Manifest, ModelManifest, ProjectManifest,
+    PromptConfig, PromptTemplates, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
@@ -63,6 +63,25 @@ fn project() -> ProjectManifest {
         slug: Slug::derive("test-project"),
         description: None,
         settings: serde_json::Value::Null,
+    }
+}
+
+fn ability(name: &str) -> AbilityManifest {
+    AbilityManifest {
+        name: name.into(),
+        path: None,
+        description: Some(format!("{name} ability")),
+        activation_condition: format!("Use {name} when useful."),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: format!("Run {name}."),
+        },
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        media: vec![],
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
     }
 }
 
@@ -306,6 +325,292 @@ impl ModelProviderFactory for SubAgentScriptFactory {
     }
 }
 
+struct DelegateScriptLlm {
+    parent_calls: Arc<AtomicUsize>,
+    child_calls: Arc<AtomicUsize>,
+    captured: CapturedRequests,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for DelegateScriptLlm {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        let tool_names: Vec<String> = request
+            .tools
+            .unwrap_or_default()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        self.captured
+            .tool_names
+            .lock()
+            .unwrap()
+            .push(tool_names.clone());
+        self.captured.messages.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect(),
+        );
+
+        if tool_names.iter().any(|name| name == "update_parent_agent") {
+            self.child_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(ChatResponse {
+                text: Some("delegated review complete".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            });
+        }
+
+        let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(match call {
+            0 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "list-delegatable".into(),
+                    name: "list_delegatable_agents".into(),
+                    arguments: serde_json::json!({}).to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            1 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "delegate".into(),
+                    name: "delegate_to".into(),
+                    arguments: serde_json::json!({
+                        "agent": "reviewer",
+                        "task": "Review the auth/session change and return findings first."
+                    })
+                    .to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            2 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "wait".into(),
+                    name: "wait".into(),
+                    arguments: serde_json::json!({"seconds": 1}).to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            3 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "wait-again".into(),
+                    name: "wait".into(),
+                    arguments: serde_json::json!({"seconds": 1}).to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            _ => ChatResponse {
+                text: Some("parent saw delegated result".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        })
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct DelegateScriptFactory {
+    parent_calls: Arc<AtomicUsize>,
+    child_calls: Arc<AtomicUsize>,
+    captured: CapturedRequests,
+}
+
+impl DelegateScriptFactory {
+    fn new(captured: CapturedRequests) -> Self {
+        Self {
+            parent_calls: Arc::new(AtomicUsize::new(0)),
+            child_calls: Arc::new(AtomicUsize::new(0)),
+            captured,
+        }
+    }
+}
+
+impl ModelProviderFactory for DelegateScriptFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(DelegateScriptLlm {
+            parent_calls: self.parent_calls.clone(),
+            child_calls: self.child_calls.clone(),
+            captured: self.captured.clone(),
+        }))
+    }
+}
+
+struct NestedAbilityDelegateLlm {
+    parent_calls: Arc<AtomicUsize>,
+    delegated_child_calls: Arc<AtomicUsize>,
+    captured: CapturedRequests,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for NestedAbilityDelegateLlm {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        let tool_names: Vec<String> = request
+            .tools
+            .unwrap_or_default()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        self.captured
+            .tool_names
+            .lock()
+            .unwrap()
+            .push(tool_names.clone());
+
+        if tool_names.iter().any(|name| name == "update_parent_agent") {
+            return Ok(ChatResponse {
+                text: Some("ability completed inside delegated child".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            });
+        }
+
+        if tool_names.iter().any(|name| name == "use_ability") {
+            let call = self.delegated_child_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(match call {
+                0 => ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "use-ability".into(),
+                        name: "use_ability".into(),
+                        arguments: serde_json::json!({
+                            "ability": "security_review",
+                            "task": "Review the delegated change and summarize the finding."
+                        })
+                        .to_string(),
+                    }],
+                    provider_tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                },
+                1 => ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "wait-ability".into(),
+                        name: "wait".into(),
+                        arguments: serde_json::json!({"seconds": 1}).to_string(),
+                    }],
+                    provider_tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                },
+                _ => ChatResponse {
+                    text: Some("delegated child observed ability completion".into()),
+                    tool_calls: vec![],
+                    provider_tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                },
+            });
+        }
+
+        let call = self.parent_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(match call {
+            0 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "delegate".into(),
+                    name: "delegate_to".into(),
+                    arguments: serde_json::json!({
+                        "agent": "reviewer",
+                        "task": "Use your assigned security_review ability and report the result."
+                    })
+                    .to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            1 | 2 => ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("wait-delegation-{call}"),
+                    name: "wait_operations".into(),
+                    arguments: serde_json::json!({
+                        "seconds": 1,
+                        "kind": "delegation"
+                    })
+                    .to_string(),
+                }],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            _ => ChatResponse {
+                text: Some("parent saw delegated ability result".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        })
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct NestedAbilityDelegateFactory {
+    parent_calls: Arc<AtomicUsize>,
+    delegated_child_calls: Arc<AtomicUsize>,
+    captured: CapturedRequests,
+}
+
+impl NestedAbilityDelegateFactory {
+    fn new(captured: CapturedRequests) -> Self {
+        Self {
+            parent_calls: Arc::new(AtomicUsize::new(0)),
+            delegated_child_calls: Arc::new(AtomicUsize::new(0)),
+            captured,
+        }
+    }
+}
+
+impl ModelProviderFactory for NestedAbilityDelegateFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(NestedAbilityDelegateLlm {
+            parent_calls: self.parent_calls.clone(),
+            delegated_child_calls: self.delegated_child_calls.clone(),
+            captured: self.captured.clone(),
+        }))
+    }
+}
+
 struct DropFlag {
     dropped: Arc<AtomicBool>,
 }
@@ -492,7 +797,7 @@ async fn parent_tools_are_available_during_execution() {
             .instance()
             .tool_specs()
             .iter()
-            .all(|tool| tool.name != "delegate_to")
+            .any(|tool| tool.name == "delegate_to")
     );
     runner.chat("coordinate review").await.unwrap();
 
@@ -502,6 +807,10 @@ async fn parent_tools_are_available_during_execution() {
         "send_sub_agents",
         "inspect_sub_agents",
         "stop_sub_agents",
+        "list_delegatable_agents",
+        "delegate_to",
+        "send_operation_input",
+        "wait_operations",
         "wait",
     ] {
         assert!(
@@ -509,7 +818,6 @@ async fn parent_tools_are_available_during_execution() {
             "{first_tools:?}"
         );
     }
-    assert!(!first_tools.iter().any(|name| name == "delegate_to"));
 }
 
 #[tokio::test]
@@ -539,6 +847,10 @@ async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
         "send_sub_agents",
         "inspect_sub_agents",
         "stop_sub_agents",
+        "list_delegatable_agents",
+        "delegate_to",
+        "send_operation_input",
+        "wait_operations",
         "wait",
     ] {
         assert!(
@@ -660,6 +972,174 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
             .flatten()
             .any(|message| message.contains("You are the reviewer agent.")),
         "child execution should use the parent-authored task directly, not the child manifest prompt"
+    );
+}
+
+#[tokio::test]
+async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools() {
+    let captured = CapturedRequests::default();
+    let model_id = Uuid::new_v4();
+    let mut reviewer = agent(Uuid::new_v4(), "reviewer", model_id);
+    reviewer.abilities = vec!["security_review".into()];
+    let manifest = Manifest {
+        agents: vec![agent(Uuid::new_v4(), "coder", model_id), reviewer],
+        abilities: vec![ability("security_review")],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(DelegateScriptFactory::new(captured.clone()))
+        .with_tool_factory(PlatformToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let output = runner.chat("delegate review").await.unwrap();
+    assert_eq!(output.text, "parent saw delegated result");
+
+    let tool_results = output
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    let list_result = tool_results
+        .iter()
+        .find(|content| content.contains(r#""tool_call_id":"list-delegatable""#))
+        .expect("list_delegatable_agents tool result");
+    let list_payload: serde_json::Value = serde_json::from_str(
+        serde_json::from_str::<serde_json::Value>(list_result).unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let first_agent = &list_payload["agents"][0];
+    assert_eq!(first_agent["slug"], "reviewer");
+    assert_eq!(first_agent["description"], "reviewer agent");
+    assert!(first_agent.get("name").is_none());
+    assert!(first_agent.get("abilities").is_none());
+    assert!(first_agent.get("platform_scopes").is_none());
+    assert!(
+        tool_results
+            .iter()
+            .any(|content| content.contains(r#"\"kind\":\"delegation\""#)
+                && content.contains("delegated review complete")),
+        "{tool_results:?}"
+    );
+
+    let child_tool_sets = captured
+        .tool_names()
+        .into_iter()
+        .filter(|names| names.iter().any(|name| name == "update_parent_agent"))
+        .collect::<Vec<_>>();
+    assert_eq!(child_tool_sets.len(), 1, "{child_tool_sets:?}");
+    let child_tools = &child_tool_sets[0];
+    for expected in [
+        "ask_parent_agent",
+        "platform_echo",
+        "list_assigned_abilities",
+        "use_ability",
+        "wait",
+    ] {
+        assert!(
+            child_tools.iter().any(|name| name == expected),
+            "{child_tools:?}"
+        );
+    }
+    for forbidden in [
+        "delegate_to",
+        "list_delegatable_agents",
+        "spawn_sub_agents",
+        "send_sub_agents",
+        "inspect_sub_agents",
+        "stop_sub_agents",
+        "inspect_operations",
+        "send_operation_input",
+        "stop_operations",
+        "respond_to_user",
+    ] {
+        assert!(
+            !child_tools.iter().any(|name| name == forbidden),
+            "{child_tools:?}"
+        );
+    }
+
+    let child_messages = captured
+        .messages()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(
+        child_messages
+            .iter()
+            .any(|message| message.contains("Delegated work boundary:")
+                && message.contains("outside your role")),
+        "{child_messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
+    let captured = CapturedRequests::default();
+    let model_id = Uuid::new_v4();
+    let mut reviewer = agent(Uuid::new_v4(), "reviewer", model_id);
+    reviewer.abilities = vec!["security_review".into()];
+    let manifest = Manifest {
+        agents: vec![agent(Uuid::new_v4(), "coder", model_id), reviewer],
+        abilities: vec![ability("security_review")],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(NestedAbilityDelegateFactory::new(captured.clone()))
+        .with_tool_factory(PlatformToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let output = runner.chat("delegate ability review").await.unwrap();
+    assert_eq!(output.text, "parent saw delegated ability result");
+
+    let tool_sets = captured.tool_names();
+    assert!(
+        tool_sets
+            .iter()
+            .any(|names| names.iter().any(|name| name == "wait_operations")),
+        "{tool_sets:?}"
+    );
+    assert!(
+        tool_sets
+            .iter()
+            .any(|names| names.iter().any(|name| name == "use_ability")
+                && names.iter().any(|name| name == "wait")),
+        "{tool_sets:?}"
+    );
+    assert!(
+        tool_sets.iter().any(
+            |names| names.iter().any(|name| name == "update_parent_agent")
+                && !names.iter().any(|name| name == "delegate_to")
+        ),
+        "{tool_sets:?}"
     );
 }
 
@@ -819,6 +1299,7 @@ async fn max_depth_zero_disables_parent_tools() {
         vec![
             "list_knowledge_packs",
             "inspect_operations",
+            "send_operation_input",
             "stop_operations",
             "wait_operations",
             "respond_to_user"

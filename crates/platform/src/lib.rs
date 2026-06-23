@@ -81,8 +81,8 @@ pub use manifest_mcp::{
     ProjectSummary, ProjectUpdateDocument, ProjectUpdateParams, ProjectsGetParams,
     ProjectsListResult, RoutineConfigureDocument, RoutineConfigureMetadata, RoutineConfigureParams,
     RoutineConfigureResult, RoutineDeleteParams, RoutineDocument, RoutineEdgeInput,
-    RoutineGetResult, RoutineGraphInput, RoutineManifestBackend, RoutineStepInput, RoutineSummary,
-    RoutinesGetParams, RoutinesListResult,
+    RoutineGetResult, RoutineGraphInput, RoutineManifestBackend, RoutineStepConfigInput,
+    RoutineStepInput, RoutineSummary, RoutinesGetParams, RoutinesListResult,
 };
 pub use policy::ManifestAccessPolicy;
 pub use resource_ids::{PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind};

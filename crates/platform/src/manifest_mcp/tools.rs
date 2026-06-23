@@ -127,6 +127,42 @@ mod tests {
     }
 
     #[test]
+    fn configure_routine_schema_exposes_step_instructions_config() {
+        let tools = all_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "configure_routine")
+            .expect("missing configure_routine");
+        let config_schema = &tool.parameters["properties"]["graph"]["allOf"][0]["properties"]["steps"]
+            ["items"]["properties"]["config"];
+
+        assert_eq!(config_schema["type"], "object");
+        assert_eq!(config_schema["additionalProperties"], false);
+        assert_eq!(
+            config_schema["properties"]["instructions"]["type"],
+            "string"
+        );
+        assert_eq!(
+            config_schema["properties"]["metadata"]["type"],
+            serde_json::json!(["object", "array", "string"])
+        );
+        assert!(
+            config_schema["properties"]["instructions"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Step-specific task instructions"),
+            "routine step config should document instructions"
+        );
+        assert!(
+            config_schema["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("edge metadata.max_attempts"),
+            "routine step config should tell agents where retry budgets belong"
+        );
+    }
+
+    #[test]
     fn scoped_resource_mutation_tools_do_not_accept_platform_scopes() {
         let tools = all_tools();
 

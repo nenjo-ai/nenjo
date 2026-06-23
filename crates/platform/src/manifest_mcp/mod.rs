@@ -79,6 +79,6 @@ pub use types::{
     ModelCreateDocument, ModelDocument, ModelSummary, ModelUpdateDocument, ProjectCreateDocument,
     ProjectDocument, ProjectSummary, ProjectUpdateDocument, RoutineConfigureDocument,
     RoutineConfigureMetadata, RoutineCronTaskConfigureDocument, RoutineDocument,
-    RoutineEdgeDocument, RoutineEdgeInput, RoutineGraphInput, RoutineStepDocument,
-    RoutineStepInput, RoutineSummary,
+    RoutineEdgeDocument, RoutineEdgeInput, RoutineGraphInput, RoutineStepConfigInput,
+    RoutineStepDocument, RoutineStepInput, RoutineSummary,
 };

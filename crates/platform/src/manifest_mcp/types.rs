@@ -12,6 +12,7 @@ use nenjo::manifest::{
     RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
 };
 use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
+use serde_json::Value;
 
 /// Canonical prompt-free agent document used by manifest list/get/update/delete operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -712,6 +713,44 @@ pub struct RoutineGraphInput {
     pub edges: Vec<RoutineEdgeInput>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+/// Step-specific routine configuration accepted by routine graph write tools.
+pub struct RoutineStepConfigInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+impl RoutineStepConfigInput {
+    pub fn from_stored_config(config: &Value) -> Self {
+        let Some(object) = config.as_object() else {
+            return Self::default();
+        };
+
+        Self {
+            instructions: object
+                .get("instructions")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            metadata: object.get("metadata").cloned(),
+        }
+    }
+
+    pub fn as_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
+    }
+
+    pub fn clear_instructions(&mut self) {
+        self.instructions = None;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One step in a routine graph write request.
 pub struct RoutineStepInput {
@@ -725,9 +764,13 @@ pub struct RoutineStepInput {
     #[serde(default)]
     pub agent: Option<Slug>,
     #[serde(default)]
-    pub config: serde_json::Value,
+    pub config: RoutineStepConfigInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_y: Option<f64>,
     pub order_index: i32,
 }
 
@@ -802,8 +845,10 @@ impl RoutineDocument {
                     step_type: step.step_type,
                     council: step.council.clone(),
                     agent: step.agent.clone(),
-                    config: step.config.clone(),
+                    config: RoutineStepConfigInput::from_stored_config(&step.config),
                     encrypted_payload: None,
+                    position_x: None,
+                    position_y: None,
                     order_index: step.order_index,
                 })
                 .collect(),
@@ -1042,5 +1087,43 @@ impl From<CouncilManifest> for CouncilDocument {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routine_step_config_rejects_unknown_fields() {
+        let error = serde_json::from_value::<RoutineStepConfigInput>(serde_json::json!({
+            "evaluation_criteria": ["Every beat has visual coverage"],
+            "inputs": ["approved_script"],
+            "max_attempts": 3
+        }))
+        .expect_err("unknown routine step config fields should be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn routine_step_config_accepts_instructions_and_metadata() {
+        let config = serde_json::from_value::<RoutineStepConfigInput>(serde_json::json!({
+            "instructions": "Write the shot list.",
+            "metadata": {
+                "inputs": ["approved_script"],
+                "evaluation_criteria": ["Every beat has visual coverage"]
+            }
+        }))
+        .expect("supported routine step config fields should deserialize");
+
+        assert_eq!(config.instructions(), Some("Write the shot list."));
+        assert_eq!(
+            config
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("inputs")),
+            Some(&serde_json::json!(["approved_script"]))
+        );
     }
 }

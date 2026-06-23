@@ -66,7 +66,7 @@ fn graph_input_to_manifest_parts(
             step_type: step.step_type,
             council: step.council,
             agent: step.agent,
-            config: step.config,
+            config: step.config.as_value(),
             order_index: step.order_index,
         })
         .collect();
@@ -1188,7 +1188,7 @@ mod tests {
 
     use super::*;
     use crate::manifest_mcp::ManifestMcpContract;
-    use crate::{RoutineEdgeInput, RoutineGraphInput, RoutineStepInput};
+    use crate::{RoutineEdgeInput, RoutineGraphInput, RoutineStepConfigInput, RoutineStepInput};
 
     struct SampleManifest {
         manifest: Manifest,
@@ -2393,8 +2393,10 @@ mod tests {
                                 step_type: RoutineStepType::Agent,
                                 council: None,
                                 agent: None,
-                                config: serde_json::json!({}),
+                                config: RoutineStepConfigInput::default(),
                                 encrypted_payload: None,
+                                position_x: None,
+                                position_y: None,
                                 order_index: 0,
                             },
                             RoutineStepInput {
@@ -2404,8 +2406,10 @@ mod tests {
                                 step_type: RoutineStepType::Terminal,
                                 council: None,
                                 agent: None,
-                                config: serde_json::json!({}),
+                                config: RoutineStepConfigInput::default(),
                                 encrypted_payload: None,
+                                position_x: None,
+                                position_y: None,
                                 order_index: 1,
                             },
                         ],
@@ -2442,8 +2446,13 @@ mod tests {
                             step_type: RoutineStepType::Agent,
                             council: None,
                             agent: None,
-                            config: serde_json::json!({ "revised": true }),
+                            config: RoutineStepConfigInput {
+                                instructions: None,
+                                metadata: Some(serde_json::json!({ "revised": true })),
+                            },
                             encrypted_payload: None,
+                            position_x: None,
+                            position_y: None,
                             order_index: 0,
                         }],
                         edges: vec![],
@@ -2455,7 +2464,7 @@ mod tests {
 
         assert_eq!(updated.routine.steps.len(), 1);
         assert!(updated.routine.edges.is_empty());
-        assert_eq!(updated.routine.steps[0].config["revised"], true);
+        assert_eq!(updated.routine.steps[0].config["metadata"]["revised"], true);
     }
 
     #[tokio::test]

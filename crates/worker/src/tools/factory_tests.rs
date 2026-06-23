@@ -50,6 +50,7 @@ fn test_platform_services(
         None,
         config.workspace_dir.clone(),
         config.config_dir.join("library"),
+        None,
     )
 }
 
@@ -807,5 +808,151 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
             })
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn platform_manifest_backend_reads_package_overlay_abilities() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
+    let package_ability = AbilityManifest {
+        name: "build_routine".into(),
+        path: Some("build".into()),
+        description: Some("Build routines".into()),
+        activation_condition: "Use for routine writes.".into(),
+        prompt_config: nenjo::types::AbilityPromptConfig {
+            developer_prompt: "Build a routine.".into(),
+        },
+        platform_scopes: vec!["routines:read".into()],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::Value::Null,
+    };
+    let client = PlatformManifestClient::new("http://localhost:3001", "test-api-key").unwrap();
+    let backend =
+        PlatformManifestBackend::new(store, client, PlatformPayloadEncoder::new(auth_provider))
+            .with_read_only_manifest(Arc::new(Manifest {
+                abilities: vec![package_ability.clone()],
+                ..Default::default()
+            }))
+            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+
+    let abilities = backend.list_abilities().await.unwrap();
+    assert_eq!(abilities.abilities.len(), 1);
+    assert_eq!(abilities.abilities[0].name, "build_routine");
+
+    let ability = backend
+        .get_ability(AbilitiesGetParams {
+            ability: Slug::derive("build_routine"),
+        })
+        .await
+        .unwrap()
+        .ability;
+    assert_eq!(ability.summary.name, package_ability.name);
+    assert_eq!(ability.prompt_config.developer_prompt, "Build a routine.");
+}
+
+#[tokio::test]
+async fn platform_manifest_backend_filters_package_overlay_abilities_by_scope() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
+    let package_ability = AbilityManifest {
+        name: "build_routine".into(),
+        path: Some("build".into()),
+        description: Some("Build routines".into()),
+        activation_condition: "Use for routine writes.".into(),
+        prompt_config: nenjo::types::AbilityPromptConfig {
+            developer_prompt: "Build a routine.".into(),
+        },
+        platform_scopes: vec!["routines:write".into()],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::Value::Null,
+    };
+    let client = PlatformManifestClient::new("http://localhost:3001", "test-api-key").unwrap();
+    let backend =
+        PlatformManifestBackend::new(store, client, PlatformPayloadEncoder::new(auth_provider))
+            .with_read_only_manifest(Arc::new(Manifest {
+                abilities: vec![package_ability],
+                ..Default::default()
+            }))
+            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+
+    let abilities = backend.list_abilities().await.unwrap();
+    assert!(abilities.abilities.is_empty());
+    assert!(
+        backend
+            .get_ability(AbilitiesGetParams {
+                ability: Slug::derive("build_routine"),
+            })
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn platform_manifest_backend_prefers_local_ability_over_package_overlay() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
+    let mut local_ability = AbilityManifest {
+        name: "build_routine".into(),
+        path: Some("build".into()),
+        description: Some("Local build routine".into()),
+        activation_condition: "Use the local ability.".into(),
+        prompt_config: nenjo::types::AbilityPromptConfig {
+            developer_prompt: "Local routine builder.".into(),
+        },
+        platform_scopes: vec!["routines:read".into()],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        source_type: "native".into(),
+        read_only: false,
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .replace_manifest(&Manifest {
+            abilities: vec![local_ability.clone()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    local_ability.prompt_config.developer_prompt = "Package routine builder.".into();
+    local_ability.source_type = "package".into();
+    local_ability.read_only = true;
+
+    let client = PlatformManifestClient::new("http://localhost:3001", "test-api-key").unwrap();
+    let backend =
+        PlatformManifestBackend::new(store, client, PlatformPayloadEncoder::new(auth_provider))
+            .with_read_only_manifest(Arc::new(Manifest {
+                abilities: vec![local_ability],
+                ..Default::default()
+            }))
+            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+
+    let abilities = backend.list_abilities().await.unwrap();
+    assert_eq!(abilities.abilities.len(), 1);
+    let ability = backend
+        .get_ability(AbilitiesGetParams {
+            ability: Slug::derive("build_routine"),
+        })
+        .await
+        .unwrap()
+        .ability;
+    assert_eq!(
+        ability.prompt_config.developer_prompt,
+        "Local routine builder."
     );
 }

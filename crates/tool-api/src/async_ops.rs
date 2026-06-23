@@ -4,7 +4,7 @@
 //! delivery. This module only defines stable tool names, argument DTOs, JSON
 //! schemas, and operation lifecycle enums.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
 pub const WAIT_OPERATIONS_TOOL_NAME: &str = "wait_operations";
@@ -16,6 +16,7 @@ pub const SEND_OPERATION_INPUT_TOOL_NAME: &str = "send_operation_input";
 #[serde(rename_all = "snake_case")]
 pub enum AsyncOperationKind {
     Ability,
+    Delegation,
     SubAgent,
     Shell,
     Media,
@@ -25,6 +26,7 @@ impl AsyncOperationKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ability => "ability",
+            Self::Delegation => "delegation",
             Self::SubAgent => "sub_agent",
             Self::Shell => "shell",
             Self::Media => "media",
@@ -90,7 +92,10 @@ pub struct InspectOperationsArgs {
     pub kind: Option<AsyncOperationKind>,
     #[serde(default)]
     pub include_transcript: bool,
-    #[serde(default = "default_inspect_limit")]
+    #[serde(
+        default = "default_inspect_limit",
+        deserialize_with = "deserialize_usize_from_json_number"
+    )]
     pub limit: usize,
 }
 
@@ -126,7 +131,7 @@ pub fn inspect_operations_parameters_schema() -> serde_json::Value {
             "operations": {"type": "array", "items": {"type": "string"}},
             "kind": operation_kind_schema(),
             "include_transcript": {"type": "boolean"},
-            "limit": {"type": "number", "minimum": 1, "maximum": 50}
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
         },
         "additionalProperties": false
     })
@@ -171,12 +176,41 @@ pub fn send_operation_input_parameters_schema() -> serde_json::Value {
 pub fn operation_kind_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "enum": ["ability", "sub_agent", "shell", "media"]
+        "enum": ["ability", "delegation", "sub_agent", "shell", "media"]
     })
 }
 
 fn default_inspect_limit() -> usize {
     30
+}
+
+pub fn deserialize_usize_from_json_number<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(raw) = number.as_u64() {
+                usize::try_from(raw).map_err(serde::de::Error::custom)
+            } else if let Some(raw) = number.as_f64() {
+                if raw.is_finite() && raw.fract() == 0.0 && raw >= 0.0 {
+                    usize::try_from(raw as u64).map_err(serde::de::Error::custom)
+                } else {
+                    Err(serde::de::Error::custom(
+                        "expected a non-negative whole number",
+                    ))
+                }
+            } else {
+                Err(serde::de::Error::custom(
+                    "expected a non-negative whole number",
+                ))
+            }
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "expected a non-negative whole number, got {other}"
+        ))),
+    }
 }
 
 fn default_wait_seconds() -> u64 {
@@ -190,6 +224,7 @@ mod tests {
     #[test]
     fn async_operation_kind_uses_wire_names() {
         assert_eq!(AsyncOperationKind::Ability.as_str(), "ability");
+        assert_eq!(AsyncOperationKind::Delegation.as_str(), "delegation");
         assert_eq!(AsyncOperationKind::SubAgent.as_str(), "sub_agent");
         assert_eq!(AsyncOperationKind::Shell.as_str(), "shell");
         assert_eq!(AsyncOperationKind::Media.as_str(), "media");
@@ -201,5 +236,27 @@ mod tests {
 
         assert_eq!(args.seconds, 10);
         assert_eq!(args.kind, None);
+    }
+
+    #[test]
+    fn inspect_args_accept_whole_float_limit_from_model_args() {
+        let args: InspectOperationsArgs = serde_json::from_value(json!({
+            "operations": ["ability_build_agent_2"],
+            "include_transcript": true,
+            "limit": 5.0
+        }))
+        .unwrap();
+
+        assert_eq!(args.limit, 5);
+    }
+
+    #[test]
+    fn inspect_args_reject_fractional_limit() {
+        let err = serde_json::from_value::<InspectOperationsArgs>(json!({
+            "limit": 5.5
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("whole number"));
     }
 }

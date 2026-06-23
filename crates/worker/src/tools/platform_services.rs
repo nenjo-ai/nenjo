@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nenjo::Manifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo_platform::{
     PlatformManifestBackend, PlatformManifestClient, PlatformResourceIdStore,
@@ -28,20 +29,23 @@ impl PlatformToolServices {
         cached_org_id: Option<Uuid>,
         workspace_dir: std::path::PathBuf,
         library_dir: std::path::PathBuf,
+        read_only_manifest: Option<Arc<Manifest>>,
     ) -> Self {
         let manifest_backend = platform_client.as_ref().map(|client| {
             let resource_ids = Arc::new(PlatformResourceIdStore::new(manifest_store.root()));
-            Arc::new(
-                PlatformManifestBackend::new(
-                    manifest_store.clone(),
-                    client.as_ref().clone(),
-                    payload_encoder.clone(),
-                )
-                .with_workspace_dir(workspace_dir)
-                .with_library_dir(library_dir)
-                .with_cached_org_id(cached_org_id)
-                .with_resource_id_store(resource_ids),
+            let mut backend = PlatformManifestBackend::new(
+                manifest_store.clone(),
+                client.as_ref().clone(),
+                payload_encoder.clone(),
             )
+            .with_workspace_dir(workspace_dir)
+            .with_library_dir(library_dir)
+            .with_cached_org_id(cached_org_id)
+            .with_resource_id_store(resource_ids);
+            if let Some(manifest) = read_only_manifest.clone() {
+                backend = backend.with_read_only_manifest(manifest);
+            }
+            Arc::new(backend)
         });
 
         let project_backend = platform_client

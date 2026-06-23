@@ -641,6 +641,7 @@ mod tests {
 schema: nenjo.knowledge.v1
 manifest:
   pack_id: nenjo.core
+  selector: pkg:nenjo-ai.packages.knowledge.core
   version: 0.1.0
   docs:
     - selector: domain.nenjo
@@ -661,6 +662,13 @@ manifest:
         assert_eq!(doc.manifest.selector, "domain.nenjo");
         assert_eq!(doc.manifest.id, "nenjo.core.domain.nenjo");
         assert!(doc.content.contains("Knowledge content"));
+        assert_eq!(
+            pack.selector(),
+            Some("pkg:nenjo-ai.packages.knowledge.core")
+        );
+        let knowledge_ref = pack.selector().unwrap().parse().unwrap();
+        let vars = crate::tools::knowledge_pack_prompt_vars(&knowledge_ref, &pack);
+        assert!(vars.contains_key("pkg.nenjo_ai.packages.knowledge.core.domain.nenjo"));
 
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -154,7 +154,7 @@ pub(crate) async fn build_provider(
         &mut security.allowed_runtime_roots,
         package_runtime_roots(config),
     );
-    let platform_tools = build_platform_tool_services(config, auth_provider);
+    let platform_tools = build_platform_tool_services(config, auth_provider).await;
     let effective_config = config_with_cached_media_providers(config);
     let tool_factory = WorkerToolFactory::with_skill_registry_and_provider_registry(
         security,
@@ -310,11 +310,18 @@ fn extend_runtime_roots(target: &mut Vec<PathBuf>, roots: Vec<PathBuf>) {
     }
 }
 
-fn build_platform_tool_services(
+async fn build_platform_tool_services(
     config: &Config,
     auth_provider: Arc<WorkerAuthProvider>,
 ) -> PlatformToolServices {
     let manifest_store = Arc::new(LocalManifestStore::new(config.manifests_dir.clone()));
+    let read_only_manifest = match load_runtime_manifest(config).await {
+        Ok(manifest) => Some(Arc::new(manifest)),
+        Err(error) => {
+            warn!(error = %error, "Failed to load read-only package manifest overlay for platform tools");
+            None
+        }
+    };
     let platform_client = PlatformManifestClient::new(config.backend_api_url(), &config.api_key)
         .map(Arc::new)
         .map_err(|error| {
@@ -334,6 +341,7 @@ fn build_platform_tool_services(
         cached_org_id,
         config.workspace_dir.clone(),
         config.config_dir.join("library"),
+        read_only_manifest,
     )
 }
 

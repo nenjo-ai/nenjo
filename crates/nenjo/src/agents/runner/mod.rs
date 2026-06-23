@@ -13,7 +13,8 @@ use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
-use super::instance::AgentExecutionMode;
+use super::async_ops::AsyncOpChildHandle;
+use super::delegation::{DELEGATE_TO_TOOL_NAME, build_delegation_tools, delegation_child_tools};
 use super::respond::RespondToUserTool;
 use super::sub_agents::{
     ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
@@ -40,6 +41,11 @@ pub struct ExecutionHandle {
     join: Option<tokio::task::JoinHandle<Result<TurnOutput>>>,
     pause_token: types::PauseToken,
     turn_input: types::TurnInputSender,
+}
+
+enum ParentHandle<P: ProviderRuntime> {
+    EphemeralSubAgent(ChildRuntimeHandle<P>),
+    Delegation(AsyncOpChildHandle),
 }
 
 impl ExecutionHandle {
@@ -159,7 +165,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .runtime
             .provider_runtime
             .as_ref()
-            .filter(|_| instance.runtime.execution_mode == AgentExecutionMode::Parent)
+            .filter(|_| instance.runtime.execution_mode.can_use_abilities())
             .map(|provider| resolve_active_abilities(provider, &instance.manifest.abilities, None))
             .filter(|abilities| !abilities.is_empty())
         {
@@ -169,13 +175,22 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .tools
                 .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
-        if instance.runtime.execution_mode == AgentExecutionMode::Parent {
+        if instance.runtime.execution_mode.can_orchestrate() {
             instance.runtime.tools.extend(build_async_operation_tools(
                 instance.runtime.async_ops.clone(),
-                instance.runtime.config.max_delegation_depth == 0,
             ));
         }
-        if instance.runtime.execution_mode == AgentExecutionMode::Parent
+        if instance.runtime.execution_mode.can_orchestrate()
+            && instance.runtime.provider_runtime.is_some()
+            && instance.runtime.config.max_delegation_depth > 0
+        {
+            let base_instance = Arc::new(instance.clone());
+            instance
+                .runtime
+                .tools
+                .extend(build_delegation_tools(base_instance));
+        }
+        if instance.runtime.execution_mode.can_respond_to_user()
             && !instance.runtime.tools.iter().any(|tool| tool.is_terminal())
         {
             instance.runtime.tools.push(Arc::new(RespondToUserTool::new(
@@ -400,7 +415,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     // -- Internal --
 
     async fn execute_stream(&self, run: AgentRun) -> Result<ExecutionHandle> {
-        self.execute_stream_with_sub_agent(run, None).await
+        self.execute_stream_with_parent_handle(run, None).await
     }
 
     pub(crate) async fn task_stream_as_sub_agent(
@@ -408,14 +423,29 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         task: TaskInput,
         child_handle: ChildRuntimeHandle<P>,
     ) -> Result<ExecutionHandle> {
-        self.execute_stream_with_sub_agent(AgentRun::task(task), Some(child_handle))
-            .await
+        self.execute_stream_with_parent_handle(
+            AgentRun::task(task),
+            Some(ParentHandle::EphemeralSubAgent(child_handle)),
+        )
+        .await
     }
 
-    async fn execute_stream_with_sub_agent(
+    pub(crate) async fn task_stream_as_delegated_agent(
+        &self,
+        task: TaskInput,
+        child_handle: AsyncOpChildHandle,
+    ) -> Result<ExecutionHandle> {
+        self.execute_stream_with_parent_handle(
+            AgentRun::task(task),
+            Some(ParentHandle::Delegation(child_handle)),
+        )
+        .await
+    }
+
+    async fn execute_stream_with_parent_handle(
         &self,
         run: AgentRun,
-        child_handle: Option<ChildRuntimeHandle<P>>,
+        parent_handle: Option<ParentHandle<P>>,
     ) -> Result<ExecutionHandle> {
         let memory_vars = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
             && self.instance.prompt.memory_vars.is_empty()
@@ -439,9 +469,18 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         let (turn_input, turn_input_rx) = types::turn_input_channel();
 
         let mut inst = (*self.instance).clone();
-        if let Some(child_handle) = child_handle {
-            inst.runtime.tools.extend(child_tools(child_handle));
-        } else if inst.runtime.execution_mode == AgentExecutionMode::Parent
+        if let Some(parent_handle) = parent_handle {
+            match parent_handle {
+                ParentHandle::EphemeralSubAgent(child_handle) => {
+                    inst.runtime.tools.extend(child_tools(child_handle));
+                }
+                ParentHandle::Delegation(child_handle) => {
+                    inst.runtime
+                        .tools
+                        .extend(delegation_child_tools(child_handle));
+                }
+            }
+        } else if inst.runtime.execution_mode.can_orchestrate()
             && let Some(provider) = inst.runtime.provider_runtime.clone()
             && inst.runtime.config.max_delegation_depth > 0
         {
@@ -449,7 +488,10 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .runtime
                 .tools
                 .iter()
-                .filter(|tool| !PARENT_TOOL_NAMES.contains(&tool.name()))
+                .filter(|tool| {
+                    !PARENT_TOOL_NAMES.contains(&tool.name())
+                        && tool.name() != DELEGATE_TO_TOOL_NAME
+                })
                 .cloned()
                 .collect();
             let runtime = SubAgentRuntime::new(
