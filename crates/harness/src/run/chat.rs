@@ -634,6 +634,7 @@ where
         } = prepared;
         let prepared_agent_for_record = agent;
         let lease_renewal = harness.sessions().spawn_lease_renewer(lease.clone());
+        let mut cancellation_requested = false;
 
         loop {
             tokio::select! {
@@ -679,9 +680,9 @@ where
                         None => break,
                     }
                 }
-                _ = join_cancel.cancelled() => {
+                _ = join_cancel.cancelled(), if !cancellation_requested => {
                     warn!(agent = %agent_name, session = %session_id, "Harness chat execution cancelled");
-                    handle.abort();
+                    handle.cancel();
                     let is_current_execution = harness
                         .executions()
                         .get(&session_id)
@@ -707,6 +708,11 @@ where
                             ],
                         );
                     }
+                    cancellation_requested = true;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)), if cancellation_requested => {
+                    warn!(agent = %agent_name, session = %session_id, "Harness chat cancellation grace period elapsed; aborting execution");
+                    handle.abort();
                     break;
                 }
             }
@@ -727,7 +733,7 @@ where
             if let Err(error) = harness.sessions().release_lease(lease).await {
                 warn!(error = %error, session = %session_id, "Failed to release cancelled chat session lease");
             }
-            return Err(crate::HarnessError::Other(anyhow!("Cancelled")));
+            return Err(crate::HarnessError::Cancelled);
         }
 
         lease_renewal.cancel();

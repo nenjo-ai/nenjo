@@ -14,8 +14,8 @@ use crate::registry::{
     RegistryPackageVersion, registry_record_manifest_path, verify_registry_package,
 };
 use crate::source::{
-    DefaultPackageSourceFetcher, PackageSource, PackageSourceFetcher, normalize_source_paths,
-    source_fetch_key,
+    DefaultPackageSourceFetcher, FetchMode, PackageSource, PackageSourceFetcher,
+    normalize_source_paths, source_fetch_key,
 };
 
 mod integrity;
@@ -51,6 +51,8 @@ pub struct InstallOptions {
     pub upgrade_policy: UpgradePolicy,
     /// Require `nenpm.lock.yml` to exist and match the resolved dependency graph.
     pub locked: bool,
+    /// Explicit source fetch mode for git-backed package sources.
+    pub fetch_mode: Option<FetchMode>,
 }
 
 impl InstallOptions {
@@ -65,6 +67,7 @@ impl InstallOptions {
             update: false,
             upgrade_policy: UpgradePolicy::Compatible,
             locked: false,
+            fetch_mode: None,
         }
     }
 
@@ -95,6 +98,12 @@ impl InstallOptions {
     /// Require the install to match `nenpm.lock.yml`.
     pub fn locked(mut self, locked: bool) -> Self {
         self.locked = locked;
+        self
+    }
+
+    /// Override the source fetch mode for git-backed package sources.
+    pub fn fetch_mode(mut self, fetch_mode: FetchMode) -> Self {
+        self.fetch_mode = Some(fetch_mode);
         self
     }
 }
@@ -158,7 +167,16 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
             .map(NenpmLock::versions_by_package)
             .unwrap_or_default(),
     };
-    let resolved = resolve_dependency_manifest(&loaded, &locked_versions, locked_version_policy)?;
+    let source_fetcher = match options.fetch_mode {
+        Some(fetch_mode) => DefaultPackageSourceFetcher::with_fetch_mode(fetch_mode),
+        None => DefaultPackageSourceFetcher::new(),
+    };
+    let resolved = resolve_dependency_manifest(
+        &loaded,
+        &locked_versions,
+        locked_version_policy,
+        &source_fetcher,
+    )?;
     let plan = InstallPlan::from_graph(resolved.graph)?;
     let lockfile = lockfile_from_plan(&plan, &resolved.sources)?;
     if let Some(existing_lockfile) = existing_lockfile {
@@ -170,8 +188,13 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
     let (wrote_lockfile, materialization) = if options.dry_run {
         (false, MaterializationReport::default())
     } else {
-        let materialization = materialize_packages(&options.root, &options.packages_dir, &lockfile)
-            .context("failed to materialize package sources")?;
+        let materialization = materialize_packages(
+            &options.root,
+            &options.packages_dir,
+            &lockfile,
+            &source_fetcher,
+        )
+        .context("failed to materialize package sources")?;
         let content =
             serde_yaml::to_string(&lockfile).context("failed to serialize nenpm lockfile")?;
         fs::write(&lockfile_path, content)
@@ -209,12 +232,13 @@ fn resolve_dependency_manifest(
     loaded: &LoadedDependencyManifest,
     locked_versions: &BTreeMap<String, String>,
     locked_version_policy: LockedVersionPolicy,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<ResolvedInstall> {
     let manifest_dir = loaded
         .path
         .parent()
         .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?;
-    let registries = ConfiguredRegistries::load(loaded)?;
+    let registries = ConfiguredRegistries::load(loaded, source_fetcher)?;
     let mut packages = BTreeMap::new();
     let mut sources = BTreeMap::new();
     let mut registry_records: BTreeMap<String, RegistryPackageVersion> = BTreeMap::new();
@@ -264,6 +288,7 @@ fn resolve_dependency_manifest(
                 &name,
                 &requirement,
                 source,
+                source_fetcher,
             )?;
             continue;
         }
@@ -304,7 +329,7 @@ fn resolve_dependency_manifest(
         registry_records.insert(name, record);
     }
 
-    let registry_resolved = resolve_registry_records_parallel(registry_records)?;
+    let registry_resolved = resolve_registry_records_parallel(registry_records, source_fetcher)?;
     merge_resolved_packages(&mut packages, registry_resolved.packages)?;
     sources.extend(registry_resolved.sources);
 
@@ -350,8 +375,9 @@ fn resolve_override_source(
     name: &str,
     requirement: &str,
     source: PackageSource,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<()> {
-    let fetched = DefaultPackageSourceFetcher::new()
+    let fetched = source_fetcher
         .fetch(&source)
         .with_context(|| format!("failed to fetch source for {name}"))?;
 
@@ -432,6 +458,7 @@ fn merge_resolved_packages(
 
 fn resolve_registry_records_parallel(
     records: BTreeMap<String, RegistryPackageVersion>,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<ResolvedPackages> {
     let mut groups: BTreeMap<String, Vec<RegistryPackageVersion>> = BTreeMap::new();
     for record in records.into_values() {
@@ -451,7 +478,7 @@ fn resolve_registry_records_parallel(
             .into_values()
             .collect::<Vec<_>>()
             .into_par_iter()
-            .map(resolve_registry_record_group)
+            .map(|records| resolve_registry_record_group(records, source_fetcher))
             .collect()
     });
 
@@ -477,20 +504,19 @@ pub(crate) fn host_parallelism() -> usize {
 
 fn resolve_registry_record_group(
     records: Vec<RegistryPackageVersion>,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<Vec<(String, ResolvedPackage, LockedSource)>> {
     let source = records
         .first()
         .ok_or_else(|| anyhow!("registry source group was empty"))?
         .source
         .clone();
-    let fetched = DefaultPackageSourceFetcher::new()
-        .fetch(&source)
-        .with_context(|| {
-            format!(
-                "failed to fetch registry source {}",
-                source_fetch_key(&source)
-            )
-        })?;
+    let fetched = source_fetcher.fetch(&source).with_context(|| {
+        format!(
+            "failed to fetch registry source {}",
+            source_fetch_key(&source)
+        )
+    })?;
     let resolver = LocalPackageResolver::new(&fetched.root);
     let mut packages = Vec::with_capacity(records.len());
 

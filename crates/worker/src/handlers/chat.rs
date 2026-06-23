@@ -19,7 +19,7 @@ use nenjo_events::{DomainActivation, Response, StreamEvent};
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::ExecutionKind;
 use nenjo_harness::request::ChatRequest;
-use nenjo_harness::{Harness, ProviderRuntime};
+use nenjo_harness::{Harness, HarnessError, ProviderRuntime};
 
 use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_events};
 use crate::handlers::ResponseSender;
@@ -223,12 +223,12 @@ where
     where
         S: Clone + 'static;
 
-    /// Cancel the active chat execution for an agent/project pair.
+    /// Cancel the active chat execution for a chat session.
     async fn handle_chat_cancel(
         &self,
         ctx: &ChatCommandContext<S>,
-        project: &str,
         agent: Option<&str>,
+        session_id: Option<Uuid>,
     ) -> Result<()>;
 
     /// Delete a chat session and cancel any active execution for that session.
@@ -273,10 +273,10 @@ where
     async fn handle_chat_cancel(
         &self,
         ctx: &ChatCommandContext<S>,
-        project: &str,
         agent: Option<&str>,
+        session_id: Option<Uuid>,
     ) -> Result<()> {
-        handle_chat_cancel(self, ctx, project, agent).await
+        handle_chat_cancel(self, ctx, agent, session_id).await
     }
 
     async fn handle_session_delete(
@@ -475,7 +475,14 @@ where
 
     debug!(session = %session_id, agent = %aname, "Chat harness event stream closed");
     debug!(session = %session_id, agent = %aname, "Awaiting chat stream output");
-    let output = stream.output().await?;
+    let output = match stream.output().await {
+        Ok(output) => output,
+        Err(HarnessError::Cancelled) => {
+            debug!(session = %session_id, agent = %aname, "Chat stream output cancelled");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     debug!(
         session = %session_id,
         agent = %aname,
@@ -757,26 +764,34 @@ where
 
 /// Cancel in-flight chat executions.
 ///
-/// `ChatCancel` carries `project_id` and optionally `agent_id` but not `session_id`.
-/// We scan the execution registry and cancel all matching entries.
+/// `ChatCancel` is broadcast so the worker that owns the active session can see
+/// it. New commands carry `session_id`; older commands fall back to cancelling
+/// every active chat on the receiving worker.
 async fn handle_chat_cancel<P, SessionRt, S>(
     harness: &Harness<P, SessionRt>,
     ctx: &ChatCommandContext<S>,
-    project: &str,
     agent: Option<&str>,
+    session_id: Option<Uuid>,
 ) -> Result<()>
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
     S: ResponseSender,
 {
-    // Collect chat-only keys to cancel.
-    let keys_to_cancel: Vec<Uuid> = harness
-        .executions()
-        .iter()
-        .filter(|entry| entry.value().kind == ExecutionKind::Chat)
-        .map(|entry| *entry.key())
-        .collect();
+    let keys_to_cancel: Vec<Uuid> = match session_id {
+        Some(session_id) => harness
+            .executions()
+            .get(&session_id)
+            .filter(|entry| entry.kind == ExecutionKind::Chat)
+            .map(|_| vec![session_id])
+            .unwrap_or_default(),
+        None => harness
+            .executions()
+            .iter()
+            .filter(|entry| entry.value().kind == ExecutionKind::Chat)
+            .map(|entry| *entry.key())
+            .collect(),
+    };
 
     let mut cancelled = 0;
     for key in keys_to_cancel {
@@ -807,7 +822,7 @@ where
     }
 
     if cancelled > 0 {
-        info!(agent = ?agent, %project, cancelled, "Cancelled chat executions");
+        info!(agent = ?agent, ?session_id, cancelled, "Cancelled chat executions");
     }
     Ok(())
 }

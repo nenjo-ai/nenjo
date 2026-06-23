@@ -160,11 +160,7 @@ impl NatsTransport {
             return Ok(rx);
         };
 
-        for capability in capabilities
-            .iter()
-            .copied()
-            .filter(Capability::is_broadcast_lane)
-        {
+        for capability in capabilities.iter().copied() {
             let subject = broadcast_requests_subject(self.org_id, capability);
             spawn_consumer(ConsumerSpawnSpec {
                 jetstream: self.jetstream.clone(),

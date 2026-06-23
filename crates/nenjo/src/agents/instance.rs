@@ -5,6 +5,7 @@ use nenjo_models::NativeModelToolId;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agents::async_ops::AsyncOpManager;
@@ -77,6 +78,7 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) provider_runtime: Option<P>,
     pub(crate) sub_agent_ctx: Option<DelegationContext>,
     pub(crate) async_ops: AsyncOpManager,
+    pub(crate) execution_cancel: CancellationToken,
     pub(crate) execution_mode: AgentExecutionMode,
     pub(crate) hook_runtime: Option<Arc<HookRuntime>>,
 }
@@ -140,6 +142,7 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             provider_runtime: self.provider_runtime.clone(),
             sub_agent_ctx: self.sub_agent_ctx.clone(),
             async_ops: self.async_ops.clone(),
+            execution_cancel: self.execution_cancel.clone(),
             execution_mode: self.execution_mode,
             hook_runtime: self.hook_runtime.clone(),
         }

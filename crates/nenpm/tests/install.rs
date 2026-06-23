@@ -3,8 +3,8 @@ mod support;
 use std::fs;
 
 use nenjo_nenpm::{
-    InstallOptions, NenpmLock, PackageInstallIndex, PackageSource, install, package_install_path,
-    package_instance_key,
+    FetchMode, InstallOptions, NenpmLock, PackageInstallIndex, PackageSource, install,
+    package_install_path, package_instance_key,
 };
 
 use support::{copy_dir, fixture, temp_workspace, write_file};
@@ -824,6 +824,37 @@ fn install_rejects_dependency_without_override_or_registry() {
         .to_string();
 
     assert!(err.contains("requires registry resolution"));
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_uses_explicit_provider_fetch_mode() {
+    let workspace = temp_workspace("provider-fetch-mode");
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@acme/core": "0.1.0"
+
+overrides:
+  "@acme/core":
+    kind: git
+    url: https://example.com/acme/core.git
+    reference: main
+    manifest_path: nenjo.package.yaml
+"#,
+    );
+
+    let err = format!(
+        "{:?}",
+        install(InstallOptions::new(&project).fetch_mode(FetchMode::Provider)).unwrap_err()
+    );
+
+    assert!(err.contains("provider fetch mode does not support git source"));
     fs::remove_dir_all(workspace).unwrap();
 }
 

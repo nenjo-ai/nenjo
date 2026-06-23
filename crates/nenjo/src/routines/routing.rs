@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use nenjo_models::ChatMessage;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -377,17 +378,29 @@ async fn stream_turn_output<P>(
     step_slug: crate::Slug,
     step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
 {
     let mut handle = runner.run_stream(task).await?;
-    while let Some(event) = handle.recv().await {
-        let _ = events_tx.send(RoutineEvent::AgentEvent {
-            step_slug: step_slug.clone(),
-            step_run_id,
-            event,
-        });
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                handle.cancel();
+                anyhow::bail!("routine cancelled");
+            }
+            event = handle.recv() => {
+                let Some(event) = event else {
+                    break;
+                };
+                let _ = events_tx.send(RoutineEvent::AgentEvent {
+                    step_slug: step_slug.clone(),
+                    step_run_id,
+                    event,
+                });
+            }
+        }
     }
     handle.output().await
 }
@@ -403,6 +416,7 @@ pub async fn execute_with_route_next_steps<P>(
     step_slug: crate::Slug,
     step_run_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
@@ -420,6 +434,7 @@ where
             step_slug.clone(),
             step_run_id,
             events_tx,
+            cancel,
         )
         .await?;
         total_input_tokens += output.input_tokens;

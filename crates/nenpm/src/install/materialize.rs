@@ -17,6 +17,7 @@ pub(super) fn materialize_packages(
     root: &Path,
     packages_dir: &Path,
     lockfile: &NenpmLock,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<MaterializationReport> {
     let previous_index = load_previous_index(packages_dir)?;
     let pruned = prune_stale_package_installs(root, packages_dir, &previous_index, lockfile)?;
@@ -29,7 +30,13 @@ pub(super) fn materialize_packages(
             .packages
             .par_iter()
             .map(|package| {
-                materialize_package(root, packages_dir, package, previous_index.as_ref())
+                materialize_package(
+                    root,
+                    packages_dir,
+                    package,
+                    previous_index.as_ref(),
+                    source_fetcher,
+                )
             })
             .collect::<Result<Vec<_>>>()
     })?;
@@ -96,6 +103,7 @@ fn materialize_package(
     packages_dir: &Path,
     package: &LockedPackage,
     previous_index: Option<&PackageInstallIndex>,
+    source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<MaterializeAction> {
     let Some(source) = &package.source else {
         return Ok(MaterializeAction::Skipped);
@@ -105,14 +113,12 @@ fn materialize_package(
     if package_install_can_be_reused(root, packages_dir, package, previous_index)? {
         return Ok(MaterializeAction::Reused);
     }
-    let fetched = DefaultPackageSourceFetcher::new()
-        .fetch(source)
-        .with_context(|| {
-            format!(
-                "failed to fetch source for {}@{}",
-                package.name, package.version
-            )
-        })?;
+    let fetched = source_fetcher.fetch(source).with_context(|| {
+        format!(
+            "failed to fetch source for {}@{}",
+            package.name, package.version
+        )
+    })?;
 
     let package_source = package_source_root(&fetched.root, &package.manifest_path)?;
     if same_path(&package_source, &target) {

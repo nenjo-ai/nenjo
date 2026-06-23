@@ -140,9 +140,10 @@ pub enum Command {
     /// Cancel an in-flight chat response.
     #[serde(rename = "chat.cancel")]
     ChatCancel {
-        project: String,
         #[serde(default)]
         agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<Uuid>,
     },
 
     /// Delete a chat session's local history.
@@ -330,7 +331,10 @@ impl std::fmt::Display for Command {
             Self::ChatDomainExit {
                 domain_session_id, ..
             } => write!(f, "chat.domain_exit(session={domain_session_id})"),
-            Self::ChatCancel { project, .. } => write!(f, "chat.cancel(project={project})"),
+            Self::ChatCancel { session_id, .. } => match session_id {
+                Some(session_id) => write!(f, "chat.cancel(session={session_id})"),
+                None => write!(f, "chat.cancel"),
+            },
             Self::ChatSessionDelete { session_id, .. } => {
                 write!(f, "chat.session_delete(session={session_id})")
             }
@@ -416,7 +420,8 @@ impl Command {
     /// How this command should be delivered over worker transport.
     pub fn delivery(&self) -> CommandDelivery {
         match self {
-            Command::ManifestChanged { .. }
+            Command::ChatCancel { .. }
+            | Command::ManifestChanged { .. }
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
             | Command::RepoUnsync { .. } => CommandDelivery::Broadcast,
@@ -482,11 +487,11 @@ mod tests {
 
         assert_eq!(
             Command::ChatCancel {
-                project: "demo_project".into(),
                 agent: None,
+                session_id: None,
             }
             .delivery(),
-            CommandDelivery::Queue
+            CommandDelivery::Broadcast
         );
         assert_eq!(
             Command::TaskExecute {

@@ -368,6 +368,9 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
         let provider_runtime = self.provider_runtime.clone();
 
+        let execution_cancel = tokio_util::sync::CancellationToken::new();
+        let async_ops = AsyncOpManager::with_cancel(execution_cancel.clone());
+
         let instance = AgentInstance {
             manifest: agent,
             model_manifest,
@@ -384,7 +387,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 config: self.agent_config,
                 provider_runtime,
                 sub_agent_ctx: self.child_delegation_ctx,
-                async_ops: AsyncOpManager::new(),
+                async_ops,
+                execution_cancel,
                 execution_mode: self.execution_mode,
                 hook_runtime: self.hook_runtime,
             },

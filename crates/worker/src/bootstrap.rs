@@ -499,7 +499,7 @@ pub async fn sync(
     if let Some(packages) = &data.packages
         && let Err(error) = sync_platform_packages(nenjo_home, packages).await
     {
-        warn!(%error, "Platform package install failed; cached manifest resources remain available");
+        warn!(error = ?error, "Platform package install failed; cached manifest resources remain available");
     }
 
     // Sync user-uploaded library knowledge under ~/.nenjo/library.
@@ -685,7 +685,8 @@ pub(crate) async fn sync_platform_packages(
         nenjo_nenpm::install(
             nenjo_nenpm::InstallOptions::new(&install_root)
                 .packages_dir(&install_root)
-                .locked(true),
+                .locked(true)
+                .fetch_mode(nenjo_nenpm::FetchMode::Provider),
         )
     })
     .await

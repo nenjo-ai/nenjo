@@ -217,6 +217,7 @@ pub(crate) struct AsyncOpManager {
 struct ManagerInner {
     operations: Mutex<HashMap<AsyncOpId, Arc<AsyncOperation>>>,
     notify: Notify,
+    cancel: CancellationToken,
 }
 
 struct AsyncOperation {
@@ -393,10 +394,15 @@ impl AsyncOperationHandle {
 
 impl AsyncOpManager {
     pub(crate) fn new() -> Self {
+        Self::with_cancel(CancellationToken::new())
+    }
+
+    pub(crate) fn with_cancel(cancel: CancellationToken) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 operations: Mutex::new(HashMap::new()),
                 notify: Notify::new(),
+                cancel,
             }),
         }
     }
@@ -419,7 +425,7 @@ impl AsyncOpManager {
             latest_output: Mutex::new(None),
             transcript: Mutex::new(TranscriptState::default()),
             inbox_tx,
-            cancel: CancellationToken::new(),
+            cancel: self.inner.cancel.child_token(),
             join: Mutex::new(None),
         });
         self.inner
@@ -849,7 +855,15 @@ impl AsyncOpChildHandle {
                 events_tx,
             )
             .await;
-        let next = self.inbox_rx.lock().await.recv().await;
+        let cancel = handle.cancel_token();
+        let mut inbox = self.inbox_rx.lock().await;
+        let next = tokio::select! {
+            _ = cancel.cancelled() => None,
+            next = inbox.recv() => next,
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
         if let Some(operation) = self.operation.upgrade() {
             *operation.status.lock().await = AsyncOpStatus::Running;
         }
@@ -1126,5 +1140,58 @@ mod tests {
             .await;
         assert_eq!(sent[0].status, "delivered");
         assert_eq!(ask.await.unwrap().as_deref(), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn operation_token_is_cancelled_by_manager_parent_token() {
+        let parent = CancellationToken::new();
+        let manager = AsyncOpManager::with_cancel(parent.clone());
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_research_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "research".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("use_ability".into()),
+                    started_summary: "starting".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+
+        assert!(!started.handle.cancel_token().is_cancelled());
+        parent.cancel();
+        started.handle.cancel_token().cancelled().await;
+        assert!(started.handle.cancel_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn child_ask_unblocks_when_operation_is_cancelled() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_research_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "research".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("use_ability".into()),
+                    started_summary: "starting".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+        let child = started.child.clone();
+        let ask = tokio::spawn(async move { child.ask("continue?".into(), None, None).await });
+        let _ = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .await;
+
+        started.handle.cancel_token().cancel();
+
+        assert_eq!(ask.await.unwrap(), None);
     }
 }

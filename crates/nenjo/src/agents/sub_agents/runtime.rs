@@ -52,6 +52,7 @@ pub(crate) struct SubAgentRuntimeOptions {
     pub(crate) limits: SubAgentLimits,
     pub(crate) delegation_ctx: Option<DelegationContext>,
     pub(crate) async_ops: AsyncOpManager,
+    pub(crate) cancel: CancellationToken,
     pub(crate) events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
@@ -132,6 +133,7 @@ struct RuntimeInner<P: ProviderRuntime> {
     inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
     async_ops: AsyncOpManager,
+    cancel: CancellationToken,
     runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
     notify: Notify,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -195,6 +197,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
                 inherited_host_tools,
                 delegation_ctx,
                 async_ops: options.async_ops,
+                cancel: options.cancel,
                 runs: Mutex::new(HashMap::new()),
                 notify: Notify::new(),
                 events_tx: options.events_tx,
@@ -268,7 +271,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             signals: Mutex::new(VecDeque::new()),
             transcript: Mutex::new(TranscriptState::default()),
             inbox_tx,
-            cancel: CancellationToken::new(),
+            cancel: self.inner.cancel.child_token(),
             join: Mutex::new(None),
         });
 
@@ -681,7 +684,14 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
                 true,
             )
             .await;
-        let next = self.inbox_rx.lock().await.recv().await;
+        let mut inbox = self.inbox_rx.lock().await;
+        let next = tokio::select! {
+            _ = run.cancel.cancelled() => None,
+            next = inbox.recv() => next,
+        };
+        if run.cancel.is_cancelled() {
+            return None;
+        }
         *run.status.lock().await = SubAgentStatus::Running;
         next
     }

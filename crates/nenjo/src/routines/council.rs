@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -52,13 +53,22 @@ pub(crate) async fn execute_council<P>(
     step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
     let invocation = CouncilInvocation::Task;
-    execute_council_with_invocation(provider, step, step_run_id, state, &invocation, events_tx)
-        .await
+    execute_council_with_invocation(
+        provider,
+        step,
+        step_run_id,
+        state,
+        &invocation,
+        events_tx,
+        cancel,
+    )
+    .await
 }
 
 /// Execute a council directly from a chat turn, reusing the same strategy
@@ -93,6 +103,7 @@ where
     let invocation = CouncilInvocation::Chat {
         history: Vec::new(),
     };
+    let cancel = CancellationToken::new();
     let step_run_id = Uuid::new_v4();
     let _ = events_tx.send(RoutineEvent::StepStarted {
         step_slug: step.slug.clone(),
@@ -108,6 +119,7 @@ where
         &state,
         &invocation,
         events_tx,
+        &cancel,
     )
     .await
     {
@@ -147,6 +159,7 @@ async fn execute_council_with_invocation<P>(
     state: &RoutineState,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -174,6 +187,7 @@ where
                 &council,
                 invocation,
                 events_tx,
+                cancel,
             )
             .await
         }
@@ -186,6 +200,7 @@ where
                 &council,
                 invocation,
                 events_tx,
+                cancel,
             )
             .await
         }
@@ -198,6 +213,7 @@ where
                 &council,
                 invocation,
                 events_tx,
+                cancel,
             )
             .await
         }
@@ -210,6 +226,7 @@ where
                 &council,
                 invocation,
                 events_tx,
+                cancel,
             )
             .await
         }
@@ -222,6 +239,7 @@ where
                 &council,
                 invocation,
                 events_tx,
+                cancel,
             )
             .await
         }
@@ -299,6 +317,7 @@ struct StreamedTaskParams<'a, P> {
     task: AgentRun,
     step_run_id: Uuid,
     events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
 }
 
 async fn run_streamed_task<P>(params: StreamedTaskParams<'_, P>) -> Result<TurnOutput>
@@ -314,6 +333,7 @@ where
         task,
         step_run_id,
         events_tx,
+        cancel,
     } = params;
 
     let mut builder = apply_session_binding_memory_scope(
@@ -342,16 +362,28 @@ where
             step.slug.clone(),
             step_run_id,
             events_tx,
+            cancel,
         )
         .await
     } else {
         let mut handle = runner.run_stream(task).await?;
-        while let Some(event) = handle.recv().await {
-            let _ = events_tx.send(RoutineEvent::AgentEvent {
-                step_slug: step.slug.clone(),
-                step_run_id,
-                event,
-            });
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    handle.cancel();
+                    anyhow::bail!("routine cancelled");
+                }
+                event = handle.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    let _ = events_tx.send(RoutineEvent::AgentEvent {
+                        step_slug: step.slug.clone(),
+                        step_run_id,
+                        event,
+                    });
+                }
+            }
         }
         handle.output().await
     }
@@ -373,6 +405,7 @@ async fn run_member_tasks<P>(
     invocation: &CouncilInvocation,
     assignments: &[CouncilAssignment],
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<Vec<StepResult>>
 where
     P: ProviderRuntime,
@@ -401,6 +434,7 @@ where
             task,
             step_run_id,
             events_tx,
+            cancel,
         })
         .await
         {
@@ -450,6 +484,7 @@ struct AggregateMemberResultsParams<'a, P> {
     council: &'a CouncilManifest,
     invocation: &'a CouncilInvocation,
     events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
     header: &'a str,
     member_results: &'a [StepResult],
     extra_data: serde_json::Value,
@@ -469,6 +504,7 @@ where
         council,
         invocation,
         events_tx,
+        cancel,
         header,
         member_results,
         extra_data,
@@ -505,6 +541,7 @@ where
         task: attach_location(invocation.run_for_instruction(state, prompt), state),
         step_run_id,
         events_tx,
+        cancel,
     })
     .await?;
 
@@ -580,6 +617,7 @@ async fn execute_dynamic<P>(
     council: &CouncilManifest,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -605,6 +643,7 @@ where
         ),
         step_run_id,
         events_tx,
+        cancel,
     })
     .await?;
 
@@ -660,6 +699,7 @@ async fn execute_decompose<P>(
     council: &CouncilManifest,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -700,6 +740,7 @@ where
         ),
         step_run_id,
         events_tx,
+        cancel,
     })
     .await?;
     let parsed_assignments = parse_assignments(&decompose_result.text, member_agents.len());
@@ -725,6 +766,7 @@ where
         invocation,
         &assignments,
         events_tx,
+        cancel,
     )
     .await?;
 
@@ -736,6 +778,7 @@ where
         council,
         invocation,
         events_tx,
+        cancel,
         header:
             "You are the leader. Your team completed their assignments. Synthesize into a final output.",
         member_results: &member_results,
@@ -760,6 +803,7 @@ async fn execute_broadcast<P>(
     council: &CouncilManifest,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -783,6 +827,7 @@ where
         invocation,
         &assignments,
         events_tx,
+        cancel,
     )
     .await?;
     aggregate_member_results(AggregateMemberResultsParams {
@@ -793,6 +838,7 @@ where
         council,
         invocation,
         events_tx,
+        cancel,
         header:
             "You are the leader. Your team independently assessed the same task. Compare the responses and synthesize the best final outcome.",
         member_results: &member_results,
@@ -809,6 +855,7 @@ async fn execute_round_robin<P>(
     council: &CouncilManifest,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -843,6 +890,7 @@ where
             invocation,
             &single_member,
             events_tx,
+            cancel,
         )
         .await?
         .into_iter()
@@ -864,6 +912,7 @@ where
         council,
         invocation,
         events_tx,
+        cancel,
         header:
             "You are the leader. Your team contributed in round-robin sequence. Merge their cumulative work into the final result.",
         member_results: &members,
@@ -883,6 +932,7 @@ async fn execute_vote<P>(
     council: &CouncilManifest,
     invocation: &CouncilInvocation,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -906,6 +956,7 @@ where
         invocation,
         &assignments,
         events_tx,
+        cancel,
     )
     .await?;
     aggregate_member_results(AggregateMemberResultsParams {
@@ -916,6 +967,7 @@ where
         council,
         invocation,
         events_tx,
+        cancel,
         header:
             "You are the leader. Your team cast votes and recommendations. Tally the votes, resolve disagreement, and produce the final council decision.",
         member_results: &member_results,

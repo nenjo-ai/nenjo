@@ -173,6 +173,7 @@ where
             let events_tx = events_tx.clone();
             let mut step_state = state.clone();
             let routine_steps = steps.to_vec();
+            let cancel = cancel.clone();
             tasks.spawn(async move {
                 execute_scheduled_step(
                     &provider,
@@ -181,13 +182,20 @@ where
                     &routine_steps,
                     &mut step_state,
                     &events_tx,
+                    &cancel,
                 )
                 .await
             });
         }
 
         let mut stop_after_wave = false;
-        while let Some(joined) = tasks.join_next().await {
+        while let Some(joined) = tokio::select! {
+            _ = cancel.cancelled() => {
+                tasks.abort_all();
+                None
+            }
+            joined = tasks.join_next() => joined,
+        } {
             let execution = joined??;
             let step = execution.step;
             let step_result = execution.result;
@@ -269,6 +277,15 @@ where
             }
         }
 
+        if cancel.is_cancelled() {
+            last_result = StepResult {
+                passed: false,
+                output: "Cancelled".to_string(),
+                ..Default::default()
+            };
+            break;
+        }
+
         if stop_after_wave || !terminal_results.is_empty() {
             break;
         }
@@ -298,6 +315,7 @@ async fn execute_scheduled_step<P>(
     routine_steps: &[RoutineStepManifest],
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepExecution>
 where
     P: ProviderRuntime,
@@ -327,6 +345,7 @@ where
         step_run_id,
         state,
         events_tx,
+        cancel,
     )
     .await;
     let duration_ms = step_start.elapsed().as_millis() as u64;
@@ -520,6 +539,7 @@ async fn execute_step<P>(
     step_run_id: Uuid,
     state: &mut RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -534,14 +554,16 @@ where
                 step_run_id,
                 state,
                 events_tx,
+                cancel,
             )
             .await
         }
         RoutineStepType::Gate => {
-            execute_gate_step(provider, step, step_run_id, state, events_tx).await
+            execute_gate_step(provider, step, step_run_id, state, events_tx, cancel).await
         }
         RoutineStepType::Council => {
-            super::council::execute_council(provider, step, step_run_id, state, events_tx).await
+            super::council::execute_council(provider, step, step_run_id, state, events_tx, cancel)
+                .await
         }
         RoutineStepType::Terminal => {
             // Terminal step: return the most recently completed step result.
@@ -581,6 +603,7 @@ async fn execute_agent_step<P>(
     step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -623,6 +646,7 @@ where
         step.slug.clone(),
         step_run_id,
         events_tx,
+        cancel,
     )
     .await?;
 
@@ -660,6 +684,7 @@ async fn execute_gate_step<P>(
     step_run_id: Uuid,
     state: &RoutineState,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
 ) -> Result<StepResult>
 where
     P: ProviderRuntime,
@@ -703,6 +728,7 @@ where
         step.slug.clone(),
         step_run_id,
         events_tx,
+        cancel,
     )
     .await?;
 

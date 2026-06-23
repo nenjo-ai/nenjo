@@ -105,16 +105,39 @@ impl RegistryIndex {
         reference: &RegistryReference,
         base_dir: impl AsRef<Path>,
     ) -> Result<Self> {
+        Self::load_reference_with_fetcher(reference, base_dir, &DefaultPackageSourceFetcher::new())
+    }
+
+    /// Load a registry from a typed registry reference using an explicit source fetcher.
+    pub fn load_reference_with_fetcher(
+        reference: &RegistryReference,
+        base_dir: impl AsRef<Path>,
+        source_fetcher: &DefaultPackageSourceFetcher,
+    ) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         match reference {
             RegistryReference::Index(reference) => Self::load(reference, base_dir),
-            RegistryReference::Source(source) => Self::load_registry_source(source, base_dir),
+            RegistryReference::Source(source) => {
+                Self::load_registry_source_with_fetcher(source, base_dir, source_fetcher)
+            }
         }
     }
 
     fn load_registry_source(source: &PackageSource, base_dir: &Path) -> Result<Self> {
+        Self::load_registry_source_with_fetcher(
+            source,
+            base_dir,
+            &DefaultPackageSourceFetcher::new(),
+        )
+    }
+
+    fn load_registry_source_with_fetcher(
+        source: &PackageSource,
+        base_dir: &Path,
+        source_fetcher: &DefaultPackageSourceFetcher,
+    ) -> Result<Self> {
         let source = normalize_source_paths(source.clone(), base_dir);
-        let fetched = DefaultPackageSourceFetcher::new()
+        let fetched = source_fetcher
             .fetch(&source)
             .context("failed to fetch package registry source")?;
         if !crate::install::is_registry_manifest_path(&fetched.manifest_path) {
