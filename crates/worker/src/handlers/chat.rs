@@ -9,7 +9,8 @@ use nenjo_sessions::{
     TranscriptState,
 };
 use std::path::{Component, Path, PathBuf};
-use tracing::{debug, info, warn};
+use tokio::time::{Duration, Instant};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use nenjo::Slug;
@@ -25,6 +26,139 @@ use crate::handlers::ResponseSender;
 use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
+
+const ASSISTANT_DELTA_FLUSH_CHARS: usize = 180;
+const ASSISTANT_DELTA_FLUSH_AFTER: Duration = Duration::from_millis(75);
+
+#[derive(Debug)]
+struct PendingAssistantDelta {
+    session_id: Uuid,
+    run_id: String,
+    request_id: String,
+    delta: String,
+    flush_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct AssistantDeltaBuffer {
+    pending: Option<PendingAssistantDelta>,
+}
+
+impl AssistantDeltaBuffer {
+    fn push(
+        &mut self,
+        session_id: Uuid,
+        event: StreamEvent,
+        now: Instant,
+    ) -> Vec<(Uuid, StreamEvent)> {
+        let StreamEvent::AssistantTextDelta {
+            run_id,
+            request_id,
+            payload,
+            encrypted_payload,
+        } = event
+        else {
+            let mut events = self.flush();
+            events.push((session_id, event));
+            return events;
+        };
+
+        if encrypted_payload.is_some() {
+            let mut events = self.flush();
+            events.push((
+                session_id,
+                StreamEvent::AssistantTextDelta {
+                    run_id,
+                    request_id,
+                    payload,
+                    encrypted_payload,
+                },
+            ));
+            return events;
+        }
+
+        let Some(delta) = payload
+            .as_ref()
+            .and_then(|value| value.get("delta"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            let mut events = self.flush();
+            events.push((
+                session_id,
+                StreamEvent::AssistantTextDelta {
+                    run_id,
+                    request_id,
+                    payload,
+                    encrypted_payload,
+                },
+            ));
+            return events;
+        };
+
+        if delta.is_empty() {
+            return Vec::new();
+        }
+
+        let same_request = self.pending.as_ref().is_some_and(|pending| {
+            pending.session_id == session_id
+                && pending.run_id == run_id
+                && pending.request_id == request_id
+        });
+        if !same_request {
+            let events = self.flush();
+            self.pending = Some(PendingAssistantDelta {
+                session_id,
+                run_id,
+                request_id,
+                delta: delta.to_string(),
+                flush_at: now + ASSISTANT_DELTA_FLUSH_AFTER,
+            });
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.delta.chars().count() >= ASSISTANT_DELTA_FLUSH_CHARS)
+            {
+                return events.into_iter().chain(self.flush()).collect();
+            }
+            return events;
+        }
+
+        if let Some(pending) = self.pending.as_mut() {
+            pending.delta.push_str(delta);
+        }
+
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.delta.chars().count() >= ASSISTANT_DELTA_FLUSH_CHARS)
+        {
+            self.flush()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn next_flush_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.flush_at)
+    }
+
+    fn flush(&mut self) -> Vec<(Uuid, StreamEvent)> {
+        let Some(pending) = self.pending.take() else {
+            return Vec::new();
+        };
+        vec![(
+            pending.session_id,
+            StreamEvent::AssistantTextDelta {
+                run_id: pending.run_id,
+                request_id: pending.request_id,
+                payload: Some(serde_json::json!({
+                    "delta": pending.delta,
+                })),
+                encrypted_payload: None,
+            },
+        )]
+    }
+}
 
 #[derive(Clone)]
 pub struct ChatCommandContext<S> {
@@ -281,19 +415,45 @@ where
         },
     })?;
 
-    while let Some(event) = stream.recv().await {
+    let mut assistant_delta_buffer = AssistantDeltaBuffer::default();
+    loop {
+        let event = if let Some(flush_at) = assistant_delta_buffer.next_flush_at() {
+            tokio::select! {
+                event = stream.recv() => event,
+                _ = tokio::time::sleep_until(flush_at) => {
+                    send_chat_stream_events(
+                        &ctx.response_sink,
+                        assistant_delta_buffer.flush(),
+                        &aname,
+                    );
+                    continue;
+                }
+            }
+        } else {
+            stream.recv().await
+        };
+
+        let Some(event) = event else {
+            break;
+        };
+
         match event {
             HarnessEvent::DomainEntered {
                 session_id: domain_session_id,
                 domain_name,
             } => {
-                let _ = ctx.response_sink.send(Response::AgentResponse {
-                    session_id: Some(session_id),
-                    payload: StreamEvent::DomainEntered {
-                        session_id: domain_session_id,
-                        domain_name,
-                    },
-                });
+                send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
+                send_chat_stream_events(
+                    &ctx.response_sink,
+                    vec![(
+                        session_id,
+                        StreamEvent::DomainEntered {
+                            session_id: domain_session_id,
+                            domain_name,
+                        },
+                    )],
+                    &aname,
+                );
             }
             HarnessEvent::Turn {
                 session_id: event_session_id,
@@ -301,27 +461,17 @@ where
                 ..
             } => {
                 for se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
-                    debug!(
-                        stream_event = %summarize_stream_event(&se),
-                        agent = %aname,
-                        "Chat handler produced stream event"
-                    );
-                    if let Err(error) = ctx.response_sink.send(Response::AgentResponse {
-                        session_id: Some(event_session_id),
-                        payload: se,
-                    }) {
-                        warn!(
-                            error = %error,
-                            session = %event_session_id,
-                            agent = %aname,
-                            "Failed to enqueue chat response"
-                        );
-                    }
+                    let buffered_events =
+                        assistant_delta_buffer.push(event_session_id, se, Instant::now());
+                    send_chat_stream_events(&ctx.response_sink, buffered_events, &aname);
                 }
             }
-            HarnessEvent::Routine { .. } => {}
+            HarnessEvent::Routine { .. } => {
+                send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
+            }
         }
     }
+    send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
 
     debug!(session = %session_id, agent = %aname, "Chat harness event stream closed");
     debug!(session = %session_id, agent = %aname, "Awaiting chat stream output");
@@ -333,6 +483,39 @@ where
         "Chat stream output completed"
     );
     Ok(())
+}
+
+fn send_chat_stream_events<S>(response_sink: &S, events: Vec<(Uuid, StreamEvent)>, agent_name: &str)
+where
+    S: ResponseSender,
+{
+    for (session_id, event) in events {
+        if matches!(event, StreamEvent::AssistantTextDelta { .. }) {
+            trace!(
+                stream_event = %summarize_stream_event(&event),
+                agent = %agent_name,
+                "Chat handler produced assistant text delta"
+            );
+        } else {
+            debug!(
+                stream_event = %summarize_stream_event(&event),
+                agent = %agent_name,
+                "Chat handler produced stream event"
+            );
+        }
+
+        if let Err(error) = response_sink.send(Response::AgentResponse {
+            session_id: Some(session_id),
+            payload: event,
+        }) {
+            warn!(
+                error = %error,
+                session = %session_id,
+                agent = %agent_name,
+                "Failed to enqueue chat response"
+            );
+        }
+    }
 }
 
 async fn handle_chat_command_adapter<P, SessionRt, S>(
@@ -742,6 +925,131 @@ mod tests {
             self.responses.lock().unwrap().push(response);
             Ok(())
         }
+    }
+
+    fn assistant_delta(run_id: &str, request_id: &str, delta: &str) -> StreamEvent {
+        StreamEvent::AssistantTextDelta {
+            run_id: run_id.to_string(),
+            request_id: request_id.to_string(),
+            payload: Some(serde_json::json!({ "delta": delta })),
+            encrypted_payload: None,
+        }
+    }
+
+    fn model_completed(run_id: &str, request_id: &str) -> StreamEvent {
+        StreamEvent::ModelRequestCompleted {
+            run_id: run_id.to_string(),
+            request_id: request_id.to_string(),
+            parent_call_id: None,
+        }
+    }
+
+    fn assistant_delta_text(event: &StreamEvent) -> &str {
+        let StreamEvent::AssistantTextDelta { payload, .. } = event else {
+            panic!("expected assistant text delta");
+        };
+        payload
+            .as_ref()
+            .and_then(|value| value.get("delta"))
+            .and_then(serde_json::Value::as_str)
+            .expect("assistant delta payload should include delta")
+    }
+
+    #[test]
+    fn assistant_delta_buffer_coalesces_small_deltas() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = AssistantDeltaBuffer::default();
+        let now = Instant::now();
+
+        assert!(
+            buffer
+                .push(session_id, assistant_delta("run", "request", "hello "), now)
+                .is_empty()
+        );
+        assert!(
+            buffer
+                .push(
+                    session_id,
+                    assistant_delta("run", "request", "world"),
+                    now + Duration::from_millis(10),
+                )
+                .is_empty()
+        );
+
+        let events = buffer.flush();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, session_id);
+        assert_eq!(assistant_delta_text(&events[0].1), "hello world");
+    }
+
+    #[test]
+    fn assistant_delta_buffer_sets_time_based_flush_deadline() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = AssistantDeltaBuffer::default();
+        let now = Instant::now();
+
+        assert!(
+            buffer
+                .push(
+                    session_id,
+                    assistant_delta("run", "request", "partial"),
+                    now
+                )
+                .is_empty()
+        );
+
+        assert_eq!(
+            buffer.next_flush_at(),
+            Some(now + ASSISTANT_DELTA_FLUSH_AFTER)
+        );
+    }
+
+    #[test]
+    fn assistant_delta_buffer_flushes_before_non_delta_event() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = AssistantDeltaBuffer::default();
+        let now = Instant::now();
+
+        assert!(
+            buffer
+                .push(
+                    session_id,
+                    assistant_delta("run", "request", "partial"),
+                    now
+                )
+                .is_empty()
+        );
+
+        let events = buffer.push(
+            session_id,
+            model_completed("run", "request"),
+            now + Duration::from_millis(10),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(assistant_delta_text(&events[0].1), "partial");
+        assert!(matches!(
+            events[1].1,
+            StreamEvent::ModelRequestCompleted { .. }
+        ));
+    }
+
+    #[test]
+    fn assistant_delta_buffer_flushes_when_size_threshold_is_reached() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = AssistantDeltaBuffer::default();
+        let now = Instant::now();
+        let large_delta = "x".repeat(ASSISTANT_DELTA_FLUSH_CHARS);
+
+        let events = buffer.push(
+            session_id,
+            assistant_delta("run", "request", &large_delta),
+            now,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(assistant_delta_text(&events[0].1), large_delta);
+        assert!(buffer.next_flush_at().is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod abilities;
 pub(crate) mod async_ops;
 pub mod builder;
+pub(crate) mod delegation;
 pub mod error;
 pub mod instance;
 pub mod prompts;

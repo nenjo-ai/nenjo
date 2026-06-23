@@ -2931,7 +2931,7 @@ async fn route_next_steps_fail_verdict_stops_routine() {
 // Sub-agent tool injection tests
 // ===========================================================================
 
-/// The legacy delegate_to tool is no longer injected at build time.
+/// Parent agents expose installed-agent delegation tools when orchestration is enabled.
 #[tokio::test]
 async fn delegation_basic() {
     let model_id = Uuid::new_v4();
@@ -2956,8 +2956,8 @@ async fn delegation_basic() {
         .await
         .unwrap();
 
-    // Parent sub-agent tools are injected into the per-run clone, not the
-    // stored runner instance. The legacy delegate_to tool should never appear.
+    // Ephemeral sub-agent tools are injected into the per-run clone, but
+    // installed-agent delegation tools are part of the parent runner surface.
     let runner = provider
         .agent("coder")
         .await
@@ -2969,14 +2969,14 @@ async fn delegation_basic() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(
-        !tool_names.contains(&"delegate_to"),
-        "delegate_to should not be injected. Tools: {:?}",
-        tool_names
-    );
+    assert!(tool_names.contains(&"list_delegatable_agents"));
+    assert!(tool_names.contains(&"delegate_to"));
+    assert!(!tool_names.contains(&"spawn_sub_agents"));
+    assert!(!tool_names.contains(&"send_sub_agents"));
+    assert!(!tool_names.contains(&"inspect_sub_agents"));
 }
 
-/// Single agent should not get legacy delegate_to.
+/// Single-agent manifests still expose delegation discovery; the tool reports no targets at execution.
 #[tokio::test]
 async fn delegation_not_injected_for_single_agent() {
     let model_id = Uuid::new_v4();
@@ -3002,10 +3002,9 @@ async fn delegation_not_injected_for_single_agent() {
     let specs = runner.instance().tool_specs();
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
-    assert!(
-        !tool_names.contains(&"delegate_to"),
-        "delegate_to should NOT be injected for a single agent"
-    );
+    assert!(tool_names.contains(&"list_delegatable_agents"));
+    assert!(tool_names.contains(&"delegate_to"));
+    assert!(!tool_names.contains(&"spawn_sub_agents"));
 }
 
 #[tokio::test]

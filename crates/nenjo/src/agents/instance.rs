@@ -84,8 +84,41 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentExecutionMode {
     Parent,
-    Child,
+    EphemeralChild,
+    DelegatedChild,
 }
+
+impl AgentExecutionMode {
+    pub(crate) fn has_own_capability_surface(self) -> bool {
+        matches!(self, Self::Parent | Self::DelegatedChild)
+    }
+
+    pub(crate) fn can_use_abilities(self) -> bool {
+        matches!(self, Self::Parent | Self::DelegatedChild)
+    }
+
+    pub(crate) fn can_orchestrate(self) -> bool {
+        matches!(self, Self::Parent)
+    }
+
+    pub(crate) fn can_respond_to_user(self) -> bool {
+        matches!(self, Self::Parent)
+    }
+
+    pub(crate) fn strips_prompt_capabilities(self) -> bool {
+        matches!(self, Self::EphemeralChild | Self::DelegatedChild)
+    }
+
+    fn delegation_prompt_guard(self) -> Option<&'static str> {
+        match self {
+            Self::DelegatedChild => Some(DELEGATED_CHILD_PROMPT_GUARD),
+            Self::Parent | Self::EphemeralChild => None,
+        }
+    }
+}
+
+const DELEGATED_CHILD_PROMPT_GUARD: &str = r#"Delegated work boundary:
+You are receiving a delegated task from another agent. Before doing the work, decide whether the task fits your agent role, description, prompt instructions, and assigned capability surface. If it does not fit, do not improvise as a generic assistant and do not call tools. Return a brief refusal explaining that the delegated task is outside your role and name the kind of agent or capability that should handle it. If it does fit, complete only the delegated task and report a focused result back to the parent agent."#;
 
 impl<P: ProviderRuntime> Clone for AgentModel<P> {
     fn clone(&self) -> Self {
@@ -362,6 +395,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
                 developer.push_str("\n\n");
             }
             developer.push_str(addon);
+        }
+        if let Some(guard) = self.runtime.execution_mode.delegation_prompt_guard() {
+            if !developer.is_empty() {
+                developer.push_str("\n\n");
+            }
+            developer.push_str(guard);
         }
 
         // 6. Select the user message template based on task type

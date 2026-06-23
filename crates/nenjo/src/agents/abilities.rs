@@ -14,9 +14,11 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::tools::{
-    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, STOP_OPERATIONS_TOOL_NAME,
-    StopOperationsArgs, Tool, ToolCategory, ToolOrigin, ToolResult, WAIT_OPERATIONS_TOOL_NAME,
-    WaitOperationsArgs, inspect_operations_parameters_schema, stop_operations_parameters_schema,
+    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, SEND_OPERATION_INPUT_TOOL_NAME,
+    STOP_OPERATIONS_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs, Tool, ToolCategory,
+    ToolOrigin, ToolResult, WAIT_OPERATIONS_TOOL_NAME, WaitOperationsArgs,
+    deserialize_usize_from_json_number, inspect_operations_parameters_schema,
+    send_operation_input_parameters_schema, stop_operations_parameters_schema,
     wait_operations_parameters_schema,
 };
 
@@ -24,6 +26,7 @@ use super::async_ops::{
     AsyncOpChildHandle, AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpWaitFilter,
     StartAsyncOp, truncate,
 };
+use super::delegation::DELEGATE_TO_TOOL_NAME;
 use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
 use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
@@ -259,6 +262,10 @@ struct StopOperationsTool {
     async_ops: AsyncOpManager,
 }
 
+struct SendOperationInputTool {
+    async_ops: AsyncOpManager,
+}
+
 struct AbilityWaitTool {
     async_ops: AsyncOpManager,
 }
@@ -273,7 +280,10 @@ struct InspectAbilitiesArgs {
     operations: Vec<String>,
     #[serde(default)]
     include_transcript: bool,
-    #[serde(default = "default_inspect_limit")]
+    #[serde(
+        default = "default_inspect_limit",
+        deserialize_with = "deserialize_usize_from_json_number"
+    )]
     limit: usize,
 }
 
@@ -322,7 +332,7 @@ impl Tool for InspectAbilitiesTool {
             "properties": {
                 "operations": {"type": "array", "items": {"type": "string"}},
                 "include_transcript": {"type": "boolean"},
-                "limit": {"type": "number", "minimum": 1, "maximum": 50}
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
             },
             "additionalProperties": false
         })
@@ -496,6 +506,36 @@ impl Tool for StopOperationsTool {
                 parsed.reason,
                 super::runner::turn_loop::current_events_tx(),
             ).await
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SendOperationInputTool {
+    fn name(&self) -> &str {
+        SEND_OPERATION_INPUT_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Send input to one or more async operations that asked the parent agent a question."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        send_operation_input_parameters_schema()
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::ReadWrite
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let parsed: SendOperationInputArgs = serde_json::from_value(args)?;
+        Ok(json_tool(serde_json::json!({
+            "sent": self.async_ops.send_input(parsed.operations, parsed.message).await
         })))
     }
 }
@@ -795,7 +835,7 @@ where
             "inspect": INSPECT_ABILITIES_TOOL_NAME,
             "send_input": SEND_ABILITIES_TOOL_NAME,
             "stop": STOP_ABILITIES_TOOL_NAME,
-            "wait": WAIT_TOOL_NAME
+            "wait": ability_wait_tool_name(&instance.runtime)
         }
     })))
 }
@@ -1151,25 +1191,36 @@ where
     ];
     if instance.runtime.config.max_delegation_depth == 0 {
         tools.push(Arc::new(AbilityWaitTool { async_ops }) as Arc<dyn Tool>);
+    } else if !instance.runtime.execution_mode.can_orchestrate() {
+        tools.push(Arc::new(AbilityWaitTool { async_ops }) as Arc<dyn Tool>);
     }
     Ok(tools)
 }
 
-pub(crate) fn build_async_operation_tools(
-    async_ops: AsyncOpManager,
-    include_wait: bool,
-) -> Vec<Arc<dyn Tool>> {
+fn ability_wait_tool_name<P>(runtime: &AgentRuntime<P>) -> &'static str
+where
+    P: ProviderRuntime,
+{
+    if runtime.execution_mode.can_orchestrate() {
+        WAIT_OPERATIONS_TOOL_NAME
+    } else {
+        WAIT_TOOL_NAME
+    }
+}
+
+pub(crate) fn build_async_operation_tools(async_ops: AsyncOpManager) -> Vec<Arc<dyn Tool>> {
     let mut tools = vec![
         Arc::new(InspectOperationsTool {
+            async_ops: async_ops.clone(),
+        }) as Arc<dyn Tool>,
+        Arc::new(SendOperationInputTool {
             async_ops: async_ops.clone(),
         }) as Arc<dyn Tool>,
         Arc::new(StopOperationsTool {
             async_ops: async_ops.clone(),
         }) as Arc<dyn Tool>,
     ];
-    if include_wait {
-        tools.push(Arc::new(WaitOperationsTool { async_ops }) as Arc<dyn Tool>);
-    }
+    tools.push(Arc::new(WaitOperationsTool { async_ops }) as Arc<dyn Tool>);
     tools
 }
 
@@ -1227,7 +1278,7 @@ where
         .runtime
         .tools
         .iter()
-        .filter(|tool| tool.origin() == ToolOrigin::Host)
+        .filter(|tool| tool.origin() == ToolOrigin::Host && tool.name() != DELEGATE_TO_TOOL_NAME)
         .cloned()
         .collect();
 
@@ -1625,6 +1676,7 @@ mod tests {
             .collect();
         assert!(tool_names.contains(&"list_agents"));
         assert!(tool_names.contains(&"create_agent"));
+        assert!(!tool_names.contains(&DELEGATE_TO_TOOL_NAME));
     }
 
     #[tokio::test]
@@ -1730,6 +1782,10 @@ mod tests {
                 name: "remember_fact",
                 origin: ToolOrigin::Host,
             }),
+            Arc::new(TestTool {
+                name: DELEGATE_TO_TOOL_NAME,
+                origin: ToolOrigin::Host,
+            }),
         ];
         let ability = AbilityManifest {
             name: "agent_builder".into(),
@@ -1761,6 +1817,7 @@ mod tests {
             1
         );
         assert!(tool_names.contains(&"remember_fact"));
+        assert!(!tool_names.contains(&DELEGATE_TO_TOOL_NAME));
     }
 
     #[tokio::test]
@@ -1903,12 +1960,25 @@ mod tests {
 
     #[test]
     fn async_operation_tools_are_generic_harness_tools() {
-        let tools = build_async_operation_tools(AsyncOpManager::new(), true);
+        let tools = build_async_operation_tools(AsyncOpManager::new());
         let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
 
         assert!(names.contains(&"inspect_operations"));
+        assert!(names.contains(&"send_operation_input"));
         assert!(names.contains(&"stop_operations"));
         assert!(names.contains(&"wait_operations"));
+    }
+
+    #[test]
+    fn inspect_abilities_args_accept_whole_float_limit_from_model_args() {
+        let args: InspectAbilitiesArgs = serde_json::from_value(serde_json::json!({
+            "operations": ["ability_build_agent_2"],
+            "include_transcript": true,
+            "limit": 5.0
+        }))
+        .unwrap();
+
+        assert_eq!(args.limit, 5);
     }
 
     #[test]

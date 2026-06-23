@@ -537,7 +537,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let operations = self
             .inner
             .async_ops
-            .drain_signals(AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .drain_signals(AsyncOpWaitFilter::model_visible())
             .await;
         let woken_by = classify_wake(&updates, &operations);
         WaitResult {
@@ -748,7 +748,7 @@ async fn run_child_agent<P: ProviderRuntime>(run: ChildAgentRun<P>) -> Result<Tu
         .with_model_manifest(run.model_manifest)
         .with_tools(run.inherited_host_tools)
         .with_child_delegation_ctx(run.child_ctx)
-        .with_execution_mode(AgentExecutionMode::Child);
+        .with_execution_mode(AgentExecutionMode::EphemeralChild);
     let runner = builder.build().await?;
     let mut handle = runner
         .task_stream_as_sub_agent(run.task, run.child_handle.clone())

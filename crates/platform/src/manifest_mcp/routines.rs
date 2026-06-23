@@ -8,6 +8,24 @@ fn routine_ref_schema() -> serde_json::Value {
     })
 }
 
+fn routine_step_config_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Step-specific configuration payload. Supported fields are instructions and metadata only. Put step guidance in instructions. Put optional structured context under metadata. Do not put retry budgets, inputs, evaluation_criteria, or other execution controls here; retry budgets belong on on_fail edge metadata.max_attempts.",
+        "properties": {
+            "instructions": {
+                "type": "string",
+                "description": "Step-specific task instructions for agent and gate steps. Describe the local objective, inputs or upstream evidence to inspect, expected output, and pass/fail standard when applicable."
+            },
+            "metadata": {
+                "type": ["object", "array", "string"],
+                "description": "Optional JSON context rendered through {{ routine.step.metadata }}. Use this for data the step prompt explicitly references; it does not control execution."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn routine_step_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -34,11 +52,7 @@ fn routine_step_schema() -> serde_json::Value {
                 "type": ["string", "null"],
                 "description": "Agent slug for agent and gate steps. Required for agent and gate steps."
             },
-            "config": {
-                "type": "object",
-                "description": "Step-specific configuration payload.",
-                "additionalProperties": true
-            },
+            "config": routine_step_config_schema(),
             "order_index": {
                 "type": "integer",
                 "description": "Display and traversal order for the step."

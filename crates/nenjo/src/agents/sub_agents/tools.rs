@@ -5,7 +5,9 @@ use serde_json::json;
 
 use crate::Slug;
 use crate::provider::ProviderRuntime;
-use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
+use crate::tools::{
+    Tool, ToolCategory, ToolOrigin, ToolResult, deserialize_usize_from_json_number,
+};
 
 use super::format::ResultFormat;
 use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle, SubAgentTask};
@@ -284,7 +286,10 @@ struct InspectArgs {
     sub_agents: Vec<String>,
     #[serde(default)]
     include_transcript: bool,
-    #[serde(default = "default_inspect_limit")]
+    #[serde(
+        default = "default_inspect_limit",
+        deserialize_with = "deserialize_usize_from_json_number"
+    )]
     limit: usize,
 }
 
@@ -316,7 +321,7 @@ impl<P: ProviderRuntime> Tool for InspectSubAgentsTool<P> {
             "properties": {
                 "sub_agents": {"type": "array", "items": {"type": "string"}},
                 "include_transcript": {"type": "boolean"},
-                "limit": {"type": "number"}
+                "limit": {"type": "integer", "minimum": 1}
             }
         })
     }
@@ -530,5 +535,22 @@ fn error(message: impl Into<String>) -> ToolResult {
         success: false,
         output: String::new(),
         error: Some(message.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_args_accept_whole_float_limit_from_model_args() {
+        let args: InspectArgs = serde_json::from_value(serde_json::json!({
+            "sub_agents": ["researcher"],
+            "include_transcript": true,
+            "limit": 5.0
+        }))
+        .unwrap();
+
+        assert_eq!(args.limit, 5);
     }
 }

@@ -301,7 +301,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         if let Some(ctx) = self.pending_step_context.take() {
             prompt_context.render_ctx_extra.routine.step = ctx;
         }
-        if self.execution_mode == AgentExecutionMode::Child {
+        if self.execution_mode.strips_prompt_capabilities() {
             strip_child_prompt_capabilities(&mut prompt_context);
         }
 
@@ -319,7 +319,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         }
         let security = Arc::new(policy);
 
-        if self.execution_mode == AgentExecutionMode::Parent
+        if self.execution_mode.has_own_capability_surface()
             && let Some(ref provider) = self.provider_runtime
         {
             let project_slug = active_project_slug(&prompt_context);
@@ -342,7 +342,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         // Build memory scope and inject tools. This is the single place
         // where memory/artifact tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
-        let memory_scope = if self.execution_mode == AgentExecutionMode::Parent
+        let memory_scope = if self.execution_mode.has_own_capability_surface()
             && let Some(ref mem) = self.memory
         {
             let scope = if let Some(scope) = self.memory_scope_override.clone() {
@@ -360,7 +360,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             None
         };
 
-        let runner_memory = if self.execution_mode == AgentExecutionMode::Parent {
+        let runner_memory = if self.execution_mode.has_own_capability_surface() {
             self.memory
         } else {
             None

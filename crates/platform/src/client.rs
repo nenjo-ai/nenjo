@@ -16,7 +16,7 @@ use crate::manifest_mcp::{
     KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
     ModelCreateDocument, ModelDocument, ModelUpdateDocument, ProjectCreateDocument,
     ProjectDocument, ProjectUpdateDocument, RoutineConfigureDocument, RoutineConfigureMetadata,
-    RoutineGraphInput,
+    RoutineGraphInput, RoutineStepConfigInput,
 };
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
@@ -81,11 +81,13 @@ struct SaveRoutineGraphStepBody {
     step_type: String,
     council: Option<Slug>,
     agent: Option<Slug>,
-    config: serde_json::Value,
+    config: RoutineStepConfigInput,
     #[serde(skip_serializing_if = "Option::is_none")]
     encrypted_payload: Option<serde_json::Value>,
-    position_x: f64,
-    position_y: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position_y: Option<f64>,
     order_index: i32,
 }
 
@@ -183,16 +185,8 @@ fn routine_graph_body<'a>(
                 agent: step.agent.clone(),
                 config: step.config.clone(),
                 encrypted_payload: step.encrypted_payload.clone(),
-                position_x: step
-                    .config
-                    .get("position_x")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                position_y: step
-                    .config
-                    .get("position_y")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
+                position_x: step.position_x,
+                position_y: step.position_y,
                 order_index: step.order_index,
             })
             .collect(),
@@ -2302,8 +2296,10 @@ mod tests {
                     step_type: RoutineStepType::Agent,
                     council: None,
                     agent: Some(Slug::derive("coder")),
-                    config: serde_json::json!({}),
+                    config: RoutineStepConfigInput::default(),
                     encrypted_payload: None,
+                    position_x: None,
+                    position_y: None,
                     order_index: 0,
                 },
                 RoutineStepInput {
@@ -2313,8 +2309,10 @@ mod tests {
                     step_type: RoutineStepType::Gate,
                     council: None,
                     agent: Some(Slug::derive("security")),
-                    config: serde_json::json!({}),
+                    config: RoutineStepConfigInput::default(),
                     encrypted_payload: None,
+                    position_x: None,
+                    position_y: None,
                     order_index: 1,
                 },
             ],
@@ -2334,6 +2332,34 @@ mod tests {
             Slug::derive("implement_pr_changes")
         );
         assert_eq!(body.edges[0].target_step, Slug::derive("evaluate_result"));
+        assert_eq!(body.steps[0].position_x, None);
+        assert_eq!(body.steps[0].position_y, None);
+    }
+
+    #[test]
+    fn routine_graph_body_preserves_explicit_step_positions() {
+        let graph = RoutineGraphInput {
+            entry_steps: vec![Slug::derive("implement_pr_changes")],
+            steps: vec![RoutineStepInput {
+                id: None,
+                slug: Slug::derive("implement_pr_changes"),
+                name: "Implement PR changes".to_string(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("coder")),
+                config: RoutineStepConfigInput::default(),
+                encrypted_payload: None,
+                position_x: Some(42.0),
+                position_y: Some(99.0),
+                order_index: 0,
+            }],
+            edges: Vec::new(),
+        };
+
+        let body = routine_graph_body(None, None, None, None, &graph);
+
+        assert_eq!(body.steps[0].position_x, Some(42.0));
+        assert_eq!(body.steps[0].position_y, Some(99.0));
     }
 
     #[tokio::test]
