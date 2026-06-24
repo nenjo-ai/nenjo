@@ -23,6 +23,7 @@ mod package;
 mod reader;
 mod resolved;
 mod schema;
+pub mod validation;
 
 pub use claude_plugin::{
     ClaudeMarketplaceManifest, ClaudeMarketplacePlugin, ClaudePluginCommand,

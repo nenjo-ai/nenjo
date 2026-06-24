@@ -48,5 +48,5 @@ pub use source::{
 };
 pub use validate::{
     PrepareOptions, PrepareReport, PreparedModule, PreparedPackage, PreparedRegistry,
-    ValidateOptions, ValidateReport, prepare, validate,
+    ValidateOptions, ValidateReport, ValidateStage, prepare, validate, validate_with_progress,
 };

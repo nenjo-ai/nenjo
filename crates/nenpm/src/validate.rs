@@ -3,15 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::Result;
-use anyhow::{Context, anyhow};
-use nenjo::Slug;
-use nenjo::routines::graph::{
-    RoutineGraph, RoutineGraphEdge, RoutineGraphEdgeCondition, RoutineGraphStep,
-    RoutineGraphStepType, RoutineValidationError, validate_routine_graph,
-};
+use anyhow::Context;
 use nenjo_packages::{
     LocalPackageResolver, ModuleImport, PackageKind, PackageRegistryManifest, ResolvedModule,
-    ResolvedPackage, validate_package_name,
+    ResolvedPackage,
+    validation::{PackageRuntimeValidationStage, validate_registry_runtime_with_progress},
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +49,31 @@ pub struct ValidateReport {
     pub registry: PackageRegistryManifest,
     /// Validated packages keyed by package name.
     pub packages: BTreeMap<String, ResolvedPackage>,
+}
+
+/// High-level stages performed by publisher-side registry validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidateStage {
+    /// Locate or normalize the registry manifest path.
+    DiscoverRegistry,
+    /// Parse and validate the registry manifest.
+    LoadRegistry,
+    /// Resolve every package manifest declared by the registry.
+    ResolvePackages,
+    /// Run shared runtime-readiness validation for the resolved package graph.
+    Runtime(PackageRuntimeValidationStage),
+}
+
+impl ValidateStage {
+    /// Human-readable stage label for console output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DiscoverRegistry => "discovering registry manifest",
+            Self::LoadRegistry => "loading registry manifest",
+            Self::ResolvePackages => "resolving package graph",
+            Self::Runtime(stage) => stage.label(),
+        }
+    }
 }
 
 /// Options for preparing a package registry source.
@@ -126,15 +147,26 @@ pub struct PreparedModule {
 
 /// Validate a package registry source.
 pub fn validate(options: ValidateOptions) -> Result<ValidateReport> {
+    validate_with_progress(options, |_| {})
+}
+
+/// Validate a package registry source and report each validation stage.
+pub fn validate_with_progress(
+    options: ValidateOptions,
+    mut progress: impl FnMut(ValidateStage),
+) -> Result<ValidateReport> {
     let root = options.root;
+    progress(ValidateStage::DiscoverRegistry);
     let registry_path = match options.registry {
         Some(path) => normalize_registry_path(&path)?,
         None => discover_registry_path(&root)?,
     };
     let resolver = LocalPackageResolver::with_registry_path(&root, &registry_path);
+    progress(ValidateStage::LoadRegistry);
     let registry = resolver.load_registry()?;
     let mut packages = BTreeMap::new();
 
+    progress(ValidateStage::ResolvePackages);
     for (name, manifest_path) in &registry.packages {
         let package = resolver
             .resolve_package_manifest(manifest_path)
@@ -145,10 +177,12 @@ pub fn validate(options: ValidateOptions) -> Result<ValidateReport> {
                 package.name
             );
         }
-        validate_package(&package)
-            .with_context(|| format!("failed to validate package {}", package.name))?;
         packages.insert(name.clone(), package);
     }
+    validate_registry_runtime_with_progress(&registry, &packages, |stage| {
+        progress(ValidateStage::Runtime(stage));
+    })
+    .with_context(|| "failed package runtime validation")?;
 
     Ok(ValidateReport {
         root,
@@ -180,459 +214,6 @@ pub fn prepare(options: PrepareOptions) -> Result<PrepareReport> {
         output_path,
         compiled,
     })
-}
-
-fn validate_package(package: &ResolvedPackage) -> Result<()> {
-    let current_selector = package_selector(&package.name)?;
-    let dependency_selectors = package
-        .dependencies()
-        .keys()
-        .map(|name| package_selector(name))
-        .collect::<Result<BTreeSet<_>>>()?;
-
-    for module in unique_modules(package) {
-        validate_module_imports(package, module).with_context(|| {
-            format!(
-                "{} ({}) failed module import validation",
-                module.source_path,
-                module.kind.as_str()
-            )
-        })?;
-        validate_prompt_selectors(module, &current_selector, &dependency_selectors).with_context(
-            || {
-                format!(
-                    "{} ({}) failed prompt selector validation",
-                    module.source_path,
-                    module.kind.as_str()
-                )
-            },
-        )?;
-        validate_knowledge_selectors(module).with_context(|| {
-            format!(
-                "{} ({}) failed knowledge selector validation",
-                module.source_path,
-                module.kind.as_str()
-            )
-        })?;
-        validate_routine_manifest(module).with_context(|| {
-            format!(
-                "{} ({}) failed routine graph validation",
-                module.source_path,
-                module.kind.as_str()
-            )
-        })?;
-    }
-    validate_context_graph(package)
-        .with_context(|| format!("{} failed context import graph validation", package.name))?;
-    Ok(())
-}
-
-fn validate_module_imports(package: &ResolvedPackage, module: &ResolvedModule) -> Result<()> {
-    for import in &module.imports {
-        import
-            .validate()
-            .with_context(|| format!("{} import {}", module.path, import.reference))?;
-        if import.surface == "context" {
-            let target = resolve_local_import_target(&module.path, &import.reference)
-                .with_context(|| {
-                    format!("failed to resolve context import {}", import.reference)
-                })?;
-            let resolved = package.modules.get(&target).ok_or_else(|| {
-                anyhow!(
-                    "{} imports missing local context module {}",
-                    module.path,
-                    import.reference
-                )
-            })?;
-            if resolved.kind != PackageKind::ContextBlock {
-                bail!(
-                    "{} imports {} as context, but target is {}",
-                    module.path,
-                    import.reference,
-                    resolved.kind.as_str()
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_prompt_selectors(
-    module: &ResolvedModule,
-    package_selector: &str,
-    dependency_selectors: &BTreeSet<String>,
-) -> Result<()> {
-    let mut strings = Vec::new();
-    collect_strings(&module.manifest.manifest, &mut strings);
-    let imported_context = module
-        .imports
-        .iter()
-        .filter(|import| import.surface == "context")
-        .map(|import| context_import_name(&module.path, &import.reference))
-        .collect::<Result<BTreeSet<_>>>()?;
-
-    for value in strings {
-        for selector in scan_pkg_selectors(value) {
-            if !pkg_selector_is_allowed(&selector, package_selector, dependency_selectors) {
-                bail!(
-                    "{} references pkg selector {}, but {} is not the current package or a package dependency",
-                    module.path,
-                    selector,
-                    selector_to_package_name(&selector)
-                );
-            }
-        }
-        for context in scan_context_selectors(value) {
-            if !imported_context.contains(&context) {
-                bail!(
-                    "{} references context.{context}, but it is not declared in wrapper imports.context",
-                    module.path
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_knowledge_selectors(module: &ResolvedModule) -> Result<()> {
-    if module.kind != PackageKind::Knowledge {
-        return Ok(());
-    }
-    let docs = module
-        .manifest
-        .manifest
-        .get("docs")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("{} knowledge manifest must define docs", module.path))?;
-    let mut selectors = BTreeSet::new();
-    for (index, doc) in docs.iter().enumerate() {
-        let selector = doc
-            .get("selector")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow!(
-                    "{} knowledge doc at index {} must define selector",
-                    module.path,
-                    index
-                )
-            })?;
-        validate_jinja_selector(selector).with_context(|| {
-            format!(
-                "{} knowledge doc selector '{}' is not Jinja-compatible",
-                module.path, selector
-            )
-        })?;
-        if !selectors.insert(selector.to_string()) {
-            bail!(
-                "{} declares duplicate knowledge selector '{}'",
-                module.path,
-                selector
-            );
-        }
-        for edge in doc
-            .get("related")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(target) = edge.get("target").and_then(serde_json::Value::as_str) {
-                validate_jinja_selector(target).with_context(|| {
-                    format!(
-                        "{} knowledge doc selector '{}' has invalid related target '{}'",
-                        module.path, selector, target
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_routine_manifest(module: &ResolvedModule) -> Result<()> {
-    if module.kind != PackageKind::Routine {
-        return Ok(());
-    }
-    let graph = package_routine_graph(module).with_context(|| {
-        format!(
-            "{} could not be adapted to the canonical routine graph contract",
-            module.path
-        )
-    })?;
-    validate_routine_graph(&graph)
-        .map_err(|error| anyhow!("{}", format_routine_validation_error(&error)))?;
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageRoutineManifest {
-    #[serde(default)]
-    entry_steps: Vec<String>,
-    #[serde(default)]
-    metadata: serde_json::Value,
-    #[serde(default)]
-    steps: Vec<PackageRoutineStep>,
-    #[serde(default)]
-    edges: Vec<PackageRoutineEdge>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageRoutineStep {
-    #[serde(default, rename = "ref", alias = "slug")]
-    step_ref: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default, rename = "type", alias = "step_type")]
-    step_type: String,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    council: Option<String>,
-    #[serde(default)]
-    lambda: Option<String>,
-    #[serde(default)]
-    lambda_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageRoutineEdge {
-    #[serde(default, alias = "source_step")]
-    from: String,
-    #[serde(default, alias = "target_step")]
-    to: String,
-    #[serde(default)]
-    condition: Option<String>,
-    #[serde(default)]
-    max_attempts: Option<u32>,
-    #[serde(default)]
-    metadata: serde_json::Value,
-}
-
-fn package_routine_graph(module: &ResolvedModule) -> Result<RoutineGraph> {
-    let routine: PackageRoutineManifest = serde_json::from_value(module.manifest.manifest.clone())
-        .with_context(|| format!("{} routine manifest has invalid shape", module.path))?;
-
-    let entry_steps = routine_entry_steps(&routine)
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| parse_routine_slug(&value, &format!("entry_steps[{index}]")))
-        .collect::<Result<Vec<_>>>()?;
-
-    let steps = routine
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| {
-            let slug = step.step_ref.trim().to_string();
-            if slug.is_empty() {
-                bail!("steps[{index}] must define ref");
-            }
-            let step_type =
-                RoutineGraphStepType::parse(step.step_type.trim()).ok_or_else(|| {
-                    anyhow!(
-                        "steps[{index}] ref '{slug}' has unsupported type '{}'",
-                        step.step_type
-                    )
-                })?;
-            Ok(RoutineGraphStep {
-                slug: parse_routine_slug(&slug, &format!("steps[{index}].ref"))?,
-                name: if step.name.trim().is_empty() {
-                    slug.clone()
-                } else {
-                    step.name.clone()
-                },
-                step_type,
-                has_agent: step
-                    .agent
-                    .as_ref()
-                    .is_some_and(|value| !value.trim().is_empty()),
-                has_council: step
-                    .council
-                    .as_ref()
-                    .is_some_and(|value| !value.trim().is_empty()),
-                has_lambda: step
-                    .lambda
-                    .as_ref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                    || step
-                        .lambda_id
-                        .as_ref()
-                        .is_some_and(|value| !value.trim().is_empty()),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let edges = routine
-        .edges
-        .iter()
-        .enumerate()
-        .map(|(index, edge)| {
-            let from = edge.from.trim();
-            let to = edge.to.trim();
-            if from.is_empty() {
-                bail!("edges[{index}] must define from");
-            }
-            if to.is_empty() {
-                bail!("edges[{index}] must define to");
-            }
-            let condition = edge.condition.as_deref().unwrap_or("always");
-            let condition =
-                RoutineGraphEdgeCondition::parse(condition.trim()).ok_or_else(|| {
-                    anyhow!("edges[{index}] has unsupported condition '{}'", condition)
-                })?;
-            let mut metadata = normalize_edge_metadata(&edge.metadata)?;
-            if let Some(max_attempts) = edge.max_attempts {
-                let object = metadata
-                    .as_object_mut()
-                    .expect("normalize_edge_metadata returns an object");
-                object.insert("max_attempts".to_string(), serde_json::json!(max_attempts));
-            }
-            Ok(RoutineGraphEdge {
-                source_step: parse_routine_slug(from, &format!("edges[{index}].from"))?,
-                target_step: parse_routine_slug(to, &format!("edges[{index}].to"))?,
-                condition,
-                metadata,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(RoutineGraph {
-        entry_steps,
-        steps,
-        edges,
-    })
-}
-
-fn routine_entry_steps(routine: &PackageRoutineManifest) -> Vec<String> {
-    if !routine.entry_steps.is_empty() {
-        return routine.entry_steps.clone();
-    }
-    routine
-        .metadata
-        .get("entry_steps")
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn normalize_edge_metadata(value: &serde_json::Value) -> Result<serde_json::Value> {
-    if value.is_null() {
-        return Ok(serde_json::json!({}));
-    }
-    if value.is_object() {
-        return Ok(value.clone());
-    }
-    bail!("edge metadata must be an object when provided");
-}
-
-fn parse_routine_slug(value: &str, field: &str) -> Result<Slug> {
-    Ok(Slug::parse(value)
-        .with_context(|| format!("{field} has invalid routine step slug '{value}'"))?)
-}
-
-fn format_routine_validation_error(error: &RoutineValidationError) -> String {
-    if error.issues.is_empty() {
-        return "routine graph validation failed".to_string();
-    }
-    error
-        .issues
-        .iter()
-        .map(|issue| {
-            let mut message = issue.message.clone();
-            if let Some(step) = &issue.step {
-                message.push_str(&format!(" [step: {step}]"));
-            }
-            if let Some(edge) = &issue.edge {
-                message.push_str(&format!(" [edge: {edge}]"));
-            }
-            message
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn validate_jinja_selector(selector: &str) -> Result<()> {
-    let selector = selector.trim();
-    if selector.is_empty() {
-        bail!("selector cannot be empty");
-    }
-    for segment in selector.split('.') {
-        if segment.is_empty() {
-            bail!("selector cannot contain empty segments");
-        }
-        let mut chars = segment.chars();
-        let first = chars.next().expect("segment is not empty");
-        if !(first == '_' || first.is_ascii_alphabetic()) {
-            bail!("selector segment '{segment}' must start with a letter or underscore");
-        }
-        if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-            bail!(
-                "selector segment '{segment}' may contain only letters, numbers, and underscores"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_context_graph(package: &ResolvedPackage) -> Result<()> {
-    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for module in unique_modules(package) {
-        if module.kind != PackageKind::ContextBlock {
-            continue;
-        }
-        let key = module.key();
-        let mut deps = Vec::new();
-        for import in module
-            .imports
-            .iter()
-            .filter(|import| import.surface == "context")
-        {
-            deps.push(resolve_local_import_target(
-                &module.path,
-                &import.reference,
-            )?);
-        }
-        graph.insert(key, deps);
-    }
-
-    let mut temporary = BTreeSet::new();
-    let mut permanent = BTreeSet::new();
-    for key in graph.keys() {
-        visit_context(key, &graph, &mut temporary, &mut permanent, &mut Vec::new())?;
-    }
-    Ok(())
-}
-
-fn visit_context(
-    key: &str,
-    graph: &BTreeMap<String, Vec<String>>,
-    temporary: &mut BTreeSet<String>,
-    permanent: &mut BTreeSet<String>,
-    stack: &mut Vec<String>,
-) -> Result<()> {
-    if permanent.contains(key) {
-        return Ok(());
-    }
-    if !temporary.insert(key.to_string()) {
-        stack.push(key.to_string());
-        bail!("context import cycle: {}", stack.join(" -> "));
-    }
-    stack.push(key.to_string());
-    for dependency in graph.get(key).into_iter().flatten() {
-        if graph.contains_key(dependency) {
-            visit_context(dependency, graph, temporary, permanent, stack)?;
-        }
-    }
-    stack.pop();
-    temporary.remove(key);
-    permanent.insert(key.to_string());
-    Ok(())
 }
 
 fn compile_registry(report: &ValidateReport) -> PreparedRegistry {
@@ -703,88 +284,6 @@ fn normalize_registry_path(path: &str) -> Result<String> {
         bail!("invalid registry path '{path}'");
     }
     Ok(trimmed.to_string())
-}
-
-fn package_selector(package: &str) -> Result<String> {
-    validate_package_name(package)?;
-    if let Some((scope, name)) = package
-        .strip_prefix('@')
-        .and_then(|value| value.split_once('/'))
-    {
-        Ok(format!("pkg.{scope}.{name}"))
-    } else {
-        Ok(format!("pkg.{package}"))
-    }
-}
-
-fn pkg_selector_is_allowed(
-    selector: &str,
-    package_selector: &str,
-    dependency_selectors: &BTreeSet<String>,
-) -> bool {
-    selector == package_selector
-        || selector
-            .strip_prefix(package_selector)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-        || dependency_selectors.contains(selector)
-        || dependency_selectors.iter().any(|dependency| {
-            selector
-                .strip_prefix(dependency)
-                .is_some_and(|suffix| suffix.starts_with('.'))
-        })
-        || selector_fully_qualified_package_leaf(selector).is_some_and(|leaf| {
-            selector_matches_unscoped_package(package_selector, leaf)
-                || dependency_selectors
-                    .iter()
-                    .any(|dependency| selector_matches_unscoped_package(dependency, leaf))
-        })
-        || selector_package_slug(selector).is_some_and(|slug| {
-            selector_matches_unscoped_package(package_selector, slug)
-                || dependency_selectors
-                    .iter()
-                    .any(|dependency| selector_matches_unscoped_package(dependency, slug))
-        })
-}
-
-fn selector_matches_unscoped_package(package_selector: &str, slug: &str) -> bool {
-    package_selector
-        .strip_prefix("pkg.")
-        .is_some_and(|package| !package.contains('.') && package == slug)
-}
-
-fn selector_package_slug(selector: &str) -> Option<&str> {
-    let mut parts = selector.split('.');
-    if parts.next()? != "pkg" {
-        return None;
-    }
-    let first = parts.next()?;
-    let second = parts.next();
-    second.or(Some(first))
-}
-
-fn selector_fully_qualified_package_leaf(selector: &str) -> Option<&str> {
-    let mut parts = selector.split('.');
-    if parts.next()? != "pkg" {
-        return None;
-    }
-    let _scope = parts.next()?;
-    let repo = parts.next()?;
-    if repo != "packages" {
-        return None;
-    }
-    parts.next()
-}
-
-fn selector_to_package_name(selector: &str) -> String {
-    let parts = selector.split('.').collect::<Vec<_>>();
-    if let Some(leaf) = selector_fully_qualified_package_leaf(selector) {
-        return leaf.to_string();
-    }
-    if parts.len() >= 3 {
-        format!("@{}/{}", parts[1], parts[2])
-    } else {
-        selector.to_string()
-    }
 }
 
 fn collect_strings<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
@@ -937,67 +436,4 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     is_ident_start(ch) || ch.is_ascii_digit()
-}
-
-fn context_import_name(module_path: &str, reference: &str) -> Result<String> {
-    if let Some(fragment) = reference.trim().strip_prefix('#') {
-        return Ok(fragment.to_string());
-    }
-    let target = resolve_local_import_target(module_path, reference)?;
-    let (_, resource) = target
-        .rsplit_once('#')
-        .ok_or_else(|| anyhow!("context import {reference} did not resolve to a resource"))?;
-    Ok(resource.to_string())
-}
-
-fn resolve_local_import_target(module_path: &str, reference: &str) -> Result<String> {
-    let reference = reference.trim();
-    if let Some(fragment) = reference.strip_prefix('#') {
-        return Ok(format!("{module_path}#{fragment}"));
-    }
-
-    let (path, fragment) = reference
-        .split_once('#')
-        .map_or((reference, None), |(path, fragment)| (path, Some(fragment)));
-    if fragment.is_some_and(str::is_empty) {
-        bail!("local import {reference} has empty fragment");
-    }
-    let base_dir = module_path.rsplit_once('/').map_or("", |(dir, _)| dir);
-    let normalized = normalize_relative_path(base_dir, path)?;
-    let fragment = fragment
-        .map(str::to_string)
-        .unwrap_or_else(|| inferred_resource_name(&normalized));
-    Ok(format!("{normalized}#{fragment}"))
-}
-
-fn inferred_resource_name(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .and_then(|file| file.rsplit_once('.').map(|(stem, _)| stem))
-        .unwrap_or(path)
-        .to_string()
-}
-
-fn normalize_relative_path(base_dir: &str, path: &str) -> Result<String> {
-    let mut components = base_dir
-        .split('/')
-        .filter(|component| !component.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => {
-                if components.pop().is_none() {
-                    bail!("local import path {path} escapes package root");
-                }
-            }
-            value if value.contains('\\') => bail!("invalid local import path {path}"),
-            value => components.push(value.to_string()),
-        }
-    }
-    if components.is_empty() {
-        bail!("local import path {path} resolved to package root");
-    }
-    Ok(components.join("/"))
 }

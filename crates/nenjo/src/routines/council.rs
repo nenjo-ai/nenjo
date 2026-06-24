@@ -177,70 +177,50 @@ where
         .with_context(|| format!("Council {council_slug} not found in manifest"))?
         .clone();
 
+    let ctx = CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    };
+
     match council.delegation_strategy {
         CouncilDelegationStrategy::Dynamic => {
-            execute_dynamic(
-                provider,
-                step,
-                step_run_id,
-                state,
-                &council,
-                invocation,
-                events_tx,
-                cancel,
-            )
+            execute_dynamic(CouncilStrategyContext {
+                ctx,
+                council: &council,
+            })
             .await
         }
         CouncilDelegationStrategy::Decompose => {
-            execute_decompose(
-                provider,
-                step,
-                step_run_id,
-                state,
-                &council,
-                invocation,
-                events_tx,
-                cancel,
-            )
+            execute_decompose(CouncilStrategyContext {
+                ctx,
+                council: &council,
+            })
             .await
         }
         CouncilDelegationStrategy::Broadcast => {
-            execute_broadcast(
-                provider,
-                step,
-                step_run_id,
-                state,
-                &council,
-                invocation,
-                events_tx,
-                cancel,
-            )
+            execute_broadcast(CouncilStrategyContext {
+                ctx,
+                council: &council,
+            })
             .await
         }
         CouncilDelegationStrategy::RoundRobin => {
-            execute_round_robin(
-                provider,
-                step,
-                step_run_id,
-                state,
-                &council,
-                invocation,
-                events_tx,
-                cancel,
-            )
+            execute_round_robin(CouncilStrategyContext {
+                ctx,
+                council: &council,
+            })
             .await
         }
         CouncilDelegationStrategy::Vote => {
-            execute_vote(
-                provider,
-                step,
-                step_run_id,
-                state,
-                &council,
-                invocation,
-                events_tx,
-                cancel,
-            )
+            execute_vote(CouncilStrategyContext {
+                ctx,
+                council: &council,
+            })
             .await
         }
     }
@@ -285,6 +265,42 @@ impl CouncilInvocation {
 struct CouncilAssignment {
     agent: Slug,
     instruction: String,
+}
+
+struct CouncilExecutionContext<'a, P> {
+    provider: &'a P,
+    step: &'a RoutineStepManifest,
+    step_run_id: Uuid,
+    state: &'a RoutineState,
+    invocation: &'a CouncilInvocation,
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
+}
+
+impl<P> Clone for CouncilExecutionContext<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for CouncilExecutionContext<'_, P> {}
+
+struct CouncilStrategyContext<'a, P> {
+    ctx: CouncilExecutionContext<'a, P>,
+    council: &'a CouncilManifest,
+}
+
+impl<P> Clone for CouncilStrategyContext<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for CouncilStrategyContext<'_, P> {}
+
+struct MemberTasksParams<'a, P> {
+    ctx: CouncilExecutionContext<'a, P>,
+    assignments: &'a [CouncilAssignment],
 }
 
 fn task_input_for_instruction(state: &RoutineState, description: String) -> TaskInput {
@@ -397,19 +413,20 @@ fn member_agents(council: &CouncilManifest) -> Result<Vec<Slug>> {
     Ok(agents)
 }
 
-async fn run_member_tasks<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    invocation: &CouncilInvocation,
-    assignments: &[CouncilAssignment],
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<Vec<StepResult>>
+async fn run_member_tasks<P>(params: MemberTasksParams<'_, P>) -> Result<Vec<StepResult>>
 where
     P: ProviderRuntime,
 {
+    let MemberTasksParams { ctx, assignments } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let mut member_results = Vec::new();
 
     for (i, assignment) in assignments.iter().enumerate() {
@@ -609,19 +626,20 @@ where
 }
 
 /// Dynamic: leader gets free reign to work (with delegation tools if configured).
-async fn execute_dynamic<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    council: &CouncilManifest,
-    invocation: &CouncilInvocation,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_dynamic<P>(params: CouncilStrategyContext<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let CouncilStrategyContext { ctx, council } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let leader_agent = council.leader_agent.clone();
 
     info!(
@@ -691,19 +709,20 @@ where
 }
 
 /// Decompose: leader splits → members execute → leader aggregates.
-async fn execute_decompose<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    council: &CouncilManifest,
-    invocation: &CouncilInvocation,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_decompose<P>(params: CouncilStrategyContext<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let CouncilStrategyContext { ctx, council } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let leader_agent = council.leader_agent.clone();
     let member_agents = member_agents(council)?;
 
@@ -758,16 +777,10 @@ where
             instruction: parsed_assignment.clone(),
         })
         .collect();
-    let member_results = run_member_tasks(
-        provider,
-        step,
-        step_run_id,
-        state,
-        invocation,
-        &assignments,
-        events_tx,
-        cancel,
-    )
+    let member_results = run_member_tasks(MemberTasksParams {
+        ctx,
+        assignments: &assignments,
+    })
     .await?;
 
     let mut result = aggregate_member_results(AggregateMemberResultsParams {
@@ -795,19 +808,20 @@ where
     Ok(result)
 }
 
-async fn execute_broadcast<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    council: &CouncilManifest,
-    invocation: &CouncilInvocation,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_broadcast<P>(params: CouncilStrategyContext<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let CouncilStrategyContext { ctx, council } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let member_agents = member_agents(council)?;
     let assignments: Vec<CouncilAssignment> = member_agents
         .iter()
@@ -819,16 +833,10 @@ where
             ),
         })
         .collect();
-    let member_results = run_member_tasks(
-        provider,
-        step,
-        step_run_id,
-        state,
-        invocation,
-        &assignments,
-        events_tx,
-        cancel,
-    )
+    let member_results = run_member_tasks(MemberTasksParams {
+        ctx,
+        assignments: &assignments,
+    })
     .await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,
@@ -847,19 +855,20 @@ where
     .await
 }
 
-async fn execute_round_robin<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    council: &CouncilManifest,
-    invocation: &CouncilInvocation,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_round_robin<P>(params: CouncilStrategyContext<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let CouncilStrategyContext { ctx, council } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let member_agents = member_agents(council)?;
     let mut running_context = String::new();
     let mut members = Vec::new();
@@ -882,16 +891,10 @@ where
             agent: agent.clone(),
             instruction: task,
         }];
-        let result = run_member_tasks(
-            provider,
-            step,
-            step_run_id,
-            state,
-            invocation,
-            &single_member,
-            events_tx,
-            cancel,
-        )
+        let result = run_member_tasks(MemberTasksParams {
+            ctx,
+            assignments: &single_member,
+        })
         .await?
         .into_iter()
         .next()
@@ -924,19 +927,20 @@ where
     .await
 }
 
-async fn execute_vote<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    council: &CouncilManifest,
-    invocation: &CouncilInvocation,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_vote<P>(params: CouncilStrategyContext<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let CouncilStrategyContext { ctx, council } = params;
+    let CouncilExecutionContext {
+        provider,
+        step,
+        step_run_id,
+        state,
+        invocation,
+        events_tx,
+        cancel,
+    } = ctx;
     let member_agents = member_agents(council)?;
     let assignments: Vec<CouncilAssignment> = member_agents
         .iter()
@@ -948,16 +952,10 @@ where
             ),
         })
         .collect();
-    let member_results = run_member_tasks(
-        provider,
-        step,
-        step_run_id,
-        state,
-        invocation,
-        &assignments,
-        events_tx,
-        cancel,
-    )
+    let member_results = run_member_tasks(MemberTasksParams {
+        ctx,
+        assignments: &assignments,
+    })
     .await?;
     aggregate_member_results(AggregateMemberResultsParams {
         provider,

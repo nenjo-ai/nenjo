@@ -2,7 +2,7 @@ mod support;
 
 use std::fs;
 
-use nenjo_nenpm::{PrepareOptions, ValidateOptions, prepare, validate};
+use nenjo_nenpm::{PrepareOptions, ValidateOptions, prepare, validate, validate_with_progress};
 
 use support::{copy_dir, fixture, temp_workspace, write_file, write_minimal_registry};
 
@@ -32,6 +32,37 @@ fn validate_accepts_registry_and_prepare_writes_compiled_metadata() {
                 .any(|module| module.prompt_package_selectors == vec!["pkg.acme.core".to_string()])
     }));
 
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_reports_runtime_validation_stages() {
+    let workspace = temp_workspace("validate-progress-stages");
+    copy_dir(&fixture("local-workspace"), &workspace);
+    let packages = workspace.join("packages");
+    let mut stages = Vec::new();
+
+    validate_with_progress(ValidateOptions::new(&packages), |stage| {
+        stages.push(stage.label().to_string());
+    })
+    .unwrap();
+
+    assert_eq!(
+        stages,
+        vec![
+            "discovering registry manifest",
+            "loading registry manifest",
+            "resolving package graph",
+            "building render fixture",
+            "validating module imports",
+            "validating prompt selectors",
+            "validating knowledge selectors",
+            "validating assignments",
+            "validating routine graphs",
+            "strict-rendering prompts",
+            "validating context graph",
+        ]
+    );
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -269,6 +300,7 @@ fn validate_accepts_valid_routine_manifest_graph() {
         r#"schema: nenjo.registry.v1
 packages:
   "routines": packages/routines/nenjo.package.yaml
+  "agents": packages/agents/nenjo.package.yaml
 "#,
     );
     write_file(
@@ -279,6 +311,35 @@ name: "routines"
 version: "0.1.0"
 modules:
   - review.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "agents"
+version: "0.1.0"
+modules:
+  - coder.yaml
+  - reviewer.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/coder.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: coder
+  prompt_config: {}
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/reviewer.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: reviewer
+  prompt_config: {}
 "#,
     );
     write_file(
@@ -294,11 +355,11 @@ manifest:
     - ref: implement
       name: Implement
       type: agent
-      agent: coder
+      agent: packages/agents/coder.yaml
     - ref: review
       name: Review
       type: gate
-      agent: reviewer
+      agent: packages/agents/reviewer.yaml
     - ref: done
       name: Done
       type: terminal
@@ -316,7 +377,7 @@ manifest:
 "#,
     );
 
-    validate(ValidateOptions::new(&workspace)).unwrap();
+    validate(ValidateOptions::new(&workspace).registry("packages.yaml")).unwrap();
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -329,6 +390,7 @@ fn validate_rejects_invalid_routine_manifest_graph_with_context() {
         r#"schema: nenjo.registry.v1
 packages:
   "routines": packages/routines/nenjo.package.yaml
+  "agents": packages/agents/nenjo.package.yaml
 "#,
     );
     write_file(
@@ -339,6 +401,35 @@ name: "routines"
 version: "0.1.0"
 modules:
   - review.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "agents"
+version: "0.1.0"
+modules:
+  - coder.yaml
+  - reviewer.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/coder.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: coder
+  prompt_config: {}
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/reviewer.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: reviewer
+  prompt_config: {}
 "#,
     );
     write_file(
@@ -354,11 +445,11 @@ manifest:
     - ref: implement
       name: Implement
       type: agent
-      agent: coder
+      agent: packages/agents/coder.yaml
     - ref: review
       name: Review
       type: gate
-      agent: reviewer
+      agent: packages/agents/reviewer.yaml
     - ref: done
       name: Done
       type: terminal
@@ -374,10 +465,10 @@ manifest:
 
     let err = format!(
         "{:?}",
-        validate(ValidateOptions::new(&workspace)).unwrap_err()
+        validate(ValidateOptions::new(&workspace).registry("packages.yaml")).unwrap_err()
     );
 
-    assert!(err.contains("review.yaml (routine) failed routine graph validation"));
+    assert!(err.contains("routine graph validation failed"));
     assert!(err.contains("Gate step 'Review' must use on_pass/on_fail edges"));
     fs::remove_dir_all(workspace).unwrap();
 }

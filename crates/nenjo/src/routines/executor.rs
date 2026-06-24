@@ -337,16 +337,16 @@ where
     });
 
     let step_start = std::time::Instant::now();
-    let result = execute_step(
+    let result = execute_step(StepExecutionParams {
         provider,
-        &step,
+        step: &step,
         route_edges,
         routine_steps,
         step_run_id,
         state,
         events_tx,
         cancel,
-    )
+    })
     .await;
     let duration_ms = step_start.elapsed().as_millis() as u64;
 
@@ -530,23 +530,46 @@ fn edge_key(edge: &RoutineEdgeManifest) -> String {
     format!("{}:{}:{}", edge.source_step, condition, edge.target_step)
 }
 
-/// Execute a single step based on its type.
-async fn execute_step<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    route_edges: &[RoutineEdgeManifest],
-    routine_steps: &[RoutineStepManifest],
+struct StepExecutionParams<'a, P> {
+    provider: &'a P,
+    step: &'a RoutineStepManifest,
+    route_edges: &'a [RoutineEdgeManifest],
+    routine_steps: &'a [RoutineStepManifest],
     step_run_id: Uuid,
-    state: &mut RoutineState,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+    state: &'a mut RoutineState,
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
+}
+
+struct AgentStepParams<'a, P> {
+    provider: &'a P,
+    step: &'a RoutineStepManifest,
+    route_edges: &'a [RoutineEdgeManifest],
+    routine_steps: &'a [RoutineStepManifest],
+    step_run_id: Uuid,
+    state: &'a RoutineState,
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
+}
+
+/// Execute a single step based on its type.
+async fn execute_step<P>(params: StepExecutionParams<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let StepExecutionParams {
+        provider,
+        step,
+        route_edges,
+        routine_steps,
+        step_run_id,
+        state,
+        events_tx,
+        cancel,
+    } = params;
     match step.step_type {
         RoutineStepType::Agent => {
-            execute_agent_step(
+            execute_agent_step(AgentStepParams {
                 provider,
                 step,
                 route_edges,
@@ -555,7 +578,7 @@ where
                 state,
                 events_tx,
                 cancel,
-            )
+            })
             .await
         }
         RoutineStepType::Gate => {
@@ -595,19 +618,20 @@ where
 // Agent step
 // ---------------------------------------------------------------------------
 
-async fn execute_agent_step<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    route_edges: &[RoutineEdgeManifest],
-    routine_steps: &[RoutineStepManifest],
-    step_run_id: Uuid,
-    state: &RoutineState,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_agent_step<P>(params: AgentStepParams<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let AgentStepParams {
+        provider,
+        step,
+        route_edges,
+        routine_steps,
+        step_run_id,
+        state,
+        events_tx,
+        cancel,
+    } = params;
     let agent = step
         .agent
         .as_ref()

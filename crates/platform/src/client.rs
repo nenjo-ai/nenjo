@@ -628,7 +628,13 @@ impl PlatformManifestClient {
                 .json::<AgentRecord>()
                 .await
                 .context("failed to decode configured agent"),
-            status => bail!("agent configure failed with status {status}"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "agent configure failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
         }
     }
 
