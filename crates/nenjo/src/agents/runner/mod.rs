@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use nenjo_models::ChatMessage;
 use tracing::{debug, info, trace};
@@ -41,6 +42,7 @@ pub struct ExecutionHandle {
     join: Option<tokio::task::JoinHandle<Result<TurnOutput>>>,
     pause_token: types::PauseToken,
     turn_input: types::TurnInputSender,
+    cancel: CancellationToken,
 }
 
 enum ParentHandle<P: ProviderRuntime> {
@@ -68,8 +70,14 @@ impl ExecutionHandle {
         self.turn_input.clone()
     }
 
-    /// Abort the running execution. The spawned task is cancelled immediately.
+    /// Request cooperative cancellation of the running execution.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Abort the running execution after signalling cooperative cancellation.
     pub fn abort(&self) {
+        self.cancel();
         if let Some(join) = &self.join {
             join.abort();
         }
@@ -110,6 +118,7 @@ impl Drop for ExecutionHandle {
         if let Some(join) = &self.join
             && !join.is_finished()
         {
+            self.cancel.cancel();
             join.abort();
         }
     }
@@ -505,6 +514,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                     },
                     delegation_ctx: inst.runtime.sub_agent_ctx.clone(),
                     async_ops: inst.runtime.async_ops.clone(),
+                    cancel: inst.runtime.execution_cancel.clone(),
                     events_tx: Some(events_tx.clone()),
                 },
             );
@@ -580,6 +590,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             _ => None,
         };
 
+        let cancel = inst.runtime.execution_cancel.clone();
         let join = tokio::spawn(async move {
             let require_respond_to_user = matches!(run.kind, AgentRunKind::Chat(_));
             let mut output = turn_loop::run(
@@ -600,6 +611,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             join: Some(join),
             pause_token,
             turn_input,
+            cancel,
         })
     }
 }

@@ -13,6 +13,7 @@ use anyhow::Result;
 use nenjo_models::ModelProvider;
 use regex::Regex;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -118,6 +119,7 @@ async fn chat_with_provider_stream<P>(
     temperature: f64,
     request_id: &str,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<(
     nenjo_models::ChatResponse,
     HashSet<String>,
@@ -138,6 +140,9 @@ where
 
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => {
+                anyhow::bail!("execution cancelled");
+            }
             Some(event) = stream_rx.recv() => {
                 match event {
                     ProviderStreamEvent::TextDelta(delta) => {
@@ -319,6 +324,14 @@ pub(crate) fn current_turn_input() -> Option<TurnInputReceiver> {
     CURRENT_TURN_INPUT.try_with(Clone::clone).ok().flatten()
 }
 
+fn cancelled_tool_result() -> ToolResult {
+    ToolResult {
+        success: false,
+        output: String::new(),
+        error: Some("execution cancelled".into()),
+    }
+}
+
 pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
 }
@@ -411,6 +424,7 @@ where
     let model = &agent.model.model_name;
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
+    let cancel = agent.runtime.execution_cancel.clone();
     let visible_tool_specs = agent.tool_specs();
     let initial_local_tool_specs = agent.local_tool_specs();
     let visible_tool_specs = visible_tool_specs.as_slice();
@@ -462,6 +476,15 @@ where
             }
 
             for iteration in 0..max_turns {
+                if cancel.is_cancelled() {
+                    agent.runtime.async_ops.stop(
+                        Vec::new(),
+                        None,
+                        Some("execution cancelled".into()),
+                        events_tx.clone(),
+                    ).await;
+                    anyhow::bail!("execution cancelled");
+                }
                 debug!(
                     agent = agent_name,
                     iteration,
@@ -505,7 +528,18 @@ where
                     && pt.is_paused()
                 {
                     emit_event(events_tx.as_ref(), TurnEvent::Paused);
-                    pt.wait_if_paused().await;
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            agent.runtime.async_ops.stop(
+                                Vec::new(),
+                                None,
+                                Some("execution cancelled".into()),
+                                events_tx.clone(),
+                            ).await;
+                            anyhow::bail!("execution cancelled");
+                        }
+                        _ = pt.wait_if_paused() => {}
+                    }
                     emit_event(events_tx.as_ref(), TurnEvent::Resumed);
                 }
 
@@ -580,6 +614,7 @@ where
                         temperature,
                         &model_request_id,
                         events_tx.as_ref(),
+                        &cancel,
                     )
                     .await?;
                 let original_tool_call_count = response.tool_calls.len();
@@ -766,6 +801,7 @@ where
                             let futs = response.tool_calls.iter().map(|tc| {
                                 let current_messages = message_snapshot.clone();
                                 let hook_runtime = hook_runtime.clone();
+                                let cancel = cancel.clone();
                                 async move {
                                     let result = execute_tool(
                                         agent_name,
@@ -776,6 +812,7 @@ where
                                         AsyncOperationRuntime::new(
                                             agent.runtime.async_ops.clone(),
                                         ),
+                                        cancel,
                                     )
                                     .await;
                                     (tc, result)
@@ -792,6 +829,7 @@ where
                                     &messages,
                                     hook_runtime.clone(),
                                     AsyncOperationRuntime::new(agent.runtime.async_ops.clone()),
+                                    cancel.clone(),
                                 )
                                 .await;
                                 results.push((tc, result));
@@ -1111,6 +1149,7 @@ async fn execute_tool(
     current_messages: &[ChatMessage],
     hook_runtime: Option<Arc<HookRuntime>>,
     async_operations: AsyncOperationRuntime,
+    cancel: CancellationToken,
 ) -> ToolResult {
     info!(
         agent = agent_name,
@@ -1145,7 +1184,7 @@ async fn execute_tool(
     };
     let events_tx = current_events_tx();
 
-    let outcome = run_hooks_for_event(
+    let pre_tool_hooks = run_hooks_for_event(
         agent_name,
         hook_runtime.as_ref(),
         HookRuntimeEvent::PreToolUse {
@@ -1155,8 +1194,11 @@ async fn execute_tool(
         },
         Some(&tool_call.name),
         events_tx.as_ref(),
-    )
-    .await;
+    );
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => return cancelled_tool_result(),
+        outcome = pre_tool_hooks => outcome,
+    };
     if let Some(block) = outcome.block {
         return ToolResult {
             success: false,
@@ -1184,26 +1226,32 @@ async fn execute_tool(
         .cloned()
         .collect();
 
-    let result = if let Some(tx) = events_tx.clone() {
-        CURRENT_EVENTS_TX
-            .scope(
-                Some(tx),
-                CURRENT_CHAT_HISTORY.scope(
-                    current_history,
-                    scope_current_async_operation_runtime(async_operations, execute),
-                ),
-            )
-            .await
-    } else {
-        CURRENT_EVENTS_TX
-            .scope(
-                None,
-                CURRENT_CHAT_HISTORY.scope(
-                    current_history,
-                    scope_current_async_operation_runtime(async_operations, execute),
-                ),
-            )
-            .await
+    let scoped_execute = async {
+        if let Some(tx) = events_tx.clone() {
+            CURRENT_EVENTS_TX
+                .scope(
+                    Some(tx),
+                    CURRENT_CHAT_HISTORY.scope(
+                        current_history,
+                        scope_current_async_operation_runtime(async_operations, execute),
+                    ),
+                )
+                .await
+        } else {
+            CURRENT_EVENTS_TX
+                .scope(
+                    None,
+                    CURRENT_CHAT_HISTORY.scope(
+                        current_history,
+                        scope_current_async_operation_runtime(async_operations, execute),
+                    ),
+                )
+                .await
+        }
+    };
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return cancelled_tool_result(),
+        result = scoped_execute => result,
     };
 
     let tool_response = serde_json::json!({
@@ -1211,7 +1259,7 @@ async fn execute_tool(
         "output": &result.output,
         "error": &result.error,
     });
-    let outcome = run_hooks_for_event(
+    let post_tool_hooks = run_hooks_for_event(
         agent_name,
         hook_runtime.as_ref(),
         HookRuntimeEvent::PostToolUse {
@@ -1222,8 +1270,11 @@ async fn execute_tool(
         },
         Some(&tool_call.name),
         events_tx.as_ref(),
-    )
-    .await;
+    );
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => return cancelled_tool_result(),
+        outcome = post_tool_hooks => outcome,
+    };
     if let Some(block) = outcome.block {
         return ToolResult {
             success: false,

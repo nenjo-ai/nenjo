@@ -423,6 +423,7 @@ where
             ..
         } = prepared;
         let lease_renewal = harness.sessions().spawn_lease_renewer(lease.clone());
+        let mut cancellation_requested = false;
 
         loop {
             tokio::select! {
@@ -455,9 +456,9 @@ where
                         None => break,
                     }
                 }
-                _ = join_cancel.cancelled() => {
+                _ = join_cancel.cancelled(), if !cancellation_requested => {
                     warn!(agent = %agent_name, task_id = %task_id, "Harness task execution cancelled");
-                    handle.abort();
+                    handle.cancel();
                     harness.sessions().record_events(
                         lease.clone(),
                         vec![SessionRuntimeEvent::Transition(SessionTransition {
@@ -467,6 +468,11 @@ where
                             status: SessionStatus::Cancelled,
                         })],
                     );
+                    cancellation_requested = true;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)), if cancellation_requested => {
+                    warn!(agent = %agent_name, task_id = %task_id, "Harness task cancellation grace period elapsed; aborting execution");
+                    handle.abort();
                     break;
                 }
             }

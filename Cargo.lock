@@ -2139,6 +2139,8 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "nenjo",
+ "nenjo-xml",
  "reqwest",
  "serde",
  "serde_json",

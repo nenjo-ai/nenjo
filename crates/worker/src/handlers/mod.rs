@@ -285,9 +285,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .await
         }
 
-        Command::ChatCancel { project, agent } => {
+        Command::ChatCancel { agent, session_id } => {
             ctx.harness
-                .handle_chat_cancel(&ctx.chat_context(), &project, agent.as_deref())
+                .handle_chat_cancel(&ctx.chat_context(), agent.as_deref(), session_id)
                 .await
         }
 

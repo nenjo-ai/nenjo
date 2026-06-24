@@ -118,6 +118,7 @@ where
                     )
                     .await?;
 
+                let mut cancellation_requested = false;
                 loop {
                     tokio::select! {
                         event = handle.recv() => {
@@ -132,7 +133,11 @@ where
                                 None => break,
                             }
                         }
-                        _ = join_cancel.cancelled() => {
+                        _ = join_cancel.cancelled(), if !cancellation_requested => {
+                            handle.cancel();
+                            cancellation_requested = true;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)), if cancellation_requested => {
                             handle.abort();
                             break;
                         }

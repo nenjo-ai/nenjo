@@ -867,6 +867,9 @@ where
     } = operation;
 
     let mut sub_instance = build_ability_instance(&instance, &ability).await;
+    let cancel_token = op_handle.cancel_token();
+    sub_instance.runtime.execution_cancel = cancel_token.clone();
+    sub_instance.runtime.async_ops = AsyncOpManager::with_cancel(cancel_token.clone());
     sub_instance
         .runtime
         .tools
@@ -1025,7 +1028,6 @@ where
     });
 
     // Run the sub turn loop with nested events enabled.
-    let cancel_token = op_handle.cancel_token();
     let result = tokio::select! {
         _ = cancel_token.cancelled() => {
             Err(anyhow::anyhow!("ability operation stopped"))
@@ -1352,6 +1354,9 @@ where
     scoped_manifest.abilities.clear();
     scoped_manifest.domains.clear();
 
+    let execution_cancel = caller.runtime.execution_cancel.child_token();
+    let async_ops = AsyncOpManager::with_cancel(execution_cancel.clone());
+
     AgentInstance {
         manifest: scoped_manifest,
         model_manifest: caller.model_manifest.clone(),
@@ -1368,7 +1373,8 @@ where
             config: caller.runtime.config.clone(),
             provider_runtime: caller.runtime.provider_runtime.clone(),
             sub_agent_ctx: caller.runtime.sub_agent_ctx.clone(),
-            async_ops: AsyncOpManager::new(),
+            async_ops,
+            execution_cancel,
             execution_mode: caller.runtime.execution_mode,
             hook_runtime: None,
         },
@@ -1543,6 +1549,9 @@ mod tests {
     }
 
     fn test_instance_with_active_domain() -> AgentInstance {
+        let execution_cancel = tokio_util::sync::CancellationToken::new();
+        let async_ops = AsyncOpManager::with_cancel(execution_cancel.clone());
+
         AgentInstance {
             manifest: AgentManifest {
                 name: "nenji".into(),
@@ -1623,7 +1632,8 @@ mod tests {
                 config: AgentConfig::default(),
                 provider_runtime: Some(test_sdk_provider()),
                 sub_agent_ctx: None,
-                async_ops: AsyncOpManager::new(),
+                async_ops,
+                execution_cancel,
                 execution_mode: AgentExecutionMode::Parent,
                 hook_runtime: None,
             },

@@ -19,6 +19,9 @@ pub enum HarnessError {
         source: anyhow::Error,
     },
 
+    #[error("cancelled")]
+    Cancelled,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

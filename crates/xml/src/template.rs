@@ -62,6 +62,31 @@ pub fn try_render_template(
     template: &str,
     vars: &HashMap<String, String>,
 ) -> Result<String, TemplateError> {
+    try_render_template_with_undefined_behavior(
+        template,
+        vars,
+        minijinja::UndefinedBehavior::Chainable,
+    )
+}
+
+/// Like [`try_render_template`] but errors when a template references a
+/// variable that is not present in the render context.
+pub fn try_render_template_strict(
+    template: &str,
+    vars: &HashMap<String, String>,
+) -> Result<String, TemplateError> {
+    try_render_template_with_undefined_behavior(
+        template,
+        vars,
+        minijinja::UndefinedBehavior::Strict,
+    )
+}
+
+fn try_render_template_with_undefined_behavior(
+    template: &str,
+    vars: &HashMap<String, String>,
+    undefined_behavior: minijinja::UndefinedBehavior,
+) -> Result<String, TemplateError> {
     if template.is_empty() {
         return Ok(String::new());
     }
@@ -71,7 +96,7 @@ pub fn try_render_template(
 
     let mut env = Environment::new();
     env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
-    env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
+    env.set_undefined_behavior(undefined_behavior);
 
     env.render_str(template, &context_value)
         .map_err(|e| TemplateError {
@@ -110,6 +135,35 @@ pub fn try_render_template_with_named_templates(
     vars: &HashMap<String, String>,
     named_templates: &HashMap<String, String>,
 ) -> Result<String, TemplateError> {
+    try_render_template_with_named_templates_and_undefined_behavior(
+        template,
+        vars,
+        named_templates,
+        minijinja::UndefinedBehavior::Chainable,
+    )
+}
+
+/// Like [`try_render_template_with_named_templates`] but errors when a template
+/// references a variable that is not present in the render context.
+pub fn try_render_template_with_named_templates_strict(
+    template: &str,
+    vars: &HashMap<String, String>,
+    named_templates: &HashMap<String, String>,
+) -> Result<String, TemplateError> {
+    try_render_template_with_named_templates_and_undefined_behavior(
+        template,
+        vars,
+        named_templates,
+        minijinja::UndefinedBehavior::Strict,
+    )
+}
+
+fn try_render_template_with_named_templates_and_undefined_behavior(
+    template: &str,
+    vars: &HashMap<String, String>,
+    named_templates: &HashMap<String, String>,
+    undefined_behavior: minijinja::UndefinedBehavior,
+) -> Result<String, TemplateError> {
     if template.is_empty() {
         return Ok(String::new());
     }
@@ -119,7 +173,7 @@ pub fn try_render_template_with_named_templates(
 
     let mut env = Environment::new();
     env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
-    env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
+    env.set_undefined_behavior(undefined_behavior);
 
     for (name, source) in named_templates {
         env.add_template_owned(name.clone(), escape_backslash_braces(source))
@@ -463,6 +517,14 @@ Task: {{ task.title }}"#;
     }
 
     #[test]
+    fn try_render_strict_errors_on_undefined_variable() {
+        let result = try_render_template_strict("{{ vars.dummy }}", &HashMap::new());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("undefined"));
+    }
+
+    #[test]
     fn try_render_empty() {
         assert_eq!(try_render_template("", &HashMap::new()).unwrap(), "");
     }
@@ -514,6 +576,18 @@ Task: {{ task.title }}"#;
 
         assert!(result.is_err());
         assert!(!result.unwrap_err().message.is_empty());
+    }
+
+    #[test]
+    fn try_render_with_named_templates_strict_errors_on_undefined_variable() {
+        let result = try_render_template_with_named_templates_strict(
+            "{{ vars.dummy }}",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("undefined"));
     }
 
     #[test]

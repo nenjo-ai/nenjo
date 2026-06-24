@@ -7,7 +7,7 @@ use eyre::{Result, WrapErr};
 use nenjo_nenpm::{
     AddOptions, CleanOptions, InfoOptions, InitOptions, InstallOptions, ListOptions, PackageSource,
     PackageSpec, PrepareOptions, RemoveOptions, ValidateOptions, add, clean, info, init, install,
-    list, prepare, remove, update, validate,
+    list, prepare, remove, update, validate_with_progress,
 };
 use nenjo_updater::{maybe_update_notice, run_nenjoup_update};
 
@@ -266,9 +266,11 @@ fn main() -> Result<()> {
             if let Some(registry) = registry {
                 options = options.registry(registry);
             }
-            let report = pm_ui::run_phase("checking package registry", || {
-                validate(options).wrap_err("failed to validate package registry")
-            })?;
+            let report = validate_with_progress(options, |stage| {
+                pm_ui::print_note(stage.label());
+            })
+            .wrap_err("failed to validate package registry")?;
+            pm_ui::print_success("package registry valid");
             println!("{}", report.registry_path);
             for package in report.packages.values() {
                 println!("{}@{}", package.name, package.version);
