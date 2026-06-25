@@ -665,7 +665,13 @@ where
             {
                 CurrentTaskState::default()
             } else {
-                let current = self.client.get_project_task(task_id).await?;
+                let current = self
+                    .client
+                    .get_project_task(task_id)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("project task not found while preparing encrypted update")
+                    })?;
                 let mut current_state: CurrentTaskState =
                     serde_json::from_value(current.clone())
                         .context("failed to decode current task state")?;
@@ -1043,10 +1049,12 @@ where
                     .backend
                     .resolve_project_task_id(&args.project, &args.task)
                     .await?;
-                let task = self.backend.client.get_project_task(task_id).await?;
-                json!({
-                    "task": self.backend.task_document(task).await?
-                })
+                match self.backend.client.get_project_task(task_id).await? {
+                    Some(task) => json!({
+                        "task": self.backend.task_document(task).await?
+                    }),
+                    None => json!({ "task": null }),
+                }
             }
             ProjectRestToolKind::CreateProjectTasks => {
                 let args: CreateProjectTasksArgs = parse_project_tool_args(
@@ -1121,6 +1129,7 @@ where
                     .client
                     .get_project_execution_run(args.execution_run_id)
                     .await?
+                    .unwrap_or(serde_json::Value::Null)
             }
             ProjectRestToolKind::StartProjectExecution => {
                 let args: StartProjectExecutionArgs = parse_project_tool_args(

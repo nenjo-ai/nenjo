@@ -83,7 +83,22 @@ fn routine_edge_schema() -> serde_json::Value {
             },
             "metadata": {
                 "type": "object",
-                "description": "Optional edge metadata. For an on_fail retry edge from a gate step, use max_attempts to bound retries; retry exhaustion fails the routine directly.",
+                "description": "Optional edge metadata. Use purpose to explain why the route exists. Use handoff_instructions to tell the source agent what information to pass to this target when it calls route_next_steps. For an on_fail retry edge from a gate step, use max_attempts to bound retries; retry exhaustion fails the routine directly.",
+                "properties": {
+                    "purpose": {
+                        "type": "string",
+                        "description": "Why this route exists."
+                    },
+                    "handoff_instructions": {
+                        "type": "string",
+                        "description": "Instructions to the source agent for what to include in the target-specific route_next_steps handoff."
+                    },
+                    "max_attempts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Retry budget for gate on_fail retry edges."
+                    }
+                },
                 "additionalProperties": true
             }
         },
@@ -214,18 +229,10 @@ fn configure_metadata_schema() -> Value {
 fn routine_configure_parameters() -> Value {
     let mut properties = Map::new();
     properties.insert(
-        "id".into(),
-        json!({
-            "type": "string",
-            "format": "uuid",
-            "description": "Optional routine UUID to use when creating a new routine."
-        }),
-    );
-    properties.insert(
         "routine".into(),
         json!({
             "type": "string",
-            "description": "Existing routine slug. Omit to create a new routine."
+            "description": "Stable routine slug. Use it to create or update the same routine idempotently; omit only when you want the slug derived from metadata.name."
         }),
     );
     properties.insert("metadata".into(), configure_metadata_schema());
@@ -269,7 +276,7 @@ pub fn routine_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_routine".to_string(),
-            description: "Create or update one routine in a single backend-owned operation. Omit routine to create; pass routine to update. When graph is present it is a full replacement and must be a JSON object, not a string."
+            description: "Create or update one routine idempotently in a single backend-owned operation. Pass routine as the stable slug when you know it; the backend owns platform IDs. When graph is present it is a full replacement and must be a JSON object, not a string."
                 .to_string(),
             parameters: routine_configure_parameters(),
             category: ToolCategory::Write,

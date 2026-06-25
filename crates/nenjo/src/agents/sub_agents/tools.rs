@@ -6,7 +6,8 @@ use serde_json::json;
 use crate::Slug;
 use crate::provider::ProviderRuntime;
 use crate::tools::{
-    Tool, ToolCategory, ToolOrigin, ToolResult, deserialize_usize_from_json_number,
+    Tool, ToolCategory, ToolOrigin, ToolResult, deserialize_u64_from_json_number,
+    deserialize_usize_from_json_number,
 };
 
 use super::format::ResultFormat;
@@ -390,7 +391,10 @@ impl<P: ProviderRuntime> Tool for StopSubAgentsTool<P> {
 
 #[derive(Debug, Deserialize)]
 struct WaitArgs {
-    #[serde(default = "default_wait_seconds")]
+    #[serde(
+        default = "default_wait_seconds",
+        deserialize_with = "deserialize_u64_from_json_number"
+    )]
     seconds: u64,
     reason: Option<String>,
 }
@@ -421,7 +425,7 @@ impl<P: ProviderRuntime> Tool for WaitTool<P> {
         json!({
             "type": "object",
             "properties": {
-                "seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                "seconds": {"type": "integer", "minimum": 1, "maximum": 30},
                 "reason": {"type": "string"}
             }
         })

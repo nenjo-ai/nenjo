@@ -232,9 +232,20 @@ fn normalize_edge_metadata(value: &serde_json::Value) -> anyhow::Result<serde_js
         return Ok(serde_json::json!({}));
     }
     if value.is_object() {
+        validate_optional_string_field(value, "purpose")?;
+        validate_optional_string_field(value, "handoff_instructions")?;
+        validate_optional_string_field(value, "handoff")?;
+        validate_optional_string_field(value, "task")?;
         return Ok(value.clone());
     }
     anyhow::bail!("edge metadata must be an object when provided");
+}
+
+fn validate_optional_string_field(value: &serde_json::Value, field: &str) -> anyhow::Result<()> {
+    if value.get(field).is_some_and(|value| !value.is_string()) {
+        anyhow::bail!("edge metadata.{field} must be a string when provided");
+    }
+    Ok(())
 }
 
 fn parse_routine_slug(value: &str, field: &str) -> anyhow::Result<Slug> {

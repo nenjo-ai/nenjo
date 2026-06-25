@@ -1450,7 +1450,7 @@ impl PlatformManifestClient {
     }
 
     /// Fetch one project task by ID.
-    pub async fn get_project_task(&self, task_id: Uuid) -> Result<serde_json::Value> {
+    pub async fn get_project_task(&self, task_id: Uuid) -> Result<Option<serde_json::Value>> {
         let response = self
             .http
             .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
@@ -1460,7 +1460,12 @@ impl PlatformManifestClient {
             .with_context(|| format!("failed to fetch task {task_id}"))?;
 
         match response.status() {
-            StatusCode::OK => response.json().await.context("failed to decode task"),
+            StatusCode::OK => response
+                .json()
+                .await
+                .map(Some)
+                .context("failed to decode task"),
+            StatusCode::NOT_FOUND => Ok(None),
             status => bail!("project task fetch failed with status {status}"),
         }
     }
@@ -1600,7 +1605,7 @@ impl PlatformManifestClient {
     pub async fn get_project_execution_run(
         &self,
         execution_run_id: Uuid,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<Option<serde_json::Value>> {
         let response = self
             .http
             .get(format!(
@@ -1616,7 +1621,9 @@ impl PlatformManifestClient {
             StatusCode::OK => response
                 .json()
                 .await
+                .map(Some)
                 .context("failed to decode execution run"),
+            StatusCode::NOT_FOUND => Ok(None),
             status => bail!("project execution run fetch failed with status {status}"),
         }
     }
@@ -1704,6 +1711,37 @@ impl PlatformManifestClient {
                 let body = response.text().await.unwrap_or_default();
                 bail!(
                     "routine configure failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
+        }
+    }
+
+    /// Get a routine record by slug or UUID, returning `None` only when the platform
+    /// confirms it does not exist.
+    pub(crate) async fn get_routine_record_optional(
+        &self,
+        routine_ref: &Slug,
+    ) -> Result<Option<RoutineRecord>> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/routines/{routine_ref}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to get routine")?;
+
+        match response.status() {
+            StatusCode::OK => response
+                .json::<RoutineRecord>()
+                .await
+                .map(Some)
+                .context("failed to decode routine"),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "routine get failed with status {status}: {}",
                     response_error_preview(&body)
                 )
             }
