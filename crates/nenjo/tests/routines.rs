@@ -1086,6 +1086,178 @@ async fn single_agent_step_retries_until_route_next_steps() {
     );
 }
 
+#[tokio::test]
+async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_handed_off() {
+    let model_id = Uuid::new_v4();
+    let start_agent_id = Uuid::new_v4();
+    let branch_agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "retry-invalid-route".into(),
+        slug: Slug::derive("retry-invalid-route"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("start")],
+            cron_task: None,
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("start"),
+                routine: Slug::derive("retry-invalid-route"),
+                name: "start".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("start-agent")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("left"),
+                routine: Slug::derive("retry-invalid-route"),
+                name: "left".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("branch-agent")),
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("right"),
+                routine: Slug::derive("retry-invalid-route"),
+                name: "right".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("branch-agent")),
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("retry-invalid-route"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 3,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-invalid-route"),
+                source_step: Slug::derive("start"),
+                target_step: Slug::derive("left"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "left branch"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-invalid-route"),
+                source_step: Slug::derive("start"),
+                target_step: Slug::derive("right"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "right branch"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-invalid-route"),
+                source_step: Slug::derive("left"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-invalid-route"),
+                source_step: Slug::derive("right"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![
+            agent(start_agent_id, "start-agent", model_id),
+            agent(branch_agent_id, "branch-agent", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let factory = SequentialResponseMockFactory::with_message_recording(vec![
+        route_response(
+            "start complete",
+            "pass",
+            "fan out",
+            serde_json::json!([
+                {"target_step": "left", "handoff": "left only"}
+            ]),
+        ),
+        route_response(
+            "start complete",
+            "pass",
+            "fan out",
+            serde_json::json!([
+                {"target_step": "left", "handoff": "left handoff"},
+                {"target_step": "right", "handoff": "right handoff"}
+            ]),
+        ),
+        route_response(
+            "branch complete",
+            "pass",
+            "branch done",
+            serde_json::json!([{"target_step": "done", "handoff": "finish"}]),
+        ),
+        route_response(
+            "branch complete",
+            "pass",
+            "branch done",
+            serde_json::json!([{"target_step": "done", "handoff": "finish"}]),
+        ),
+    ]);
+    let seen_messages = factory.seen_messages().unwrap();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("retry-invalid-route")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Do branches"))
+        .await
+        .unwrap();
+
+    let mut step_names = Vec::new();
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            step_names.push(step_name);
+        }
+    }
+
+    let result = handle.output().await.unwrap();
+    assert!(result.passed);
+    assert!(step_names.contains(&"left".to_string()));
+    assert!(step_names.contains(&"right".to_string()));
+    assert_eq!(step_names.last().map(String::as_str), Some("done"));
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        seen_messages.iter().any(|messages| messages_contain(
+            std::slice::from_ref(messages),
+            "route_next_steps requires exactly 2 next_steps item(s)"
+        )),
+        "invalid route call should produce a corrective retry with the validation error. Messages: {seen_messages:#?}"
+    );
+}
+
 /// Stream events from a single-step routine.
 #[tokio::test]
 async fn stream_events_single_step() {
@@ -2811,6 +2983,212 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
 
     let result = handle.output().await.unwrap();
     assert!(result.passed);
+}
+
+#[tokio::test]
+async fn fan_in_agent_receives_all_upstream_handoffs() {
+    let model_id = Uuid::new_v4();
+    let left_agent_id = Uuid::new_v4();
+    let right_agent_id = Uuid::new_v4();
+    let synth_agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "handoff-join".into(),
+        slug: Slug::derive("handoff-join"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("left"), Slug::derive("right")],
+            cron_task: None,
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("left"),
+                routine: Slug::derive("handoff-join"),
+                name: "left".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("left-agent")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("right"),
+                routine: Slug::derive("handoff-join"),
+                name: "right".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("right-agent")),
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("synthesize"),
+                routine: Slug::derive("handoff-join"),
+                name: "synthesize".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("synth-agent")),
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("handoff-join"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 3,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("handoff-join"),
+                source_step: Slug::derive("left"),
+                target_step: Slug::derive("synthesize"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({
+                    "purpose": "Provide left branch evidence.",
+                    "handoff_instructions": "Hand off left evidence only."
+                }),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("handoff-join"),
+                source_step: Slug::derive("right"),
+                target_step: Slug::derive("synthesize"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({
+                    "purpose": "Provide right branch evidence.",
+                    "handoff_instructions": "Hand off right evidence only."
+                }),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("handoff-join"),
+                source_step: Slug::derive("synthesize"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![
+            agent(left_agent_id, "left-agent", model_id),
+            agent(right_agent_id, "right-agent", model_id),
+            agent(synth_agent_id, "synth-agent", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let factory = SequentialResponseMockFactory::with_message_recording(vec![
+        route_response(
+            "left complete",
+            "pass",
+            "left ready",
+            serde_json::json!([{
+                "target_step": "synthesize",
+                "handoff": "LEFT_HANDOFF_CONTENT",
+                "summary": "left handoff"
+            }]),
+        ),
+        route_response(
+            "right complete",
+            "pass",
+            "right ready",
+            serde_json::json!([{
+                "target_step": "synthesize",
+                "handoff": "RIGHT_HANDOFF_CONTENT",
+                "summary": "right handoff"
+            }]),
+        ),
+        route_response(
+            "synthesis complete",
+            "pass",
+            "done",
+            serde_json::json!([{"target_step": "done", "handoff": "final"}]),
+        ),
+    ]);
+    let seen_messages = factory.seen_messages().unwrap();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("handoff-join")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Do branches"))
+        .await
+        .unwrap();
+
+    let mut event_log = Vec::new();
+    while let Some(event) = handle.recv().await {
+        match event {
+            RoutineEvent::StepStarted { step_slug, .. } => {
+                event_log.push(format!("started:{step_slug}"));
+            }
+            RoutineEvent::StepCompleted { step_slug, .. } => {
+                event_log.push(format!("completed:{step_slug}"));
+            }
+            _ => {}
+        }
+    }
+    let result = handle.output().await.unwrap();
+    assert!(result.passed);
+
+    let synth_started = event_log
+        .iter()
+        .position(|event| event == "started:synthesize")
+        .expect("synthesize should start");
+    let left_completed = event_log
+        .iter()
+        .position(|event| event == "completed:left")
+        .expect("left should complete");
+    let right_completed = event_log
+        .iter()
+        .position(|event| event == "completed:right")
+        .expect("right should complete");
+    assert!(
+        synth_started > left_completed && synth_started > right_completed,
+        "joined synthesize step started before all upstream steps completed: {event_log:#?}"
+    );
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, "Routine handoffs:"),
+        "joined agent should receive routine handoffs. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        messages_contain(&seen_messages, "From step `left`")
+            && messages_contain(&seen_messages, "From step `right`"),
+        "joined agent should receive one handoff section from each upstream step. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        messages_contain(&seen_messages, "LEFT_HANDOFF_CONTENT")
+            && messages_contain(&seen_messages, "RIGHT_HANDOFF_CONTENT"),
+        "joined agent should receive both upstream handoffs. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        !messages_contain(&seen_messages, "&lt;routine_handoffs&gt;")
+            && !messages_contain(&seen_messages, "<routine_handoffs>"),
+        "joined agent should not receive handoffs as escaped or nested XML. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        !messages_contain(&seen_messages, "Hand off left evidence only.")
+            && !messages_contain(&seen_messages, "Hand off right evidence only."),
+        "joined agent should receive handoff content, not source-agent handoff instructions. Messages: {seen_messages:#?}"
+    );
 }
 
 #[tokio::test]

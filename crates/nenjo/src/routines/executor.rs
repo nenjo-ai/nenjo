@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::AgentBuilder;
+use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, GateInput, ProjectLocation, TaskInput};
 use crate::manifest::{
     RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
@@ -24,7 +25,7 @@ use crate::routines::types::StepResult;
 use crate::routines::{apply_session_binding_memory_scope, gate, routing};
 
 use super::RoutineEvent;
-use super::types::RoutineState;
+use super::types::{RoutineHandoff, RoutineState};
 use crate::context::{RoutineContext, RoutineStepContext};
 
 const DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS: u32 = 3;
@@ -259,6 +260,9 @@ where
                 }
 
                 traversed_edges.insert(edge_key(edge));
+                if let Some(handoff) = routine_handoff_for_edge(&step, &step_result, edge) {
+                    state.record_handoff(handoff);
+                }
                 let target_slug = edge.target_step.clone();
 
                 if scheduled.contains(&target_slug) {
@@ -439,6 +443,92 @@ fn edge_matches_result(edge: &RoutineEdgeManifest, passed: bool) -> bool {
         RoutineEdgeCondition::OnPass => passed,
         RoutineEdgeCondition::OnFail => !passed,
     }
+}
+
+fn routine_handoff_for_edge(
+    step: &RoutineStepManifest,
+    result: &StepResult,
+    edge: &RoutineEdgeManifest,
+) -> Option<RoutineHandoff> {
+    let dynamic = route_next_step_handoff(result, &edge.target_step);
+    let instructions = edge_metadata_string(edge, "handoff_instructions")
+        .or_else(|| edge_metadata_string(edge, "handoff"))
+        .or_else(|| edge_metadata_string(edge, "task"));
+    let purpose =
+        edge_metadata_string(edge, "purpose").or_else(|| edge_metadata_string(edge, "description"));
+
+    let handoff = dynamic
+        .as_ref()
+        .map(|handoff| handoff.handoff.clone())
+        .or_else(|| {
+            if instructions.is_some() || purpose.is_some() {
+                Some(result.output.clone())
+            } else {
+                None
+            }
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+
+    Some(RoutineHandoff {
+        source_step: step.slug.clone(),
+        source_step_name: step.name.clone(),
+        target_step: edge.target_step.clone(),
+        handoff,
+        purpose: dynamic
+            .as_ref()
+            .and_then(|handoff| handoff.purpose.clone())
+            .or(purpose),
+        summary: dynamic.and_then(|handoff| handoff.summary),
+    })
+}
+
+#[derive(Debug)]
+struct DynamicRouteHandoff {
+    handoff: String,
+    purpose: Option<String>,
+    summary: Option<String>,
+}
+
+fn route_next_step_handoff(result: &StepResult, target_step: &Slug) -> Option<DynamicRouteHandoff> {
+    result
+        .data
+        .get("route_next_steps")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find_map(|next| {
+            let target = next
+                .get("target_step")
+                .and_then(serde_json::Value::as_str)?;
+            if target != target_step.to_string() {
+                return None;
+            }
+            let handoff = next
+                .get("handoff")
+                .or_else(|| next.get("task"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            Some(DynamicRouteHandoff {
+                handoff,
+                purpose: json_string_field(next, "purpose"),
+                summary: json_string_field(next, "summary"),
+            })
+        })
+}
+
+fn edge_metadata_string(edge: &RoutineEdgeManifest, key: &str) -> Option<String> {
+    json_string_field(&edge.metadata, key)
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn exhausted_failure_for_edge(
@@ -663,15 +753,17 @@ where
     debug!(is_cron = state.input.is_cron_trigger, step = %step.name, "Building task for agent step");
     let task = attach_location(AgentRun::task(build_task(state, task_description)?), state);
 
-    let output = routing::execute_with_route_next_steps(
-        &runner,
+    let output = routing::execute_with_route_next_steps(routing::ExecuteRouteNextStepsParams {
+        runner: &runner,
         task,
-        state.input.project.clone(),
-        step.slug.clone(),
+        project: state.input.project.clone(),
+        step_slug: step.slug.clone(),
         step_run_id,
+        route_edges,
+        routine_steps,
         events_tx,
         cancel,
-    )
+    })
     .await?;
 
     let decision = routing::resolve_route_next_steps(&output.messages)?;
@@ -815,7 +907,7 @@ fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
 }
 
 /// Build the task body from routine input plus execution feedback.
-fn build_task_description(_step: &RoutineStepManifest, state: &RoutineState) -> String {
+fn build_task_description(step: &RoutineStepManifest, state: &RoutineState) -> String {
     let mut description = state.input.description.clone();
 
     // Append gate feedback if available (from a previous failed gate)
@@ -825,8 +917,14 @@ fn build_task_description(_step: &RoutineStepManifest, state: &RoutineState) -> 
         ));
     }
 
-    // Append previous step context
-    if let Some(last) = state.last_step_result()
+    let handoffs = state.handoffs_for(&step.slug);
+    if !handoffs.is_empty() {
+        let rendered = render_routine_handoffs(handoffs);
+        if !rendered.is_empty() {
+            description.push_str("\n\n");
+            description.push_str(&rendered);
+        }
+    } else if let Some(last) = state.last_step_result()
         && !last.output.is_empty()
     {
         let preview = if last.output.len() > 2000 {
@@ -841,4 +939,34 @@ fn build_task_description(_step: &RoutineStepManifest, state: &RoutineState) -> 
     }
 
     description
+}
+
+fn render_routine_handoffs(handoffs: &[RoutineHandoff]) -> String {
+    if handoffs.is_empty() {
+        return String::new();
+    }
+
+    let mut rendered = String::from("Routine handoffs:\n");
+    for (index, handoff) in handoffs.iter().enumerate() {
+        if index > 0 {
+            rendered.push('\n');
+        }
+        rendered.push_str(&format!(
+            "- From step `{}` ({}) to `{}`\n",
+            handoff.source_step, handoff.source_step_name, handoff.target_step
+        ));
+        if let Some(purpose) = handoff.purpose.as_deref().filter(|value| !value.is_empty()) {
+            rendered.push_str(&format!("  Purpose: {purpose}\n"));
+        }
+        if let Some(summary) = handoff.summary.as_deref().filter(|value| !value.is_empty()) {
+            rendered.push_str(&format!("  Summary: {summary}\n"));
+        }
+        rendered.push_str("  Content:\n");
+        for line in handoff.handoff.lines() {
+            rendered.push_str("    ");
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+    }
+    rendered
 }

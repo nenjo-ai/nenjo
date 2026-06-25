@@ -110,7 +110,10 @@ pub struct StopOperationsArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WaitOperationsArgs {
-    #[serde(default = "default_wait_seconds")]
+    #[serde(
+        default = "default_wait_seconds",
+        deserialize_with = "deserialize_u64_from_json_number"
+    )]
     pub seconds: u64,
     #[serde(default)]
     pub kind: Option<AsyncOperationKind>,
@@ -153,7 +156,7 @@ pub fn wait_operations_parameters_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
-            "seconds": {"type": "number", "minimum": 1, "maximum": 30},
+            "seconds": {"type": "integer", "minimum": 1, "maximum": 30},
             "kind": operation_kind_schema(),
             "reason": {"type": "string"}
         },
@@ -213,6 +216,35 @@ where
     }
 }
 
+pub fn deserialize_u64_from_json_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(raw) = number.as_u64() {
+                Ok(raw)
+            } else if let Some(raw) = number.as_f64() {
+                if raw.is_finite() && raw.fract() == 0.0 && raw >= 0.0 {
+                    Ok(raw as u64)
+                } else {
+                    Err(serde::de::Error::custom(
+                        "expected a non-negative whole number",
+                    ))
+                }
+            } else {
+                Err(serde::de::Error::custom(
+                    "expected a non-negative whole number",
+                ))
+            }
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "expected a non-negative whole number, got {other}"
+        ))),
+    }
+}
+
 fn default_wait_seconds() -> u64 {
     10
 }
@@ -236,6 +268,28 @@ mod tests {
 
         assert_eq!(args.seconds, 10);
         assert_eq!(args.kind, None);
+    }
+
+    #[test]
+    fn wait_args_accept_whole_float_seconds_from_model_args() {
+        let args: WaitOperationsArgs = serde_json::from_value(json!({
+            "kind": "ability",
+            "seconds": 30.0
+        }))
+        .unwrap();
+
+        assert_eq!(args.seconds, 30);
+        assert_eq!(args.kind, Some(AsyncOperationKind::Ability));
+    }
+
+    #[test]
+    fn wait_args_reject_fractional_seconds() {
+        let err = serde_json::from_value::<WaitOperationsArgs>(json!({
+            "seconds": 5.5
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("whole number"));
     }
 
     #[test]

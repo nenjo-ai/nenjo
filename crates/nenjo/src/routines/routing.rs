@@ -28,6 +28,7 @@ pub struct RouteOption {
     pub target_name: String,
     pub condition: RoutineEdgeCondition,
     pub purpose: String,
+    pub handoff_instructions: String,
 }
 
 impl RouteOption {
@@ -39,6 +40,7 @@ impl RouteOption {
                 .unwrap_or_else(|| edge.target_step.to_string()),
             condition: edge.condition,
             purpose: edge_purpose(edge),
+            handoff_instructions: edge_handoff_instructions(edge),
         }
     }
 }
@@ -103,17 +105,21 @@ impl Tool for RouteNextStepsTool {
                                 "enum": targets,
                                 "description": "The downstream routine step slug for this decomposed task."
                             },
-                            "task": {
+                            "handoff": {
                                 "type": "string",
                                 "minLength": 1,
-                                "description": "The specific task, evidence, or handoff this downstream step should receive."
+                                "description": "The actual downstream payload for this target_step: include the concrete data, evidence, artifacts, decisions, or work item the next step needs. Do not repeat or paraphrase handoff_instructions; use those instructions only to decide what content to include here."
                             },
                             "purpose": {
                                 "type": "string",
                                 "description": "Why this branch exists and what the downstream step should optimize for."
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "Optional short label for logs or UI."
                             }
                         },
-                        "required": ["target_step", "task"]
+                        "required": ["target_step", "handoff"]
                     }
                 },
                 "verdict": {
@@ -271,6 +277,21 @@ pub fn route_next_steps_tool(
     RouteNextStepsTool::new(edges, steps)
 }
 
+pub fn validate_route_next_steps_call(
+    edges: &[RoutineEdgeManifest],
+    steps: &[RoutineStepManifest],
+    args: &Value,
+) -> Result<()> {
+    let routes = edges
+        .iter()
+        .map(|edge| {
+            let target = steps.iter().find(|step| step.slug == edge.target_step);
+            RouteOption::from_edge(edge, target)
+        })
+        .collect::<Vec<_>>();
+    validate_route_args(&routes, args)
+}
+
 fn validate_route_args(routes: &[RouteOption], args: &Value) -> Result<()> {
     let Some(verdict) = args.get("verdict").and_then(|value| value.as_str()) else {
         bail!("route_next_steps requires verdict");
@@ -318,13 +339,14 @@ fn validate_route_args(routes: &[RouteOption], args: &Value) -> Result<()> {
         if !seen.insert(target.to_string()) {
             bail!("route_next_steps target_step '{target}' was submitted more than once");
         }
-        let has_task = next
-            .get("task")
+        let has_handoff = next
+            .get("handoff")
+            .or_else(|| next.get("task"))
             .and_then(|value| value.as_str())
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false);
-        if !has_task {
-            bail!("route_next_steps target_step '{target}' is missing task");
+        if !has_handoff {
+            bail!("route_next_steps target_step '{target}' is missing handoff");
         }
     }
 
@@ -333,33 +355,44 @@ fn validate_route_args(routes: &[RouteOption], args: &Value) -> Result<()> {
 
 fn build_description(routes: &[RouteOption]) -> String {
     let mut description = format!(
-        "Submit the final result for this agent routine step. Use verdict=\"fail\" when the step should fail and downstream routing must stop. Use verdict=\"pass\" when the step completed successfully; in that case, decompose the completed work across all {} outgoing edges and include exactly one next_steps item for each listed target. The runtime will fan out to all downstream steps only after this tool records a pass verdict.",
+        "Submit the final result for this agent routine step. Use verdict=\"fail\" when the step should fail and downstream routing must stop. Use verdict=\"pass\" when the step completed successfully; in that case, include exactly one next_steps item for each listed target. Each next_steps.handoff must be the concrete payload for that downstream step: actual data, evidence, artifacts, decisions, or a specific work item. Do not put route instructions, summaries of what should happen, or a restatement of handoff_instructions in handoff. The runtime will fan out to all downstream steps only after this tool records a pass verdict with all {} outgoing edge handoffs.",
         routes.len()
     );
     for route in routes {
         description.push_str(&format!(
-            "\n- target_step={} target_name=\"{}\" condition={} purpose=\"{}\"",
+            "\n- target_step={} target_name=\"{}\" condition={} purpose=\"{}\" handoff_instructions=\"{}\"",
             route.target_step,
             route.target_name,
             condition_label(route.condition),
-            route.purpose
+            route.purpose,
+            route.handoff_instructions
         ));
     }
     description
 }
 
-fn route_retry_prompt(previous_text: &str) -> String {
+fn route_retry_prompt(previous_text: &str, validation_error: Option<&str>) -> String {
+    let error_context = validation_error
+        .filter(|value| !value.trim().is_empty())
+        .map(|error| {
+            format!(
+                "Your previous `{}` call was invalid: {} ",
+                ROUTE_NEXT_STEPS_TOOL_NAME, error
+            )
+        })
+        .unwrap_or_default();
+
     if previous_text.trim().is_empty() {
         format!(
-            "You did not call `{}`. Call `{}` exactly once now as your final action. \
-             Use verdict=\"pass\" with next_steps for every downstream route, or verdict=\"fail\" with reasoning and output if the step failed.",
-            ROUTE_NEXT_STEPS_TOOL_NAME, ROUTE_NEXT_STEPS_TOOL_NAME
+            "{}Call `{}` exactly once now as your final action. \
+             Use verdict=\"pass\" with a handoff in next_steps for every downstream route, or verdict=\"fail\" with reasoning and output if the step failed.",
+            error_context, ROUTE_NEXT_STEPS_TOOL_NAME
         )
     } else {
         format!(
-            "Your previous response did not call `{}`. Based on the work you already completed, \
-             call `{}` exactly once now as your final action. Do not redo the task. Use verdict=\"pass\" with next_steps for every downstream route, or verdict=\"fail\" with reasoning and output if the step failed.\n\nPrevious response:\n{}",
-            ROUTE_NEXT_STEPS_TOOL_NAME, ROUTE_NEXT_STEPS_TOOL_NAME, previous_text
+            "{}Based on the work you already completed, \
+             call `{}` exactly once now as your final action. Do not redo the task. Use verdict=\"pass\" with a handoff in next_steps for every downstream route, or verdict=\"fail\" with reasoning and output if the step failed.\n\nPrevious response:\n{}",
+            error_context, ROUTE_NEXT_STEPS_TOOL_NAME, previous_text
         )
     }
 }
@@ -409,18 +442,38 @@ where
 ///
 /// If the model omits the tool, the harness sends a corrective follow-up turn
 /// rather than accepting free-form text as a routine step result.
+pub struct ExecuteRouteNextStepsParams<'a, P>
+where
+    P: ProviderRuntime,
+{
+    pub runner: &'a AgentRunner<P>,
+    pub task: AgentRun,
+    pub project: Option<crate::Slug>,
+    pub step_slug: crate::Slug,
+    pub step_run_id: Uuid,
+    pub route_edges: &'a [RoutineEdgeManifest],
+    pub routine_steps: &'a [RoutineStepManifest],
+    pub events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    pub cancel: &'a CancellationToken,
+}
+
 pub async fn execute_with_route_next_steps<P>(
-    runner: &AgentRunner<P>,
-    task: AgentRun,
-    project: Option<crate::Slug>,
-    step_slug: crate::Slug,
-    step_run_id: Uuid,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
+    params: ExecuteRouteNextStepsParams<'_, P>,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
 {
+    let ExecuteRouteNextStepsParams {
+        runner,
+        task,
+        project,
+        step_slug,
+        step_run_id,
+        route_edges,
+        routine_steps,
+        events_tx,
+        cancel,
+    } = params;
     let mut attempts = 0usize;
     let mut pending_task = task;
     let mut total_input_tokens = 0u64;
@@ -441,32 +494,55 @@ where
         total_output_tokens += output.output_tokens;
         total_tool_calls += output.tool_calls;
 
-        if extract_route_next_steps(&output.messages).is_some() {
-            return Ok(TurnOutput {
-                input_tokens: total_input_tokens,
-                output_tokens: total_output_tokens,
-                tool_calls: total_tool_calls,
-                ..output
-            });
-        }
+        let validation_error = match extract_route_next_steps(&output.messages) {
+            Some(args) => match validate_route_next_steps_call(route_edges, routine_steps, &args) {
+                Ok(()) => {
+                    return Ok(TurnOutput {
+                        input_tokens: total_input_tokens,
+                        output_tokens: total_output_tokens,
+                        tool_calls: total_tool_calls,
+                        ..output
+                    });
+                }
+                Err(error) => Some(error.to_string()),
+            },
+            None => None,
+        };
 
         attempts += 1;
         if attempts > ROUTE_NEXT_STEPS_RETRY_LIMIT {
-            bail!(
-                "Agent did not call required {} tool after {} corrective attempt(s)",
-                ROUTE_NEXT_STEPS_TOOL_NAME,
-                ROUTE_NEXT_STEPS_RETRY_LIMIT
+            if let Some(error) = validation_error {
+                bail!(
+                    "Agent called invalid {} tool after {} corrective attempt(s): {}",
+                    ROUTE_NEXT_STEPS_TOOL_NAME,
+                    ROUTE_NEXT_STEPS_RETRY_LIMIT,
+                    error
+                );
+            } else {
+                bail!(
+                    "Agent did not call required {} tool after {} corrective attempt(s)",
+                    ROUTE_NEXT_STEPS_TOOL_NAME,
+                    ROUTE_NEXT_STEPS_RETRY_LIMIT
+                );
+            }
+        }
+
+        if let Some(error) = validation_error.as_deref() {
+            warn!(
+                attempt = attempts,
+                error = %error,
+                "Agent called invalid route_next_steps tool, retrying with explicit instruction"
+            );
+        } else {
+            warn!(
+                attempt = attempts,
+                "Agent omitted route_next_steps tool call, retrying with explicit instruction"
             );
         }
 
-        warn!(
-            attempt = attempts,
-            "Agent omitted route_next_steps tool call, retrying with explicit instruction"
-        );
-
         pending_task = AgentRun {
             kind: crate::input::AgentRunKind::FollowUp(FollowUpInput {
-                message: route_retry_prompt(&output.text),
+                message: route_retry_prompt(&output.text, validation_error.as_deref()),
                 history: chat_history(&output.messages),
                 project: project.clone(),
             }),
@@ -478,11 +554,21 @@ where
 fn edge_purpose(edge: &RoutineEdgeManifest) -> String {
     edge.metadata
         .get("purpose")
-        .or_else(|| edge.metadata.get("task"))
         .or_else(|| edge.metadata.get("description"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Downstream branch from this routine step.")
+        .to_string()
+}
+
+fn edge_handoff_instructions(edge: &RoutineEdgeManifest) -> String {
+    edge.metadata
+        .get("handoff_instructions")
+        .or_else(|| edge.metadata.get("handoff"))
+        .or_else(|| edge.metadata.get("task"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Pass the information this downstream step needs to continue.")
         .to_string()
 }
 
@@ -523,6 +609,40 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exactly 2"));
+    }
+
+    #[test]
+    fn extracted_route_call_validation_uses_step_edges() {
+        let edges = vec![edge("a"), edge("b")];
+        let error = validate_route_next_steps_call(
+            &edges,
+            &[],
+            &serde_json::json!({
+                "verdict": "pass",
+                "reasoning": "complete",
+                "output": "done",
+                "next_steps": [
+                    {"target_step": "a", "handoff": "do a"}
+                ]
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exactly 2"));
+
+        validate_route_next_steps_call(
+            &edges,
+            &[],
+            &serde_json::json!({
+                "verdict": "pass",
+                "reasoning": "complete",
+                "output": "done",
+                "next_steps": [
+                    {"target_step": "a", "handoff": "do a"},
+                    {"target_step": "b", "handoff": "do b"}
+                ]
+            }),
+        )
+        .expect("all outgoing targets should validate");
     }
 
     #[tokio::test]

@@ -136,6 +136,10 @@ mod tests {
         let config_schema = &tool.parameters["properties"]["graph"]["allOf"][0]["properties"]["steps"]
             ["items"]["properties"]["config"];
 
+        assert!(
+            tool.parameters["properties"].get("id").is_none(),
+            "configure_routine should not expose platform UUIDs to agents"
+        );
         assert_eq!(config_schema["type"], "object");
         assert_eq!(config_schema["additionalProperties"], false);
         assert_eq!(

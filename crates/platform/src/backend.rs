@@ -129,6 +129,13 @@ fn local_routine_from_document(routine: &RoutineDocument) -> RoutineManifest {
     }
 }
 
+fn routine_encrypted_payload_object_id(payload: Option<&serde_json::Value>) -> Option<Uuid> {
+    payload?
+        .get("object_id")?
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
     command.name == command_ref
         || command.command == command_ref
@@ -369,6 +376,62 @@ where
                 slug
             )
         })
+    }
+
+    fn optional_platform_object_id(
+        &self,
+        kind: PlatformResourceKind,
+        slug: &Slug,
+    ) -> Result<Option<Uuid>> {
+        let Some(store) = self.resource_ids.as_ref() else {
+            return Ok(None);
+        };
+        store.get(kind, slug)
+    }
+
+    fn ensure_platform_object_id(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Uuid> {
+        if let Some(id) = self.optional_platform_object_id(kind, slug)? {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4();
+        self.record_platform_object_id(kind, slug, id)?;
+        Ok(id)
+    }
+
+    async fn ensure_routine_object_id(&self, routine: &Slug) -> Result<Uuid> {
+        if let Some(id) =
+            self.optional_platform_object_id(PlatformResourceKind::Routine, routine)?
+        {
+            return Ok(id);
+        }
+
+        if let Some(record) = self
+            .platform_client
+            .get_routine_record_optional(routine)
+            .await?
+        {
+            let id = routine_encrypted_payload_object_id(record.encrypted_payload.as_ref())
+                .unwrap_or(record.id);
+            if id != record.id {
+                return Err(anyhow!(
+                    "routine {} encrypted_payload object_id {} does not match platform id {}",
+                    routine,
+                    id,
+                    record.id
+                ));
+            }
+            self.record_platform_object_id(
+                PlatformResourceKind::Routine,
+                &Slug::derive(&record.slug),
+                id,
+            )?;
+            if Slug::derive(&record.slug) != *routine {
+                self.record_platform_object_id(PlatformResourceKind::Routine, routine, id)?;
+            }
+            return Ok(id);
+        }
+
+        self.ensure_platform_object_id(PlatformResourceKind::Routine, routine)
     }
 
     fn record_platform_object_id(
@@ -1626,12 +1689,40 @@ where
             None
         };
 
+        if data.id.is_none() {
+            let routine_id = match data.routine.as_ref() {
+                Some(routine) => self.ensure_routine_object_id(routine).await?,
+                None => {
+                    let routine = configure_name_slug(
+                        data.metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.name.as_ref()),
+                    )
+                    .ok_or_else(|| anyhow!("metadata.name is required when creating a routine"))?;
+                    self.ensure_platform_object_id(PlatformResourceKind::Routine, &routine)?
+                }
+            };
+            data.id = Some(routine_id);
+        }
+
+        if data.cron_task.is_some()
+            && data
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.trigger)
+                .is_none()
+            && existing_routine
+                .as_ref()
+                .map(|routine| routine.trigger)
+                .is_none()
+        {
+            data.metadata
+                .get_or_insert_with(RoutineConfigureMetadata::default)
+                .trigger = Some(RoutineTrigger::Cron);
+        }
+
         let mut submitted_step_instructions = Vec::new();
         if let Some(graph) = data.graph.as_mut() {
-            if data.routine.is_none() && data.id.is_none() {
-                let id = data.id.unwrap_or_else(Uuid::new_v4);
-                data.id = Some(id);
-            }
             let org_id = self.local_manifest_org_id().await?;
             for step in &mut graph.steps {
                 let instructions = step
@@ -1679,12 +1770,13 @@ where
                 return Err(anyhow!("routine cron_task requires a cron routine trigger"));
             }
             let routine_object_id = match data.routine.as_ref() {
-                Some(routine) => self.platform_object_id(PlatformResourceKind::Routine, routine)?,
-                None => {
-                    let id = data.id.unwrap_or_else(Uuid::new_v4);
-                    data.id = Some(id);
-                    id
-                }
+                Some(routine) => self
+                    .optional_platform_object_id(PlatformResourceKind::Routine, routine)?
+                    .or(data.id)
+                    .ok_or_else(|| anyhow!("routine configure id was not initialized"))?,
+                None => data
+                    .id
+                    .ok_or_else(|| anyhow!("routine configure id was not initialized"))?,
             };
             submitted_cron_task = Some(RoutineCronTaskManifest {
                 title: cron_task.title.clone(),
@@ -2373,6 +2465,34 @@ mod tests {
         Ok((base_url, handle))
     }
 
+    async fn spawn_request_sequence_server(
+        expected: Vec<(&'static str, &'static str, &'static str, serde_json::Value)>,
+    ) -> Result<(
+        String,
+        tokio::task::JoinHandle<Result<Vec<RecordedRequest>>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let base_url = format!("http://{address}");
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (expected_method, expected_path, status, response_body) in expected {
+                let (mut stream, _) = listener.accept().await?;
+                let request = read_request(&mut stream).await?;
+                let body = match (request.method.as_str(), request.path.as_str()) {
+                    (method, path) if method == expected_method && path == expected_path => {
+                        response(status, response_body)
+                    }
+                    _ => response("404 Not Found", json!({ "error": "not found" })),
+                };
+                stream.write_all(body.as_bytes()).await?;
+                requests.push(request);
+            }
+            Ok(requests)
+        });
+        Ok((base_url, handle))
+    }
+
     async fn spawn_knowledge_update_server(
         pack_id: Uuid,
         doc_id: Uuid,
@@ -3033,49 +3153,60 @@ mod tests {
     async fn configure_routine_encrypts_cron_task_and_preserves_manifest_plaintext() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let resource_ids = Arc::new(PlatformResourceIdStore::new(temp.path().join("manifests")));
         let org_id = Uuid::new_v4();
         let routine_id = Uuid::new_v4();
-        let (base_url, server) = spawn_single_request_server(
-            "POST",
-            "/api/v1/routines/configure",
-            "201 Created",
-            json!({
-                "id": routine_id,
-                "org_id": org_id,
-                "project_id": null,
-                "slug": "nightly-review",
-                "name": "Nightly Review",
-                "description": null,
-                "trigger": "cron",
-                "is_active": false,
-                "is_default": false,
-                "max_retries": 0,
-                "step_count": 0,
-                "metadata": {
-                    "schedule": "0 0 * * *",
-                    "entry_steps": []
-                },
-                "steps": [],
-                "edges": [],
-                "created_by": null,
-                "created_at": "2026-05-23T00:00:00Z",
-                "updated_at": "2026-05-23T00:00:00Z"
-            }),
-        )
+        let (base_url, server) = spawn_request_sequence_server(vec![
+            (
+                "GET",
+                "/api/v1/routines/nightly-review",
+                "404 Not Found",
+                json!({ "error": "not found" }),
+            ),
+            (
+                "POST",
+                "/api/v1/routines/configure",
+                "201 Created",
+                json!({
+                    "id": routine_id,
+                    "org_id": org_id,
+                    "project_id": null,
+                    "slug": "nightly-review",
+                    "name": "Nightly Review",
+                    "description": null,
+                    "trigger": "cron",
+                    "is_active": false,
+                    "is_default": false,
+                    "max_retries": 0,
+                    "step_count": 0,
+                    "metadata": {
+                        "schedule": "0 0 * * *",
+                        "entry_steps": []
+                    },
+                    "steps": [],
+                    "edges": [],
+                    "created_by": null,
+                    "created_at": "2026-05-23T00:00:00Z",
+                    "updated_at": "2026-05-23T00:00:00Z"
+                }),
+            ),
+        ])
         .await
         .unwrap();
         let client = PlatformManifestClient::new(base_url, "test").unwrap();
         let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_resource_id_store(resource_ids.clone())
             .with_cached_org_id(Some(org_id));
 
         let result = backend
             .configure_routine(RoutineConfigureParams {
                 data: RoutineConfigureDocument {
+                    routine: Some(Slug::derive("nightly-review")),
                     metadata: Some(RoutineConfigureMetadata {
                         name: Some("Nightly Review".to_string()),
                         description: None,
                         project_id: None,
-                        trigger: Some(RoutineTrigger::Cron),
+                        trigger: None,
                         is_active: None,
                         max_retries: None,
                     }),
@@ -3110,16 +3241,161 @@ mod tests {
             Some("Sensitive acceptance criteria")
         );
         let requests = server.await.unwrap().unwrap();
-        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/api/v1/routines/nightly-review");
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        let request_routine_id = body["id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("routine id should be generated before configure");
+        assert_eq!(body["routine"], "nightly-review");
+        assert_eq!(body["metadata"]["trigger"], "cron");
         assert!(body.get("cron_task").is_none());
         assert!(body.get("encrypted_payload").is_some());
+        assert_eq!(
+            body["encrypted_payload"]["object_id"],
+            request_routine_id.to_string()
+        );
         assert_eq!(
             body["encrypted_payload"]["object_type"],
             SensitiveContentKind::RoutineCronTask.encrypted_object_type()
         );
-        assert!(!requests[0].body.contains("Sensitive nightly task"));
-        assert!(!requests[0].body.contains("Sensitive task description"));
-        assert!(!requests[0].body.contains("Sensitive acceptance criteria"));
+        assert!(!requests[1].body.contains("Sensitive nightly task"));
+        assert!(!requests[1].body.contains("Sensitive task description"));
+        assert!(!requests[1].body.contains("Sensitive acceptance criteria"));
+        assert_eq!(
+            resource_ids
+                .get(
+                    PlatformResourceKind::Routine,
+                    &Slug::derive("nightly-review")
+                )
+                .unwrap(),
+            Some(routine_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_routine_recovers_missing_sidecar_id_from_existing_encrypted_payload() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let resource_ids = Arc::new(PlatformResourceIdStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let (base_url, server) = spawn_request_sequence_server(vec![
+            (
+                "GET",
+                "/api/v1/routines/nightly-review",
+                "200 OK",
+                json!({
+                    "id": routine_id,
+                    "org_id": org_id,
+                    "project_id": null,
+                    "slug": "nightly-review",
+                    "name": "Nightly Review",
+                    "description": null,
+                    "trigger": "cron",
+                    "is_active": false,
+                    "is_default": false,
+                    "max_retries": 0,
+                    "step_count": 0,
+                    "metadata": {
+                        "schedule": "0 0 * * *",
+                        "entry_steps": []
+                    },
+                    "encrypted_payload": {
+                        "object_id": routine_id,
+                        "object_type": "routine.cron_task",
+                        "ciphertext": "existing-encrypted-payload",
+                        "encryption_scope": "org"
+                    },
+                    "steps": [],
+                    "edges": [],
+                    "created_by": null,
+                    "created_at": "2026-05-23T00:00:00Z",
+                    "updated_at": "2026-05-23T00:00:00Z"
+                }),
+            ),
+            (
+                "POST",
+                "/api/v1/routines/configure",
+                "200 OK",
+                json!({
+                    "id": routine_id,
+                    "org_id": org_id,
+                    "project_id": null,
+                    "slug": "nightly-review",
+                    "name": "Nightly Review",
+                    "description": null,
+                    "trigger": "cron",
+                    "is_active": false,
+                    "is_default": false,
+                    "max_retries": 0,
+                    "step_count": 0,
+                    "metadata": {
+                        "schedule": "0 0 * * *",
+                        "entry_steps": []
+                    },
+                    "steps": [],
+                    "edges": [],
+                    "created_by": null,
+                    "created_at": "2026-05-23T00:00:00Z",
+                    "updated_at": "2026-05-23T00:00:00Z"
+                }),
+            ),
+        ])
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_resource_id_store(resource_ids.clone())
+            .with_cached_org_id(Some(org_id));
+
+        backend
+            .configure_routine(RoutineConfigureParams {
+                data: RoutineConfigureDocument {
+                    routine: Some(Slug::derive("nightly-review")),
+                    metadata: Some(RoutineConfigureMetadata {
+                        name: Some("Nightly Review".to_string()),
+                        description: None,
+                        project_id: None,
+                        trigger: None,
+                        is_active: None,
+                        max_retries: None,
+                    }),
+                    runtime_metadata: Some(json!({
+                        "schedule": "0 0 * * *",
+                        "entry_steps": []
+                    })),
+                    cron_task: Some(RoutineCronTaskConfigureDocument {
+                        title: "Updated nightly task".to_string(),
+                        description: None,
+                        acceptance_criteria: None,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(body["id"], routine_id.to_string());
+        assert_eq!(
+            body["encrypted_payload"]["object_id"],
+            routine_id.to_string()
+        );
+        assert_eq!(
+            resource_ids
+                .get(
+                    PlatformResourceKind::Routine,
+                    &Slug::derive("nightly-review")
+                )
+                .unwrap(),
+            Some(routine_id)
+        );
     }
 
     #[tokio::test]
@@ -3128,32 +3404,40 @@ mod tests {
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
         let org_id = Uuid::new_v4();
         let routine_id = Uuid::new_v4();
-        let (base_url, server) = spawn_single_request_server(
-            "POST",
-            "/api/v1/routines/configure",
-            "201 Created",
-            json!({
-                "id": routine_id,
-                "org_id": org_id,
-                "project_id": null,
-                "slug": "brand-design-workflow",
-                "name": "Brand Design Workflow",
-                "description": "Updated workflow",
-                "trigger": "task",
-                "is_active": true,
-                "is_default": false,
-                "max_retries": 2,
-                "step_count": 0,
-                "metadata": {
-                    "entry_steps": []
-                },
-                "steps": [],
-                "edges": [],
-                "created_by": null,
-                "created_at": "2026-05-23T00:00:00Z",
-                "updated_at": "2026-05-23T00:00:00Z"
-            }),
-        )
+        let (base_url, server) = spawn_request_sequence_server(vec![
+            (
+                "GET",
+                "/api/v1/routines/brand-design-workflow",
+                "404 Not Found",
+                json!({ "error": "not found" }),
+            ),
+            (
+                "POST",
+                "/api/v1/routines/configure",
+                "201 Created",
+                json!({
+                    "id": routine_id,
+                    "org_id": org_id,
+                    "project_id": null,
+                    "slug": "brand-design-workflow",
+                    "name": "Brand Design Workflow",
+                    "description": "Updated workflow",
+                    "trigger": "task",
+                    "is_active": true,
+                    "is_default": false,
+                    "max_retries": 2,
+                    "step_count": 0,
+                    "metadata": {
+                        "entry_steps": []
+                    },
+                    "steps": [],
+                    "edges": [],
+                    "created_by": null,
+                    "created_at": "2026-05-23T00:00:00Z",
+                    "updated_at": "2026-05-23T00:00:00Z"
+                }),
+            ),
+        ])
         .await
         .unwrap();
         let client = PlatformManifestClient::new(base_url, "test").unwrap();
@@ -3183,8 +3467,9 @@ mod tests {
             Slug::derive("brand-design-workflow")
         );
         let requests = server.await.unwrap().unwrap();
-        assert_eq!(requests.len(), 1);
-        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
         assert_eq!(body["routine"], "brand-design-workflow");
         assert_eq!(body["metadata"]["name"], "Brand Design Workflow");
     }

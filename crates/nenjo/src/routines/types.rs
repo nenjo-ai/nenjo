@@ -266,6 +266,7 @@ impl RoutineInput {
 #[derive(Clone)]
 pub(crate) struct RoutineState {
     pub step_results: HashMap<Slug, StepResult>,
+    pub handoffs: HashMap<Slug, Vec<RoutineHandoff>>,
     pub step_run_ids: HashMap<Slug, Uuid>,
     pub completed_steps: Vec<Slug>,
     pub initial_input: String,
@@ -284,6 +285,7 @@ impl RoutineState {
         let initial_input = input.description.clone();
         Self {
             step_results: HashMap::new(),
+            handoffs: HashMap::new(),
             step_run_ids: HashMap::new(),
             completed_steps: Vec::new(),
             initial_input,
@@ -303,6 +305,20 @@ impl RoutineState {
         self.step_results.insert(step_slug, result);
     }
 
+    pub(crate) fn record_handoff(&mut self, handoff: RoutineHandoff) {
+        self.handoffs
+            .entry(handoff.target_step.clone())
+            .or_default()
+            .push(handoff);
+    }
+
+    pub(crate) fn handoffs_for(&self, step_slug: &Slug) -> &[RoutineHandoff] {
+        self.handoffs
+            .get(step_slug)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn step_run_id_for(&mut self, step_slug: &Slug) -> Uuid {
         *self
             .step_run_ids
@@ -316,6 +332,16 @@ impl RoutineState {
             .rev()
             .find_map(|slug| self.step_results.get(slug))
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RoutineHandoff {
+    pub source_step: Slug,
+    pub source_step_name: String,
+    pub target_step: Slug,
+    pub handoff: String,
+    pub purpose: Option<String>,
+    pub summary: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -17,9 +17,9 @@ use crate::tools::{
     INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, SEND_OPERATION_INPUT_TOOL_NAME,
     STOP_OPERATIONS_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs, Tool, ToolCategory,
     ToolOrigin, ToolResult, WAIT_OPERATIONS_TOOL_NAME, WaitOperationsArgs,
-    deserialize_usize_from_json_number, inspect_operations_parameters_schema,
-    send_operation_input_parameters_schema, stop_operations_parameters_schema,
-    wait_operations_parameters_schema,
+    deserialize_u64_from_json_number, deserialize_usize_from_json_number,
+    inspect_operations_parameters_schema, send_operation_input_parameters_schema,
+    stop_operations_parameters_schema, wait_operations_parameters_schema,
 };
 
 use super::async_ops::{
@@ -303,7 +303,10 @@ struct StopAbilitiesArgs {
 
 #[derive(Debug, Deserialize)]
 struct WaitArgs {
-    #[serde(default = "default_wait_seconds")]
+    #[serde(
+        default = "default_wait_seconds",
+        deserialize_with = "deserialize_u64_from_json_number"
+    )]
     seconds: u64,
     reason: Option<String>,
 }
@@ -554,7 +557,7 @@ impl Tool for AbilityWaitTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                "seconds": {"type": "integer", "minimum": 1, "maximum": 30},
                 "reason": {"type": "string"}
             },
             "additionalProperties": false

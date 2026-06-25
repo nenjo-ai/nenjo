@@ -172,3 +172,58 @@ impl PlatformRecord for RoutineRecord {
         &self.slug
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routine_record_to_manifest_preserves_edge_handoff_metadata() {
+        let now = Utc::now();
+        let routine_id = Uuid::new_v4();
+        let record = RoutineRecord {
+            id: routine_id,
+            org_id: Uuid::new_v4(),
+            project_id: None,
+            slug: "handoff-routine".to_string(),
+            name: "Handoff Routine".to_string(),
+            description: None,
+            trigger: "task".to_string(),
+            is_active: true,
+            is_default: false,
+            max_retries: 3,
+            step_count: 0,
+            metadata: serde_json::json!({ "entry_steps": ["source"] }),
+            encrypted_payload: None,
+            steps: Vec::new(),
+            edges: vec![RoutineEdgeRecord {
+                id: Uuid::new_v4(),
+                routine_id,
+                routine: "handoff-routine".to_string(),
+                source_step_id: Uuid::new_v4(),
+                source_step: "source".to_string(),
+                target_step_id: Uuid::new_v4(),
+                target_step: "target".to_string(),
+                condition: "always".to_string(),
+                metadata: serde_json::json!({
+                    "purpose": "batch_1",
+                    "handoff_instructions": "Send the first batch only"
+                }),
+                created_at: now,
+            }],
+            last_run_at: None,
+            next_run_at: None,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let manifest = record.to_manifest();
+
+        assert_eq!(manifest.edges[0].metadata["purpose"], "batch_1");
+        assert_eq!(
+            manifest.edges[0].metadata["handoff_instructions"],
+            "Send the first batch only"
+        );
+    }
+}
