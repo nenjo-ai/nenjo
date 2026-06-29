@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::Slug;
+use crate::routines::handoff_schema::{HANDOFF_SCHEMA_METADATA_KEY, validate_handoff_schema};
 
 use super::error::{RoutineValidationError, RoutineValidationIssue};
 use super::types::{
@@ -25,7 +26,7 @@ pub fn validate_routine_manifest(routine: &crate::manifest::RoutineManifest) -> 
 /// Canonical semantics:
 /// - one or more `entry_steps` start as parallel roots;
 /// - a step with multiple activated inbound edges is an all-success join;
-/// - agent fan-out is explicit and auditable through `route_next_steps`;
+/// - routable fan-out is explicit and auditable through `route_next_steps`;
 /// - `on_fail` edges are only gate verdict branches;
 /// - gate retry exhaustion fails the routine directly;
 /// - cycles are only allowed through gate `on_fail` retry loops.
@@ -34,6 +35,7 @@ pub fn validate_routine_graph(graph: &RoutineGraph) -> ValidationResult {
     validate_unique_steps(&graph.steps)?;
     validate_step_resource_bindings(&graph.steps)?;
     validate_edges_reference_steps(&graph.steps, &graph.edges)?;
+    validate_routable_edge_handoff_schemas(&graph.steps, &graph.edges)?;
     validate_no_self_edges(&graph.edges)?;
     validate_no_duplicate_edges(&graph.edges)?;
     validate_gate_edges_are_verdict_routed(&graph.steps, &graph.edges)?;
@@ -127,6 +129,47 @@ fn validate_edges_reference_steps(
                 "Unknown edge target step slug: {}",
                 edge.target_step
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_routable_edge_handoff_schemas(
+    steps: &[RoutineGraphStep],
+    edges: &[RoutineGraphEdge],
+) -> ValidationResult {
+    let step_map = steps_by_slug(steps);
+    for edge in edges {
+        let Some(source) = step_map.get(&edge.source_step) else {
+            continue;
+        };
+        if !matches!(
+            source.step_type,
+            RoutineGraphStepType::Agent | RoutineGraphStepType::Gate
+        ) {
+            continue;
+        }
+        let Some(schema) = edge.metadata.get(HANDOFF_SCHEMA_METADATA_KEY) else {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "{} edge {} must define metadata.{HANDOFF_SCHEMA_METADATA_KEY}",
+                    step_type_label(source.step_type),
+                    edge_key(edge)
+                ))
+                .step(source.slug.to_string())
+                .edge(edge_key(edge)),
+            ));
+        };
+        if let Err(error) = validate_handoff_schema(schema) {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "{} edge {} has invalid metadata.{HANDOFF_SCHEMA_METADATA_KEY}: {error}",
+                    step_type_label(source.step_type),
+                    edge_key(edge)
+                ))
+                .step(source.slug.to_string())
+                .edge(edge_key(edge)),
+            ));
         }
     }
     Ok(())
@@ -303,9 +346,11 @@ fn validate_cycles_only_use_on_fail_edges(
         visited += 1;
         if let Some(targets) = adjacency.get(&slug) {
             for target in targets {
-                let degree = indegree
-                    .get_mut(target)
-                    .expect("target indegree should exist for known step");
+                let Some(degree) = indegree.get_mut(target) else {
+                    return Err(fail(format!(
+                        "Unknown edge target step slug while checking cycles: {target}"
+                    )));
+                };
                 *degree -= 1;
                 if *degree == 0 {
                     queue.push_back(target.clone());
@@ -425,7 +470,16 @@ mod tests {
             source_step: Slug::derive(source),
             target_step: Slug::derive(target),
             condition,
-            metadata: serde_json::json!({}),
+            metadata: serde_json::json!({
+                "handoff_schema": {
+                    "type": "object",
+                    "required": ["work"],
+                    "properties": {
+                        "work": {"type": "string", "minLength": 1}
+                    },
+                    "additionalProperties": false
+                }
+            }),
         }
     }
 
@@ -515,6 +569,36 @@ mod tests {
             .push(edge("start", "done", RoutineGraphEdgeCondition::Always));
 
         assert_invalid(graph, "Duplicate routine edge");
+    }
+
+    #[test]
+    fn rejects_agent_edge_without_handoff_schema() {
+        let mut graph = valid_linear_graph();
+        graph.edges[0].metadata = serde_json::json!({});
+
+        assert_invalid(graph, "must define metadata.handoff_schema");
+    }
+
+    #[test]
+    fn rejects_gate_edge_without_handoff_schema() {
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("gate")],
+            steps: vec![
+                step("gate", RoutineGraphStepType::Gate),
+                step("done", RoutineGraphStepType::Terminal),
+            ],
+            edges: vec![RoutineGraphEdge {
+                source_step: Slug::derive("gate"),
+                target_step: Slug::derive("done"),
+                condition: RoutineGraphEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        assert_invalid(
+            graph,
+            "Gate edge gate:on_pass:done must define metadata.handoff_schema",
+        );
     }
 
     #[test]
@@ -614,7 +698,7 @@ mod tests {
     #[test]
     fn rejects_retry_exhaustion_branch_metadata() {
         let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
-        retry.metadata = serde_json::json!({"on_exhausted": "missing"});
+        retry.metadata["on_exhausted"] = serde_json::json!("missing");
         let graph = RoutineGraph {
             entry_steps: vec![Slug::derive("work")],
             steps: vec![

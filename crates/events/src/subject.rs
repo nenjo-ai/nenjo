@@ -7,8 +7,8 @@
 //! | `work_requests.<org_id>.>`              | `work_requests.<org_id>.>` |
 //! | `worker_requests.<org_id>.<worker_id>.>` | `worker_requests.<org_id>.<worker_id>.>` |
 //! | `broadcast_requests.<org_id>.>`         | `broadcast_requests.<org_id>.>` |
-//! | `responses.<org_id>.<user_id>`          | `responses.<org_id>.<user_id>` |
 //! | `streams.chat.<org_id>.<session_id>`    | `streams.chat.<org_id>.<session_id>` |
+//! | `streams.execution.<org_id>.<execution_run_id>` | `streams.execution.<org_id>.<execution_run_id>` |
 
 use uuid::Uuid;
 
@@ -78,11 +78,23 @@ pub fn chat_stream_subject(org_id: Uuid, session_id: Uuid) -> String {
     format!("streams.chat.{org_id}.{session_id}")
 }
 
+/// Local NATS subject for sending execution progress stream events.
+/// `streams.execution.<org_id>.<execution_run_id>`
+pub fn execution_stream_subject(org_id: Uuid, execution_run_id: Uuid) -> String {
+    format!("streams.execution.{org_id}.{execution_run_id}")
+}
+
 /// Resolve the local subject for a response.
 pub fn response_subject(org_id: Uuid, user_id: Uuid, response: &Response) -> String {
     match response {
-        Response::WorkerHeartbeat { .. } | Response::WorkerRegistered { .. } => {
-            response_org_subject(org_id)
+        Response::WorkerHeartbeat { .. }
+        | Response::WorkerRegistered { .. }
+        | Response::RepoSyncComplete { .. } => response_org_subject(org_id),
+        Response::ExecutionEvent {
+            execution_run_id, ..
+        } => format!("streams.execution.{org_id}.{execution_run_id}"),
+        Response::ExecutionStarted { id, .. } | Response::ExecutionCompleted { id, .. } => {
+            execution_stream_subject(org_id, *id)
         }
         Response::AgentResponse {
             session_id: Some(session_id),
@@ -176,6 +188,16 @@ mod tests {
     }
 
     #[test]
+    fn execution_stream_subject_format() {
+        let org_id = Uuid::nil();
+        let execution_run_id = Uuid::from_u128(1);
+        assert_eq!(
+            execution_stream_subject(org_id, execution_run_id),
+            format!("streams.execution.{org_id}.{execution_run_id}")
+        );
+    }
+
+    #[test]
     fn worker_presence_responses_are_org_scoped() {
         let org_id = Uuid::from_u128(1);
         let user_id = Uuid::from_u128(2);
@@ -204,6 +226,84 @@ mod tests {
                 },
             ),
             format!("responses.{org_id}")
+        );
+    }
+
+    #[test]
+    fn repo_sync_complete_response_is_org_scoped() {
+        let org_id = Uuid::from_u128(1);
+        let user_id = Uuid::from_u128(2);
+
+        assert_eq!(
+            response_subject(
+                org_id,
+                user_id,
+                &Response::RepoSyncComplete {
+                    project: "demo-project".to_string(),
+                    success: true,
+                    error: None,
+                },
+            ),
+            format!("responses.{org_id}")
+        );
+    }
+
+    #[test]
+    fn execution_responses_are_execution_stream_scoped() {
+        let org_id = Uuid::from_u128(1);
+        let user_id = Uuid::from_u128(2);
+        let execution_run_id = Uuid::from_u128(3);
+
+        assert_eq!(
+            response_subject(
+                org_id,
+                user_id,
+                &Response::ExecutionEvent {
+                    execution_run_id: execution_run_id.to_string(),
+                    task_id: None,
+                    event: crate::ExecutionEventPayload::WorkflowStep(
+                        crate::ExecutionWorkflowStepEvent {
+                            event_type: "step_started".to_string(),
+                            step_name: "plan".to_string(),
+                            step_type: "agent".to_string(),
+                            duration_ms: None,
+                            data: serde_json::json!({}),
+                            payload: None,
+                            encrypted_payload: None,
+                            agent: None,
+                        },
+                    ),
+                },
+            ),
+            format!("streams.execution.{org_id}.{execution_run_id}")
+        );
+    }
+
+    #[test]
+    fn execution_response_subject_does_not_fallback_to_actor_subject() {
+        let org_id = Uuid::from_u128(1);
+        let user_id = Uuid::from_u128(2);
+        let execution_run_id = "invalid-run-id";
+
+        assert_eq!(
+            response_subject(
+                org_id,
+                user_id,
+                &Response::ExecutionEvent {
+                    execution_run_id: execution_run_id.to_string(),
+                    task_id: None,
+                    event: crate::ExecutionEventPayload::TaskCompleted(
+                        crate::ExecutionTaskCompletedEvent {
+                            success: true,
+                            error: None,
+                            merge_error: None,
+                            total_input_tokens: 0,
+                            total_output_tokens: 0,
+                        },
+                    ),
+                },
+            ),
+            format!("streams.execution.{org_id}.{execution_run_id}")
         );
     }
 

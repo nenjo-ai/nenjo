@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::events::HarnessEvent;
 use crate::execution_context::{project_slug, summarize_turn_event};
 use crate::handle::HarnessExecutionHandle;
-use crate::registry::{ActiveExecution, ExecutionKind};
+use crate::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
 use crate::request::TaskRequest;
 use crate::session::{
     TurnEventContext, session_runtime_events_from_turn_event, task_session_upsert_event,
@@ -42,10 +42,8 @@ where
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
-    if let Some((_, previous)) = harness.executions().remove(&prepared.task_id) {
-        previous.cancel.cancel();
-    }
-    harness.executions().insert(
+    install_task_execution(
+        &harness.executions(),
         prepared.task_id,
         ActiveExecution {
             kind: ExecutionKind::Task,
@@ -134,10 +132,8 @@ where
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
-    if let Some((_, previous)) = harness.executions().remove(&request.task_id) {
-        previous.cancel.cancel();
-    }
-    harness.executions().insert(
+    install_task_execution(
+        &harness.executions(),
         request.task_id,
         ActiveExecution {
             kind: ExecutionKind::Task,
@@ -256,6 +252,34 @@ where
     });
 
     Ok(HarnessExecutionHandle::new(events_rx, join, cancel))
+}
+
+fn install_task_execution(executions: &ExecutionRegistry, task_id: Uuid, active: ActiveExecution) {
+    let should_start_cancelled =
+        replace_active_execution_for_task_start(executions, task_id, &active);
+    if should_start_cancelled {
+        active.cancel.cancel();
+    }
+    executions.insert(task_id, active);
+}
+
+fn replace_active_execution_for_task_start(
+    executions: &ExecutionRegistry,
+    task_id: Uuid,
+    active: &ActiveExecution,
+) -> bool {
+    let Some((_, previous)) = executions.remove(&task_id) else {
+        return false;
+    };
+
+    if previous.kind == ExecutionKind::PreparingTask
+        && previous.execution_run_id == active.execution_run_id
+    {
+        return previous.cancel.is_cancelled();
+    }
+
+    previous.cancel.cancel();
+    false
 }
 
 struct PreparedTaskExecution {
@@ -567,4 +591,133 @@ fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option
         )
         .project
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::{install_task_execution, replace_active_execution_for_task_start};
+    use crate::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
+
+    fn active_execution(
+        kind: ExecutionKind,
+        execution_run_id: Option<Uuid>,
+        cancel: CancellationToken,
+    ) -> ActiveExecution {
+        ActiveExecution {
+            kind,
+            registry_token: Uuid::new_v4(),
+            execution_run_id,
+            cancel,
+            pause: None,
+            turn_input: None,
+        }
+    }
+
+    #[test]
+    fn task_start_replaces_matching_preparing_entry_without_cancelling_it() {
+        let executions: ExecutionRegistry = Arc::new(DashMap::new());
+        let task_id = Uuid::new_v4();
+        let execution_run_id = Uuid::new_v4();
+        let preparing_cancel = CancellationToken::new();
+        let running_cancel = CancellationToken::new();
+
+        executions.insert(
+            task_id,
+            active_execution(
+                ExecutionKind::PreparingTask,
+                Some(execution_run_id),
+                preparing_cancel.clone(),
+            ),
+        );
+
+        install_task_execution(
+            &executions,
+            task_id,
+            active_execution(
+                ExecutionKind::Task,
+                Some(execution_run_id),
+                running_cancel.clone(),
+            ),
+        );
+
+        assert!(
+            !preparing_cancel.is_cancelled(),
+            "starting the same task run must not cancel the worker preparation token"
+        );
+        assert!(!running_cancel.is_cancelled());
+        assert_eq!(
+            executions.get(&task_id).map(|entry| entry.kind),
+            Some(ExecutionKind::Task)
+        );
+    }
+
+    #[test]
+    fn task_start_propagates_already_cancelled_preparing_entry() {
+        let executions: ExecutionRegistry = Arc::new(DashMap::new());
+        let task_id = Uuid::new_v4();
+        let execution_run_id = Uuid::new_v4();
+        let preparing_cancel = CancellationToken::new();
+        let running_cancel = CancellationToken::new();
+        preparing_cancel.cancel();
+
+        executions.insert(
+            task_id,
+            active_execution(
+                ExecutionKind::PreparingTask,
+                Some(execution_run_id),
+                preparing_cancel,
+            ),
+        );
+
+        install_task_execution(
+            &executions,
+            task_id,
+            active_execution(
+                ExecutionKind::Task,
+                Some(execution_run_id),
+                running_cancel.clone(),
+            ),
+        );
+
+        assert!(
+            running_cancel.is_cancelled(),
+            "a cancellation received during task preparation must carry into the running task"
+        );
+    }
+
+    #[test]
+    fn task_start_cancels_non_preparing_previous_execution() {
+        let executions: ExecutionRegistry = Arc::new(DashMap::new());
+        let task_id = Uuid::new_v4();
+        let execution_run_id = Uuid::new_v4();
+        let previous_cancel = CancellationToken::new();
+        let running_cancel = CancellationToken::new();
+
+        executions.insert(
+            task_id,
+            active_execution(
+                ExecutionKind::Task,
+                Some(execution_run_id),
+                previous_cancel.clone(),
+            ),
+        );
+
+        let should_start_cancelled = replace_active_execution_for_task_start(
+            &executions,
+            task_id,
+            &active_execution(ExecutionKind::Task, Some(execution_run_id), running_cancel),
+        );
+
+        assert!(!should_start_cancelled);
+        assert!(
+            previous_cancel.is_cancelled(),
+            "a real previous execution must still be cancelled when replaced"
+        );
+    }
 }

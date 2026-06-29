@@ -16,22 +16,27 @@ use crate::AgentBuilder;
 use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, GateInput, ProjectLocation, TaskInput};
 use crate::manifest::{
-    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
-    RoutineStepType,
+    ProjectManifest, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
+    RoutineStepManifest, RoutineStepType,
 };
 use crate::provider::ProviderRuntime;
 use crate::routines::graph::validate_routine_manifest;
 use crate::routines::types::StepResult;
-use crate::routines::{apply_session_binding_memory_scope, gate, routing};
+use crate::routines::{apply_session_binding_memory_scope, routing};
 
 use super::RoutineEvent;
 use super::types::{RoutineHandoff, RoutineState};
-use crate::context::{RoutineContext, RoutineStepContext};
+use crate::context::{
+    RoutineContext, RoutineHandoffContext, RoutineHandoffsContext, RoutineStepContext,
+};
 
 const DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS: u32 = 3;
 
 /// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
-fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContext) {
+fn build_routine_ctx(
+    state: &RoutineState,
+    step: &RoutineStepManifest,
+) -> (RoutineContext, RoutineStepContext) {
     let routine = RoutineContext {
         name: state.routine_name.clone().unwrap_or_default(),
         slug: state
@@ -47,6 +52,7 @@ fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContex
             .unwrap_or_default(),
         description: None,
         step: Default::default(),
+        handoffs: routine_handoffs_context(state, step),
     };
     let step = RoutineStepContext {
         name: state.current_step_name.clone().unwrap_or_default(),
@@ -55,6 +61,25 @@ fn build_routine_ctx(state: &RoutineState) -> (RoutineContext, RoutineStepContex
         metadata: state.step_metadata.clone().unwrap_or_default(),
     };
     (routine, step)
+}
+
+fn routine_handoffs_context(
+    state: &RoutineState,
+    step: &RoutineStepManifest,
+) -> RoutineHandoffsContext {
+    let items = state
+        .handoffs_for(&step.slug)
+        .iter()
+        .map(|handoff| RoutineHandoffContext {
+            source_step: handoff.source_step.to_string(),
+            target_step: handoff.target_step.to_string(),
+            purpose: handoff.purpose.clone(),
+            summary: handoff.summary.clone(),
+            payload: serde_json::to_string_pretty(&handoff.handoff)
+                .unwrap_or_else(|_| handoff.handoff.to_string()),
+        })
+        .collect();
+    RoutineHandoffsContext { items }
 }
 
 fn scope_tools_to_work_dir<P>(mut builder: AgentBuilder<P>, state: &RoutineState) -> AgentBuilder<P>
@@ -67,6 +92,13 @@ where
         builder = builder.with_work_dir(&git.work_dir);
     }
     builder
+}
+
+fn project_manifest_for_slug<P>(provider: &P, project: Option<&Slug>) -> Option<ProjectManifest>
+where
+    P: ProviderRuntime,
+{
+    provider.find_project(project?).cloned()
 }
 
 /// Execute a routine once (one-shot). For cron execution, the Provider
@@ -200,6 +232,7 @@ where
             let execution = joined??;
             let step = execution.step;
             let step_result = execution.result;
+            let step_status = execution.status;
 
             state.metrics.record_step(
                 &step.slug,
@@ -208,6 +241,7 @@ where
             );
 
             if !step_result.passed
+                && step_status == StepExecutionStatus::Completed
                 && matches!(
                     step.step_type,
                     RoutineStepType::Gate | RoutineStepType::Council
@@ -227,6 +261,15 @@ where
             completed.insert(step.slug.clone());
             scheduled.remove(&step.slug);
             last_result = step_result.clone();
+
+            if step_status == StepExecutionStatus::ExecutionFailed {
+                debug!(
+                    step = %step.name,
+                    "Routine step failed during execution, terminating routine"
+                );
+                stop_after_wave = true;
+                continue;
+            }
 
             if matches!(
                 step.step_type,
@@ -275,7 +318,7 @@ where
                     &traversed_edges,
                     state,
                     &steps_by_slug,
-                ) {
+                )? {
                     ready.push_back(target_slug);
                 }
             }
@@ -297,6 +340,15 @@ where
 
     if let Some(result) = terminal_results.last() {
         last_result = result.clone();
+    } else if last_result.passed && !cancel.is_cancelled() {
+        last_result = StepResult {
+            passed: false,
+            output: "Routine ended before reaching a terminal step".to_string(),
+            data: serde_json::json!({
+                "reason": "no_terminal_reached",
+            }),
+            ..last_result
+        };
     }
 
     let _ = events_tx.send(RoutineEvent::Done {
@@ -310,6 +362,13 @@ where
 struct StepExecution {
     step: RoutineStepManifest,
     result: StepResult,
+    status: StepExecutionStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepExecutionStatus {
+    Completed,
+    ExecutionFailed,
 }
 
 async fn execute_scheduled_step<P>(
@@ -362,7 +421,7 @@ where
                 result: step_result.clone(),
                 duration_ms,
             });
-            step_result
+            (step_result, StepExecutionStatus::Completed)
         }
         Err(e) => {
             let error_msg = format!("{e:#}");
@@ -371,21 +430,33 @@ where
             let _ = events_tx.send(RoutineEvent::StepFailed {
                 step_slug: step.slug.clone(),
                 step_run_id,
+                step_name: step.name.clone(),
+                step_type: step.step_type.to_string(),
                 error: error_msg.clone(),
                 duration_ms,
             });
 
-            StepResult {
-                passed: false,
-                output: error_msg,
-                step_slug: step.slug.clone(),
-                step_name: step.name.clone(),
-                ..Default::default()
-            }
+            (
+                StepResult {
+                    passed: false,
+                    output: error_msg,
+                    data: serde_json::json!({
+                        "reason": "execution_error",
+                    }),
+                    step_slug: step.slug.clone(),
+                    step_name: step.name.clone(),
+                    ..Default::default()
+                },
+                StepExecutionStatus::ExecutionFailed,
+            )
         }
     };
 
-    Ok(StepExecution { step, result })
+    Ok(StepExecution {
+        step,
+        result: result.0,
+        status: result.1,
+    })
 }
 
 fn prepare_step_state(state: &mut RoutineState, step: &RoutineStepManifest) {
@@ -450,43 +521,21 @@ fn routine_handoff_for_edge(
     result: &StepResult,
     edge: &RoutineEdgeManifest,
 ) -> Option<RoutineHandoff> {
-    let dynamic = route_next_step_handoff(result, &edge.target_step);
-    let instructions = edge_metadata_string(edge, "handoff_instructions")
-        .or_else(|| edge_metadata_string(edge, "handoff"))
-        .or_else(|| edge_metadata_string(edge, "task"));
-    let purpose =
-        edge_metadata_string(edge, "purpose").or_else(|| edge_metadata_string(edge, "description"));
-
-    let handoff = dynamic
-        .as_ref()
-        .map(|handoff| handoff.handoff.clone())
-        .or_else(|| {
-            if instructions.is_some() || purpose.is_some() {
-                Some(result.output.clone())
-            } else {
-                None
-            }
-        })
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())?;
+    let dynamic = route_next_step_handoff(result, &edge.target_step)?;
+    let purpose = edge_metadata_string(edge, "purpose");
 
     Some(RoutineHandoff {
         source_step: step.slug.clone(),
-        source_step_name: step.name.clone(),
         target_step: edge.target_step.clone(),
-        handoff,
-        purpose: dynamic
-            .as_ref()
-            .and_then(|handoff| handoff.purpose.clone())
-            .or(purpose),
-        summary: dynamic.and_then(|handoff| handoff.summary),
+        handoff: dynamic.handoff,
+        purpose,
+        summary: dynamic.summary,
     })
 }
 
 #[derive(Debug)]
 struct DynamicRouteHandoff {
-    handoff: String,
-    purpose: Option<String>,
+    handoff: serde_json::Value,
     summary: Option<String>,
 }
 
@@ -503,16 +552,9 @@ fn route_next_step_handoff(result: &StepResult, target_step: &Slug) -> Option<Dy
             if target != target_step.to_string() {
                 return None;
             }
-            let handoff = next
-                .get("handoff")
-                .or_else(|| next.get("task"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())?
-                .to_string();
+            let handoff = next.get("handoff")?.clone();
             Some(DynamicRouteHandoff {
                 handoff,
-                purpose: json_string_field(next, "purpose"),
                 summary: json_string_field(next, "summary"),
             })
         })
@@ -566,32 +608,38 @@ fn target_is_ready(
     traversed_edges: &HashSet<String>,
     state: &RoutineState,
     steps_by_slug: &HashMap<crate::Slug, RoutineStepManifest>,
-) -> bool {
+) -> Result<bool> {
     let Some(incoming) = incoming_by_target.get(target_slug) else {
-        return true;
+        return Ok(true);
     };
 
     for edge in incoming {
         let Some(source_result) = state.step_results.get(&edge.source_step) else {
-            return false;
+            if edge.condition == RoutineEdgeCondition::OnFail {
+                continue;
+            }
+            return Ok(false);
         };
         if !completed.contains(&edge.source_step) {
-            return false;
+            return Ok(false);
         }
-        let source_step = steps_by_slug
-            .get(&edge.source_step)
-            .expect("validated graph should contain incoming source");
+        let Some(source_step) = steps_by_slug.get(&edge.source_step) else {
+            bail!(
+                "validated graph is missing incoming source step '{}'",
+                edge.source_step
+            );
+        };
         if source_step.step_type == RoutineStepType::Agent && !source_result.passed {
-            return false;
+            return Ok(false);
         }
         if edge_matches_result(edge, source_result.passed)
             && !traversed_edges.contains(&edge_key(edge))
         {
-            return false;
+            return Ok(false);
         }
     }
 
-    true
+    Ok(true)
 }
 
 fn edge_max_attempts(
@@ -642,6 +690,17 @@ struct AgentStepParams<'a, P> {
     cancel: &'a CancellationToken,
 }
 
+struct GateStepParams<'a, P> {
+    provider: &'a P,
+    step: &'a RoutineStepManifest,
+    route_edges: &'a [RoutineEdgeManifest],
+    routine_steps: &'a [RoutineStepManifest],
+    step_run_id: Uuid,
+    state: &'a RoutineState,
+    events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &'a CancellationToken,
+}
+
 /// Execute a single step based on its type.
 async fn execute_step<P>(params: StepExecutionParams<'_, P>) -> Result<StepResult>
 where
@@ -672,7 +731,17 @@ where
             .await
         }
         RoutineStepType::Gate => {
-            execute_gate_step(provider, step, step_run_id, state, events_tx, cancel).await
+            execute_gate_step(GateStepParams {
+                provider,
+                step,
+                route_edges,
+                routine_steps,
+                step_run_id,
+                state,
+                events_tx,
+                cancel,
+            })
+            .await
         }
         RoutineStepType::Council => {
             super::council::execute_council(provider, step, step_run_id, state, events_tx, cancel)
@@ -731,11 +800,16 @@ where
         provider.agent(agent).await?,
         state.input.session_binding.as_ref(),
     );
+    if let Some(project_manifest) =
+        project_manifest_for_slug(provider, state.input.project.as_ref())
+    {
+        builder = builder.with_project_context(&project_manifest);
+    }
 
     // Resolve project context from manifest so agent prompts can reference
     // {{ project.name }}, {{ project.description }}, etc.
     // Inject routine + step context into the agent's render vars.
-    let (routine_ctx, step_ctx) = build_routine_ctx(state);
+    let (routine_ctx, step_ctx) = build_routine_ctx(state, step);
     builder = builder
         .with_routine_context(routine_ctx)
         .with_step_context(step_ctx)
@@ -743,12 +817,17 @@ where
 
     builder = scope_tools_to_work_dir(builder, state);
 
-    let builder = super::with_routine_step_max_turns(builder, step)
-        .with_tool(routing::route_next_steps_tool(route_edges, routine_steps));
+    let builder = super::with_routine_step_max_turns(builder, step).with_tool(
+        routing::route_next_steps_tool(
+            route_edges,
+            routine_steps,
+            routing::RoutingStepKind::Agent,
+        )?,
+    );
     let runner = builder.build().await?;
 
     // Build the task description from template context
-    let task_description = build_task_description(step, state);
+    let task_description = build_task_description(state);
 
     debug!(is_cron = state.input.is_cron_trigger, step = %step.name, "Building task for agent step");
     let task = attach_location(AgentRun::task(build_task(state, task_description)?), state);
@@ -759,6 +838,7 @@ where
         project: state.input.project.clone(),
         step_slug: step.slug.clone(),
         step_run_id,
+        step_kind: routing::RoutingStepKind::Agent,
         route_edges,
         routine_steps,
         events_tx,
@@ -794,32 +874,46 @@ where
 // Gate step
 // ---------------------------------------------------------------------------
 
-async fn execute_gate_step<P>(
-    provider: &P,
-    step: &RoutineStepManifest,
-    step_run_id: Uuid,
-    state: &RoutineState,
-    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
-    cancel: &CancellationToken,
-) -> Result<StepResult>
+async fn execute_gate_step<P>(params: GateStepParams<'_, P>) -> Result<StepResult>
 where
     P: ProviderRuntime,
 {
+    let GateStepParams {
+        provider,
+        step,
+        route_edges,
+        routine_steps,
+        step_run_id,
+        state,
+        events_tx,
+        cancel,
+    } = params;
     let agent = step
         .agent
         .as_ref()
         .with_context(|| format!("Gate step '{}' is missing agent", step.name))?;
 
-    let (routine_ctx, step_ctx) = build_routine_ctx(state);
-    let builder = apply_session_binding_memory_scope(
+    let (routine_ctx, step_ctx) = build_routine_ctx(state, step);
+    let mut builder = apply_session_binding_memory_scope(
         provider.agent(agent).await?,
         state.input.session_binding.as_ref(),
-    )
-    .with_routine_context(routine_ctx)
-    .with_step_context(step_ctx)
-    .with_tool_current_session_id(step_run_id);
+    );
+    if let Some(project_manifest) =
+        project_manifest_for_slug(provider, state.input.project.as_ref())
+    {
+        builder = builder.with_project_context(&project_manifest);
+    }
+    let builder = builder
+        .with_routine_context(routine_ctx)
+        .with_step_context(step_ctx)
+        .with_tool_current_session_id(step_run_id);
     let builder = scope_tools_to_work_dir(builder, state);
-    let runner = super::with_agent_step_tools(super::with_routine_step_max_turns(builder, step))
+    let runner = super::with_routine_step_max_turns(builder, step)
+        .with_tool(routing::route_next_steps_tool(
+            route_edges,
+            routine_steps,
+            routing::RoutingStepKind::Gate,
+        )?)
         .build()
         .await?;
 
@@ -837,31 +931,36 @@ where
         state,
     );
 
-    let output = gate::execute_with_pass_verdict(
-        &runner,
+    let output = routing::execute_with_route_next_steps(routing::ExecuteRouteNextStepsParams {
+        runner: &runner,
         task,
-        state.input.project.clone(),
-        step.slug.clone(),
+        project: state.input.project.clone(),
+        step_slug: step.slug.clone(),
         step_run_id,
+        step_kind: routing::RoutingStepKind::Gate,
+        route_edges,
+        routine_steps,
         events_tx,
         cancel,
-    )
+    })
     .await?;
 
-    let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
+    let decision = routing::resolve_route_next_steps(&output.messages)?;
+    let step_output = routing::route_next_steps_display_output(&decision, &output.text);
 
     // Store verdict + reasoning in `data` so the event bus and gate_feedback
     // can surface structured information instead of raw LLM text.
     let data = serde_json::json!({
-        "verdict": if verdict.passed { "pass" } else { "fail" },
-        "reasoning": verdict.reasoning,
-        "output": verdict.output,
+        "verdict": if decision.passed { "pass" } else { "fail" },
+        "reasoning": decision.reasoning,
+        "output": decision.output,
+        "route_next_steps": decision.next_steps,
+        "route_next_steps_arguments": decision.arguments,
     });
 
     Ok(StepResult {
         task_id: output.task_id.or(state.input.task_id),
-        passed: verdict.passed,
+        passed: decision.passed,
         output: step_output,
         data,
         step_slug: step.slug.clone(),
@@ -869,7 +968,7 @@ where
         input_tokens: output.input_tokens,
         output_tokens: output.output_tokens,
         tool_calls: output.tool_calls,
-        ..Default::default()
+        messages: output.messages,
     })
 }
 
@@ -907,7 +1006,7 @@ fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
 }
 
 /// Build the task body from routine input plus execution feedback.
-fn build_task_description(step: &RoutineStepManifest, state: &RoutineState) -> String {
+fn build_task_description(state: &RoutineState) -> String {
     let mut description = state.input.description.clone();
 
     // Append gate feedback if available (from a previous failed gate)
@@ -917,56 +1016,5 @@ fn build_task_description(step: &RoutineStepManifest, state: &RoutineState) -> S
         ));
     }
 
-    let handoffs = state.handoffs_for(&step.slug);
-    if !handoffs.is_empty() {
-        let rendered = render_routine_handoffs(handoffs);
-        if !rendered.is_empty() {
-            description.push_str("\n\n");
-            description.push_str(&rendered);
-        }
-    } else if let Some(last) = state.last_step_result()
-        && !last.output.is_empty()
-    {
-        let preview = if last.output.len() > 2000 {
-            format!("{}...", &last.output[..2000])
-        } else {
-            last.output.clone()
-        };
-        description.push_str(&format!(
-            "\n\n<previous_step>\nStep '{}' output:\n{preview}\n</previous_step>",
-            last.step_name
-        ));
-    }
-
     description
-}
-
-fn render_routine_handoffs(handoffs: &[RoutineHandoff]) -> String {
-    if handoffs.is_empty() {
-        return String::new();
-    }
-
-    let mut rendered = String::from("Routine handoffs:\n");
-    for (index, handoff) in handoffs.iter().enumerate() {
-        if index > 0 {
-            rendered.push('\n');
-        }
-        rendered.push_str(&format!(
-            "- From step `{}` ({}) to `{}`\n",
-            handoff.source_step, handoff.source_step_name, handoff.target_step
-        ));
-        if let Some(purpose) = handoff.purpose.as_deref().filter(|value| !value.is_empty()) {
-            rendered.push_str(&format!("  Purpose: {purpose}\n"));
-        }
-        if let Some(summary) = handoff.summary.as_deref().filter(|value| !value.is_empty()) {
-            rendered.push_str(&format!("  Summary: {summary}\n"));
-        }
-        rendered.push_str("  Content:\n");
-        for line in handoff.handoff.lines() {
-            rendered.push_str("    ");
-            rendered.push_str(line);
-            rendered.push('\n');
-        }
-    }
-    rendered
 }

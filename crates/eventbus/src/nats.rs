@@ -58,15 +58,27 @@ impl Transport for NatsTransport {
     async fn publish(&self, subject: &str, payload: &[u8]) -> Result<(), EventBusError> {
         let subject = subject.to_string();
         let payload = bytes::Bytes::from(payload.to_vec());
-        let ack_future = self
-            .jetstream
-            .publish(subject, payload)
-            .await
-            .map_err(|e| EventBusError::Transport(format!("publish failed: {e}")))?;
+        let ack_future = match self.jetstream.publish(subject.clone(), payload).await {
+            Ok(ack_future) => ack_future,
+            Err(error) => {
+                return Err(EventBusError::Transport(format!("publish failed: {error}")));
+            }
+        };
 
-        ack_future
-            .await
-            .map_err(|e| EventBusError::Transport(format!("publish ack failed: {e}")))?;
+        let ack = match ack_future.await {
+            Ok(ack) => ack,
+            Err(error) => {
+                return Err(EventBusError::Transport(format!(
+                    "publish ack failed: {error}"
+                )));
+            }
+        };
+
+        debug!(
+            subject = %subject,
+            ack = ?ack,
+            "NATS JetStream publish acknowledged"
+        );
 
         Ok(())
     }
@@ -86,7 +98,9 @@ impl Transport for NatsTransport {
             }
         }
     }
+}
 
+impl NatsTransport {
     async fn subscribe_subject(
         &self,
         subject: &str,
@@ -113,9 +127,6 @@ impl Transport for NatsTransport {
 
         Ok(rx)
     }
-}
-
-impl NatsTransport {
     async fn subscribe_worker_commands(
         &self,
         worker_id: uuid::Uuid,

@@ -4,6 +4,7 @@ use nenjo::routines::graph::{
     RoutineGraph, RoutineGraphEdge, RoutineGraphEdgeCondition, RoutineGraphStep,
     RoutineGraphStepType, RoutineValidationError, validate_routine_graph,
 };
+use nenjo::routines::handoff_schema::{HANDOFF_SCHEMA_METADATA_KEY, validate_handoff_schema};
 use serde::Deserialize;
 
 use crate::{PackageKind, ResolvedModule, ResolvedPackage, validate_source_path};
@@ -188,9 +189,9 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
                 })?;
             let mut metadata = normalize_edge_metadata(&edge.metadata)?;
             if let Some(max_attempts) = edge.max_attempts {
-                let object = metadata
-                    .as_object_mut()
-                    .expect("normalize_edge_metadata returns an object");
+                let Some(object) = metadata.as_object_mut() else {
+                    anyhow::bail!("edges[{index}].metadata must be an object");
+                };
                 object.insert("max_attempts".to_string(), serde_json::json!(max_attempts));
             }
             Ok(RoutineGraphEdge {
@@ -234,11 +235,25 @@ fn normalize_edge_metadata(value: &serde_json::Value) -> anyhow::Result<serde_js
     if value.is_object() {
         validate_optional_string_field(value, "purpose")?;
         validate_optional_string_field(value, "handoff_instructions")?;
-        validate_optional_string_field(value, "handoff")?;
-        validate_optional_string_field(value, "task")?;
+        reject_legacy_edge_metadata(value, "handoff")?;
+        reject_legacy_edge_metadata(value, "task")?;
+        if let Some(schema) = value.get(HANDOFF_SCHEMA_METADATA_KEY) {
+            validate_handoff_schema(schema).with_context(|| {
+                format!("edge metadata.{HANDOFF_SCHEMA_METADATA_KEY} is invalid")
+            })?;
+        }
         return Ok(value.clone());
     }
     anyhow::bail!("edge metadata must be an object when provided");
+}
+
+fn reject_legacy_edge_metadata(value: &serde_json::Value, field: &str) -> anyhow::Result<()> {
+    if value.get(field).is_some() {
+        anyhow::bail!(
+            "edge metadata.{field} is no longer supported; use metadata.handoff_schema and metadata.handoff_instructions"
+        );
+    }
+    Ok(())
 }
 
 fn validate_optional_string_field(value: &serde_json::Value, field: &str) -> anyhow::Result<()> {

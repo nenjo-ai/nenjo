@@ -40,6 +40,36 @@ pub struct RoutineContext {
     /// Current step context within the routine.
     #[serde(skip_serializing_if = "RoutineStepContext::is_empty")]
     pub step: RoutineStepContext,
+    /// Structured handoffs routed to the current step.
+    #[serde(skip_serializing_if = "RoutineHandoffsContext::is_empty")]
+    pub handoffs: RoutineHandoffsContext,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename = "handoffs")]
+pub struct RoutineHandoffsContext {
+    #[serde(rename = "handoff", default)]
+    pub items: Vec<RoutineHandoffContext>,
+}
+
+impl RoutineHandoffsContext {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename = "handoff")]
+pub struct RoutineHandoffContext {
+    #[serde(rename = "@source_step")]
+    pub source_step: String,
+    #[serde(rename = "@target_step")]
+    pub target_step: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub payload: String,
 }
 
 /// Context for the currently executing routine step.
@@ -179,7 +209,7 @@ pub struct ArtifactsContext {
 }
 
 // ---------------------------------------------------------------------------
-// Task (current/active) cron, gate
+// Task (current/active) cron
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -230,28 +260,6 @@ impl TaskContext {
 
     pub fn is_empty(&self) -> bool {
         self.id.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "gate_evaluation")]
-pub struct GateContext {
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub previous_output: String,
-}
-
-impl GateContext {
-    pub fn from_vars(vars: &HashMap<String, String>) -> Self {
-        Self {
-            previous_output: vars
-                .get("gate.previous_output")
-                .cloned()
-                .unwrap_or_default(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.previous_output.is_empty()
     }
 }
 
@@ -420,16 +428,6 @@ mod tests {
         assert!(xml.contains("<description>SSO is broken</description>"));
         // Empty fields should be omitted
         assert!(!xml.contains("acceptance_criteria"));
-    }
-
-    #[test]
-    fn test_gate_context_xml() {
-        let gate = GateContext {
-            previous_output: "3 tests failed".into(),
-        };
-        let xml = nenjo_xml::to_xml_pretty(&gate, 2);
-        assert!(xml.contains("<gate_evaluation>"));
-        assert!(xml.contains("<previous_output>3 tests failed</previous_output>"));
     }
 
     #[test]

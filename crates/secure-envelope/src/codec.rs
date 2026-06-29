@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, Response,
-    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, CronTaskContent, EncryptedPayload, ExecutionEventPayload,
+    HeartbeatInstructionsContent, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
 use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
@@ -17,6 +17,11 @@ use crate::{
     CodecContext, CodecResult, DecodeCommandResult, EnvelopeCodec, decrypt_text,
     encrypt_text_for_scope,
 };
+
+enum StreamPayloadScope<'a> {
+    User { user_id: Uuid, key: &'a ContentKey },
+    Org { key: &'a ContentKey },
+}
 
 /// Secure-envelope codec that encrypts and decrypts content-bearing command and response payloads.
 #[derive(Clone)]
@@ -311,10 +316,26 @@ impl SecureEnvelopeCodec {
             .await
     }
 
+    async fn encrypt_stream_payload(
+        &self,
+        scope: &StreamPayloadScope<'_>,
+        object_type: &str,
+        payload: Option<Value>,
+    ) -> Result<Option<EncryptedPayload>> {
+        match scope {
+            StreamPayloadScope::User { user_id, key } => {
+                self.encrypt_user_payload(*user_id, key, object_type, payload)
+                    .await
+            }
+            StreamPayloadScope::Org { key } => {
+                self.encrypt_org_payload(key, object_type, payload).await
+            }
+        }
+    }
+
     async fn encode_stream_event(
         &self,
-        user_id: Uuid,
-        ack: &ContentKey,
+        scope: &StreamPayloadScope<'_>,
         event: StreamEvent,
     ) -> Result<Option<StreamEvent>> {
         match event {
@@ -328,7 +349,7 @@ impl SecureEnvelopeCodec {
                 session_id,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "run_failed_payload", payload)
+                    .encrypt_stream_payload(scope, "run_failed_payload", payload)
                     .await?,
             })),
             StreamEvent::AssistantTextDelta {
@@ -341,7 +362,7 @@ impl SecureEnvelopeCodec {
                 request_id,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "assistant_text_delta", payload)
+                    .encrypt_stream_payload(scope, "assistant_text_delta", payload)
                     .await?,
             })),
             StreamEvent::AssistantResponse {
@@ -350,7 +371,7 @@ impl SecureEnvelopeCodec {
                 run_id,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "assistant_response", payload)
+                    .encrypt_stream_payload(scope, "assistant_response", payload)
                     .await?,
             })),
             StreamEvent::ToolCallStarted {
@@ -369,7 +390,7 @@ impl SecureEnvelopeCodec {
                 tool_name,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "tool_call_payload", payload)
+                    .encrypt_stream_payload(scope, "tool_call_payload", payload)
                     .await?,
             })),
             StreamEvent::ToolOutputDelta {
@@ -384,7 +405,7 @@ impl SecureEnvelopeCodec {
                 stream,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "tool_output_delta", payload)
+                    .encrypt_stream_payload(scope, "tool_output_delta", payload)
                     .await?,
             })),
             StreamEvent::ToolCallCompleted {
@@ -403,7 +424,7 @@ impl SecureEnvelopeCodec {
                 success,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "tool_result_payload", payload)
+                    .encrypt_stream_payload(scope, "tool_result_payload", payload)
                     .await?,
             })),
             StreamEvent::HookStarted {
@@ -422,7 +443,7 @@ impl SecureEnvelopeCodec {
                 source,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "hook_start_payload", payload)
+                    .encrypt_stream_payload(scope, "hook_start_payload", payload)
                     .await?,
             })),
             StreamEvent::HookCompleted {
@@ -445,7 +466,7 @@ impl SecureEnvelopeCodec {
                 blocked,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "hook_result_payload", payload)
+                    .encrypt_stream_payload(scope, "hook_result_payload", payload)
                     .await?,
             })),
             StreamEvent::AsyncOperationEvent {
@@ -472,7 +493,7 @@ impl SecureEnvelopeCodec {
                 summary,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "async_operation_payload", payload)
+                    .encrypt_stream_payload(scope, "async_operation_payload", payload)
                     .await?,
             })),
             StreamEvent::AsyncOperationTranscript {
@@ -489,12 +510,7 @@ impl SecureEnvelopeCodec {
                 event,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(
-                        user_id,
-                        ack,
-                        "async_operation_transcript_payload",
-                        payload,
-                    )
+                    .encrypt_stream_payload(scope, "async_operation_transcript_payload", payload)
                     .await?,
             })),
             StreamEvent::Error {
@@ -503,9 +519,8 @@ impl SecureEnvelopeCodec {
                 message: "Execution failed".to_string(),
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(
-                        user_id,
-                        ack,
+                    .encrypt_stream_payload(
+                        scope,
                         "agent_error",
                         Some(payload.unwrap_or_else(|| serde_json::json!({ "message": message }))),
                     )
@@ -522,7 +537,7 @@ impl SecureEnvelopeCodec {
             } => Ok(Some(StreamEvent::Done {
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_user_payload(user_id, ack, "agent_response", payload)
+                    .encrypt_stream_payload(scope, "agent_response", payload)
                     .await?,
                 total_input_tokens,
                 total_output_tokens,
@@ -1004,7 +1019,13 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     }));
                 };
                 let Some(payload) = self
-                    .encode_stream_event(actor_user_id, &ack, payload)
+                    .encode_stream_event(
+                        &StreamPayloadScope::User {
+                            user_id: actor_user_id,
+                            key: &ack,
+                        },
+                        payload,
+                    )
                     .await?
                 else {
                     return Ok(None);
@@ -1014,73 +1035,83 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     payload,
                 }))
             }
-            Response::TaskStepEvent {
+            Response::ExecutionEvent {
                 execution_run_id,
                 task_id,
-                event_type,
-                step_name,
-                step_type,
-                duration_ms,
-                data,
-                payload,
-                encrypted_payload: _,
-                agent,
+                event,
             } => {
-                let Some(ock) = self.key_provider.load_key(ContentScope::Org).await? else {
-                    if payload.is_some() {
-                        warn!(
-                            %execution_run_id,
-                            event_type = %event_type,
-                            step_name = %step_name,
-                            "Dropping plaintext task step payload because org content key is unavailable"
-                        );
+                let event = match event {
+                    ExecutionEventPayload::WorkflowStep(mut step) => {
+                        let Some(ock) = self.key_provider.load_key(ContentScope::Org).await? else {
+                            if step.payload.is_some() {
+                                warn!(
+                                    %execution_run_id,
+                                    event_type = %step.event_type,
+                                    step_name = %step.step_name,
+                                    "Dropping plaintext execution workflow payload because org content key is unavailable"
+                                );
+                            }
+                            step.payload = None;
+                            step.encrypted_payload = None;
+                            return Ok(Some(Response::ExecutionEvent {
+                                execution_run_id,
+                                task_id,
+                                event: ExecutionEventPayload::WorkflowStep(step),
+                            }));
+                        };
+                        step.encrypted_payload = self
+                            .encrypt_org_payload(&ock, "execution_workflow_payload", step.payload)
+                            .await?;
+                        step.payload = None;
+                        ExecutionEventPayload::WorkflowStep(step)
                     }
-                    return Ok(Some(Response::TaskStepEvent {
-                        execution_run_id,
-                        task_id,
-                        event_type,
-                        step_name,
-                        step_type,
-                        duration_ms,
-                        data,
-                        payload: None,
-                        encrypted_payload: None,
-                        agent,
-                    }));
+                    ExecutionEventPayload::AgentTrace {
+                        routine_step,
+                        payload,
+                    } => {
+                        let Some(ock) = self.key_provider.load_key(ContentScope::Org).await? else {
+                            if Self::stream_event_requires_encryption(&payload) {
+                                warn!(
+                                    %execution_run_id,
+                                    event = %payload,
+                                    "Dropping plaintext execution trace payload because org content key is unavailable"
+                                );
+                                return Ok(None);
+                            }
+                            return Ok(Some(Response::ExecutionEvent {
+                                execution_run_id,
+                                task_id,
+                                event: ExecutionEventPayload::AgentTrace {
+                                    routine_step,
+                                    payload,
+                                },
+                            }));
+                        };
+                        let Some(payload) = self
+                            .encode_stream_event(&StreamPayloadScope::Org { key: &ock }, payload)
+                            .await?
+                        else {
+                            return Ok(None);
+                        };
+                        ExecutionEventPayload::AgentTrace {
+                            routine_step,
+                            payload,
+                        }
+                    }
+                    ExecutionEventPayload::TaskCompleted(mut outcome) => {
+                        outcome.error = Self::redact_error_text(outcome.error, "Execution failed");
+                        outcome.merge_error =
+                            Self::redact_error_text(outcome.merge_error, "Merge failed");
+                        ExecutionEventPayload::TaskCompleted(outcome)
+                    }
                 };
-                let encrypted_payload = self
-                    .encrypt_org_payload(&ock, "task_step_payload", payload)
-                    .await?;
-                Ok(Some(Response::TaskStepEvent {
+
+                Ok(Some(Response::ExecutionEvent {
                     execution_run_id,
                     task_id,
-                    event_type,
-                    step_name,
-                    step_type,
-                    duration_ms,
-                    data,
-                    payload: None,
-                    encrypted_payload,
-                    agent,
+                    event,
                 }))
             }
-            Response::TaskCompleted {
-                execution_run_id,
-                task_id,
-                success,
-                error,
-                merge_error,
-                total_input_tokens,
-                total_output_tokens,
-            } => Ok(Some(Response::TaskCompleted {
-                execution_run_id,
-                task_id,
-                success,
-                error: Self::redact_error_text(error, "Execution failed"),
-                merge_error: Self::redact_error_text(merge_error, "Merge failed"),
-                total_input_tokens,
-                total_output_tokens,
-            })),
             Response::ExecutionCompleted {
                 id,
                 success,
@@ -1120,7 +1151,8 @@ mod tests {
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
     use nenjo_events::{
-        Command, ResourceAction, ResourceType, Response, StreamEvent, TaskExecuteContent,
+        Command, ExecutionEventPayload, ExecutionWorkflowStepEvent, ResourceAction, ResourceType,
+        Response, StreamEvent, TaskExecuteContent,
     };
     use tokio::sync::RwLock;
     use uuid::Uuid;
@@ -1500,38 +1532,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_step_payload_without_org_key_is_stripped() {
+    async fn execution_workflow_payload_without_org_key_is_stripped() {
         let actor_user_id = Uuid::new_v4();
         let provider = StubKeyProvider {
             user_keys: Arc::new(RwLock::new(HashMap::new())),
         };
         let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
-        let response = Response::TaskStepEvent {
+        let response = Response::ExecutionEvent {
             execution_run_id: Uuid::new_v4().to_string(),
             task_id: Some(Uuid::new_v4().to_string()),
-            event_type: "step_completed".into(),
-            step_name: "agent_response".into(),
-            step_type: "agent".into(),
-            duration_ms: None,
-            data: serde_json::json!({ "ok": true }),
-            payload: Some(serde_json::json!({ "output_preview": "plaintext output" })),
-            encrypted_payload: None,
-            agent: None,
+            event: ExecutionEventPayload::WorkflowStep(ExecutionWorkflowStepEvent {
+                event_type: "step_completed".into(),
+                step_name: "agent_response".into(),
+                step_type: "agent".into(),
+                duration_ms: None,
+                data: serde_json::json!({ "ok": true }),
+                payload: Some(serde_json::json!({ "output_preview": "plaintext output" })),
+                encrypted_payload: None,
+                agent: None,
+            }),
         };
 
         let encoded = codec
             .encode_response(&CodecContext::for_actor(actor_user_id), response)
             .await
-            .expect("encode should strip plaintext task step payload");
+            .expect("encode should strip plaintext workflow step payload");
 
         match encoded {
-            Some(Response::TaskStepEvent {
-                payload,
-                encrypted_payload,
+            Some(Response::ExecutionEvent {
+                event: ExecutionEventPayload::WorkflowStep(step),
                 ..
             }) => {
-                assert!(payload.is_none());
-                assert!(encrypted_payload.is_none());
+                assert!(step.payload.is_none());
+                assert!(step.encrypted_payload.is_none());
             }
             other => panic!("unexpected encoded response: {other:?}"),
         }

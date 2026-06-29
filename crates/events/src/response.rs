@@ -26,6 +26,107 @@ pub struct StepAgent {
     pub agent_color: Option<String>,
 }
 
+/// Routine step scope attached to execution trace events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionTraceRoutineStep {
+    pub step_slug: String,
+    pub step_run_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_type: Option<String>,
+}
+
+/// A workflow/routine progress event inside an execution run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionWorkflowStepEvent {
+    /// One of: `step_started`, `step_completed`, `step_failed`,
+    /// `step_warning`, `progress`, or cron/worktree lifecycle event names.
+    pub event_type: String,
+    pub step_name: String,
+    pub step_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub data: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<EncryptedPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<StepAgent>,
+}
+
+/// A task terminal event inside an execution run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionTaskCompletedEvent {
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_error: Option<String>,
+    #[serde(default)]
+    pub total_input_tokens: u64,
+    #[serde(default)]
+    pub total_output_tokens: u64,
+}
+
+/// Stable discriminator for canonical execution-scoped event payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExecutionEventKind {
+    #[serde(rename = "workflow.step")]
+    WorkflowStep,
+    #[serde(rename = "agent.trace")]
+    AgentTrace,
+    #[serde(rename = "task.completed")]
+    TaskCompleted,
+}
+
+impl ExecutionEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkflowStep => "workflow.step",
+            Self::AgentTrace => "agent.trace",
+            Self::TaskCompleted => "task.completed",
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutionEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Canonical execution-scoped event payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum ExecutionEventPayload {
+    /// Coarse workflow/routine progress used for task and step status.
+    #[serde(rename = "workflow.step")]
+    WorkflowStep(ExecutionWorkflowStepEvent),
+    /// Fine-grained agent trace event shared with chat.
+    #[serde(rename = "agent.trace")]
+    AgentTrace {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routine_step: Option<ExecutionTraceRoutineStep>,
+        payload: StreamEvent,
+    },
+    /// Terminal task outcome.
+    #[serde(rename = "task.completed")]
+    TaskCompleted(ExecutionTaskCompletedEvent),
+}
+
+impl ExecutionEventPayload {
+    pub const fn kind(&self) -> ExecutionEventKind {
+        match self {
+            Self::WorkflowStep(_) => ExecutionEventKind::WorkflowStep,
+            Self::AgentTrace { .. } => ExecutionEventKind::AgentTrace,
+            Self::TaskCompleted(_) => ExecutionEventKind::TaskCompleted,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Top-level response wrapper
 // ---------------------------------------------------------------------------
@@ -44,45 +145,13 @@ pub enum Response {
         payload: StreamEvent,
     },
 
-    /// A routine step lifecycle event (started, completed, failed, etc.).
-    #[serde(rename = "task.step_event")]
-    TaskStepEvent {
+    /// Canonical execution-scoped event.
+    #[serde(rename = "execution.event")]
+    ExecutionEvent {
         execution_run_id: String,
         #[serde(default)]
         task_id: Option<String>,
-        /// One of: `step_started`, `step_completed`, `step_failed`,
-        /// `step_warning`, `progress`.
-        event_type: String,
-        step_name: String,
-        step_type: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        #[serde(default)]
-        data: serde_json::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_payload: Option<EncryptedPayload>,
-        /// Agent executing this step (if it's an agent step).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<StepAgent>,
-    },
-
-    /// Signals that a task execution finished.
-    #[serde(rename = "task.completed")]
-    TaskCompleted {
-        execution_run_id: String,
-        #[serde(default)]
-        task_id: Option<String>,
-        success: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        merge_error: Option<String>,
-        #[serde(default)]
-        total_input_tokens: u64,
-        #[serde(default)]
-        total_output_tokens: u64,
+        event: ExecutionEventPayload,
     },
 
     /// Periodic heartbeat from the cron scheduler reporting active schedules.
@@ -229,27 +298,44 @@ impl std::fmt::Display for Response {
                 Some(session_id) => write!(f, "agent_response(session={session_id}, {payload})"),
                 None => write!(f, "agent_response({payload})"),
             },
-            Self::TaskStepEvent {
+            Self::ExecutionEvent {
                 execution_run_id,
-                event_type,
-                step_name,
+                event,
                 ..
-            } => {
-                write!(
+            } => match event {
+                ExecutionEventPayload::WorkflowStep(step) => write!(
                     f,
-                    "task.step_event(run={execution_run_id}, {event_type}, step={step_name})"
-                )
-            }
-            Self::TaskCompleted {
-                execution_run_id,
-                success,
-                ..
-            } => {
-                write!(
+                    "execution.event(run={execution_run_id}, {}={}, step={})",
+                    event.kind(),
+                    step.event_type,
+                    step.step_name
+                ),
+                ExecutionEventPayload::AgentTrace {
+                    routine_step,
+                    payload,
+                } => {
+                    if let Some(routine_step) = routine_step {
+                        write!(
+                            f,
+                            "execution.event(run={execution_run_id}, {}, step={}, {payload})",
+                            event.kind(),
+                            routine_step.step_slug
+                        )
+                    } else {
+                        write!(
+                            f,
+                            "execution.event(run={execution_run_id}, {}, {payload})",
+                            event.kind()
+                        )
+                    }
+                }
+                ExecutionEventPayload::TaskCompleted(outcome) => write!(
                     f,
-                    "task.completed(run={execution_run_id}, success={success})"
-                )
-            }
+                    "execution.event(run={execution_run_id}, {}, success={})",
+                    event.kind(),
+                    outcome.success
+                ),
+            },
             Self::CronHeartbeat { active_schedules } => {
                 write!(f, "cron.heartbeat(schedules={})", active_schedules.len())
             }
@@ -736,8 +822,8 @@ pub struct CronScheduleStatus {
 // ---------------------------------------------------------------------------
 
 impl Response {
-    /// Build a `task.step_event` response.
-    pub fn step_event(
+    /// Build a canonical workflow step execution event.
+    pub fn workflow_step_event(
         execution_run_id: Uuid,
         task_id: Option<Uuid>,
         event_type: impl Into<String>,
@@ -746,21 +832,23 @@ impl Response {
         duration_ms: Option<u64>,
         data: serde_json::Value,
     ) -> Self {
-        Self::TaskStepEvent {
+        Self::ExecutionEvent {
             execution_run_id: execution_run_id.to_string(),
             task_id: task_id.map(|id| id.to_string()),
-            event_type: event_type.into(),
-            step_name: step_name.into(),
-            step_type: step_type.into(),
-            duration_ms,
-            data,
-            payload: None,
-            encrypted_payload: None,
-            agent: None,
+            event: ExecutionEventPayload::WorkflowStep(ExecutionWorkflowStepEvent {
+                event_type: event_type.into(),
+                step_name: step_name.into(),
+                step_type: step_type.into(),
+                duration_ms,
+                data,
+                payload: None,
+                encrypted_payload: None,
+                agent: None,
+            }),
         }
     }
 
-    /// Build a `task.completed` response.
+    /// Build a canonical task completion execution event.
     pub fn task_completed(
         execution_run_id: Uuid,
         task_id: Option<Uuid>,
@@ -770,14 +858,16 @@ impl Response {
         total_input_tokens: u64,
         total_output_tokens: u64,
     ) -> Self {
-        Self::TaskCompleted {
+        Self::ExecutionEvent {
             execution_run_id: execution_run_id.to_string(),
             task_id: task_id.map(|id| id.to_string()),
-            success,
-            error,
-            merge_error,
-            total_input_tokens,
-            total_output_tokens,
+            event: ExecutionEventPayload::TaskCompleted(ExecutionTaskCompletedEvent {
+                success,
+                error,
+                merge_error,
+                total_input_tokens,
+                total_output_tokens,
+            }),
         }
     }
 }
@@ -866,8 +956,8 @@ mod tests {
     }
 
     #[test]
-    fn response_step_event_builder() {
-        let resp = Response::step_event(
+    fn response_workflow_step_event_builder() {
+        let resp = Response::workflow_step_event(
             Uuid::nil(),
             Some(Uuid::nil()),
             "step_started",
@@ -877,7 +967,8 @@ mod tests {
             serde_json::json!({}),
         );
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains(r#""type":"task.step_event""#));
+        assert!(json.contains(r#""type":"execution.event""#));
+        assert!(json.contains(r#""kind":"workflow.step""#));
         assert!(json.contains(r#""event_type":"step_started""#));
     }
 
@@ -885,8 +976,89 @@ mod tests {
     fn response_task_completed_builder() {
         let resp = Response::task_completed(Uuid::nil(), None, true, None, None, 100, 50);
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains(r#""type":"task.completed""#));
+        assert!(json.contains(r#""type":"execution.event""#));
+        assert!(json.contains(r#""kind":"task.completed""#));
         assert!(json.contains(r#""success":true"#));
+    }
+
+    #[test]
+    fn execution_event_kind_uses_stable_wire_values() {
+        assert_eq!(ExecutionEventKind::WorkflowStep.as_str(), "workflow.step");
+        assert_eq!(ExecutionEventKind::AgentTrace.as_str(), "agent.trace");
+        assert_eq!(ExecutionEventKind::TaskCompleted.as_str(), "task.completed");
+        assert_eq!(
+            serde_json::to_string(&ExecutionEventKind::WorkflowStep).unwrap(),
+            r#""workflow.step""#,
+        );
+    }
+
+    #[test]
+    fn execution_event_payload_exposes_typed_kind() {
+        let event = ExecutionEventPayload::TaskCompleted(ExecutionTaskCompletedEvent {
+            success: true,
+            error: None,
+            merge_error: None,
+            total_input_tokens: 1,
+            total_output_tokens: 2,
+        });
+
+        assert_eq!(event.kind(), ExecutionEventKind::TaskCompleted);
+    }
+
+    #[test]
+    fn execution_event_wire_shape_is_canonical_for_all_kinds() {
+        let run_id = Uuid::nil();
+        let task_id = Uuid::nil();
+        let workflow = Response::workflow_step_event(
+            run_id,
+            Some(task_id),
+            "step_started",
+            "plan",
+            "agent",
+            Some(12),
+            serde_json::json!({"step_slug": "plan"}),
+        );
+        let agent_trace = Response::ExecutionEvent {
+            execution_run_id: run_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            event: ExecutionEventPayload::AgentTrace {
+                routine_step: Some(ExecutionTraceRoutineStep {
+                    step_slug: "plan".to_string(),
+                    step_run_id: task_id,
+                    step_name: Some("plan".to_string()),
+                    step_type: Some("agent".to_string()),
+                }),
+                payload: StreamEvent::AssistantTextDelta {
+                    run_id: "trace-run".to_string(),
+                    request_id: "request-1".to_string(),
+                    payload: Some(serde_json::json!({"text_preview": "Planning"})),
+                    encrypted_payload: None,
+                },
+            },
+        };
+        let completed = Response::task_completed(run_id, Some(task_id), true, None, None, 1, 2);
+
+        let workflow_json = serde_json::to_value(&workflow).unwrap();
+        assert_eq!(workflow_json["type"], "execution.event");
+        assert_eq!(workflow_json["event"]["kind"], "workflow.step");
+        assert_eq!(workflow_json["event"]["data"]["step_name"], "plan");
+
+        let trace_json = serde_json::to_value(&agent_trace).unwrap();
+        assert_eq!(trace_json["type"], "execution.event");
+        assert_eq!(trace_json["event"]["kind"], "agent.trace");
+        assert_eq!(
+            trace_json["event"]["data"]["routine_step"]["step_slug"],
+            "plan"
+        );
+        assert_eq!(
+            trace_json["event"]["data"]["payload"]["event_type"],
+            "AssistantTextDelta"
+        );
+
+        let completed_json = serde_json::to_value(&completed).unwrap();
+        assert_eq!(completed_json["type"], "execution.event");
+        assert_eq!(completed_json["event"]["kind"], "task.completed");
+        assert_eq!(completed_json["event"]["data"]["success"], true);
     }
 
     #[test]

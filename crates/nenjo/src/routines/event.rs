@@ -46,6 +46,10 @@ pub enum RoutineEvent {
         step_slug: Slug,
         /// Unique ID for this step execution attempt.
         step_run_id: Uuid,
+        /// Human-readable step name.
+        step_name: String,
+        /// Step type label.
+        step_type: String,
         /// Error message.
         error: String,
         /// Step duration in milliseconds.

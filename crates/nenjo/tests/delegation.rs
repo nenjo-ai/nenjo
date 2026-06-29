@@ -1,5 +1,6 @@
 //! Integration tests for the native sub-agent runtime.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -763,6 +764,36 @@ impl ToolFactory for PlatformToolFactory {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingWorkspaceToolFactory {
+    workspace_dirs: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl RecordingWorkspaceToolFactory {
+    fn workspace_dirs(&self) -> Vec<PathBuf> {
+        self.workspace_dirs.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolFactory for RecordingWorkspaceToolFactory {
+    async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(PlatformEchoTool)]
+    }
+
+    async fn create_tools_with_security(
+        &self,
+        _agent: &AgentManifest,
+        security: Arc<nenjo::ToolSecurity>,
+    ) -> Vec<Arc<dyn Tool>> {
+        self.workspace_dirs
+            .lock()
+            .unwrap()
+            .push(security.workspace_dir.clone());
+        vec![Arc::new(PlatformEchoTool)]
+    }
+}
+
 #[tokio::test]
 async fn parent_tools_are_available_during_execution() {
     let captured = CapturedRequests::default();
@@ -1086,6 +1117,53 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
                 && message.contains("outside your role")),
         "{child_messages:?}"
     );
+}
+
+#[tokio::test]
+async fn delegate_to_preserves_parent_workspace_scope() {
+    let captured = CapturedRequests::default();
+    let tool_factory = RecordingWorkspaceToolFactory::default();
+    let model_id = Uuid::new_v4();
+    let manifest = Manifest {
+        agents: vec![
+            agent(Uuid::new_v4(), "coder", model_id),
+            agent(Uuid::new_v4(), "reviewer", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(DelegateScriptFactory::new(captured))
+        .with_tool_factory(tool_factory.clone())
+        .build()
+        .await
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let worktree = temp.path().join("task-worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let runner = provider
+        .agent("coder")
+        .await
+        .unwrap()
+        .with_work_dir(worktree.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let output = runner.chat("delegate review").await.unwrap();
+    assert_eq!(output.text, "parent saw delegated result");
+
+    let workspace_dirs = tool_factory.workspace_dirs();
+    assert!(
+        workspace_dirs.len() >= 2,
+        "expected parent and delegated child tool construction: {workspace_dirs:?}"
+    );
+    for dir in &workspace_dirs {
+        assert_eq!(dir, &worktree);
+    }
 }
 
 #[tokio::test]

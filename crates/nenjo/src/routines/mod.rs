@@ -24,8 +24,8 @@ pub mod council;
 pub mod cron;
 pub mod event;
 pub mod executor;
-pub mod gate;
 pub mod graph;
+pub mod handoff_schema;
 pub mod routing;
 pub mod runner;
 pub mod types;
@@ -40,13 +40,6 @@ pub use runner::{RoutineExecutionHandle, RoutineRunner};
 pub use types::{
     EdgeCondition, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics, StepResult, StepType,
 };
-
-pub(crate) fn with_agent_step_tools<P>(builder: AgentBuilder<P>) -> AgentBuilder<P>
-where
-    P: ProviderRuntime,
-{
-    builder.with_tool(gate::PassVerdictTool::new())
-}
 
 const DEFAULT_ROUTINE_STEP_MAX_TURNS: usize = 50;
 

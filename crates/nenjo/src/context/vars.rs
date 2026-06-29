@@ -22,7 +22,6 @@ pub struct RenderContextVars {
 
     // Separate vars
     pub chat_message: String,
-    pub gate_previous_output: String,
     pub heartbeat_instructions: String,
     pub heartbeat_previous_output: String,
     pub heartbeat_last_run_at: String,
@@ -66,6 +65,11 @@ impl RenderContextVars {
             String::new()
         } else {
             nenjo_xml::to_xml_pretty(&self.routine, 2)
+        };
+        let routine_handoffs_xml = if self.routine.handoffs.is_empty() {
+            String::new()
+        } else {
+            nenjo_xml::to_xml_pretty(&self.routine.handoffs, 2)
         };
         let task_xml = if self.task.id.is_empty() {
             String::new()
@@ -114,8 +118,6 @@ impl RenderContextVars {
             ("task.complexity", &self.task.complexity),
             // Chat
             ("chat.message", &self.chat_message),
-            // Gate
-            ("gate.previous_output", &self.gate_previous_output),
             // Heartbeat
             ("heartbeat.instructions", &self.heartbeat_instructions),
             ("heartbeat.previous_output", &self.heartbeat_previous_output),
@@ -143,6 +145,7 @@ impl RenderContextVars {
             ("routine.slug", &self.routine.slug),
             ("routine.name", &self.routine.name),
             ("routine.execution_id", &self.routine.execution_id),
+            ("routine.handoffs", routine_handoffs_xml.as_str()),
             // Routine step context
             ("routine.step.name", &self.routine.step.name),
             ("routine.step.type", &self.routine.step.step_type),

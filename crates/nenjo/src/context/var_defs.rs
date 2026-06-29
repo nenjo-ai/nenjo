@@ -171,7 +171,7 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
             variables: vec![
                 TemplateVarDef {
                     name: "routine",
-                    description: "Full XML of the active routine (slug, name, execution_id, step)",
+                    description: "Full XML of the active routine (slug, name, execution_id, step, handoffs)",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -187,6 +187,11 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                 TemplateVarDef {
                     name: "routine.execution_id",
                     description: "Unique ID for the current routine execution run",
+                    group: "Routine",
+                },
+                TemplateVarDef {
+                    name: "routine.handoffs",
+                    description: "Structured XML handoff payloads routed to the current step",
                     group: "Routine",
                 },
                 TemplateVarDef {
@@ -210,14 +215,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Routine",
                 },
             ],
-        },
-        TemplateVarGroup {
-            name: "Gate",
-            variables: vec![TemplateVarDef {
-                name: "gate.previous_output",
-                description: "Output from the previous step being evaluated",
-                group: "Gate",
-            }],
         },
         TemplateVarGroup {
             name: "Heartbeat",
