@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use anyhow::{Context, anyhow};
 use nenjo::context::{
     AgentContext, FocusListContext, GitContext, MemoryProfileContext, ProjectContext,
-    RenderContextVars, RoutineContext, RoutineStepContext, TaskContext,
+    RenderContextVars, RoutineContext, RoutineHandoffContext, RoutineHandoffsContext,
+    RoutineStepContext, TaskContext,
 };
 
 use crate::{PackageKind, ResolvedModule, ResolvedPackage};
@@ -358,6 +359,15 @@ fn synthetic_vars() -> HashMap<String, String> {
                 instructions: "Validate package runtime behavior".into(),
                 metadata: r#"{"purpose":"validation"}"#.into(),
             },
+            handoffs: RoutineHandoffsContext {
+                items: vec![RoutineHandoffContext {
+                    source_step: "validation-source".into(),
+                    target_step: "validation-step".into(),
+                    purpose: Some("Synthetic handoff coverage".into()),
+                    summary: Some("Validation handoff".into()),
+                    payload: r#"{"work":"Validate handoff rendering"}"#.into(),
+                }],
+            },
         },
         memory_profile: MemoryProfileContext {
             core_focus: Some(FocusListContext {
@@ -377,7 +387,6 @@ fn synthetic_vars() -> HashMap<String, String> {
             work_dir: "/workspace/validation-project".into(),
         },
         chat_message: "Validate this package".into(),
-        gate_previous_output: "Previous step output".into(),
         heartbeat_instructions: "Run validation heartbeat".into(),
         heartbeat_previous_output: "Previous heartbeat output".into(),
         heartbeat_last_run_at: "2025-12-31T00:00:00Z".into(),

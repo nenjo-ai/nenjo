@@ -29,7 +29,6 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             ctx.chat_message = follow_up.message.clone();
         }
         AgentRunKind::Gate(gate) => {
-            ctx.gate_previous_output = gate.previous_result.output.clone();
             if let Some(task) = &gate.task {
                 ctx.task = task_to_context(task);
             }

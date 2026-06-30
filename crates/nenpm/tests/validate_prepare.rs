@@ -367,13 +367,40 @@ manifest:
     - from: implement
       to: review
       condition: on_pass
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
     - from: review
       to: done
       condition: on_pass
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
     - from: review
       to: implement
       condition: on_fail
       max_attempts: 2
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
 "#,
     );
 
@@ -457,9 +484,27 @@ manifest:
     - from: implement
       to: review
       condition: on_pass
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
     - from: review
       to: done
       condition: always
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
 "#,
     );
 

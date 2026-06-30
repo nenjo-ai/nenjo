@@ -78,6 +78,7 @@ pub struct CommandContext {
     pub api: Arc<ApiClient>,
     pub actor_user_id: Uuid,
     pub response_tx: ResponseSender,
+    pub org_response_tx: ResponseSender,
     pub auth_provider: Arc<WorkerAuthProvider>,
     pub external_mcp: Arc<ExternalMcpPool>,
     pub skill_registry: Arc<SkillRegistry>,
@@ -218,12 +219,14 @@ impl WorkerRuntime {
         &self,
         actor_user_id: Uuid,
         response_tx: ResponseSender,
+        org_response_tx: ResponseSender,
     ) -> CommandContext {
         CommandContext {
             harness: self.harness.clone(),
             api: self.api.clone(),
             actor_user_id,
             response_tx,
+            org_response_tx,
             auth_provider: self.auth_provider.clone(),
             external_mcp: self.external_mcp.clone(),
             skill_registry: self.skill_registry.clone(),

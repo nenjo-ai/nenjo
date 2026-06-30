@@ -19,7 +19,7 @@ use uuid::Uuid;
 use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
 use nenjo_harness::{Harness, ProviderRuntime};
 
-use crate::event_bridge::{project_slug, routine_event_to_response};
+use crate::event_bridge::{project_slug, routine_event_to_responses};
 use crate::handlers::ResponseSender;
 use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
@@ -545,7 +545,7 @@ where
 
                                                     let event_for_response =
                                                         response_event.as_ref().unwrap_or(&event);
-                                                    if let Some(response) = routine_event_to_response(
+                                                    for response in routine_event_to_responses(
                                                         event_for_response,
                                                         response_execution_id,
                                                         None,

@@ -109,6 +109,78 @@ async fn worker_factory_always_exposes_use_skill_tool() {
 }
 
 #[tokio::test]
+async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let workspace = root.join("workspace");
+    let worktree = root.join("worktrees").join("task-worktree");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&worktree).await.unwrap();
+    tokio::fs::write(worktree.join("marker.txt"), "factory scoped")
+        .await
+        .unwrap();
+
+    let config = crate::config::Config {
+        workspace_dir: workspace.clone(),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(workspace);
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+
+    let tools = factory
+        .create_tools_with_security(
+            &agent,
+            Arc::new(nenjo::ToolSecurity::with_workspace_dir(worktree.clone())),
+        )
+        .await;
+    let shell = tools
+        .iter()
+        .find(|tool| tool.name() == "shell")
+        .expect("shell tool should be exposed");
+
+    let pwd = shell
+        .execute(serde_json::json!({"command": "pwd"}))
+        .await
+        .unwrap();
+    assert!(pwd.success);
+    assert_eq!(
+        std::fs::canonicalize(pwd.output.trim()).unwrap(),
+        std::fs::canonicalize(&worktree).unwrap()
+    );
+
+    let relative_read = shell
+        .execute(serde_json::json!({"command": "cat marker.txt"}))
+        .await
+        .unwrap();
+    assert!(relative_read.success);
+    assert_eq!(relative_read.output.trim(), "factory scoped");
+}
+
+#[tokio::test]
 async fn worker_factory_exposes_agent_native_media_tools() {
     let temp = tempdir().unwrap();
     let root = temp.path();

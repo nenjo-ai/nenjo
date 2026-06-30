@@ -270,6 +270,103 @@ async fn project_context_renders_template_and_knowledge_vars() {
 }
 
 #[tokio::test]
+async fn task_prompt_project_context_renders_into_project_xml() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.templates.task_execution =
+        "{{ project.context }}\n{{ project }}".into();
+    manifest.projects[0].settings = serde_json::json!({
+        "context": "Project {{ project.name }} context"
+    });
+    let project = manifest.projects[0].clone();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .with_project_context(&project)
+        .build()
+        .await
+        .unwrap();
+
+    let prompts = runner
+        .instance()
+        .build_prompts(&crate::input::AgentRun::task(
+            crate::input::TaskInput::new("Task", "Description").with_project("p"),
+        ));
+
+    assert!(prompts.user_message.contains("Project p context"));
+    assert!(
+        prompts
+            .user_message
+            .contains("<context>Project p context</context>")
+    );
+    assert!(!prompts.user_message.contains("{{ project.name }}"));
+}
+
+#[tokio::test]
+async fn task_prompt_does_not_append_routine_handoffs_twice() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.templates.task_execution =
+        "{{ routine }}\n{{ task.description }}".into();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let routine_context = crate::context::RoutineContext {
+        name: "Pipeline".into(),
+        slug: "pipeline".into(),
+        execution_id: "run-1".into(),
+        description: None,
+        step: crate::context::RoutineStepContext {
+            name: "implement".into(),
+            step_type: "agent".into(),
+            ..Default::default()
+        },
+        handoffs: crate::context::RoutineHandoffsContext {
+            items: vec![crate::context::RoutineHandoffContext {
+                source_step: "plan".into(),
+                target_step: "implement".into(),
+                summary: Some("Plan ready".into()),
+                payload: r#"{"work":"build"}"#.into(),
+                ..Default::default()
+            }],
+        },
+    };
+
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .with_routine_context(routine_context)
+        .build()
+        .await
+        .unwrap();
+
+    let prompts = runner
+        .instance()
+        .build_prompts(&crate::input::AgentRun::task(crate::input::TaskInput::new(
+            "Task",
+            "Description",
+        )));
+
+    assert_eq!(prompts.user_message.matches("<handoffs>").count(), 1);
+    assert!(!prompts.user_message.contains("# Routine Handoffs"));
+}
+
+#[tokio::test]
 async fn provider_registers_multiple_knowledge_packs() {
     let provider = Provider::builder()
         .with_manifest(test_manifest())

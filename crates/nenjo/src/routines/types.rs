@@ -337,9 +337,8 @@ impl RoutineState {
 #[derive(Debug, Clone)]
 pub(crate) struct RoutineHandoff {
     pub source_step: Slug,
-    pub source_step_name: String,
     pub target_step: Slug,
-    pub handoff: String,
+    pub handoff: serde_json::Value,
     pub purpose: Option<String>,
     pub summary: Option<String>,
 }

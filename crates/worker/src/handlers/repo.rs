@@ -38,7 +38,7 @@ pub trait RepoRuntime: Send + Sync {
 
 #[derive(Clone)]
 pub struct RepoCommandContext<S, R> {
-    pub response_sink: S,
+    pub org_response_sink: S,
     pub repo_runtime: R,
 }
 
@@ -99,7 +99,7 @@ where
         match &result {
             Ok(()) => {
                 info!(%project_id, slug = %project_slug, "Repo sync complete");
-                let _ = ctx.response_sink.send(Response::RepoSyncComplete {
+                let _ = ctx.org_response_sink.send(Response::RepoSyncComplete {
                     project: project_slug.to_string(),
                     success: true,
                     error: None,
@@ -107,7 +107,7 @@ where
             }
             Err(error) => {
                 error!(%project_id, slug = %project_slug, error = %error, "Repo sync failed");
-                let _ = ctx.response_sink.send(Response::RepoSyncComplete {
+                let _ = ctx.org_response_sink.send(Response::RepoSyncComplete {
                     project: project_slug.to_string(),
                     success: false,
                     error: Some(error.to_string()),

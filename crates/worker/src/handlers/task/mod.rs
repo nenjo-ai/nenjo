@@ -18,18 +18,20 @@ use uuid::Uuid;
 
 use nenjo::types::GitContext;
 use nenjo::{ProjectLocation, Slug, TaskInput};
-use nenjo_events::{Response, StepAgent};
+use nenjo_events::StepAgent;
 use serde_json::json;
 
 use nenjo_harness::events::HarnessEvent;
-use nenjo_harness::registry::{ActiveExecution, ExecutionKind};
+use nenjo_harness::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
 use nenjo_harness::request::TaskRequest;
 use nenjo_harness::session::{TurnEventContext, session_runtime_events_from_turn_event};
 use nenjo_harness::{Harness, ProviderRuntime};
 
 use crate::event_bridge::{
-    TaskTurnEventContext, agent_name, project_slug, routine_event_to_response,
-    turn_event_to_task_step_response,
+    ExecutionAgentTraceContext, ExecutionWorkflowStepEventContext, TaskTurnEventContext,
+    agent_name, execution_task_completed_response, execution_workflow_step_response, project_slug,
+    routine_event_to_responses, turn_event_to_agent_trace_responses,
+    turn_event_to_workflow_step_response,
 };
 use crate::handlers::ResponseSender;
 use crate::handlers::notification::platform_notification_emitter;
@@ -50,6 +52,23 @@ fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option
         )
         .project
     })
+}
+
+fn remove_active_execution_if_current(
+    executions: &ExecutionRegistry,
+    task_id: Uuid,
+    registry_token: Uuid,
+) -> Option<ActiveExecution> {
+    match executions.entry(task_id) {
+        Entry::Occupied(entry) => {
+            if entry.get().registry_token == registry_token {
+                Some(entry.remove())
+            } else {
+                None
+            }
+        }
+        Entry::Vacant(_) => None,
+    }
 }
 
 async fn restore_task_git_context<P, SessionRt>(
@@ -589,7 +608,7 @@ where
         }
         Entry::Vacant(entry) => {
             entry.insert(ActiveExecution {
-                kind: ExecutionKind::Task,
+                kind: ExecutionKind::PreparingTask,
                 registry_token,
                 execution_run_id: Some(execution_run_id),
                 cancel: cancel.clone(),
@@ -649,6 +668,11 @@ where
     // we don't run tasks against a dirty or shared working tree.
     let eid = execution_run_id.to_string();
     let tid = Some(task_id.to_string());
+    let workflow_event_context = ExecutionWorkflowStepEventContext {
+        execution_run_id,
+        task_id: Some(task_id),
+        agent: None,
+    };
     // Per-repo mutex — git's .git/config lock doesn't support concurrent writes,
     // so parallel worktree add/remove on the same repo must be serialized.
     let git_locks = ctx.git_locks.clone();
@@ -660,37 +684,31 @@ where
     let restored_git_ctx = restore_task_git_context(harness, task_id).await;
     let git_ctx = if let Some(wt) = restored_git_ctx {
         info!(branch = %wt.branch, work_dir = %wt.work_dir, "Restored git worktree from task checkpoint");
-        let _ = ctx.response_sink.send(Response::TaskStepEvent {
-            execution_run_id: eid.clone(),
-            task_id: tid.clone(),
-            event_type: "step_completed".to_string(),
-            step_name: "worktree_restore".to_string(),
-            step_type: "worktree".to_string(),
-            duration_ms: Some(0),
-            data: serde_json::json!({
+        let _ = ctx.response_sink.send(execution_workflow_step_response(
+            &workflow_event_context,
+            "step_completed",
+            "worktree_restore",
+            "worktree",
+            Some(0),
+            serde_json::json!({
                 "branch": wt.branch,
                 "target_branch": wt.target_branch,
             }),
-            payload: Some(serde_json::json!({
+            Some(serde_json::json!({
                 "work_dir": wt.work_dir,
             })),
-            encrypted_payload: None,
-            agent: None,
-        });
+        ));
         Some(wt)
     } else if repo_dir.join(".git").exists() {
-        let _ = ctx.response_sink.send(Response::TaskStepEvent {
-            execution_run_id: eid.clone(),
-            task_id: tid.clone(),
-            event_type: "step_started".to_string(),
-            step_name: "worktree_setup".to_string(),
-            step_type: "worktree".to_string(),
-            duration_ms: None,
-            data: serde_json::Value::Null,
-            payload: None,
-            encrypted_payload: None,
-            agent: None,
-        });
+        let _ = ctx.response_sink.send(execution_workflow_step_response(
+            &workflow_event_context,
+            "step_started",
+            "worktree_setup",
+            "worktree",
+            None,
+            serde_json::Value::Null,
+            None,
+        ));
 
         let start = std::time::Instant::now();
         let setup_result = {
@@ -704,23 +722,20 @@ where
                 let duration_ms = start.elapsed().as_millis() as u64;
                 info!(branch = %wt.branch, work_dir = %wt.work_dir, "Created git worktree for task");
 
-                let _ = ctx.response_sink.send(Response::TaskStepEvent {
-                    execution_run_id: eid.clone(),
-                    task_id: tid.clone(),
-                    event_type: "step_completed".to_string(),
-                    step_name: "worktree_setup".to_string(),
-                    step_type: "worktree".to_string(),
-                    duration_ms: Some(duration_ms),
-                    data: serde_json::json!({
+                let _ = ctx.response_sink.send(execution_workflow_step_response(
+                    &workflow_event_context,
+                    "step_completed",
+                    "worktree_setup",
+                    "worktree",
+                    Some(duration_ms),
+                    serde_json::json!({
                         "branch": wt.branch,
                         "target_branch": wt.target_branch,
                     }),
-                    payload: Some(serde_json::json!({
+                    Some(serde_json::json!({
                         "work_dir": wt.work_dir,
                     })),
-                    encrypted_payload: None,
-                    agent: None,
-                });
+                ));
 
                 Some(wt)
             }
@@ -729,18 +744,15 @@ where
                 let error_msg = format!("{e:#}");
                 warn!(error = %error_msg, "Worktree setup failed");
 
-                let _ = ctx.response_sink.send(Response::TaskStepEvent {
-                    execution_run_id: eid.clone(),
-                    task_id: tid.clone(),
-                    event_type: "step_failed".to_string(),
-                    step_name: "worktree_setup".to_string(),
-                    step_type: "worktree".to_string(),
-                    duration_ms: Some(duration_ms),
-                    data: serde_json::json!({ "error": "Worktree setup failed" }),
-                    payload: Some(serde_json::json!({ "error": &error_msg })),
-                    encrypted_payload: None,
-                    agent: None,
-                });
+                let _ = ctx.response_sink.send(execution_workflow_step_response(
+                    &workflow_event_context,
+                    "step_failed",
+                    "worktree_setup",
+                    "worktree",
+                    Some(duration_ms),
+                    serde_json::json!({ "error": "Worktree setup failed" }),
+                    Some(serde_json::json!({ "error": &error_msg })),
+                ));
 
                 send_task_failed(ctx, &eid, &tid, &error_msg);
                 update_task_checkpoint(
@@ -766,7 +778,7 @@ where
                     SessionUpsertMode::Spawn,
                 )
                 .await;
-                harness.executions().remove(&task_id);
+                remove_active_execution_if_current(&harness.executions(), task_id, registry_token);
                 return Ok(());
             }
         }
@@ -801,14 +813,6 @@ where
         task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
     )
     .await;
-
-    if harness
-        .executions()
-        .get(&task_id)
-        .is_some_and(|active| active.registry_token == registry_token)
-    {
-        harness.executions().remove(&task_id);
-    }
 
     let execution = TaskExecutionShared {
         harness,
@@ -869,7 +873,7 @@ where
             task_worktree_snapshot(Some(&repo_dir), git_ctx.as_ref()),
         )
         .await;
-        harness.executions().remove(&task_id);
+        remove_active_execution_if_current(&harness.executions(), task_id, registry_token);
         // Still clean up worktree even on failure.
         if let Some(ref wt) = git_ctx {
             let _guard = git_lock.lock().await;
@@ -903,7 +907,7 @@ where
     }
 
     // Unregister execution
-    harness.executions().remove(&task_id);
+    remove_active_execution_if_current(&harness.executions(), task_id, registry_token);
     let final_status = if cancel.is_cancelled() {
         SessionStatus::Cancelled
     } else {
@@ -923,18 +927,15 @@ where
     if let Some(ref wt) = git_ctx
         && final_status != SessionStatus::Cancelled
     {
-        let _ = ctx.response_sink.send(Response::TaskStepEvent {
-            execution_run_id: eid.clone(),
-            task_id: tid.clone(),
-            event_type: "step_started".to_string(),
-            step_name: "worktree_cleanup".to_string(),
-            step_type: "worktree".to_string(),
-            duration_ms: None,
-            data: serde_json::Value::Null,
-            payload: None,
-            encrypted_payload: None,
-            agent: None,
-        });
+        let _ = ctx.response_sink.send(execution_workflow_step_response(
+            &workflow_event_context,
+            "step_started",
+            "worktree_cleanup",
+            "worktree",
+            None,
+            serde_json::Value::Null,
+            None,
+        ));
 
         let start = std::time::Instant::now();
         let cleanup_result: Result<()> = {
@@ -948,33 +949,27 @@ where
         match &cleanup_result {
             Ok(()) => {
                 debug!(branch = %wt.branch, "Cleaned up worktree");
-                let _ = ctx.response_sink.send(Response::TaskStepEvent {
-                    execution_run_id: eid.clone(),
-                    task_id: tid.clone(),
-                    event_type: "step_completed".to_string(),
-                    step_name: "worktree_cleanup".to_string(),
-                    step_type: "worktree".to_string(),
-                    duration_ms: Some(duration_ms),
-                    data: serde_json::json!({ "branch": wt.branch }),
-                    payload: None,
-                    encrypted_payload: None,
-                    agent: None,
-                });
+                let _ = ctx.response_sink.send(execution_workflow_step_response(
+                    &workflow_event_context,
+                    "step_completed",
+                    "worktree_cleanup",
+                    "worktree",
+                    Some(duration_ms),
+                    serde_json::json!({ "branch": wt.branch }),
+                    None,
+                ));
             }
             Err(e) => {
                 warn!(error = %e, branch = %wt.branch, "Failed to clean up worktree");
-                let _ = ctx.response_sink.send(Response::TaskStepEvent {
-                    execution_run_id: eid.clone(),
-                    task_id: tid.clone(),
-                    event_type: "step_failed".to_string(),
-                    step_name: "worktree_cleanup".to_string(),
-                    step_type: "worktree".to_string(),
-                    duration_ms: Some(duration_ms),
-                    data: serde_json::json!({ "error": "Worktree cleanup failed" }),
-                    payload: Some(serde_json::json!({ "error": e.to_string() })),
-                    encrypted_payload: None,
-                    agent: None,
-                });
+                let _ = ctx.response_sink.send(execution_workflow_step_response(
+                    &workflow_event_context,
+                    "step_failed",
+                    "worktree_cleanup",
+                    "worktree",
+                    Some(duration_ms),
+                    serde_json::json!({ "error": "Worktree cleanup failed" }),
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                ));
             }
         }
     }
@@ -1275,8 +1270,21 @@ where
                                 include_upsert,
                             );
                         }
-                        if let Some(r) = routine_event_to_response(&ev, execution_run_id, Some(task_id), current_agent_id, &harness.provider().manifest_snapshot()) {
-                            let _ = ctx.response_sink.send(r);
+                        for response in routine_event_to_responses(
+                            &ev,
+                            execution_run_id,
+                            Some(task_id),
+                            current_agent_id,
+                            &harness.provider().manifest_snapshot(),
+                        ) {
+                            if let Err(error) = ctx.response_sink.send(response) {
+                                warn!(
+                                    %execution_run_id,
+                                    %task_id,
+                                    error = %error,
+                                    "Failed to queue routine worker response"
+                                );
+                            }
                         }
                     }
                     Some(HarnessEvent::Turn { .. }) | Some(HarnessEvent::DomainEntered { .. }) => {}
@@ -1349,27 +1357,43 @@ where
                         } else {
                             None
                         };
-                        if let Some(response) = turn_event_to_task_step_response(
+                        for response in turn_event_to_agent_trace_responses(
                             &ev,
-                            &TaskTurnEventContext {
+                            &ExecutionAgentTraceContext {
                                 execution_run_id,
                                 task_id: Some(task_id),
-                                agent: Some(StepAgent {
-                                    agent: agent_slug.clone(),
-                                    agent_name: Some(aname.clone()),
-                                    agent_color: manifest
-                                        .agents
-                                        .iter()
-                                        .find(|a| crate::resource_resolver::stable_resource_id("agent", &a.slug) == agent_id)
-                                        .and_then(|a| a.color.clone()),
-                                }),
+                                agent_name: aname.clone(),
+                                trace_run_id: execution_run_id.to_string(),
+                                trace_session_id: execution_run_id,
                                 routine_step: None,
-                                agent_duration_ms,
-                                emit_done: true,
-                                summarize_outputs: false,
                             },
                         ) {
                             let _ = ctx.response_sink.send(response);
+                        }
+                        if matches!(ev, nenjo::TurnEvent::Done { .. }) {
+                            let response = turn_event_to_workflow_step_response(
+                                &ev,
+                                &TaskTurnEventContext {
+                                    execution_run_id,
+                                    task_id: Some(task_id),
+                                    agent: Some(StepAgent {
+                                        agent: agent_slug.clone(),
+                                        agent_name: Some(aname.clone()),
+                                        agent_color: manifest
+                                            .agents
+                                            .iter()
+                                            .find(|a| crate::resource_resolver::stable_resource_id("agent", &a.slug) == agent_id)
+                                            .and_then(|a| a.color.clone()),
+                                    }),
+                                    routine_step: None,
+                                    agent_duration_ms,
+                                    emit_done: true,
+                                    summarize_outputs: false,
+                                },
+                            );
+                            if let Some(response) = response {
+                                let _ = ctx.response_sink.send(response);
+                            }
                         }
                     }
                     Some(HarnessEvent::DomainEntered { .. }) | Some(HarnessEvent::Routine { .. }) => {}
@@ -1401,15 +1425,19 @@ fn send_task_completed<S, W>(
     S: ResponseSender,
     W: TaskWorktreeManager,
 {
-    let _ = ctx.response_sink.send(Response::TaskCompleted {
-        execution_run_id: eid.to_string(),
-        task_id: tid.clone(),
-        success: outcome.success,
-        error: outcome.error.clone(),
-        merge_error: None,
-        total_input_tokens: outcome.total_input_tokens,
-        total_output_tokens: outcome.total_output_tokens,
-    });
+    let Some(execution_run_id) = Uuid::parse_str(eid).ok() else {
+        return;
+    };
+    let task_id = tid.as_deref().and_then(|value| Uuid::parse_str(value).ok());
+    let _ = ctx.response_sink.send(execution_task_completed_response(
+        execution_run_id,
+        task_id,
+        outcome.success,
+        outcome.error.clone(),
+        None,
+        outcome.total_input_tokens,
+        outcome.total_output_tokens,
+    ));
 }
 
 /// Send `TaskCompleted` (failed) to the platform.
@@ -1448,12 +1476,16 @@ fn evict_git_lock(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
     use super::{
-        RoutineStepSessionRecord, routine_step_session_upsert_event, worktree_listing_contains,
+        RoutineStepSessionRecord, remove_active_execution_if_current,
+        routine_step_session_upsert_event, worktree_listing_contains,
     };
+    use dashmap::DashMap;
+    use nenjo_harness::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
     use nenjo_sessions::SessionRuntimeEvent;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     #[test]
@@ -1533,5 +1565,37 @@ branch refs/heads/agent/abcd/other
         );
         assert_eq!(upsert.metadata["step_run_id"], step_run_id.to_string());
         assert_eq!(upsert.metadata["step_slug"], "agent_step");
+    }
+
+    #[test]
+    fn active_execution_remove_requires_current_registry_token() {
+        let executions: ExecutionRegistry = Arc::new(DashMap::new());
+        let task_id = Uuid::new_v4();
+        let execution_run_id = Uuid::new_v4();
+        let current_token = Uuid::new_v4();
+        let stale_token = Uuid::new_v4();
+
+        executions.insert(
+            task_id,
+            ActiveExecution {
+                kind: ExecutionKind::Task,
+                registry_token: current_token,
+                execution_run_id: Some(execution_run_id),
+                cancel: CancellationToken::new(),
+                pause: None,
+                turn_input: None,
+            },
+        );
+
+        assert!(
+            remove_active_execution_if_current(&executions, task_id, stale_token).is_none(),
+            "stale token must not remove an active execution"
+        );
+        assert!(executions.contains_key(&task_id));
+
+        let removed = remove_active_execution_if_current(&executions, task_id, current_token)
+            .expect("current token should remove active execution");
+        assert_eq!(removed.registry_token, current_token);
+        assert!(!executions.contains_key(&task_id));
     }
 }

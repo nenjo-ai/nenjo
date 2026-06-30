@@ -1,5 +1,6 @@
 //! Installed-agent delegation tools.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -194,15 +195,16 @@ where
         };
 
         let project = active_project(&self.instance.prompt.context.current_project);
-        start_delegation_operation(
-            &self.instance,
+        start_delegation_operation(StartDelegationOperation {
+            instance: &self.instance,
             provider,
-            target_agent.name.clone(),
+            target_agent_name: target_agent.name.clone(),
             target_slug,
-            parsed.task,
+            task: parsed.task,
             child_ctx,
             project,
-        )
+            workspace_dir: self.instance.runtime.security.workspace_dir.clone(),
+        })
         .await
     }
 }
@@ -328,18 +330,34 @@ impl Tool for AskDelegationParentTool {
     }
 }
 
-async fn start_delegation_operation<P>(
-    instance: &Arc<AgentInstance<P>>,
+struct StartDelegationOperation<'a, P: ProviderRuntime> {
+    instance: &'a Arc<AgentInstance<P>>,
     provider: P,
     target_agent_name: String,
     target_slug: Slug,
     task: String,
     child_ctx: crate::types::DelegationContext,
     project: Option<ProjectManifest>,
+    workspace_dir: PathBuf,
+}
+
+async fn start_delegation_operation<P>(
+    params: StartDelegationOperation<'_, P>,
 ) -> Result<ToolResult>
 where
     P: ProviderRuntime,
 {
+    let StartDelegationOperation {
+        instance,
+        provider,
+        target_agent_name,
+        target_slug,
+        task,
+        child_ctx,
+        project,
+        workspace_dir,
+    } = params;
+
     debug!(
         caller = instance.name(),
         target = target_slug.as_str(),
@@ -376,6 +394,7 @@ where
             task,
             child_ctx,
             project,
+            workspace_dir,
             child_handle,
             op_handle,
             operation_id: join_operation_id,
@@ -408,6 +427,7 @@ struct DelegationOperation<P: ProviderRuntime> {
     task: String,
     child_ctx: crate::types::DelegationContext,
     project: Option<ProjectManifest>,
+    workspace_dir: PathBuf,
     child_handle: AsyncOpChildHandle,
     op_handle: AsyncOpHandle,
     operation_id: String,
@@ -458,6 +478,7 @@ where
         .agent(&operation.target_slug)
         .await?
         .with_child_delegation_ctx(operation.child_ctx.clone())
+        .with_work_dir(operation.workspace_dir.clone())
         .with_execution_mode(AgentExecutionMode::DelegatedChild);
     if let Some(project) = &operation.project {
         builder = builder.with_project_context(project);

@@ -163,7 +163,7 @@ fn test_manifest() -> Manifest {
                         .into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval:
-                    "Evaluate:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
+                    "Evaluate:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
                         .into(),
                 heartbeat_task: String::new(),
             },

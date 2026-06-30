@@ -8,6 +8,7 @@ use nenjo_events::{Response, StreamEvent};
 use nenjo_secure_envelope::{DecodingError, ReceivedInput, SecureEnvelopeBus};
 use serde_json::json;
 use thiserror::Error;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -107,6 +108,16 @@ fn ack_received_envelope(received: ReceivedEnvelope, message_id: Uuid, context: 
     });
 }
 
+fn log_join_result(task: &'static str, result: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        if error.is_cancelled() {
+            debug!(task, "Worker background task cancelled");
+        } else {
+            error!(task, error = %error, "Worker background task failed");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerEventLoopContext {
     pub org_id: Uuid,
@@ -148,14 +159,18 @@ where
         version: app_version.clone(),
     });
 
-    let restore_ctx = runtime.command_context(Uuid::nil(), system_response_tx.clone());
+    let restore_ctx = runtime.command_context(
+        Uuid::nil(),
+        system_response_tx.clone(),
+        system_response_tx.clone(),
+    );
     runtime.recover_reconcilable_sessions(restore_ctx).await;
 
     let heartbeat_tx = system_response_tx.clone();
     let heartbeat_shutdown = runtime.shutdown_token();
     let heartbeat_caps = capabilities;
     let seen_message_ids = runtime.seen_message_ids();
-    tokio::spawn(async move {
+    let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(45));
         interval.tick().await;
         loop {
@@ -184,6 +199,18 @@ where
                     match msg {
                         Some(routed) => {
                             let response_label = routed.response.to_string();
+                            let response_subject = match routed.target {
+                                ResponseTarget::Actor(actor_user_id) => {
+                                    nenjo_events::response_subject(
+                                        org_id,
+                                        actor_user_id,
+                                        &routed.response,
+                                    )
+                                }
+                                ResponseTarget::System { org_id } => {
+                                    nenjo_events::responses_subject(org_id)
+                                }
+                            };
                             let result = match routed.target {
                                 ResponseTarget::Actor(actor_user_id) => {
                                     response_bus.send_response_for(org_id, actor_user_id, routed.response)
@@ -194,12 +221,34 @@ where
                                 }
                             };
                             if let Err(e) = result {
-                                warn!(error = %e, "Failed to send response");
+                                match routed.target {
+                                    ResponseTarget::Actor(actor_user_id) => {
+                                        warn!(
+                                            %actor_user_id,
+                                            %org_id,
+                                            subject = %response_subject,
+                                            response = %response_label,
+                                            error = %e,
+                                            "Failed to send response"
+                                        );
+                                    }
+                                    ResponseTarget::System { org_id } => {
+                                        warn!(
+                                            %org_id,
+                                            subject = %response_subject,
+                                            response = %response_label,
+                                            error = %e,
+                                            "Failed to send response"
+                                        );
+                                    }
+                                }
                             } else {
                                 match routed.target {
                                     ResponseTarget::Actor(actor_user_id) => {
                                         debug!(
                                             %actor_user_id,
+                                            %org_id,
+                                            subject = %response_subject,
                                             response = %response_label,
                                             "Published worker response"
                                         );
@@ -207,6 +256,7 @@ where
                                     ResponseTarget::System { org_id } => {
                                         debug!(
                                             %org_id,
+                                            subject = %response_subject,
                                             response = %response_label,
                                             "Published worker response"
                                         );
@@ -249,7 +299,25 @@ where
 
     info!("Nenjo harness event loop started");
 
-    while let Some(received) = command_rx.recv().await {
+    let loop_shutdown = runtime.shutdown_token();
+    let mut command_tasks = JoinSet::new();
+
+    loop {
+        let received = tokio::select! {
+            received = command_rx.recv() => received,
+            joined = command_tasks.join_next(), if !command_tasks.is_empty() => {
+                if let Some(result) = joined {
+                    log_join_result("command_handler", result);
+                }
+                continue;
+            }
+            _ = loop_shutdown.cancelled() => break,
+        };
+
+        let Some(received) = received else {
+            break;
+        };
+
         match received {
             ReceivedInput::Command(received) => {
                 let source = received.source().cloned();
@@ -281,9 +349,10 @@ where
                 let ctx = runtime.command_context(
                     actor_user_id,
                     ResponseSender::for_actor(response_tx.clone(), actor_user_id),
+                    system_response_tx.clone(),
                 );
 
-                tokio::spawn(async move {
+                command_tasks.spawn(async move {
                     if let Err(e) = crate::handlers::route_command(command, ctx).await {
                         error!(error = %e, "Error handling command");
                     }
@@ -323,9 +392,15 @@ where
     }
 
     runtime.cancel_active_executions();
+    command_tasks.abort_all();
+    while let Some(result) = command_tasks.join_next().await {
+        log_join_result("command_handler", result);
+    }
+    heartbeat_handle.abort();
+    log_join_result("heartbeat", heartbeat_handle.await);
     drop(response_tx);
-    let _ = response_handle.await;
-    let _ = command_handle.await;
+    log_join_result("response_publisher", response_handle.await);
+    log_join_result("command_receiver", command_handle.await);
 
     Ok(())
 }

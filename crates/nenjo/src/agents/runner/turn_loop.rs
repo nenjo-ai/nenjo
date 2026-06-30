@@ -18,7 +18,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::compaction::{
-    compact_messages_with_summary, truncate, truncate_old_tool_arguments, truncate_str,
+    compact_messages_for_payload, compact_messages_with_summary, estimate_serialized_bytes,
+    estimate_serialized_messages_bytes, truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::types::{ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnOutput};
 use crate::agents::async_ops::{
@@ -584,6 +585,25 @@ where
                 } else {
                     Some(local_tool_specs.as_slice())
                 };
+                let tool_payload_bytes = tools_ref.map(estimate_serialized_bytes).unwrap_or(0);
+                let message_payload_budget = agent
+                    .runtime
+                    .config
+                    .max_model_request_payload_bytes
+                    .saturating_sub(tool_payload_bytes)
+                    .saturating_sub(1024);
+                let payload_bytes_before = estimate_serialized_messages_bytes(&messages);
+                if compact_messages_for_payload(&mut messages, message_payload_budget) {
+                    warn!(
+                        agent = agent_name,
+                        model,
+                        payload_bytes_before,
+                        payload_bytes_after = estimate_serialized_messages_bytes(&messages),
+                        message_payload_budget,
+                        tool_payload_bytes,
+                        "Compacted messages to fit model request payload budget"
+                    );
+                }
 
                 let request = ChatRequest {
                     messages: &messages,
@@ -846,7 +866,7 @@ where
                         );
                     }
 
-                    // Check if any executed tool is terminal (e.g. pass_verdict).
+                    // Check if any executed tool is terminal.
                     // Terminal tools signal that the turn loop should stop immediately
                     // without feeding the tool result back to the LLM.
                     let terminal_result = tool_results.iter().find(|(tc, result)| {

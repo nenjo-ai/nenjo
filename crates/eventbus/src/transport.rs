@@ -128,17 +128,6 @@ pub trait Transport: Send + Sync + 'static {
     async fn subscribe(
         &self,
         subscription: Subscription,
-    ) -> Result<tokio::sync::mpsc::Receiver<Message>, EventBusError> {
-        match subscription {
-            Subscription::Subject(subject) => self.subscribe_subject(&subject).await,
-            Subscription::WorkerCommands { .. } => self.subscribe_subject("work_requests.>").await,
-        }
-    }
-
-    /// Subscribe to one broker subject.
-    async fn subscribe_subject(
-        &self,
-        subject: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<Message>, EventBusError>;
 
     /// The unique instance ID for this worker process.

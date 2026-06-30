@@ -320,6 +320,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_executes_relative_to_workspace_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("worktree");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(workspace.join("marker.txt"), "scoped workspace")
+            .await
+            .unwrap();
+
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            blocked_commands: vec![],
+            workspace_dir: workspace.clone(),
+            ..SecurityPolicy::default()
+        });
+        let tool = ShellTool::new(security, test_runtime());
+
+        let pwd = tool.execute(json!({"command": "pwd"})).await.unwrap();
+        assert!(pwd.success);
+        assert_eq!(
+            std::fs::canonicalize(pwd.output.trim()).unwrap(),
+            std::fs::canonicalize(&workspace).unwrap()
+        );
+
+        let relative_read = tool
+            .execute(json!({"command": "cat marker.txt"}))
+            .await
+            .unwrap();
+        assert!(relative_read.success);
+        assert_eq!(relative_read.output.trim(), "scoped workspace");
+    }
+
+    #[tokio::test]
     async fn shell_blocks_disallowed_command() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         let result = tool.execute(json!({"command": "rm -rf /"})).await.unwrap();

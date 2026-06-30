@@ -5,7 +5,7 @@
 //! - **decompose**: leader splits task → members execute → leader aggregates
 //! - **broadcast**: members independently respond to the same task → leader aggregates
 //! - **round_robin**: members contribute sequentially, each seeing prior outputs → leader aggregates
-//! - **vote**: members cast votes/recommendations → leader tallies and submits final verdict
+//! - **vote**: members cast votes/recommendations → leader tallies and synthesizes
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
@@ -14,9 +14,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::RoutineEvent;
-use super::{
-    apply_session_binding_memory_scope, gate, with_agent_step_tools, with_routine_step_max_turns,
-};
+use super::{apply_session_binding_memory_scope, with_routine_step_max_turns};
 use crate::AgentBuilder;
 use crate::Slug;
 use crate::agents::runner::types::TurnOutput;
@@ -136,6 +134,8 @@ where
             let _ = events_tx.send(RoutineEvent::StepFailed {
                 step_slug: step.slug.clone(),
                 step_run_id,
+                step_name: step.name.clone(),
+                step_type: "council".to_string(),
                 error: error.to_string(),
                 duration_ms: started.elapsed().as_millis() as u64,
             });
@@ -235,13 +235,6 @@ enum CouncilInvocation {
 }
 
 impl CouncilInvocation {
-    fn requires_pass_verdict(&self) -> bool {
-        match self {
-            CouncilInvocation::Chat { .. } => false,
-            CouncilInvocation::Task => true,
-        }
-    }
-
     fn run_for_instruction(
         &self,
         state: &RoutineState,
@@ -329,7 +322,6 @@ struct StreamedTaskParams<'a, P> {
     agent: Slug,
     state: &'a RoutineState,
     step: &'a RoutineStepManifest,
-    invocation: &'a CouncilInvocation,
     task: AgentRun,
     step_run_id: Uuid,
     events_tx: &'a mpsc::UnboundedSender<RoutineEvent>,
@@ -345,7 +337,6 @@ where
         agent,
         state,
         step,
-        invocation,
         task,
         step_run_id,
         events_tx,
@@ -363,46 +354,28 @@ where
     }
     let builder = scope_tools_to_work_dir(builder, state).with_tool_current_session_id(step_run_id);
     let builder = with_routine_step_max_turns(builder, step);
-    let builder = if invocation.requires_pass_verdict() {
-        with_agent_step_tools(builder)
-    } else {
-        builder
-    };
     let runner = builder.build().await?;
 
-    if invocation.requires_pass_verdict() {
-        gate::execute_with_pass_verdict(
-            &runner,
-            task,
-            state.input.project.clone(),
-            step.slug.clone(),
-            step_run_id,
-            events_tx,
-            cancel,
-        )
-        .await
-    } else {
-        let mut handle = runner.run_stream(task).await?;
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    handle.cancel();
-                    anyhow::bail!("routine cancelled");
-                }
-                event = handle.recv() => {
-                    let Some(event) = event else {
-                        break;
-                    };
-                    let _ = events_tx.send(RoutineEvent::AgentEvent {
-                        step_slug: step.slug.clone(),
-                        step_run_id,
-                        event,
-                    });
-                }
+    let mut handle = runner.run_stream(task).await?;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                handle.cancel();
+                anyhow::bail!("routine cancelled");
+            }
+            event = handle.recv() => {
+                let Some(event) = event else {
+                    break;
+                };
+                let _ = events_tx.send(RoutineEvent::AgentEvent {
+                    step_slug: step.slug.clone(),
+                    step_run_id,
+                    event,
+                });
             }
         }
-        handle.output().await
     }
+    handle.output().await
 }
 
 fn member_agents(council: &CouncilManifest) -> Result<Vec<Slug>> {
@@ -447,7 +420,6 @@ where
             agent: assignment.agent.clone(),
             state,
             step,
-            invocation,
             task,
             step_run_id,
             events_tx,
@@ -455,19 +427,6 @@ where
         })
         .await
         {
-            Ok(output) if invocation.requires_pass_verdict() => {
-                let verdict = gate::resolve_pass_verdict(&output.messages)?;
-                member_results.push(StepResult {
-                    task_id: output.task_id.or(state.input.task_id),
-                    passed: verdict.passed,
-                    output: gate::pass_verdict_display_output(&verdict, &output.text),
-                    step_name: format!("member-{}", i + 1),
-                    input_tokens: output.input_tokens,
-                    output_tokens: output.output_tokens,
-                    tool_calls: output.tool_calls,
-                    ..Default::default()
-                })
-            }
             Ok(output) => member_results.push(StepResult {
                 task_id: output.task_id.or(state.input.task_id),
                 passed: true,
@@ -541,20 +500,13 @@ where
         ));
     }
 
-    if invocation.requires_pass_verdict() {
-        prompt.push_str(
-            "\nSynthesize the final result and submit a pass_verdict that reflects the council outcome.",
-        );
-    } else {
-        prompt.push_str("\nSynthesize the final response for the user.");
-    }
+    prompt.push_str("\nSynthesize the final response for the user.");
 
     let aggregate_result = run_streamed_task(StreamedTaskParams {
         provider,
         agent: council.leader_agent.clone(),
         state,
         step,
-        invocation,
         task: attach_location(invocation.run_for_instruction(state, prompt), state),
         step_run_id,
         events_tx,
@@ -568,43 +520,11 @@ where
         + aggregate_result.output_tokens;
     let total_tool_calls =
         member_results.iter().map(|r| r.tool_calls).sum::<u32>() + aggregate_result.tool_calls;
-    if !invocation.requires_pass_verdict() {
-        return Ok(StepResult {
-            task_id: aggregate_result.task_id.or(state.input.task_id),
-            passed: true,
-            output: aggregate_result.text,
-            data: serde_json::json!({
-                "member_results": member_results.iter().map(|r| serde_json::json!({
-                    "step_name": r.step_name,
-                    "passed": r.passed,
-                    "output_preview": if r.output.len() > 200 {
-                        format!("{}...", &r.output[..200])
-                    } else {
-                        r.output.clone()
-                    }
-                })).collect::<Vec<_>>(),
-                "strategy_data": extra_data,
-            }),
-            step_slug: step.slug.clone(),
-            step_name: step.name.clone(),
-            input_tokens: total_input,
-            output_tokens: total_output,
-            tool_calls: total_tool_calls,
-            messages: aggregate_result.messages,
-        });
-    }
-
-    let verdict = gate::resolve_pass_verdict(&aggregate_result.messages)?;
-    let output = gate::pass_verdict_display_output(&verdict, &aggregate_result.text);
-
     Ok(StepResult {
         task_id: aggregate_result.task_id.or(state.input.task_id),
-        passed: verdict.passed,
-        output,
+        passed: member_results.iter().all(|result| result.passed),
+        output: aggregate_result.text,
         data: serde_json::json!({
-            "verdict": if verdict.passed { "pass" } else { "fail" },
-            "reasoning": verdict.reasoning,
-            "output": verdict.output,
             "member_results": member_results.iter().map(|r| serde_json::json!({
                 "step_name": r.step_name,
                 "passed": r.passed,
@@ -654,7 +574,6 @@ where
         agent: leader_agent,
         state,
         step,
-        invocation,
         task: attach_location(
             invocation.run_for_instruction(state, state.initial_input.clone()),
             state,
@@ -670,35 +589,11 @@ where
         "Dynamic council execution complete"
     );
 
-    if !invocation.requires_pass_verdict() {
-        return Ok(StepResult {
-            task_id: output.task_id.or(state.input.task_id),
-            passed: true,
-            output: output.text,
-            data: serde_json::json!({ "strategy": "dynamic" }),
-            step_slug: step.slug.clone(),
-            step_name: step.name.clone(),
-            input_tokens: output.input_tokens,
-            output_tokens: output.output_tokens,
-            tool_calls: output.tool_calls,
-            messages: output.messages,
-        });
-    }
-
-    let verdict = gate::resolve_pass_verdict(&output.messages)?;
-    let step_output = gate::pass_verdict_display_output(&verdict, &output.text);
-    let data = serde_json::json!({
-        "verdict": if verdict.passed { "pass" } else { "fail" },
-        "reasoning": verdict.reasoning,
-        "output": verdict.output,
-        "strategy": "dynamic",
-    });
-
     Ok(StepResult {
         task_id: output.task_id.or(state.input.task_id),
-        passed: verdict.passed,
-        output: step_output,
-        data,
+        passed: true,
+        output: output.text,
+        data: serde_json::json!({ "strategy": "dynamic" }),
         step_slug: step.slug.clone(),
         step_name: step.name.clone(),
         input_tokens: output.input_tokens,
@@ -752,7 +647,6 @@ where
         agent: leader_agent,
         state,
         step,
-        invocation,
         task: attach_location(
             invocation.run_for_instruction(state, decompose_message),
             state,

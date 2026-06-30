@@ -2,13 +2,13 @@
 
 ## Goal
 
-The turn loop keeps chat history within the model context budget while preserving the most useful recent state for the next LLM call.
+The turn loop keeps chat history within the model context budget and the outbound provider request payload budget while preserving the most useful recent state for the next LLM call.
 
 The implementation lives in `crates/nenjo/src/agents/runner/turn_loop.rs`.
 
 ## Chronological Strategy
 
-Compaction runs at the start of each turn-loop iteration after deferred tool-argument truncation and before the next provider chat call.
+Context compaction runs at the start of each turn-loop iteration after deferred tool-argument truncation. Payload compaction runs later, immediately before the next provider chat call, after hook-added context and the visible tool list are known.
 
 ### Pre-step: Deferred Tool Argument Truncation
 
@@ -92,7 +92,24 @@ This phase:
 - keeps at least the system message plus a recent tail
 - removes trailing tool-result messages when their preceding assistant tool-call message is dropped
 
-This is the final fallback when truncation and summarization are not enough.
+This is the final context-budget fallback when truncation and summarization are not enough.
+
+### Payload Guard: Compact Serialized Request Bodies
+
+Some providers and gateways can reject a request because the serialized HTTP body is too large even when the model context estimate is acceptable. OpenRouter reports this as `payload_too_large` / HTTP `413`; this is distinct from `context_length_exceeded`.
+
+Immediately before constructing the provider request, the turn loop estimates serialized message bytes and reserves room for visible tool schemas. If the message payload exceeds `AgentConfig.max_model_request_payload_bytes`, it performs a payload-only compaction pass.
+
+This pass:
+
+- is driven by serialized byte size, not token estimates
+- truncates bulky `tool` result content first, including recent tool results if necessary
+- compacts assistant tool-call arguments next
+- truncates other large non-system messages only after tool content is not enough
+- protects the latest user message until the last resort
+- writes `[payload compacted — ...]` markers so payload compaction is distinguishable from context compaction
+
+The default payload budget is 8 MiB because OpenRouter documents the `413` error category but does not publish a numeric JSON request-body limit.
 
 ## Protected Invariants
 
@@ -102,6 +119,7 @@ Across all phases, the implementation preserves these invariants:
 - the recent protected tail is preserved as much as possible
 - assistant tool-call messages and their following tool results remain grouped
 - synthetic history summaries are represented as plain assistant text
+- payload compaction is only triggered by serialized request size, not by the token heuristic
 - compaction failure never fails the user-facing turn
 
 ## Persistence

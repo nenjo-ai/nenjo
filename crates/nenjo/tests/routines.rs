@@ -14,10 +14,10 @@ use nenjo::manifest::{
     RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
     model_manifest_slug,
 };
-use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
+use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::routines::RoutineEvent;
-use nenjo::routines::gate::PassVerdictTool;
 use nenjo::{CronInput, ProjectLocation, RoutineRun, Slug, TaskInput};
+use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{
     ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
 };
@@ -116,7 +116,7 @@ impl ModelProvider for SequentialResponseMockLlm {
             .get(idx)
             .unwrap_or(self.responses.last().unwrap())
             .clone();
-        Ok(adapt_legacy_verdict_response(resp, &request))
+        Ok(resp)
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -170,6 +170,66 @@ impl ModelProviderFactory for SequentialResponseMockFactory {
     }
 }
 
+struct FallibleSequentialResponseMockLlm {
+    responses: Arc<Vec<Result<ChatResponse, String>>>,
+    call_index: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for FallibleSequentialResponseMockLlm {
+    async fn chat(
+        &self,
+        _request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
+        match self.responses.get(idx).unwrap_or_else(|| {
+            self.responses
+                .last()
+                .expect("fallible sequential mock must have at least one response")
+        }) {
+            Ok(response) => Ok(response.clone()),
+            Err(error) => anyhow::bail!(error.clone()),
+        }
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct FallibleSequentialResponseMockFactory {
+    responses: Arc<Vec<Result<ChatResponse, String>>>,
+    call_index: Arc<AtomicUsize>,
+}
+
+impl FallibleSequentialResponseMockFactory {
+    fn new(responses: Vec<Result<ChatResponse, String>>) -> Self {
+        Self {
+            responses: Arc::new(responses),
+            call_index: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl ModelProviderFactory for FallibleSequentialResponseMockFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(FallibleSequentialResponseMockLlm {
+            responses: self.responses.clone(),
+            call_index: self.call_index.clone(),
+        }))
+    }
+}
+
 struct RecordingToolsMockLlm {
     response: ChatResponse,
     seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
@@ -187,10 +247,7 @@ impl ModelProvider for RecordingToolsMockLlm {
             .lock()
             .unwrap()
             .push(request.tools.map(tool_names).unwrap_or_default());
-        Ok(adapt_legacy_verdict_response(
-            self.response.clone(),
-            &request,
-        ))
+        Ok(self.response.clone())
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -250,10 +307,7 @@ impl ModelProvider for RecordingMessagesMockLlm {
             .lock()
             .unwrap()
             .push(request.messages.to_vec());
-        Ok(adapt_legacy_verdict_response(
-            self.response.clone(),
-            &request,
-        ))
+        Ok(self.response.clone())
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -296,66 +350,97 @@ impl ModelProviderFactory for RecordingMessagesMockFactory {
     }
 }
 
-fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
-    tools.iter().map(|tool| tool.name.clone()).collect()
+struct ProgressTool;
+
+#[async_trait::async_trait]
+impl Tool for ProgressTool {
+    fn name(&self) -> &str {
+        "progress_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Records deterministic test progress."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Write
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
+        Ok(ToolResult {
+            success: true,
+            output: "progress recorded".into(),
+            error: None,
+        })
+    }
 }
 
-fn adapt_legacy_verdict_response(
-    mut response: ChatResponse,
-    request: &ChatRequest<'_>,
-) -> ChatResponse {
-    let Some(tools) = request.tools else {
-        return response;
-    };
-    let Some(route_tool) = tools.iter().find(|tool| tool.name == "route_next_steps") else {
-        return response;
-    };
-    if tools.iter().any(|tool| tool.name == "pass_verdict") {
-        return response;
+struct ProgressToolFactory;
+
+#[async_trait::async_trait]
+impl ToolFactory for ProgressToolFactory {
+    async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(ProgressTool)]
     }
+}
 
-    let targets = route_tool.parameters["properties"]["next_steps"]["items"]["properties"]
-        ["target_step"]["enum"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-
-    for call in &mut response.tool_calls {
-        if call.name != "pass_verdict" {
-            continue;
-        }
-        let mut args = serde_json::from_str::<serde_json::Value>(&call.arguments)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let output = args
-            .get("output")
-            .cloned()
-            .or_else(|| response.text.clone().map(serde_json::Value::String))
-            .unwrap_or_else(|| serde_json::json!(""));
-        args["output"] = output;
-        if args.get("verdict").and_then(|value| value.as_str()) == Some("pass") {
-            args["next_steps"] = serde_json::Value::Array(
-                targets
-                    .iter()
-                    .filter_map(|target| target.as_str())
-                    .map(|target| {
-                        serde_json::json!({
-                            "target_step": target,
-                            "task": format!("Continue to {target}"),
-                        })
-                    })
-                    .collect(),
-            );
-        }
-        call.name = "route_next_steps".into();
-        call.arguments = args.to_string();
-    }
-
-    response
+fn tool_names(tools: &[nenjo::ToolSpec]) -> Vec<String> {
+    tools.iter().map(|tool| tool.name.clone()).collect()
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn default_handoff_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["work"],
+        "properties": {
+            "work": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn implicit_done_target() -> String {
+    Slug::derive("__done").to_string()
+}
+
+fn ensure_routable_edge_handoff_schemas(routine: &mut RoutineManifest) {
+    let step_types = routine
+        .steps
+        .iter()
+        .map(|step| (step.slug.clone(), step.step_type))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for edge in &mut routine.edges {
+        if !matches!(
+            step_types.get(&edge.source_step),
+            Some(RoutineStepType::Agent | RoutineStepType::Gate)
+        ) {
+            continue;
+        }
+        if !edge.metadata.is_object() {
+            edge.metadata = serde_json::json!({});
+        }
+        let object = edge
+            .metadata
+            .as_object_mut()
+            .expect("metadata was normalized to an object");
+        object
+            .entry("handoff_schema".to_string())
+            .or_insert_with(default_handoff_schema);
+    }
+}
 
 fn test_task(_project_id: Uuid, title: &str, desc: &str) -> TaskInput {
     TaskInput::new(title, desc)
@@ -388,7 +473,7 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
                 task_execution: "Execute: {{ task.title }}\n{{ task.description }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval:
-                    "Evaluate:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
+                    "Evaluate:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
                         .into(),
                 heartbeat_task: String::new(),
             },
@@ -423,14 +508,10 @@ fn project() -> ProjectManifest {
     }
 }
 
-fn verdict_response(text: &str, verdict: &str, reasoning: &str) -> ChatResponse {
+fn plain_response(text: &str) -> ChatResponse {
     ChatResponse {
         text: Some(text.into()),
-        tool_calls: vec![ToolCall {
-            id: format!("call_{verdict}"),
-            name: "pass_verdict".into(),
-            arguments: format!(r#"{{"verdict":"{}","reasoning":"{}"}}"#, verdict, reasoning),
-        }],
+        tool_calls: vec![],
         provider_tool_calls: vec![],
         usage: TokenUsage {
             input_tokens: 10,
@@ -510,6 +591,8 @@ fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
         }
     }
 
+    ensure_routable_edge_handoff_schemas(&mut routine);
+
     routine
 }
 
@@ -524,7 +607,7 @@ fn route_response(
         "reasoning": reasoning,
         "output": text,
     });
-    if verdict == "pass" {
+    if !next_steps.is_null() {
         arguments["next_steps"] = next_steps;
     }
 
@@ -534,6 +617,22 @@ fn route_response(
             id: format!("call_route_{verdict}"),
             name: "route_next_steps".into(),
             arguments: arguments.to_string(),
+        }],
+        provider_tool_calls: vec![],
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        },
+    }
+}
+
+fn progress_tool_response(text: &str) -> ChatResponse {
+    ChatResponse {
+        text: Some(text.into()),
+        tool_calls: vec![ToolCall {
+            id: "call_progress".into(),
+            name: "progress_tool".into(),
+            arguments: "{}".into(),
         }],
         provider_tool_calls: vec![],
         usage: TokenUsage {
@@ -584,10 +683,11 @@ async fn single_agent_step() {
 
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SequentialResponseMockFactory::new(vec![verdict_response(
+        .with_model_factory(SequentialResponseMockFactory::new(vec![route_response(
             "Implementation complete.",
             "pass",
             "Implementation is complete",
+            serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
         )]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -642,10 +742,11 @@ async fn routine_agent_request_includes_route_next_steps_tool() {
         routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
-    let factory = RecordingToolsMockFactory::new(verdict_response(
+    let factory = RecordingToolsMockFactory::new(route_response(
         "Implementation complete.",
         "pass",
         "Implementation is complete",
+        serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
     ));
     let seen_tools = factory.seen_tools();
 
@@ -683,13 +784,6 @@ async fn routine_agent_request_includes_route_next_steps_tool() {
             .first()
             .is_some_and(|tools| tools.iter().any(|name| name == "route_next_steps")),
         "route_next_steps should be sent in the routine model request. Tool requests: {:?}",
-        *seen_tools
-    );
-    assert!(
-        seen_tools
-            .first()
-            .is_some_and(|tools| !tools.iter().any(|name| name == "pass_verdict")),
-        "pass_verdict should not be sent to agent routine steps. Tool requests: {:?}",
         *seen_tools
     );
 }
@@ -735,10 +829,11 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
-    let factory = RecordingMessagesMockFactory::new(verdict_response(
+    let factory = RecordingMessagesMockFactory::new(route_response(
         "Implementation complete.",
         "pass",
         "Implementation is complete",
+        serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
     ));
     let seen_messages = factory.seen_messages();
 
@@ -765,6 +860,92 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
     assert!(
         messages_contain(&seen_messages, instructions),
         "agent step instructions should render through routine.step.instructions. Messages: {seen_messages:#?}"
+    );
+}
+
+#[tokio::test]
+async fn routine_agent_step_renders_project_context() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+
+    let mut coder = agent(agent_id, "coder", model_id);
+    coder.prompt_config.templates.task_execution =
+        "Project context:\n{{ project.context }}\n\nProject XML:\n{{ project }}".into();
+
+    let routine = RoutineManifest {
+        name: "agent-project-context".into(),
+        slug: Slug::derive("agent-project-context"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("agent-project-context"),
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council: None,
+            agent: Some(Slug::derive("coder")),
+            config: serde_json::json!({}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let mut project = project();
+    project.settings = serde_json::json!({
+        "context": "Use {{ project.name }} conventions."
+    });
+    let project_slug = project.slug.clone();
+
+    let manifest = Manifest {
+        agents: vec![coder],
+        models: vec![model(model_id)],
+        projects: vec![project],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+    let factory = RecordingMessagesMockFactory::new(route_response(
+        "Implementation complete.",
+        "pass",
+        "Implementation is complete",
+        serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
+    ));
+    let seen_messages = factory.seen_messages();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    provider
+        .routine("agent-project-context")
+        .unwrap()
+        .run(
+            test_task(
+                Uuid::new_v4(),
+                "Add dark mode",
+                "Implement dark mode support",
+            )
+            .with_project(project_slug),
+        )
+        .await
+        .unwrap();
+
+    let seen_messages = seen_messages.lock().unwrap();
+    assert!(
+        messages_contain(&seen_messages, "Use test-project conventions."),
+        "agent step should render project.context for project-backed routine tasks. Messages: {seen_messages:#?}"
+    );
+    assert!(
+        messages_contain(
+            &seen_messages,
+            "<context>Use test-project conventions.</context>"
+        ),
+        "agent step should include rendered project context in project XML. Messages: {seen_messages:#?}"
     );
 }
 
@@ -804,10 +985,11 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
         routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
-    let factory = RecordingMessagesMockFactory::new(verdict_response(
+    let factory = RecordingMessagesMockFactory::new(route_response(
         "Implementation complete.",
         "pass",
         "Implementation is complete",
+        serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
     ));
     let seen_messages = factory.seen_messages();
 
@@ -881,10 +1063,11 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
         routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
-    let factory = RecordingMessagesMockFactory::new(verdict_response(
+    let factory = RecordingMessagesMockFactory::new(route_response(
         "Implementation complete.",
         "pass",
         "Implementation is complete",
+        serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
     ));
     let seen_messages = factory.seen_messages();
 
@@ -928,7 +1111,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
 
     let mut reviewer = agent(agent_id, "reviewer", model_id);
     reviewer.prompt_config.templates.gate_eval =
-        "Gate instructions:\n{{ routine.step.instructions }}\n\nPrevious output:\n{{ gate.previous_output }}"
+        "Gate instructions:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
             .into();
 
     let routine = RoutineManifest {
@@ -959,10 +1142,14 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         routines: vec![canonical_routine(routine)],
         ..Default::default()
     };
-    let factory = RecordingMessagesMockFactory::new(verdict_response(
+    let factory = RecordingMessagesMockFactory::new(route_response(
         "Gate passed.",
         "pass",
         "Criteria are satisfied",
+        serde_json::json!([{
+            "target_step": implicit_done_target(),
+            "handoff": {"work": "gate accepted the prior result"}
+        }]),
     ));
     let seen_messages = factory.seen_messages();
 
@@ -1002,14 +1189,14 @@ async fn single_agent_step_retries_until_route_next_steps() {
     let _routine_id = Uuid::new_v4();
 
     let routine = RoutineManifest {
-        name: "retry-for-pass-verdict".into(),
-        slug: Slug::derive("retry-for-pass-verdict"),
+        name: "retry-for-route-next-steps".into(),
+        slug: Slug::derive("retry-for-route-next-steps"),
         description: None,
         trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
-            routine: Slug::derive("retry-for-pass-verdict"),
+            routine: Slug::derive("retry-for-route-next-steps"),
             name: "implement".into(),
             step_type: RoutineStepType::Agent,
             council: None,
@@ -1041,10 +1228,11 @@ async fn single_agent_step_retries_until_route_next_steps() {
                 output_tokens: 5,
             },
         },
-        verdict_response(
+        route_response(
             "Implementation complete.",
             "pass",
             "Implementation is complete",
+            serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
         ),
     ]);
     let seen_messages = factory.seen_messages().unwrap();
@@ -1059,7 +1247,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
 
     let task = test_task(Uuid::new_v4(), "Add auth", "Implement JWT authentication");
     let result = provider
-        .routine("retry-for-pass-verdict")
+        .routine("retry-for-route-next-steps")
         .unwrap()
         .run(task)
         .await
@@ -1081,9 +1269,107 @@ async fn single_agent_step_retries_until_route_next_steps() {
         "retry turn should instruct the agent to call route_next_steps. Messages: {retry_messages:#?}"
     );
     assert!(
+        messages_contain(
+            std::slice::from_ref(retry_messages),
+            "If work remains, continue executing the step using the available tools"
+        ),
+        "retry turn should allow unfinished work to continue. Messages: {retry_messages:#?}"
+    );
+    assert!(
         !messages_contain(std::slice::from_ref(retry_messages), "CHAT TEMPLATE"),
         "retry turn should not render the chat template. Messages: {retry_messages:#?}"
     );
+}
+
+#[tokio::test]
+async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let step_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "route-progress-reset".into(),
+        slug: Slug::derive("route-progress-reset"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![RoutineStepManifest {
+            slug: Slug::derive(step_id.to_string()),
+            routine: Slug::derive("route-progress-reset"),
+            name: "implement".into(),
+            step_type: RoutineStepType::Agent,
+            council: None,
+            agent: Some(Slug::derive("coder")),
+            config: serde_json::json!({}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            ChatResponse {
+                text: Some("I need to inspect the project first.".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            },
+            progress_tool_response("Writing the implementation now."),
+            ChatResponse {
+                text: Some("Progress recorded; I still need to finalize.".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            },
+            ChatResponse {
+                text: Some("I need one more verification pass.".into()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            },
+            route_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation is complete",
+                serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
+            ),
+        ]))
+        .with_tool_factory(ProgressToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let result = provider
+        .routine("route-progress-reset")
+        .unwrap()
+        .run(test_task(
+            Uuid::new_v4(),
+            "Add auth",
+            "Implement JWT authentication",
+        ))
+        .await
+        .unwrap();
+
+    assert!(result.passed);
+    assert_eq!(result.output, "Implementation complete.");
 }
 
 #[tokio::test]
@@ -1193,7 +1479,7 @@ async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_hande
             "pass",
             "fan out",
             serde_json::json!([
-                {"target_step": "left", "handoff": "left only"}
+                {"target_step": "left", "handoff": {"work": "left only"}}
             ]),
         ),
         route_response(
@@ -1201,21 +1487,21 @@ async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_hande
             "pass",
             "fan out",
             serde_json::json!([
-                {"target_step": "left", "handoff": "left handoff"},
-                {"target_step": "right", "handoff": "right handoff"}
+                {"target_step": "left", "handoff": {"work": "left handoff"}},
+                {"target_step": "right", "handoff": {"work": "right handoff"}}
             ]),
         ),
         route_response(
             "branch complete",
             "pass",
             "branch done",
-            serde_json::json!([{"target_step": "done", "handoff": "finish"}]),
+            serde_json::json!([{"target_step": "done", "handoff": {"work": "finish"}}]),
         ),
         route_response(
             "branch complete",
             "pass",
             "branch done",
-            serde_json::json!([{"target_step": "done", "handoff": "finish"}]),
+            serde_json::json!([{"target_step": "done", "handoff": {"work": "finish"}}]),
         ),
     ]);
     let seen_messages = factory.seen_messages().unwrap();
@@ -1295,10 +1581,11 @@ async fn stream_events_single_step() {
 
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SequentialResponseMockFactory::new(vec![verdict_response(
+        .with_model_factory(SequentialResponseMockFactory::new(vec![route_response(
             "Streamed output.",
             "pass",
             "Work completed successfully",
+            serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
         )]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -1408,8 +1695,21 @@ async fn two_step_chain() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response("Step done.", "pass", "Implementation step passed"),
-            verdict_response("Step done.", "pass", "Review step passed"),
+            route_response(
+                "Step done.",
+                "pass",
+                "Implementation step passed",
+                serde_json::json!([{
+                    "target_step": step2_id.to_string(),
+                    "handoff": {"work": "review this"}
+                }]),
+            ),
+            route_response(
+                "Step done.",
+                "pass",
+                "Review step passed",
+                serde_json::json!([{"target_step": implicit_done_target(), "handoff": {"work": "finish"}}]),
+            ),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -1497,26 +1797,17 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
         ..Default::default()
     };
 
-    let fail_verdict_response = ChatResponse {
-        text: Some("The implementation is not acceptable.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_fail_verdict".into(),
-            name: "pass_verdict".into(),
-            arguments:
-                r#"{"verdict":"fail","reasoning":"Critical acceptance criteria were missed"}"#
-                    .into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
+    let fail_route_response = route_response(
+        "The implementation is not acceptable.",
+        "fail",
+        "Critical acceptance criteria were missed",
+        serde_json::Value::Null,
+    );
 
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            fail_verdict_response,
+            fail_route_response,
             ChatResponse {
                 text: Some("This should never run.".into()),
                 tool_calls: vec![],
@@ -1639,12 +1930,24 @@ async fn gate_step_pass() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
+            route_response(
                 "Implementation complete.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this implementation"}
+                }]),
             ),
-            verdict_response("Code looks good.", "pass", "Criteria were satisfied"),
+            route_response(
+                "Code looks good.",
+                "pass",
+                "Criteria were satisfied",
+                serde_json::json!([{
+                    "target_step": terminal_id.to_string(),
+                    "handoff": {"work": "finish the routine"}
+                }]),
+            ),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -1739,12 +2042,24 @@ async fn gate_always_edge_is_invalid() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
+            route_response(
                 "Implementation complete.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this implementation"}
+                }]),
             ),
-            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
+            route_response(
+                "Needs changes.",
+                "fail",
+                "Criteria were not satisfied",
+                serde_json::json!([{
+                    "target_step": step1_id.to_string(),
+                    "handoff": {"work": "revise the implementation"}
+                }]),
+            ),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -1845,18 +2160,42 @@ async fn gate_on_fail_routes_back_before_completion() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
+            route_response(
                 "Implementation complete.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this implementation"}
+                }]),
             ),
-            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
-            verdict_response(
+            route_response(
+                "Needs changes.",
+                "fail",
+                "Criteria were not satisfied",
+                serde_json::json!([{
+                    "target_step": step1_id.to_string(),
+                    "handoff": {"work": "revise the implementation"}
+                }]),
+            ),
+            route_response(
                 "Implementation revised.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this revision"}
+                }]),
             ),
-            verdict_response("Looks good.", "pass", "Criteria were satisfied"),
+            route_response(
+                "Looks good.",
+                "pass",
+                "Criteria were satisfied",
+                serde_json::json!([{
+                    "target_step": terminal_id.to_string(),
+                    "handoff": {"work": "finish the routine"}
+                }]),
+            ),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -1974,21 +2313,41 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
+            route_response(
                 "Implementation complete.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this implementation"}
+                }]),
             ),
-            verdict_response("Needs changes.", "fail", "Criteria were not satisfied"),
-            verdict_response(
+            route_response(
+                "Needs changes.",
+                "fail",
+                "Criteria were not satisfied",
+                serde_json::json!([{
+                    "target_step": step1_id.to_string(),
+                    "handoff": {"work": "revise the implementation"}
+                }]),
+            ),
+            route_response(
                 "Implementation revised.",
                 "pass",
                 "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "verify this revision"}
+                }]),
             ),
-            verdict_response(
+            route_response(
                 "Still needs changes.",
                 "fail",
                 "Criteria were not satisfied",
+                serde_json::json!([{
+                    "target_step": step1_id.to_string(),
+                    "handoff": {"work": "revise the implementation again"}
+                }]),
             ),
         ]))
         .with_tool_factory(NoopToolFactory)
@@ -2012,6 +2371,146 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         result.output
     );
     assert_eq!(result.data["reason"], "retry_exhausted");
+}
+
+#[tokio::test]
+async fn gate_execution_error_does_not_activate_on_fail_route() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let implement_id = Uuid::new_v4();
+    let gate_id = Uuid::new_v4();
+    let done_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "gate-provider-error-stops".into(),
+        slug: Slug::derive("gate-provider-error-stops"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive(implement_id.to_string()),
+                routine: Slug::derive("gate-provider-error-stops"),
+                name: "implement".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("coder")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive(gate_id.to_string()),
+                routine: Slug::derive("gate-provider-error-stops"),
+                name: "review".into(),
+                step_type: RoutineStepType::Gate,
+                council: None,
+                agent: Some(Slug::derive("coder")),
+                config: serde_json::json!({ "instructions": "Review implementation quality." }),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive(done_id.to_string()),
+                routine: Slug::derive("gate-provider-error-stops"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("gate-provider-error-stops"),
+                source_step: Slug::derive(implement_id.to_string()),
+                target_step: Slug::derive(gate_id.to_string()),
+                condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("gate-provider-error-stops"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(implement_id.to_string()),
+                condition: RoutineEdgeCondition::OnFail,
+                metadata: serde_json::json!({}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("gate-provider-error-stops"),
+                source_step: Slug::derive(gate_id.to_string()),
+                target_step: Slug::derive(done_id.to_string()),
+                condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "coder", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let provider_error = "All providers/models failed. Attempts:\nopenrouter/minimax/minimax-m2.7 streaming attempt 1/3: Provider returned error";
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(FallibleSequentialResponseMockFactory::new(vec![
+            Ok(route_response(
+                "Implementation complete.",
+                "pass",
+                "Implementation succeeded",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "review this implementation"}
+                }]),
+            )),
+            Err(provider_error.into()),
+            Ok(route_response(
+                "This should not run.",
+                "pass",
+                "Unexpected retry",
+                serde_json::json!([{
+                    "target_step": gate_id.to_string(),
+                    "handoff": {"work": "unexpected"}
+                }]),
+            )),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("gate-provider-error-stops")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Build feature"))
+        .await
+        .unwrap();
+
+    let mut step_names = Vec::new();
+    let mut saw_gate_step_failed = false;
+    while let Some(event) = handle.recv().await {
+        match event {
+            RoutineEvent::StepStarted { step_name, .. } => step_names.push(step_name),
+            RoutineEvent::StepFailed {
+                step_name, error, ..
+            } if step_name == "review" && error.contains("All providers/models failed") => {
+                saw_gate_step_failed = true;
+            }
+            _ => {}
+        }
+    }
+
+    let result = handle.output().await.unwrap();
+
+    assert_eq!(step_names, vec!["implement", "review"]);
+    assert!(saw_gate_step_failed);
+    assert!(!result.passed);
+    assert_eq!(result.step_slug, Slug::derive(gate_id.to_string()));
+    assert_eq!(result.step_name, "review");
+    assert!(result.output.contains("All providers/models failed"));
+    assert_eq!(result.data["reason"], "execution_error");
 }
 
 /// Routine not found → error.
@@ -2133,9 +2632,9 @@ async fn council_decompose() {
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response("1. Do the thing", "pass", "Decomposition is complete"),
-            verdict_response("Did the thing", "pass", "Assignment is complete"),
-            verdict_response("Council synthesis complete.", "pass", "Council agrees"),
+            plain_response("1. Do the thing"),
+            plain_response("Did the thing"),
+            plain_response("Council synthesis complete."),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -2210,34 +2709,12 @@ async fn council_broadcast() {
         ..Default::default()
     };
 
-    let leader_response = ChatResponse {
-        text: Some("Broadcast consensus complete.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_broadcast".into(),
-            name: "pass_verdict".into(),
-            arguments: r#"{"verdict":"pass","reasoning":"Broadcast consensus reached"}"#.into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
-                "Member A independent assessment",
-                "pass",
-                "Assessment complete",
-            ),
-            verdict_response(
-                "Member B independent assessment",
-                "pass",
-                "Assessment complete",
-            ),
-            leader_response,
+            plain_response("Member A independent assessment"),
+            plain_response("Member B independent assessment"),
+            plain_response("Broadcast consensus complete."),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -2312,30 +2789,12 @@ async fn council_round_robin() {
         ..Default::default()
     };
 
-    let leader_response = ChatResponse {
-        text: Some("Round robin synthesis complete.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_round_robin".into(),
-            name: "pass_verdict".into(),
-            arguments: r#"{"verdict":"pass","reasoning":"Round robin sequence converged"}"#.into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response("Contribution one", "pass", "First contribution complete"),
-            verdict_response(
-                "Contribution two building on prior context",
-                "pass",
-                "Second contribution complete",
-            ),
-            leader_response,
+            plain_response("Contribution one"),
+            plain_response("Contribution two building on prior context"),
+            plain_response("Round robin synthesis complete."),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -2410,34 +2869,12 @@ async fn council_vote() {
         ..Default::default()
     };
 
-    let leader_response = ChatResponse {
-        text: Some("Vote tallied and accepted.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_vote".into(),
-            name: "pass_verdict".into(),
-            arguments: r#"{"verdict":"pass","reasoning":"Majority voted to proceed"}"#.into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
-
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(SequentialResponseMockFactory::new(vec![
-            verdict_response(
-                "Vote: pass. Reason: solution is sound.",
-                "pass",
-                "Vote cast in favor",
-            ),
-            verdict_response(
-                "Vote: pass. Reason: acceptable tradeoffs.",
-                "pass",
-                "Vote cast in favor",
-            ),
-            leader_response,
+            plain_response("Vote: pass. Reason: solution is sound."),
+            plain_response("Vote: pass. Reason: acceptable tradeoffs."),
+            plain_response("Vote tallied and accepted."),
         ]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -2491,24 +2928,20 @@ async fn scheduled_cron_routine_execution() {
         ..Default::default()
     };
 
-    // Mock returns a pass_verdict tool call for the gate step. The cron
+    // Mock returns a route_next_steps tool call for the gate step. The cron
     // wrapper should complete this scheduled firing after the DAG run.
-    let verdict_response = ChatResponse {
-        text: Some("Evaluation complete.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_1".into(),
-            name: "pass_verdict".into(),
-            arguments: r#"{"verdict": "pass", "reasoning": "All checks passed"}"#.into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
+    let route_response = route_response(
+        "Evaluation complete.",
+        "pass",
+        "All checks passed",
+        serde_json::json!([{
+            "target_step": implicit_done_target(),
+            "handoff": {"work": "record healthy status"}
+        }]),
+    );
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SequentialResponseMockFactory::new(vec![verdict_response]))
+        .with_model_factory(SequentialResponseMockFactory::new(vec![route_response]))
         .with_tool_factory(NoopToolFactory)
         .build()
         .await
@@ -2544,7 +2977,10 @@ async fn scheduled_cron_routine_execution() {
     assert_eq!(cycles_completed, 1, "should have completed 1 cron cycle");
 
     let result = handle.output().await.unwrap();
-    assert!(result.passed, "cron routine should pass with pass_verdict");
+    assert!(
+        result.passed,
+        "cron routine should pass with route_next_steps"
+    );
     assert_eq!(
         result.data.get("verdict").and_then(|v| v.as_str()),
         Some("pass"),
@@ -2552,9 +2988,9 @@ async fn scheduled_cron_routine_execution() {
     );
 }
 
-/// Cron execution: agent pass_verdict routes to following terminal step.
+/// Cron execution: agent route_next_steps routes to following terminal step.
 #[tokio::test]
-async fn cron_agent_pass_verdict_continues_to_terminal_step() {
+async fn cron_agent_route_next_steps_continues_to_terminal_step() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let agent_step_id = Uuid::new_v4();
@@ -2606,24 +3042,18 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
         ..Default::default()
     };
 
-    let verdict_response = ChatResponse {
-        text: Some("Inspection complete.".into()),
-        tool_calls: vec![ToolCall {
-            id: "call_pass_verdict".into(),
-            name: "pass_verdict".into(),
-            arguments:
-                r#"{"verdict":"pass","reasoning":"Workspace inspected","output":"Found files"}"#
-                    .into(),
-        }],
-        provider_tool_calls: vec![],
-        usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        },
-    };
+    let route_response = route_response(
+        "Found files",
+        "pass",
+        "Workspace inspected",
+        serde_json::json!([{
+            "target_step": terminal_step_id.to_string(),
+            "handoff": {"work": "finish"}
+        }]),
+    );
     let provider = Provider::builder()
         .with_manifest(manifest)
-        .with_model_factory(SequentialResponseMockFactory::new(vec![verdict_response]))
+        .with_model_factory(SequentialResponseMockFactory::new(vec![route_response]))
         .with_tool_factory(NoopToolFactory)
         .build()
         .await
@@ -2662,7 +3092,7 @@ async fn cron_agent_pass_verdict_continues_to_terminal_step() {
     assert_eq!(
         step_names,
         vec!["inspect", "done"],
-        "pass verdict should allow the next routine step to run"
+        "route_next_steps should allow the next routine step to run"
     );
 
     let result = handle.output().await.unwrap();
@@ -2748,7 +3178,7 @@ async fn cron_cancellation() {
 }
 
 #[tokio::test]
-async fn agent_step_receives_route_next_steps_not_pass_verdict() {
+async fn agent_step_receives_route_next_steps_tool() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
 
@@ -2804,7 +3234,7 @@ async fn agent_step_receives_route_next_steps_not_pass_verdict() {
         "work complete",
         "pass",
         "ready",
-        serde_json::json!([{"target_step": "done", "task": "finish"}]),
+        serde_json::json!([{"target_step": "done", "handoff": {"work": "finish"}}]),
     ));
     let seen_tools = factory.seen_tools();
 
@@ -2826,7 +3256,72 @@ async fn agent_step_receives_route_next_steps_not_pass_verdict() {
     let seen_tools = seen_tools.lock().unwrap();
     let first_tools = seen_tools.first().expect("model should receive tool specs");
     assert!(first_tools.iter().any(|name| name == "route_next_steps"));
-    assert!(!first_tools.iter().any(|name| name == "pass_verdict"));
+}
+
+#[tokio::test]
+async fn gate_step_receives_route_next_steps_tool() {
+    let model_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "gate-route-tool-check".into(),
+        slug: Slug::derive("gate-route-tool-check"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("review")],
+            cron_task: None,
+        },
+        steps: vec![RoutineStepManifest {
+            slug: Slug::derive("review"),
+            routine: Slug::derive("gate-route-tool-check"),
+            name: "review".into(),
+            step_type: RoutineStepType::Gate,
+            council: None,
+            agent: Some(Slug::derive("reviewer")),
+            config: serde_json::json!({"instructions": "Accept completed work."}),
+            order_index: 0,
+        }],
+        edges: vec![],
+    };
+
+    let manifest = Manifest {
+        agents: vec![agent(agent_id, "reviewer", model_id)],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+    let factory = RecordingToolsMockFactory::new(route_response(
+        "accepted",
+        "pass",
+        "meets criteria",
+        serde_json::json!([{
+            "target_step": implicit_done_target(),
+            "handoff": {"work": "finish"}
+        }]),
+    ));
+    let seen_tools = factory.seen_tools();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(factory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    provider
+        .routine("gate-route-tool-check")
+        .unwrap()
+        .run(test_task(Uuid::new_v4(), "Task", "Review work"))
+        .await
+        .unwrap();
+
+    let seen_tools = seen_tools.lock().unwrap();
+    let first_tools = seen_tools.first().expect("model should receive tool specs");
+    assert!(first_tools.iter().any(|name| name == "route_next_steps"));
 }
 
 #[tokio::test]
@@ -2940,21 +3435,21 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
                 "pass",
                 "fan out",
                 serde_json::json!([
-                    {"target_step": "left", "task": "left task"},
-                    {"target_step": "right", "task": "right task"}
+                    {"target_step": "left", "handoff": {"work": "left task"}},
+                    {"target_step": "right", "handoff": {"work": "right task"}}
                 ]),
             ),
             route_response(
                 "branch complete",
                 "pass",
                 "branch done",
-                serde_json::json!([{"target_step": "done", "task": "finish"}]),
+                serde_json::json!([{"target_step": "done", "handoff": {"work": "finish"}}]),
             ),
             route_response(
                 "branch complete",
                 "pass",
                 "branch done",
-                serde_json::json!([{"target_step": "done", "task": "finish"}]),
+                serde_json::json!([{"target_step": "done", "handoff": {"work": "finish"}}]),
             ),
         ]))
         .with_tool_factory(NoopToolFactory)
@@ -3075,11 +3570,15 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
         ],
     };
 
+    let mut synth_agent = agent(synth_agent_id, "synth-agent", model_id);
+    synth_agent.prompt_config.templates.task_execution =
+        "{{ routine }}\n\nExecute: {{ task.title }}\n{{ task.description }}".into();
+
     let manifest = Manifest {
         agents: vec![
             agent(left_agent_id, "left-agent", model_id),
             agent(right_agent_id, "right-agent", model_id),
-            agent(synth_agent_id, "synth-agent", model_id),
+            synth_agent,
         ],
         models: vec![model(model_id)],
         projects: vec![project()],
@@ -3094,7 +3593,7 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
             "left ready",
             serde_json::json!([{
                 "target_step": "synthesize",
-                "handoff": "LEFT_HANDOFF_CONTENT",
+                "handoff": {"work": "LEFT_HANDOFF_CONTENT"},
                 "summary": "left handoff"
             }]),
         ),
@@ -3104,7 +3603,7 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
             "right ready",
             serde_json::json!([{
                 "target_step": "synthesize",
-                "handoff": "RIGHT_HANDOFF_CONTENT",
+                "handoff": {"work": "RIGHT_HANDOFF_CONTENT"},
                 "summary": "right handoff"
             }]),
         ),
@@ -3112,7 +3611,7 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
             "synthesis complete",
             "pass",
             "done",
-            serde_json::json!([{"target_step": "done", "handoff": "final"}]),
+            serde_json::json!([{"target_step": "done", "handoff": {"work": "final"}}]),
         ),
     ]);
     let seen_messages = factory.seen_messages().unwrap();
@@ -3166,13 +3665,13 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
 
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
-        messages_contain(&seen_messages, "Routine handoffs:"),
-        "joined agent should receive routine handoffs. Messages: {seen_messages:#?}"
+        messages_contain(&seen_messages, "<handoffs>"),
+        "joined agent should receive routine.handoffs. Messages: {seen_messages:#?}"
     );
     assert!(
-        messages_contain(&seen_messages, "From step `left`")
-            && messages_contain(&seen_messages, "From step `right`"),
-        "joined agent should receive one handoff section from each upstream step. Messages: {seen_messages:#?}"
+        messages_contain(&seen_messages, "source_step=\"left\"")
+            && messages_contain(&seen_messages, "source_step=\"right\""),
+        "joined agent should receive one structured handoff from each upstream step. Messages: {seen_messages:#?}"
     );
     assert!(
         messages_contain(&seen_messages, "LEFT_HANDOFF_CONTENT")
@@ -3180,15 +3679,163 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
         "joined agent should receive both upstream handoffs. Messages: {seen_messages:#?}"
     );
     assert!(
-        !messages_contain(&seen_messages, "&lt;routine_handoffs&gt;")
-            && !messages_contain(&seen_messages, "<routine_handoffs>"),
-        "joined agent should not receive handoffs as escaped or nested XML. Messages: {seen_messages:#?}"
+        !messages_contain(&seen_messages, "&lt;handoffs&gt;"),
+        "joined agent should not receive handoffs as escaped XML. Messages: {seen_messages:#?}"
     );
     assert!(
         !messages_contain(&seen_messages, "Hand off left evidence only.")
             && !messages_contain(&seen_messages, "Hand off right evidence only."),
-        "joined agent should receive handoff content, not source-agent handoff instructions. Messages: {seen_messages:#?}"
+        "joined agent should receive handoff content, not source-step handoff instructions. Messages: {seen_messages:#?}"
     );
+}
+
+#[tokio::test]
+async fn gate_on_fail_retry_edge_does_not_block_first_downstream_pass() {
+    let model_id = Uuid::new_v4();
+    let planner_id = Uuid::new_v4();
+    let implementer_id = Uuid::new_v4();
+    let reviewer_id = Uuid::new_v4();
+
+    let routine = RoutineManifest {
+        name: "retry-loop-first-pass".into(),
+        slug: Slug::derive("retry-loop-first-pass"),
+        description: None,
+        trigger: nenjo::manifest::RoutineTrigger::Task,
+        metadata: RoutineMetadata {
+            schedule: None,
+            entry_steps: vec![Slug::derive("plan")],
+            cron_task: None,
+        },
+        steps: vec![
+            RoutineStepManifest {
+                slug: Slug::derive("plan"),
+                routine: Slug::derive("retry-loop-first-pass"),
+                name: "plan".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("planner")),
+                config: serde_json::json!({}),
+                order_index: 0,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("implement"),
+                routine: Slug::derive("retry-loop-first-pass"),
+                name: "implement".into(),
+                step_type: RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("implementer")),
+                config: serde_json::json!({}),
+                order_index: 1,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("review"),
+                routine: Slug::derive("retry-loop-first-pass"),
+                name: "review".into(),
+                step_type: RoutineStepType::Gate,
+                council: None,
+                agent: Some(Slug::derive("reviewer")),
+                config: serde_json::json!({}),
+                order_index: 2,
+            },
+            RoutineStepManifest {
+                slug: Slug::derive("done"),
+                routine: Slug::derive("retry-loop-first-pass"),
+                name: "done".into(),
+                step_type: RoutineStepType::Terminal,
+                council: None,
+                agent: None,
+                config: serde_json::json!({}),
+                order_index: 3,
+            },
+        ],
+        edges: vec![
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-loop-first-pass"),
+                source_step: Slug::derive("plan"),
+                target_step: Slug::derive("implement"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "handoff plan"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-loop-first-pass"),
+                source_step: Slug::derive("implement"),
+                target_step: Slug::derive("review"),
+                condition: RoutineEdgeCondition::Always,
+                metadata: serde_json::json!({"purpose": "review implementation"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-loop-first-pass"),
+                source_step: Slug::derive("review"),
+                target_step: Slug::derive("done"),
+                condition: RoutineEdgeCondition::OnPass,
+                metadata: serde_json::json!({"purpose": "finish"}),
+            },
+            RoutineEdgeManifest {
+                routine: Slug::derive("retry-loop-first-pass"),
+                source_step: Slug::derive("review"),
+                target_step: Slug::derive("implement"),
+                condition: RoutineEdgeCondition::OnFail,
+                metadata: serde_json::json!({"purpose": "revise implementation"}),
+            },
+        ],
+    };
+
+    let manifest = Manifest {
+        agents: vec![
+            agent(planner_id, "planner", model_id),
+            agent(implementer_id, "implementer", model_id),
+            agent(reviewer_id, "reviewer", model_id),
+        ],
+        models: vec![model(model_id)],
+        projects: vec![project()],
+        routines: vec![canonical_routine(routine)],
+        ..Default::default()
+    };
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(SequentialResponseMockFactory::new(vec![
+            route_response(
+                "plan complete",
+                "pass",
+                "ready to implement",
+                serde_json::json!([{"target_step": "implement", "handoff": {"work": "build it"}}]),
+            ),
+            route_response(
+                "implementation complete",
+                "pass",
+                "ready for review",
+                serde_json::json!([{"target_step": "review", "handoff": {"work": "review it"}}]),
+            ),
+            route_response(
+                "review passed",
+                "pass",
+                "ship it",
+                serde_json::json!([{"target_step": "done", "handoff": {"work": "complete"}}]),
+            ),
+        ]))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let mut handle = provider
+        .routine("retry-loop-first-pass")
+        .unwrap()
+        .run_stream(test_task(Uuid::new_v4(), "Task", "Build feature"))
+        .await
+        .unwrap();
+
+    let mut step_names = Vec::new();
+    while let Some(event) = handle.recv().await {
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            step_names.push(step_name);
+        }
+    }
+
+    let result = handle.output().await.unwrap();
+    assert!(result.passed);
+    assert_eq!(step_names, vec!["plan", "implement", "review", "done"]);
 }
 
 #[tokio::test]
@@ -3274,7 +3921,7 @@ async fn route_next_steps_fail_verdict_stops_routine() {
             "blocked",
             "fail",
             "cannot continue",
-            serde_json::json!([]),
+            serde_json::Value::Null,
         )]))
         .with_tool_factory(NoopToolFactory)
         .build()
@@ -3410,7 +4057,7 @@ async fn worktree_scoped_agent_keeps_extra_runtime_tools() {
         .agent("worker")
         .await
         .unwrap()
-        .with_tool(PassVerdictTool::new())
+        .with_tool(ProgressTool)
         .with_work_dir(work_dir.path())
         .build()
         .await
@@ -3420,8 +4067,8 @@ async fn worktree_scoped_agent_keeps_extra_runtime_tools() {
     let tool_names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
-        tool_names.contains(&"pass_verdict"),
-        "pass_verdict should survive worktree tool rebuild. Tools: {:?}",
+        tool_names.contains(&"progress_tool"),
+        "extra runtime tool should survive worktree tool rebuild. Tools: {:?}",
         tool_names
     );
 }

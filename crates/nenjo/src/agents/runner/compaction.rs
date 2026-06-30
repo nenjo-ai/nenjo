@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use anyhow::Result;
+use serde::Serialize;
 use tokio::sync::mpsc;
 
 use nenjo_models::{ChatMessage, ChatRequest, ModelProvider};
@@ -11,10 +12,31 @@ const HISTORY_SUMMARY_MARKER: &str = "[history summary]";
 const PHASE4_MIN_MESSAGES: usize = 4;
 const PHASE4_MIN_TOKENS: usize = 800;
 const PHASE4_MAX_CHARS: usize = 1_200;
+const PAYLOAD_TOOL_RESULT_MAX_CHARS: usize = 4_000;
+const PAYLOAD_MESSAGE_MAX_CHARS: usize = 8_000;
 
 /// Estimate total token count across all messages using the chars/4 heuristic.
 pub(crate) fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(|m| m.content.len() / 4).sum()
+}
+
+pub(crate) fn estimate_serialized_bytes<T>(value: &T) -> usize
+where
+    T: Serialize + ?Sized,
+{
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+pub(crate) fn estimate_serialized_messages_bytes(messages: &[ChatMessage]) -> usize {
+    let serialized = estimate_serialized_bytes(messages);
+    if serialized > 0 {
+        return serialized;
+    }
+
+    messages
+        .iter()
+        .map(|message| message.role.len() + message.content.len() + 32)
+        .sum()
 }
 
 pub(crate) async fn compact_messages_with_summary<P>(
@@ -189,6 +211,156 @@ fn drop_oldest_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
             }
         }
     }
+}
+
+pub(crate) fn compact_messages_for_payload(
+    messages: &mut [ChatMessage],
+    max_payload_bytes: usize,
+) -> bool {
+    let original_size = estimate_serialized_messages_bytes(messages);
+    if original_size <= max_payload_bytes {
+        return false;
+    }
+
+    let latest_user_index = messages.iter().rposition(|message| message.role == "user");
+
+    for index in (1..messages.len()).rev() {
+        if messages[index].role != "tool" {
+            continue;
+        }
+        compact_tool_result_message(&mut messages[index], PAYLOAD_TOOL_RESULT_MAX_CHARS);
+        if estimate_serialized_messages_bytes(messages) <= max_payload_bytes {
+            return true;
+        }
+    }
+
+    for index in 1..messages.len() {
+        if messages[index].role != "assistant" {
+            continue;
+        }
+        if compact_assistant_tool_arguments(&mut messages[index])
+            && estimate_serialized_messages_bytes(messages) <= max_payload_bytes
+        {
+            return true;
+        }
+    }
+
+    for index in (1..messages.len()).rev() {
+        if messages[index].role == "system" || latest_user_index == Some(index) {
+            continue;
+        }
+        compact_payload_message(&mut messages[index], PAYLOAD_MESSAGE_MAX_CHARS);
+        if estimate_serialized_messages_bytes(messages) <= max_payload_bytes {
+            return true;
+        }
+    }
+
+    for index in (1..messages.len()).rev() {
+        if messages[index].role == "system" {
+            continue;
+        }
+        compact_payload_message(&mut messages[index], PAYLOAD_MESSAGE_MAX_CHARS);
+        if estimate_serialized_messages_bytes(messages) <= max_payload_bytes {
+            return true;
+        }
+    }
+
+    estimate_serialized_messages_bytes(messages) < original_size
+}
+
+fn compact_assistant_tool_arguments(message: &mut ChatMessage) -> bool {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&message.content) else {
+        return false;
+    };
+    let Some(calls) = parsed
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .cloned()
+    else {
+        return false;
+    };
+
+    let mut changed = false;
+    let compacted_calls = calls
+        .iter()
+        .map(|call| {
+            let name = call
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let arguments = call
+                .get("arguments")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let compacted_arguments = truncate_tool_arguments(name, arguments);
+            changed |= compacted_arguments != arguments;
+
+            let mut compacted_call = call.clone();
+            if let Some(obj) = compacted_call.as_object_mut() {
+                obj.insert(
+                    "arguments".to_string(),
+                    serde_json::Value::String(compacted_arguments),
+                );
+            }
+            compacted_call
+        })
+        .collect::<Vec<_>>();
+
+    if !changed {
+        return false;
+    }
+
+    if let Some(obj) = parsed.as_object_mut() {
+        obj.insert(
+            "tool_calls".to_string(),
+            serde_json::Value::Array(compacted_calls),
+        );
+        message.content = serde_json::to_string(obj).unwrap_or_else(|_| message.content.clone());
+    }
+
+    true
+}
+
+fn compact_tool_result_message(message: &mut ChatMessage, max_content_chars: usize) {
+    if message.content.len() <= max_content_chars {
+        return;
+    }
+
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&message.content) {
+        if let Some(obj) = parsed.as_object_mut()
+            && let Some(content) = obj.get("content").and_then(|v| v.as_str())
+            && content.len() > max_content_chars
+        {
+            let original_len = content.len();
+            obj.insert(
+                "content".to_string(),
+                serde_json::Value::String(format!(
+                    "{}\n[payload compacted — {original_len} chars total]",
+                    truncate(content, max_content_chars)
+                )),
+            );
+            message.content = serde_json::to_string(obj).unwrap_or_default();
+        }
+        return;
+    }
+
+    let original_len = message.content.len();
+    message.content = format!(
+        "{}\n[payload compacted — {original_len} chars total]",
+        truncate(&message.content, max_content_chars)
+    );
+}
+
+fn compact_payload_message(message: &mut ChatMessage, max_content_chars: usize) {
+    if message.content.len() <= max_content_chars {
+        return;
+    }
+
+    let original_len = message.content.len();
+    message.content = format!(
+        "{}\n[payload compacted — {original_len} chars total]",
+        truncate(&message.content, max_content_chars)
+    );
 }
 
 fn replace_range_with_summary(
@@ -829,6 +1001,75 @@ mod tests {
 
         assert_eq!(msgs[0].content, system_content);
         assert_eq!(msgs.last().unwrap().content, last_content);
+    }
+
+    #[test]
+    fn compact_messages_for_payload_truncates_recent_tool_results() {
+        let huge_result = "x".repeat(600_000);
+        let tool_result = |id: &str, content: &str| -> ChatMessage {
+            let json = serde_json::json!({
+                "tool_call_id": id,
+                "content": content,
+            });
+            ChatMessage::tool(json.to_string())
+        };
+        let assistant_tool_call = |id: &str, name: &str| -> ChatMessage {
+            let json = serde_json::json!({
+                "content": "Running a tool.",
+                "tool_calls": [{
+                    "id": id,
+                    "name": name,
+                    "arguments": r#"{"cmd":"large output"}"#,
+                }],
+            });
+            ChatMessage::assistant(json.to_string())
+        };
+
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("old request"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("older request"),
+            ChatMessage::assistant("older answer"),
+            assistant_tool_call("c1", "shell"),
+            tool_result("c1", &huge_result),
+            assistant_tool_call("c2", "file_read"),
+            tool_result("c2", &huge_result),
+            ChatMessage::user("continue"),
+        ];
+
+        let budget = estimate_serialized_messages_bytes(&msgs) / 3;
+        assert!(compact_messages_for_payload(&mut msgs, budget));
+
+        assert!(estimate_serialized_messages_bytes(&msgs) <= budget);
+        assert!(
+            msgs.iter()
+                .any(|msg| msg.role == "tool" && msg.content.contains("payload compacted"))
+        );
+    }
+
+    #[test]
+    fn compact_messages_does_not_payload_compact_for_token_budget() {
+        let huge_result = "x".repeat(600_000);
+        let tool_result = serde_json::json!({
+            "tool_call_id": "c1",
+            "content": huge_result,
+        });
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("old request"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::tool(tool_result.to_string()),
+            ChatMessage::user("continue"),
+        ];
+
+        compact_messages(&mut msgs, 20_000);
+
+        assert!(
+            !msgs
+                .iter()
+                .any(|msg| msg.content.contains("payload compacted"))
+        );
     }
 
     #[test]

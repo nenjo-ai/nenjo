@@ -701,7 +701,7 @@ fn repo_context(
     ctx: &CommandContext,
 ) -> RepoCommandContext<EventLoopResponseSender, repo::WorkerRepoRuntime> {
     RepoCommandContext {
-        response_sink: ctx.response_tx.clone(),
+        org_response_sink: ctx.org_response_tx.clone(),
         repo_runtime: repo::WorkerRepoRuntime {
             workspace_dir: ctx.config.workspace_dir.clone(),
             git_locks: ctx.git_locks.clone(),

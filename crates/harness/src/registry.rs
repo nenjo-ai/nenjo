@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionKind {
     Chat,
+    PreparingTask,
     Task,
     Cron,
     Heartbeat,

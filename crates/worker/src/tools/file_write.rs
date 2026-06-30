@@ -2,8 +2,9 @@
 
 use crate::tools::security::SecurityPolicy;
 use crate::tools::{Tool, ToolCategory, ToolResult};
+use anyhow::Context;
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Write file contents with path sandboxing
@@ -44,8 +45,15 @@ impl Tool for FileWriteTool {
                     "description": "Relative path to the file within the workspace"
                 },
                 "content": {
-                    "type": "string",
-                    "description": "Content to write to the file"
+                    "description": "Content to write to the file. Strings are written exactly; non-string JSON values are written as pretty-printed JSON.",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "object"},
+                        {"type": "array"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "null"}
+                    ]
                 }
             },
             "required": ["path", "content"]
@@ -58,10 +66,10 @@ impl Tool for FileWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
 
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
+        let content = file_content_to_string(
+            args.get("content")
+                .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?,
+        )?;
 
         if !self.security.can_act() {
             return Ok(ToolResult {
@@ -163,7 +171,7 @@ impl Tool for FileWriteTool {
             });
         }
 
-        match tokio::fs::write(&resolved_target, content).await {
+        match tokio::fs::write(&resolved_target, &content).await {
             Ok(()) => Ok(ToolResult {
                 success: true,
                 output: format!("Written {} bytes to {path}", content.len()),
@@ -175,6 +183,15 @@ impl Tool for FileWriteTool {
                 error: Some(format!("Failed to write file: {e}")),
             }),
         }
+    }
+}
+
+fn file_content_to_string(content: &Value) -> anyhow::Result<String> {
+    match content {
+        Value::String(value) => Ok(value.clone()),
+        Value::Object(_) | Value::Array(_) => serde_json::to_string_pretty(content)
+            .context("Failed to serialize JSON content for file_write"),
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(content.to_string()),
     }
 }
 
@@ -242,6 +259,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "written!");
+    }
+
+    #[tokio::test]
+    async fn file_write_serializes_json_content() {
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
+
+        let tool = FileWriteTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "package.json",
+                "content": {
+                    "name": "backend",
+                    "scripts": {
+                        "start": "node server.js"
+                    }
+                }
+            }))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        let content = tokio::fs::read_to_string(dir.join("package.json"))
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["name"], "backend");
+        assert_eq!(parsed["scripts"]["start"], "node server.js");
     }
 
     #[tokio::test]
