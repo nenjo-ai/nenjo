@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/nenjo-ai/nenjo/compare/v0.22.0...v0.23.0) - 2026-06-30
+
+### Added
+
+- Custom handoff JSON schema validation for routine edges and route outputs ([#78](https://github.com/nenjo-ai/nenjo/pull/78))
+- Payload-aware context compaction to keep provider request bodies under a configurable byte budget ([#78](https://github.com/nenjo-ai/nenjo/pull/78))
+
+### Changed
+
+- Reworked routine routing and execution across agent, gate, council, fan-out, fan-in, retry, and failure flows ([#78](https://github.com/nenjo-ai/nenjo/pull/78))
+- Expanded routine/task runtime event coverage and worker event bridging ([#78](https://github.com/nenjo-ai/nenjo/pull/78))
+- Hardened related worker tools and package routine validation behavior ([#78](https://github.com/nenjo-ai/nenjo/pull/78))
+
 ## [0.22.0](https://github.com/nenjo-ai/nenjo/compare/v0.21.0...v0.22.0) - 2026-06-25
 
 ### Fixed
