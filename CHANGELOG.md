@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0](https://github.com/nenjo-ai/nenjo/compare/v0.23.0...v0.24.0) - 2026-07-01
+
+### Fixed
+
+- manifest caching and access policy ([#80](https://github.com/nenjo-ai/nenjo/pull/80))
+
 ## [0.23.0](https://github.com/nenjo-ai/nenjo/compare/v0.22.0...v0.23.0) - 2026-06-30
 
 ### Added
