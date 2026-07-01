@@ -28,7 +28,6 @@ use crate::manifest_contract::{
 };
 use crate::manifest_kinds::{ContentScope, SensitiveContentKind};
 use crate::manifest_mcp::*;
-use crate::policy::ManifestAccessPolicy;
 use crate::prompt_merge::merge_prompt_config;
 use crate::resource_ids::{PlatformResourceIdStore, PlatformResourceKind};
 
@@ -146,6 +145,37 @@ fn ability_matches_ref(ability: &AbilityManifest, ability_ref: &Slug) -> bool {
     ability.manifest_slug() == *ability_ref || Slug::derive(&ability.name) == *ability_ref
 }
 
+fn agent_matches_ref(agent: &AgentManifest, agent_ref: &Slug) -> bool {
+    agent.manifest_slug() == *agent_ref || Slug::derive(&agent.name) == *agent_ref
+}
+
+fn domain_matches_ref(domain: &DomainManifest, domain_ref: &Slug) -> bool {
+    domain.slug() == *domain_ref || Slug::derive(&domain.name) == *domain_ref
+}
+
+fn routine_matches_ref(routine: &RoutineManifest, routine_ref: &Slug) -> bool {
+    routine.manifest_slug() == *routine_ref || Slug::derive(&routine.name) == *routine_ref
+}
+
+fn model_matches_ref(model: &ModelManifest, model_ref: &Slug) -> bool {
+    model.manifest_slug() == *model_ref || Slug::derive(&model.name) == *model_ref
+}
+
+fn council_matches_ref(council: &CouncilManifest, council_ref: &Slug) -> bool {
+    council.manifest_slug() == *council_ref
+}
+
+fn context_block_matches_ref(
+    context_block: &ContextBlockManifest,
+    context_block_ref: &Slug,
+) -> bool {
+    context_block.slug() == *context_block_ref
+}
+
+fn project_matches_ref(project: &ProjectManifest, project_ref: &Slug) -> bool {
+    project.manifest_slug() == *project_ref
+}
+
 fn configure_name_slug(name: Option<&String>) -> Option<Slug> {
     name.map(|value| value.trim())
         .filter(|value| !value.is_empty())
@@ -212,7 +242,6 @@ pub struct PlatformManifestBackend<L, E> {
     local_store: Arc<L>,
     platform_client: PlatformManifestClient,
     sensitive_payload_encoder: E,
-    access_policy: Option<ManifestAccessPolicy>,
     workspace_dir: Option<PathBuf>,
     library_dir: Option<PathBuf>,
     cached_org_id: Option<Uuid>,
@@ -232,7 +261,6 @@ impl<L, E> PlatformManifestBackend<L, E> {
             local_store,
             platform_client,
             sensitive_payload_encoder,
-            access_policy: None,
             workspace_dir: None,
             library_dir: None,
             cached_org_id: None,
@@ -240,12 +268,6 @@ impl<L, E> PlatformManifestBackend<L, E> {
             resource_ids: None,
             read_only_manifest: None,
         }
-    }
-
-    /// Attach a scope-based access policy used to filter reads and validate writes.
-    pub fn with_access_policy(mut self, access_policy: ManifestAccessPolicy) -> Self {
-        self.access_policy = Some(access_policy);
-        self
     }
 
     /// Attach the worker workspace root used for local-first library knowledge reads.
@@ -301,18 +323,14 @@ where
     L: ManifestReader + ManifestWriter + Send + Sync,
     E: SensitivePayloadEncoder,
 {
-    fn allow_agent(&self, agent: &AgentManifest) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.allows_agent(agent))
-            .unwrap_or(true)
-    }
-
-    fn allow_ability(&self, ability: &AbilityManifest) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.allows_ability(ability))
-            .unwrap_or(true)
+    async fn merged_manifest(&self) -> Result<Manifest> {
+        let mut manifest = self
+            .read_only_manifest
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        manifest.merge(self.local_store.load_manifest().await?);
+        Ok(manifest)
     }
 
     fn read_only_ability(&self, ability_ref: &Slug) -> Option<AbilityManifest> {
@@ -324,11 +342,13 @@ where
             .cloned()
     }
 
-    fn allow_domain(&self, domain: &DomainManifest) -> bool {
-        self.access_policy
-            .as_ref()
-            .map(|policy| policy.allows_domain(domain))
-            .unwrap_or(true)
+    fn read_only_domain(&self, domain_ref: &Slug) -> Option<DomainManifest> {
+        self.read_only_manifest
+            .as_ref()?
+            .domains
+            .iter()
+            .find(|domain| domain_matches_ref(domain, domain_ref))
+            .cloned()
     }
 
     async fn decode_domain_prompt_record(
@@ -565,15 +585,6 @@ where
         Ok(hydrated)
     }
 
-    async fn cached_agent(&self, agent: &Slug) -> Result<AgentManifest> {
-        self.local_store
-            .list_agents()
-            .await?
-            .into_iter()
-            .find(|item| item.manifest_slug() == *agent || Slug::derive(&item.name) == *agent)
-            .ok_or_else(|| anyhow!("agent not found in local manifest: {agent}"))
-    }
-
     async fn cached_local_agent(&self, agent: &Slug) -> Result<Option<AgentManifest>> {
         Ok(self
             .local_store
@@ -619,15 +630,6 @@ where
             .ok_or_else(|| anyhow!("model not found in local manifest: {model}"))
     }
 
-    async fn cached_context_block(&self, context_block: &Slug) -> Result<ContextBlockManifest> {
-        self.local_store
-            .list_context_blocks()
-            .await?
-            .into_iter()
-            .find(|item| item.slug() == *context_block)
-            .ok_or_else(|| anyhow!("context block not found in local manifest: {context_block}"))
-    }
-
     async fn cached_local_context_block(
         &self,
         context_block: &Slug,
@@ -648,6 +650,10 @@ where
             .into_iter()
             .find(|item| item.slug() == *domain_ref);
         if let Some(domain) = local {
+            return Ok(domain);
+        }
+
+        if let Some(domain) = self.read_only_domain(domain_ref) {
             return Ok(domain);
         }
 
@@ -801,24 +807,23 @@ where
 {
     async fn list_agents(&self) -> Result<AgentsListResult> {
         let agents: Vec<AgentSummary> = self
-            .local_store
-            .list_agents()
+            .merged_manifest()
             .await?
+            .agents
             .into_iter()
-            .filter(|agent| self.allow_agent(agent))
             .map(|agent| AgentDocument::from(agent).summary)
             .collect();
         Ok(AgentsListResult { agents })
     }
 
     async fn get_agent(&self, params: AgentsGetParams) -> Result<AgentGetResult> {
-        let agent = self.cached_agent(&params.agent).await?;
-        if !self.allow_agent(&agent) {
-            return Err(anyhow!(
-                "agent not found in local manifest: {}",
-                params.agent
-            ));
-        }
+        let agent = self
+            .merged_manifest()
+            .await?
+            .agents
+            .into_iter()
+            .find(|agent| agent_matches_ref(agent, &params.agent))
+            .ok_or_else(|| anyhow!("agent not found in local manifest: {}", params.agent))?;
         Ok(AgentGetResult {
             agent: AgentDocument::from(agent),
         })
@@ -838,15 +843,7 @@ where
         }
 
         let existing_agent = if let Some(agent) = data.agent.as_ref() {
-            match self.cached_local_agent(agent).await? {
-                Some(existing) => {
-                    if !self.allow_agent(&existing) {
-                        return Err(anyhow!("agent not found in local manifest: {}", agent));
-                    }
-                    Some(existing)
-                }
-                None => None,
-            }
+            self.cached_local_agent(agent).await?
         } else {
             None
         };
@@ -975,25 +972,10 @@ where
     E: SensitivePayloadEncoder + Send + Sync,
 {
     async fn list_abilities(&self) -> Result<AbilitiesListResult> {
-        let mut abilities = self
-            .local_store
-            .list_abilities()
+        let abilities = self
+            .merged_manifest()
             .await?
-            .into_iter()
-            .filter(|ability| self.allow_ability(ability))
-            .collect::<Vec<_>>();
-        if let Some(manifest) = self.read_only_manifest.as_ref() {
-            for ability in &manifest.abilities {
-                if self.allow_ability(ability)
-                    && !abilities
-                        .iter()
-                        .any(|existing| existing.manifest_slug() == ability.manifest_slug())
-                {
-                    abilities.push(ability.clone());
-                }
-            }
-        }
-        let abilities = abilities
+            .abilities
             .into_iter()
             .map(|ability| AbilityDocument::from(ability).summary)
             .collect();
@@ -1002,12 +984,6 @@ where
 
     async fn get_ability(&self, params: AbilitiesGetParams) -> Result<AbilityGetResult> {
         let ability = self.cached_or_remote_ability(&params.ability).await?;
-        if !self.allow_ability(&ability) {
-            return Err(anyhow!(
-                "ability not found in local manifest: {}",
-                params.ability
-            ));
-        }
         Ok(AbilityGetResult {
             ability: AbilityDocument::from(ability),
         })
@@ -1025,21 +1001,12 @@ where
                     .and_then(|metadata| metadata.name.as_ref()),
             )
             && let Some(existing) = self.cached_local_ability(&ability).await?
-            && self.allow_ability(&existing)
         {
             data.ability = Some(existing.manifest_slug());
         }
 
         let existing_ability = if let Some(ability) = data.ability.as_ref() {
-            match self.cached_local_ability(ability).await? {
-                Some(existing) => {
-                    if !self.allow_ability(&existing) {
-                        return Err(anyhow!("ability not found in local manifest: {}", ability));
-                    }
-                    Some(existing)
-                }
-                None => None,
-            }
+            self.cached_local_ability(ability).await?
         } else {
             None
         };
@@ -1112,8 +1079,7 @@ where
 {
     async fn list_commands(&self) -> Result<CommandsListResult> {
         let commands = self
-            .local_store
-            .load_manifest()
+            .merged_manifest()
             .await?
             .commands
             .into_iter()
@@ -1125,8 +1091,7 @@ where
     async fn get_command(&self, params: CommandsGetParams) -> Result<CommandGetResult> {
         let command_ref = params.command;
         let command = self
-            .local_store
-            .load_manifest()
+            .merged_manifest()
             .await?
             .commands
             .into_iter()
@@ -1238,11 +1203,10 @@ where
 {
     async fn list_domains(&self) -> Result<DomainsListResult> {
         let domains: Vec<DomainSummary> = self
-            .local_store
-            .list_domains()
+            .merged_manifest()
             .await?
+            .domains
             .into_iter()
-            .filter(|domain| self.allow_domain(domain))
             .map(|domain| DomainDocument::from(domain).summary)
             .collect();
         Ok(DomainsListResult { domains })
@@ -1250,12 +1214,6 @@ where
 
     async fn get_domain(&self, params: DomainsGetParams) -> Result<DomainGetResult> {
         let domain = self.cached_or_remote_domain(&params.domain).await?;
-        if !self.allow_domain(&domain) {
-            return Err(anyhow!(
-                "domain not found in local manifest: {}",
-                params.domain
-            ));
-        }
         Ok(DomainGetResult {
             domain: DomainDocument::from(domain),
         })
@@ -1276,23 +1234,13 @@ where
         {
             let path = metadata.path.as_deref().unwrap_or_default();
             let domain = domain_slug(path, name);
-            if let Some(existing) = self.cached_local_domain(&domain).await?
-                && self.allow_domain(&existing)
-            {
+            if let Some(existing) = self.cached_local_domain(&domain).await? {
                 data.domain = Some(existing.manifest_slug());
             }
         }
 
         let existing_domain = if let Some(domain) = data.domain.as_ref() {
-            match self.cached_local_domain(domain).await? {
-                Some(existing) => {
-                    if !self.allow_domain(&existing) {
-                        return Err(anyhow!("domain not found in local manifest: {}", domain));
-                    }
-                    Some(existing)
-                }
-                None => None,
-            }
+            self.cached_local_domain(domain).await?
         } else {
             None
         };
@@ -1360,9 +1308,9 @@ where
 {
     async fn list_projects(&self) -> Result<ProjectsListResult> {
         let projects: Vec<ProjectSummary> = self
-            .local_store
-            .list_projects()
+            .merged_manifest()
             .await?
+            .projects
             .into_iter()
             .map(|project| ProjectDocument::from(project).summary)
             .collect();
@@ -1370,7 +1318,13 @@ where
     }
 
     async fn get_project(&self, params: ProjectsGetParams) -> Result<ProjectGetResult> {
-        let project = self.cached_project(&params.project).await?;
+        let project = self
+            .merged_manifest()
+            .await?
+            .projects
+            .into_iter()
+            .find(|project| project_matches_ref(project, &params.project))
+            .ok_or_else(|| anyhow!("project not found in local manifest: {}", params.project))?;
         Ok(ProjectGetResult {
             project: ProjectDocument::from(project),
         })
@@ -1641,9 +1595,9 @@ where
 {
     async fn list_routines(&self) -> Result<RoutinesListResult> {
         let routines = self
-            .local_store
-            .list_routines()
+            .merged_manifest()
             .await?
+            .routines
             .into_iter()
             .map(|routine| RoutineDocument::from(routine).summary)
             .collect();
@@ -1651,7 +1605,13 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = self.cached_routine(&params.slug).await?;
+        let routine = self
+            .merged_manifest()
+            .await?
+            .routines
+            .into_iter()
+            .find(|routine| routine_matches_ref(routine, &params.slug))
+            .ok_or_else(|| anyhow!("routine not found in local manifest: {}", params.slug))?;
         Ok(RoutineGetResult {
             routine: RoutineDocument::from(routine),
         })
@@ -1849,9 +1809,9 @@ where
 {
     async fn list_models(&self) -> Result<ModelsListResult> {
         let models = self
-            .local_store
-            .list_models()
+            .merged_manifest()
             .await?
+            .models
             .into_iter()
             .map(|model| ModelDocument::from(model).summary)
             .collect();
@@ -1859,7 +1819,13 @@ where
     }
 
     async fn get_model(&self, params: ModelsGetParams) -> Result<ModelGetResult> {
-        let model = self.cached_model(&params.model).await?;
+        let model = self
+            .merged_manifest()
+            .await?
+            .models
+            .into_iter()
+            .find(|model| model_matches_ref(model, &params.model))
+            .ok_or_else(|| anyhow!("model not found in local manifest: {}", params.model))?;
         Ok(ModelGetResult {
             model: ModelDocument::from(model),
         })
@@ -1954,9 +1920,9 @@ where
 {
     async fn list_councils(&self) -> Result<CouncilsListResult> {
         let councils = self
-            .local_store
-            .list_councils()
+            .merged_manifest()
             .await?
+            .councils
             .into_iter()
             .map(|council| CouncilDocument::from(council).summary)
             .collect();
@@ -1964,7 +1930,13 @@ where
     }
 
     async fn get_council(&self, params: CouncilsGetParams) -> Result<CouncilGetResult> {
-        let council = self.cached_council(&params.council).await?;
+        let council = self
+            .merged_manifest()
+            .await?
+            .councils
+            .into_iter()
+            .find(|council| council_matches_ref(council, &params.council))
+            .ok_or_else(|| anyhow!("council not found in local manifest: {}", params.council))?;
         Ok(CouncilGetResult {
             council: CouncilDocument::from(council),
         })
@@ -2099,9 +2071,9 @@ where
 {
     async fn list_context_blocks(&self) -> Result<ContextBlocksListResult> {
         let context_blocks: Vec<ContextBlockSummary> = self
-            .local_store
-            .list_context_blocks()
+            .merged_manifest()
             .await?
+            .context_blocks
             .into_iter()
             .map(|context_block| ContextBlockDocument::from(context_block).summary)
             .collect();
@@ -2112,7 +2084,18 @@ where
         &self,
         params: ContextBlocksGetParams,
     ) -> Result<ContextBlockGetResult> {
-        let context_block = self.cached_context_block(&params.context_block).await?;
+        let context_block = self
+            .merged_manifest()
+            .await?
+            .context_blocks
+            .into_iter()
+            .find(|context_block| context_block_matches_ref(context_block, &params.context_block))
+            .ok_or_else(|| {
+                anyhow!(
+                    "context block not found in local manifest: {}",
+                    params.context_block
+                )
+            })?;
         Ok(ContextBlockGetResult {
             context_block: ContextBlockDocument::from(context_block),
         })
