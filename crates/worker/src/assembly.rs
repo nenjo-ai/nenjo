@@ -202,6 +202,13 @@ pub(crate) async fn load_runtime_manifest(config: &Config) -> Result<Manifest> {
     Ok(manifest)
 }
 
+pub(crate) async fn load_package_overlay_manifest(config: &Config) -> Result<Manifest> {
+    let mut manifest = global_package_manifest_loader(config).load().await?;
+    manifest.merge(platform_package_manifest_loader(config).load().await?);
+    manifest.merge(workspace_package_manifest_loader(config).load().await?);
+    Ok(manifest)
+}
+
 fn global_package_manifest_loader(config: &Config) -> PackageManifestLoader {
     PackageManifestLoader::with_packages_dir(
         config.config_dir.clone(),
@@ -315,7 +322,7 @@ async fn build_platform_tool_services(
     auth_provider: Arc<WorkerAuthProvider>,
 ) -> PlatformToolServices {
     let manifest_store = Arc::new(LocalManifestStore::new(config.manifests_dir.clone()));
-    let read_only_manifest = match load_runtime_manifest(config).await {
+    let read_only_manifest = match load_package_overlay_manifest(config).await {
         Ok(manifest) => Some(Arc::new(manifest)),
         Err(error) => {
             warn!(error = %error, "Failed to load read-only package manifest overlay for platform tools");
@@ -349,9 +356,9 @@ async fn build_platform_tool_services(
 mod tests {
     use super::*;
     use crate::config::MediaProviderConfig;
-    use nenjo::Slug;
     use nenjo::agents::prompts::PromptConfig;
     use nenjo::manifest::{AgentManifest, MediaRequirement};
+    use nenjo::{ManifestWriter, Slug};
     use nenjo_models::NativeOperation;
 
     #[test]
@@ -582,6 +589,47 @@ modules:
             pack.root_path.as_ref().unwrap(),
             &package_root.join("core/manifest.yaml")
         );
+    }
+
+    #[tokio::test]
+    async fn package_overlay_manifest_does_not_include_local_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            config_dir: temp.path().join("config"),
+            workspace_dir: temp.path().join("workspace"),
+            state_dir: temp.path().join("state"),
+            manifests_dir: temp.path().join("manifests"),
+            ..Default::default()
+        };
+        let store = LocalManifestStore::new(&config.manifests_dir);
+        store
+            .replace_manifest(&Manifest {
+                agents: vec![AgentManifest {
+                    name: "cached agent".into(),
+                    slug: Slug::derive("cached-agent"),
+                    description: None,
+                    prompt_config: PromptConfig::default(),
+                    color: None,
+                    model: None,
+                    domains: vec![],
+                    platform_scopes: vec![],
+                    mcp_servers: vec![],
+                    script_tools: Vec::new(),
+                    media: Vec::new(),
+                    abilities: vec![],
+                    prompt_locked: false,
+                    heartbeat: None,
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let runtime = load_runtime_manifest(&config).await.unwrap();
+        assert_eq!(runtime.agents.len(), 1);
+
+        let overlay = load_package_overlay_manifest(&config).await.unwrap();
+        assert!(overlay.agents.is_empty());
     }
 
     #[tokio::test]

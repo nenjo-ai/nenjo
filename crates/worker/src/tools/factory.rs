@@ -248,7 +248,6 @@ where
                 backend
                     .as_ref()
                     .clone()
-                    .with_access_policy(policy.clone())
                     .with_current_library_slug(tool_context.project_slug.clone()),
             ) as Arc<dyn ManifestMcpBackend>
         });

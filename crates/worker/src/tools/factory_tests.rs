@@ -8,16 +8,22 @@ use crate::tools::platform_services::PlatformToolServices;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
-    AbilityManifest, DomainManifest, Manifest, McpServerManifest, SkillManifest,
+    AbilityManifest, CommandManifest, ContextBlockManifest, CouncilDelegationStrategy,
+    CouncilManifest, DomainManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest,
+    RoutineManifest, RoutineMetadata, RoutineTrigger, SkillManifest,
 };
 use nenjo::manifest::{AgentManifest, MediaRequirement};
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_events::EncryptedPayload;
 use nenjo_models::NativeOperation;
+use nenjo_platform::manifest_mcp::CommandsGetParams;
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
-    DomainManifestBackend, DomainsGetParams, ManifestAccessPolicy, PlatformManifestBackend,
-    PlatformManifestClient, tools::PlatformNotificationEmitter,
+    CommandManifestBackend, ContextBlockManifestBackend, ContextBlocksGetParams,
+    CouncilManifestBackend, CouncilsGetParams, DomainManifestBackend, DomainsGetParams,
+    ModelManifestBackend, ModelsGetParams, PlatformManifestBackend, PlatformManifestClient,
+    ProjectManifestBackend, ProjectsGetParams, RoutineManifestBackend, RoutinesGetParams,
+    tools::PlatformNotificationEmitter,
 };
 use tempfile::tempdir;
 
@@ -388,9 +394,7 @@ done
     .to_string()
 }
 
-async fn scoped_backend(
-    caller_scopes: Vec<String>,
-) -> (
+async fn scoped_backend() -> (
     PlatformManifestBackend<LocalManifestStore, PlatformPayloadEncoder>,
     AgentManifest,
     AgentManifest,
@@ -406,7 +410,7 @@ async fn scoped_backend(
 
     let visible_agent = AgentManifest {
         name: "visible-agent".into(),
-        slug: Slug::derive("test-agent"),
+        slug: Slug::derive("visible-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -422,7 +426,7 @@ async fn scoped_backend(
     };
     let hidden_agent = AgentManifest {
         name: "hidden-agent".into(),
-        slug: Slug::derive("test-agent"),
+        slug: Slug::derive("hidden-agent"),
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -513,10 +517,7 @@ async fn scoped_backend(
     ));
 
     (
-        inner
-            .as_ref()
-            .clone()
-            .with_access_policy(ManifestAccessPolicy::new(caller_scopes)),
+        inner.as_ref().clone(),
         visible_agent,
         hidden_agent,
         visible_ability,
@@ -830,7 +831,7 @@ async fn worker_factory_resolves_registered_notification_emitter_from_context() 
 }
 
 #[tokio::test]
-async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scopes() {
+async fn platform_manifest_backend_does_not_filter_read_results_by_resource_scopes() {
     let (
         backend,
         visible_agent,
@@ -839,34 +840,56 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
         hidden_ability,
         visible_domain,
         hidden_domain,
-    ) = scoped_backend(vec!["projects:read".into()]).await;
+    ) = scoped_backend().await;
 
     let agents = backend.list_agents().await.unwrap();
-    assert_eq!(agents.agents.len(), 1);
-    assert_eq!(agents.agents[0].name, visible_agent.name);
+    assert_eq!(agents.agents.len(), 2);
     assert!(
-        backend
-            .get_agent(AgentsGetParams {
-                agent: Slug::derive(&hidden_agent.name)
-            })
-            .await
-            .is_err()
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.name == visible_agent.name)
     );
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.name == hidden_agent.name)
+    );
+    let agent = backend
+        .get_agent(AgentsGetParams {
+            agent: Slug::derive(&hidden_agent.name),
+        })
+        .await
+        .unwrap()
+        .agent;
+    assert_eq!(agent.summary.name, hidden_agent.name);
 
     let abilities = backend.list_abilities().await.unwrap();
-    assert_eq!(abilities.abilities.len(), 1);
-    assert_eq!(abilities.abilities[0].name, visible_ability.name);
+    assert_eq!(abilities.abilities.len(), 2);
     assert!(
-        backend
-            .get_ability(AbilitiesGetParams {
-                ability: Slug::derive(&hidden_ability.name)
-            })
-            .await
-            .is_err()
+        abilities
+            .abilities
+            .iter()
+            .any(|ability| ability.name == visible_ability.name)
     );
+    assert!(
+        abilities
+            .abilities
+            .iter()
+            .any(|ability| ability.name == hidden_ability.name)
+    );
+    let ability = backend
+        .get_ability(AbilitiesGetParams {
+            ability: Slug::derive(&hidden_ability.name),
+        })
+        .await
+        .unwrap()
+        .ability;
+    assert_eq!(ability.summary.name, hidden_ability.name);
 
     let domains = backend.list_domains().await.unwrap();
-    assert_eq!(domains.domains.len(), 1);
+    assert_eq!(domains.domains.len(), 2);
     assert!(
         domains
             .domains
@@ -874,13 +897,19 @@ async fn platform_manifest_backend_filters_agents_abilities_and_domains_by_scope
             .any(|domain| domain.slug == visible_domain.slug())
     );
     assert!(
-        backend
-            .get_domain(DomainsGetParams {
-                domain: hidden_domain.slug()
-            })
-            .await
-            .is_err()
+        domains
+            .domains
+            .iter()
+            .any(|domain| domain.slug == hidden_domain.slug())
     );
+    let domain = backend
+        .get_domain(DomainsGetParams {
+            domain: hidden_domain.slug(),
+        })
+        .await
+        .unwrap()
+        .domain;
+    assert_eq!(domain.summary.slug, hidden_domain.slug());
 }
 
 #[tokio::test]
@@ -911,8 +940,7 @@ async fn platform_manifest_backend_reads_package_overlay_abilities() {
             .with_read_only_manifest(Arc::new(Manifest {
                 abilities: vec![package_ability.clone()],
                 ..Default::default()
-            }))
-            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+            }));
 
     let abilities = backend.list_abilities().await.unwrap();
     assert_eq!(abilities.abilities.len(), 1);
@@ -930,7 +958,255 @@ async fn platform_manifest_backend_reads_package_overlay_abilities() {
 }
 
 #[tokio::test]
-async fn platform_manifest_backend_filters_package_overlay_abilities_by_scope() {
+async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
+    let package_agent = AgentManifest {
+        name: "package agent".into(),
+        slug: Slug::derive("package-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+    };
+    let package_ability = AbilityManifest {
+        name: "package_ability".into(),
+        path: None,
+        description: None,
+        activation_condition: "package".into(),
+        prompt_config: nenjo::types::AbilityPromptConfig {
+            developer_prompt: "package ability prompt".into(),
+        },
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::Value::Null,
+    };
+    let package_command = CommandManifest {
+        name: "package_command".into(),
+        path: String::new(),
+        command: "/package-command".into(),
+        display_name: None,
+        description: Some("Package command".into()),
+        entry_path: "command.md".into(),
+        content: "package command content".into(),
+        root_path: String::new(),
+        root_dir: std::path::PathBuf::new(),
+        plugin_root_path: None,
+        plugin_root_dir: None,
+        hooks: vec![],
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::Value::Null,
+    };
+    let package_domain = DomainManifest {
+        name: "package domain".into(),
+        path: String::new(),
+        description: None,
+        command: "#package".into(),
+        platform_scopes: vec![],
+        abilities: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        prompt_config: nenjo::types::DomainPromptConfig::default(),
+    };
+    let package_project = ProjectManifest {
+        name: "Package Project".into(),
+        slug: Slug::derive("package-project"),
+        description: None,
+        settings: serde_json::json!({}),
+    };
+    let package_routine = RoutineManifest {
+        name: "Package Routine".into(),
+        slug: Slug::derive("package-routine"),
+        description: None,
+        trigger: RoutineTrigger::Task,
+        metadata: RoutineMetadata::default(),
+        steps: vec![],
+        edges: vec![],
+    };
+    let package_model = ModelManifest {
+        name: "Package Model".into(),
+        slug: Slug::derive("package-model"),
+        description: None,
+        model: "gpt-4.1".into(),
+        model_provider: "openai".into(),
+        temperature: None,
+        base_url: None,
+        native_tools: vec![],
+    };
+    let package_council = CouncilManifest {
+        name: "Package Council".into(),
+        delegation_strategy: CouncilDelegationStrategy::Decompose,
+        leader_agent: package_agent.slug.clone(),
+        members: vec![],
+    };
+    let package_context_block = ContextBlockManifest {
+        name: "package block".into(),
+        path: String::new(),
+        description: None,
+        template: "package context".into(),
+    };
+
+    let client = PlatformManifestClient::new("http://localhost:3001", "test-api-key").unwrap();
+    let backend =
+        PlatformManifestBackend::new(store, client, PlatformPayloadEncoder::new(auth_provider))
+            .with_read_only_manifest(Arc::new(Manifest {
+                agents: vec![package_agent.clone()],
+                abilities: vec![package_ability.clone()],
+                commands: vec![package_command.clone()],
+                domains: vec![package_domain.clone()],
+                projects: vec![package_project.clone()],
+                routines: vec![package_routine.clone()],
+                models: vec![package_model.clone()],
+                councils: vec![package_council.clone()],
+                context_blocks: vec![package_context_block.clone()],
+                ..Default::default()
+            }));
+
+    assert_eq!(backend.list_agents().await.unwrap().agents.len(), 1);
+    assert_eq!(
+        backend
+            .get_agent(AgentsGetParams {
+                agent: package_agent.slug.clone(),
+            })
+            .await
+            .unwrap()
+            .agent
+            .summary
+            .name,
+        package_agent.name
+    );
+    assert_eq!(backend.list_abilities().await.unwrap().abilities.len(), 1);
+    assert_eq!(
+        backend
+            .get_ability(AbilitiesGetParams {
+                ability: Slug::derive(&package_ability.name),
+            })
+            .await
+            .unwrap()
+            .ability
+            .summary
+            .name,
+        package_ability.name
+    );
+    assert_eq!(backend.list_commands().await.unwrap().commands.len(), 1);
+    assert_eq!(
+        backend
+            .get_command(CommandsGetParams {
+                command: package_command.command.clone(),
+            })
+            .await
+            .unwrap()
+            .command
+            .name,
+        package_command.name
+    );
+    assert_eq!(backend.list_domains().await.unwrap().domains.len(), 1);
+    assert_eq!(
+        backend
+            .get_domain(DomainsGetParams {
+                domain: package_domain.slug(),
+            })
+            .await
+            .unwrap()
+            .domain
+            .summary
+            .name,
+        package_domain.name
+    );
+    assert_eq!(backend.list_projects().await.unwrap().projects.len(), 1);
+    assert_eq!(
+        backend
+            .get_project(ProjectsGetParams {
+                project: package_project.slug.clone(),
+            })
+            .await
+            .unwrap()
+            .project
+            .summary
+            .name,
+        package_project.name
+    );
+    assert_eq!(backend.list_routines().await.unwrap().routines.len(), 1);
+    assert_eq!(
+        backend
+            .get_routine(RoutinesGetParams {
+                slug: package_routine.slug.clone(),
+            })
+            .await
+            .unwrap()
+            .routine
+            .summary
+            .name,
+        package_routine.name
+    );
+    assert_eq!(backend.list_models().await.unwrap().models.len(), 1);
+    assert_eq!(
+        backend
+            .get_model(ModelsGetParams {
+                model: package_model.slug.clone(),
+            })
+            .await
+            .unwrap()
+            .model
+            .summary
+            .name,
+        package_model.name
+    );
+    assert_eq!(backend.list_councils().await.unwrap().councils.len(), 1);
+    assert_eq!(
+        backend
+            .get_council(CouncilsGetParams {
+                council: Slug::derive(&package_council.name),
+            })
+            .await
+            .unwrap()
+            .council
+            .summary
+            .name,
+        package_council.name
+    );
+    assert_eq!(
+        backend
+            .list_context_blocks()
+            .await
+            .unwrap()
+            .context_blocks
+            .len(),
+        1
+    );
+    assert_eq!(
+        backend
+            .get_context_block(ContextBlocksGetParams {
+                context_block: package_context_block.slug(),
+            })
+            .await
+            .unwrap()
+            .context_block
+            .summary
+            .name,
+        package_context_block.name
+    );
+}
+
+#[tokio::test]
+async fn platform_manifest_backend_returns_package_overlay_abilities_regardless_of_resource_scope()
+{
     let temp = tempdir().unwrap();
     let root = temp.path();
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
@@ -957,19 +1233,19 @@ async fn platform_manifest_backend_filters_package_overlay_abilities_by_scope() 
             .with_read_only_manifest(Arc::new(Manifest {
                 abilities: vec![package_ability],
                 ..Default::default()
-            }))
-            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+            }));
 
     let abilities = backend.list_abilities().await.unwrap();
-    assert!(abilities.abilities.is_empty());
-    assert!(
-        backend
-            .get_ability(AbilitiesGetParams {
-                ability: Slug::derive("build_routine"),
-            })
-            .await
-            .is_err()
-    );
+    assert_eq!(abilities.abilities.len(), 1);
+    assert_eq!(abilities.abilities[0].name, "build_routine");
+    let ability = backend
+        .get_ability(AbilitiesGetParams {
+            ability: Slug::derive("build_routine"),
+        })
+        .await
+        .unwrap()
+        .ability;
+    assert_eq!(ability.summary.name, "build_routine");
 }
 
 #[tokio::test]
@@ -1011,8 +1287,7 @@ async fn platform_manifest_backend_prefers_local_ability_over_package_overlay() 
             .with_read_only_manifest(Arc::new(Manifest {
                 abilities: vec![local_ability],
                 ..Default::default()
-            }))
-            .with_access_policy(ManifestAccessPolicy::new(vec!["routines:read".into()]));
+            }));
 
     let abilities = backend.list_abilities().await.unwrap();
     assert_eq!(abilities.abilities.len(), 1);
