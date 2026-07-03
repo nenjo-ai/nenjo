@@ -93,12 +93,9 @@ fn validate_routine_references(
             .filter(|value| !value.trim().is_empty())
         {
             let path = validate_source_path(agent)?;
-            let Some(target) = find_module_by_source_path(packages, &path) else {
-                anyhow::bail!(
-                    "routine step '{}' references agent package path '{path}' that was not resolved",
-                    step.step_ref
-                );
-            };
+            let target = find_module_by_source_path(packages, &path)
+                .map(Ok)
+                .unwrap_or_else(|| find_agent_by_name(packages, agent))?;
             if target.kind != PackageKind::Agent {
                 anyhow::bail!(
                     "routine step '{}' references {path}, but it is {} not agent",
@@ -116,6 +113,32 @@ fn validate_routine_references(
         }
     }
     Ok(())
+}
+
+fn find_agent_by_name<'a>(
+    packages: &'a std::collections::BTreeMap<String, ResolvedPackage>,
+    name: &str,
+) -> anyhow::Result<&'a ResolvedModule> {
+    let matches = packages
+        .values()
+        .flat_map(|package| {
+            package
+                .modules
+                .iter()
+                .filter(|(key, module)| *key == &module.key())
+                .map(|(_, module)| module)
+        })
+        .filter(|module| module.kind == PackageKind::Agent && module.name() == name)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [module] => Ok(module),
+        [] => anyhow::bail!(
+            "routine step references agent '{name}', but no resolved package agent has that name"
+        ),
+        _ => anyhow::bail!(
+            "routine step references agent '{name}', but multiple resolved package agents have that name"
+        ),
+    }
 }
 
 fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<RoutineGraph> {

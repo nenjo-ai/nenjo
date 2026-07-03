@@ -36,6 +36,130 @@ fn validate_accepts_registry_and_prepare_writes_compiled_metadata() {
 }
 
 #[test]
+fn validate_resolves_external_registry_dependencies_for_package_selectors() {
+    let workspace = temp_workspace("validate-external-registry-dependencies");
+    let foo = workspace.join("foo");
+    let bar = workspace.join("bar");
+    write_file(
+        &foo,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+registries:
+  - kind: local
+    scope: "@bar"
+    root: ../bar
+    manifest_path: packages.yaml
+packages:
+  app: packages/app/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &foo,
+        "packages/app/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: app
+version: "1.0.0"
+dependencies:
+  "@bar/core": "^1.0.0"
+modules:
+  - agent.yaml
+"#,
+    );
+    write_file(
+        &foo,
+        "packages/app/agent.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: app_agent
+  prompt_config:
+    developer_prompt: |
+      {{ pkg.bar.core.context.core_context }}
+"#,
+    );
+    write_file(
+        &bar,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  core: packages/core/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &bar,
+        "packages/core/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: core
+version: "1.0.0"
+modules:
+  - context.yaml
+"#,
+    );
+    write_file(
+        &bar,
+        "packages/core/context.yaml",
+        r#"schema: nenjo.context_block.v1
+manifest:
+  name: core_context
+  template: External core context.
+"#,
+    );
+
+    let report = validate(ValidateOptions::new(&foo)).unwrap();
+
+    assert!(report.packages.contains_key("app"));
+    assert!(!report.packages.contains_key("@bar/core"));
+
+    let output = workspace.join("compiled.json");
+    let prepared = prepare(PrepareOptions::new(&foo).output(&output)).unwrap();
+    assert_eq!(prepared.compiled.registries.len(), 1);
+    let app = prepared
+        .compiled
+        .packages
+        .iter()
+        .find(|package| package.name == "app")
+        .unwrap();
+    assert_eq!(app.dependencies["@bar/core"], "^1.0.0");
+    assert!(
+        app.modules
+            .iter()
+            .any(|module| { module.prompt_package_selectors == vec!["pkg.bar.core".to_string()] })
+    );
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_rejects_external_dependency_without_declared_registry() {
+    let workspace = temp_workspace("validate-missing-external-registry");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  app: packages/app/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/app/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: app
+version: "1.0.0"
+dependencies:
+  "@bar/core": "^1.0.0"
+"#,
+    );
+
+    let err = format!(
+        "{:?}",
+        validate(ValidateOptions::new(&workspace)).unwrap_err()
+    );
+
+    assert!(err.contains("no external registries are declared"), "{err}");
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn validate_reports_runtime_validation_stages() {
     let workspace = temp_workspace("validate-progress-stages");
     copy_dir(&fixture("local-workspace"), &workspace);
@@ -392,6 +516,83 @@ manifest:
       to: implement
       condition: on_fail
       max_attempts: 2
+      metadata:
+        handoff_schema:
+          type: object
+          required: [work]
+          properties:
+            work:
+              type: string
+              minLength: 1
+          additionalProperties: false
+"#,
+    );
+
+    validate(ValidateOptions::new(&workspace).registry("packages.yaml")).unwrap();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_accepts_routine_agent_slug_references() {
+    let workspace = temp_workspace("validate-routine-agent-slug");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  "routines": packages/routines/nenjo.package.yaml
+  "agents": packages/agents/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "routines"
+version: "0.1.0"
+modules:
+  - review.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: "agents"
+version: "0.1.0"
+modules:
+  - coder.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/agents/coder.yaml",
+        r#"schema: nenjo.agent.v1
+manifest:
+  name: coder
+  prompt_config: {}
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/routines/review.yaml",
+        r#"schema: nenjo.routine.v1
+manifest:
+  name: review_flow
+  trigger: task
+  entry_steps:
+    - implement
+  steps:
+    - ref: implement
+      name: Implement
+      type: agent
+      agent: coder
+    - ref: done
+      name: Done
+      type: terminal
+  edges:
+    - from: implement
+      to: done
       metadata:
         handoff_schema:
           type: object

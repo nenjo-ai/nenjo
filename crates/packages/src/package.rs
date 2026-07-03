@@ -123,6 +123,9 @@ pub struct PackageRegistryManifest {
     /// Optional registry description.
     #[serde(default)]
     pub description: Option<String>,
+    /// External package registries this registry depends on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registries: Vec<PackageRegistryReference>,
     /// Package names mapped to registry-relative package manifest paths.
     #[serde(default)]
     pub packages: BTreeMap<String, String>,
@@ -137,6 +140,11 @@ impl PackageRegistryManifest {
     /// Validate the registry schema, package names, and manifest paths.
     pub fn validate(&self) -> Result<()> {
         self.schema_version()?;
+        for (index, registry) in self.registries.iter().enumerate() {
+            registry
+                .validate()
+                .with_context(|| format!("external registry reference {} is invalid", index + 1))?;
+        }
         for (name, path) in &self.packages {
             validate_package_slug(name)
                 .with_context(|| format!("registry package '{name}' is invalid"))?;
@@ -145,6 +153,118 @@ impl PackageRegistryManifest {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+/// Registry dependency reference advertised by a publisher registry.
+pub enum PackageRegistryReference {
+    /// Legacy registry index reference, such as `registry.yml` or an HTTPS URL.
+    Index(String),
+    /// Repository-style registry source, usually a git source pointing at `packages.yaml`.
+    Source(PackageRegistrySource),
+}
+
+impl PackageRegistryReference {
+    /// Validate that this registry reference is well-formed.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Index(reference) => {
+                if reference.trim().is_empty() {
+                    bail!("registry reference cannot be empty");
+                }
+            }
+            Self::Source(source) => source.validate()?,
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+/// Fetchable registry source descriptor advertised by a publisher registry.
+pub enum PackageRegistrySource {
+    /// Package registry content comes from a git repository.
+    Git {
+        /// Git remote URL.
+        url: String,
+        /// Branch, tag, or commit reference.
+        reference: String,
+        /// Repository-relative registry manifest path.
+        manifest_path: String,
+    },
+    /// Package registry content comes from an immutable package artifact.
+    Artifact {
+        /// Artifact URL.
+        url: String,
+        /// Expected artifact checksum.
+        checksum: String,
+        /// Artifact-relative registry manifest path.
+        manifest_path: String,
+    },
+    /// Package registry content comes from a local repository checkout.
+    Local {
+        /// Local repository root.
+        root: String,
+        /// Repository-relative registry manifest path.
+        manifest_path: String,
+        /// Package scope used when the local source points at a registry manifest.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+}
+
+impl PackageRegistrySource {
+    /// Return the registry manifest path for this source.
+    pub fn manifest_path(&self) -> &str {
+        match self {
+            Self::Git { manifest_path, .. }
+            | Self::Artifact { manifest_path, .. }
+            | Self::Local { manifest_path, .. } => manifest_path,
+        }
+    }
+
+    /// Validate that this source descriptor is well-formed.
+    pub fn validate(&self) -> Result<()> {
+        validate_source_path(self.manifest_path())
+            .context("registry source manifest path is invalid")?;
+        match self {
+            Self::Git { url, reference, .. } => {
+                if url.trim().is_empty() {
+                    bail!("git registry source url cannot be empty");
+                }
+                if reference.trim().is_empty() {
+                    bail!("git registry source reference cannot be empty");
+                }
+            }
+            Self::Artifact { url, checksum, .. } => {
+                if url.trim().is_empty() {
+                    bail!("artifact registry source url cannot be empty");
+                }
+                if checksum.trim().is_empty() {
+                    bail!("artifact registry source checksum cannot be empty");
+                }
+            }
+            Self::Local { root, scope, .. } => {
+                if root.trim().is_empty() {
+                    bail!("local registry source root cannot be empty");
+                }
+                if let Some(scope) = scope {
+                    validate_registry_scope(scope)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_registry_scope(scope: &str) -> Result<()> {
+    if !scope.starts_with('@') || scope.contains('/') {
+        bail!("local registry scope must look like @scope");
+    }
+    validate_package_name(&format!("{scope}/package"))
+        .context("local registry scope is invalid")?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

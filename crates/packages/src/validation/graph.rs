@@ -106,45 +106,80 @@ pub(crate) fn package_selector(package: &str) -> anyhow::Result<String> {
         .strip_prefix('@')
         .and_then(|value| value.split_once('/'))
     {
-        Ok(format!("pkg.{scope}.{name}"))
+        Ok(format!(
+            "pkg.{}.{}",
+            selector_segment(scope),
+            selector_segment(name)
+        ))
     } else {
-        Ok(format!("pkg.{package}"))
+        Ok(format!("pkg.{}", selector_segment(package)))
     }
+}
+
+pub(crate) fn package_selector_aliases(package: &str) -> anyhow::Result<BTreeSet<String>> {
+    validate_package_name(package)?;
+    let mut selectors = BTreeSet::from([package_selector(package)?]);
+    if let Some((scope, name)) = package
+        .strip_prefix('@')
+        .and_then(|value| value.split_once('/'))
+    {
+        selectors.insert(format!(
+            "pkg.{}.packages.{}",
+            selector_segment(scope),
+            selector_segment(name)
+        ));
+    } else {
+        selectors.insert(format!(
+            "pkg.nenjo_ai.packages.{}",
+            selector_segment(package)
+        ));
+    }
+    Ok(selectors)
 }
 
 pub(crate) fn pkg_selector_is_allowed(
     selector: &str,
-    package_selector: &str,
+    package_selectors: &BTreeSet<String>,
     dependency_selectors: &BTreeSet<String>,
 ) -> bool {
-    selector == package_selector
-        || selector
-            .strip_prefix(package_selector)
-            .is_some_and(|suffix| suffix.starts_with('.'))
+    selector_matches_any(selector, package_selectors)
+        || selector_matches_any(selector, dependency_selectors)
         || dependency_selectors.contains(selector)
-        || dependency_selectors.iter().any(|dependency| {
-            selector
-                .strip_prefix(dependency)
-                .is_some_and(|suffix| suffix.starts_with('.'))
-        })
         || selector_fully_qualified_package_leaf(selector).is_some_and(|leaf| {
-            selector_matches_unscoped_package(package_selector, leaf)
+            package_selectors
+                .iter()
+                .any(|package| selector_matches_unscoped_package(package, leaf))
                 || dependency_selectors
                     .iter()
                     .any(|dependency| selector_matches_unscoped_package(dependency, leaf))
         })
         || selector_package_slug(selector).is_some_and(|slug| {
-            selector_matches_unscoped_package(package_selector, slug)
+            package_selectors
+                .iter()
+                .any(|package| selector_matches_unscoped_package(package, slug))
                 || dependency_selectors
                     .iter()
                     .any(|dependency| selector_matches_unscoped_package(dependency, slug))
         })
 }
 
+fn selector_matches_any(selector: &str, allowed: &BTreeSet<String>) -> bool {
+    allowed.iter().any(|allowed| {
+        selector == allowed
+            || selector
+                .strip_prefix(allowed)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    })
+}
+
 fn selector_matches_unscoped_package(package_selector: &str, slug: &str) -> bool {
     package_selector
         .strip_prefix("pkg.")
         .is_some_and(|package| !package.contains('.') && package == slug)
+}
+
+fn selector_segment(value: &str) -> String {
+    value.replace('-', "_")
 }
 
 fn selector_package_slug(selector: &str) -> Option<&str> {

@@ -3,8 +3,8 @@ mod support;
 use std::fs;
 
 use nenjo_nenpm::{
-    FetchMode, InstallOptions, NenpmLock, PackageInstallIndex, PackageSource, install,
-    package_install_path, package_instance_key,
+    DependencyManifest, FetchMode, InstallOptions, NenpmLock, PackageInstallIndex, PackageSource,
+    ResolveOptions, install, package_install_path, package_instance_key, resolve,
 };
 
 use support::{copy_dir, fixture, temp_workspace, write_file};
@@ -767,6 +767,191 @@ registries:
 
     let locked = install(InstallOptions::new(&project).locked(true)).unwrap();
     assert_eq!(locked.lockfile, report.lockfile);
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_resolves_external_registry_dependencies_advertised_by_registry_source() {
+    let workspace = temp_workspace("external-registry-dependencies");
+    let project = workspace.join("project");
+    let foo = workspace.join("foo");
+    let bar = workspace.join("bar");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "@foo/app": "^1.0.0"
+
+registries:
+  - kind: local
+    scope: "@foo"
+    root: ../foo
+    manifest_path: packages.yaml
+"#,
+    );
+    write_file(
+        &foo,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+registries:
+  - kind: local
+    scope: "@bar"
+    root: ../bar
+    manifest_path: packages.yaml
+packages:
+  app: packages/app/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &foo,
+        "packages/app/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: app
+version: "1.0.0"
+dependencies:
+  "@bar/core": "^1.0.0"
+"#,
+    );
+    write_file(
+        &bar,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  core: packages/core/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &bar,
+        "packages/core/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: core
+version: "1.0.0"
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project).dry_run(true)).unwrap();
+
+    let mut packages = report
+        .lockfile
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect::<Vec<_>>();
+    packages.sort();
+    assert_eq!(
+        packages,
+        vec!["@bar/core@1.0.0".to_string(), "@foo/app@1.0.0".to_string()]
+    );
+    let app = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "@foo/app")
+        .unwrap();
+    assert_eq!(app.dependencies["@bar/core"], "^1.0.0");
+    assert_eq!(app.resolved_dependencies["@bar/core"], "1.0.0");
+    assert!(matches!(
+        app.source.as_ref().unwrap(),
+        PackageSource::Local { manifest_path, scope, .. }
+            if manifest_path == "packages/app/nenjo.package.yaml"
+                && scope.as_deref() == Some("@foo")
+    ));
+    let core = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "@bar/core")
+        .unwrap();
+    assert!(matches!(
+        core.source.as_ref().unwrap(),
+        PackageSource::Local { manifest_path, scope, .. }
+            if manifest_path == "packages/core/nenjo.package.yaml"
+                && scope.as_deref() == Some("@bar")
+    ));
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn resolve_accepts_manifest_without_dependency_file() {
+    let workspace = temp_workspace("resolve-external-registry");
+    let project = workspace.join("project");
+    let foo = workspace.join("foo");
+    let bar = workspace.join("bar");
+    fs::create_dir_all(&project).unwrap();
+    let manifest_yml = r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "@foo/app": "^1.0.0"
+
+registries:
+  - kind: local
+    scope: "@foo"
+    root: ../foo
+    manifest_path: packages.yaml
+"#;
+    write_file(
+        &foo,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+registries:
+  - kind: local
+    scope: "@bar"
+    root: ../bar
+    manifest_path: packages.yaml
+packages:
+  app: packages/app/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &foo,
+        "packages/app/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: app
+version: "1.0.0"
+dependencies:
+  "@bar/core": "^1.0.0"
+"#,
+    );
+    write_file(
+        &bar,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  core: packages/core/nenjo.package.yaml
+"#,
+    );
+    write_file(
+        &bar,
+        "packages/core/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: core
+version: "1.0.0"
+"#,
+    );
+
+    let manifest = DependencyManifest::parse_yaml(manifest_yml).unwrap();
+    let resolved = resolve(ResolveOptions::new(&project, manifest)).unwrap();
+
+    assert!(!project.join("nenpm.yml").exists());
+    let mut packages = resolved
+        .lockfile
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect::<Vec<_>>();
+    packages.sort();
+    assert_eq!(
+        packages,
+        vec!["@bar/core@1.0.0".to_string(), "@foo/app@1.0.0".to_string()]
+    );
+
+    write_file(&project, "nenpm.yml", manifest_yml);
+    let installed = install(InstallOptions::new(&project).dry_run(true)).unwrap();
+    assert_eq!(resolved.lockfile, installed.lockfile);
 
     fs::remove_dir_all(workspace).unwrap();
 }

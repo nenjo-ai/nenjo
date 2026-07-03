@@ -55,7 +55,7 @@ pub(crate) use module::{
 };
 pub use package::{
     ModulePackageManifest, PackageCatalog, PackageDescriptor, PackageEntry, PackageModule,
-    PackageRegistryManifest, ResourceDependency,
+    PackageRegistryManifest, PackageRegistryReference, PackageRegistrySource, ResourceDependency,
 };
 pub use reader::{
     PackageFileReader, resolve_module_package_graph_from_reader,

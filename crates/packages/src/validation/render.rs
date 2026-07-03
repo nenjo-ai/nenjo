@@ -10,7 +10,8 @@ use nenjo::context::{
 use crate::{PackageKind, ResolvedModule, ResolvedPackage};
 
 use super::graph::{
-    package_selector, scan_context_selectors, scan_pkg_reference_selectors, scan_pkg_selectors,
+    package_selector_aliases, scan_context_selectors, scan_pkg_reference_selectors,
+    scan_pkg_selectors,
 };
 
 #[derive(Debug, Clone)]
@@ -128,10 +129,10 @@ fn selector_bases(
     package: &ResolvedPackage,
     referenced_bases: &BTreeMap<String, BTreeSet<String>>,
 ) -> anyhow::Result<Vec<String>> {
-    let base = package_selector(&package.name)?;
-    let mut bases = vec![base];
+    let mut bases = package_selector_aliases(&package.name)?
+        .into_iter()
+        .collect::<Vec<_>>();
     if !package.name.starts_with('@') {
-        bases.push(format!("pkg.nenjo_ai.packages.{}", package.name));
         bases.extend(
             referenced_bases
                 .get(&package.name)
@@ -304,11 +305,15 @@ fn normalize_named_template_refs(
         if !key.contains('.') {
             continue;
         }
-        let needle = format!("{{{{ {key} }}}}");
         let include = format!("{{% include \"{}\" %}}", key.replace('.', "/"));
-        out = out.replace(&needle, &include);
-        let compact = format!("{{{{{key}}}}}");
-        out = out.replace(&compact, &include);
+        for needle in [
+            format!("{{{{ {key} }}}}"),
+            format!("{{{{{key}}}}}"),
+            format!("{{{{ {key}}}}}"),
+            format!("{{{{{key} }}}}"),
+        ] {
+            out = out.replace(&needle, &include);
+        }
     }
     out
 }
@@ -456,6 +461,21 @@ mod tests {
         assert!(
             missing.is_empty(),
             "synthetic validation vars missing declared runtime vars: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn normalizes_named_template_refs_with_partial_spacing() {
+        let templates =
+            HashMap::from([("pkg.scope.context.block".to_string(), "body".to_string())]);
+
+        assert_eq!(
+            normalize_named_template_refs("{{ pkg.scope.context.block}}", &templates),
+            "{% include \"pkg/scope/context/block\" %}"
+        );
+        assert_eq!(
+            normalize_named_template_refs("{{pkg.scope.context.block }}", &templates),
+            "{% include \"pkg/scope/context/block\" %}"
         );
     }
 }
