@@ -1,7 +1,9 @@
 use crate::Result;
-use anyhow::{Context, anyhow};
+use std::path::Path;
 
-use crate::dependency::LoadedDependencyManifest;
+use anyhow::Context;
+
+use crate::dependency::DependencyManifest;
 use crate::registry::RegistryIndex;
 use crate::source::DefaultPackageSourceFetcher;
 
@@ -11,17 +13,14 @@ pub(super) struct ConfiguredRegistries {
 
 impl ConfiguredRegistries {
     pub(super) fn load(
-        loaded: &LoadedDependencyManifest,
+        manifest: &DependencyManifest,
+        base_dir: &Path,
         source_fetcher: &DefaultPackageSourceFetcher,
     ) -> Result<Self> {
-        let manifest_dir = loaded
-            .path
-            .parent()
-            .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?;
         let mut registries = Vec::new();
-        for reference in &loaded.manifest.registries {
+        for reference in &manifest.registries {
             let registry =
-                RegistryIndex::load_reference_with_fetcher(reference, manifest_dir, source_fetcher)
+                RegistryIndex::load_reference_with_fetcher(reference, base_dir, source_fetcher)
                     .context("failed to load registry")?;
             registries.push(registry);
         }

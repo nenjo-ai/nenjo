@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ use crate::dependency::RegistryReference;
 use crate::source::{
     DefaultPackageSourceFetcher, FetchedPackageSource, PackageSource, PackageSourceFetcher,
     fetch_bytes, normalize_fetch_url, normalize_source_paths, package_source_scope,
-    validate_package_source,
+    source_fetch_key, validate_package_source,
 };
 
 /// Registry metadata for one concrete package version.
@@ -115,26 +115,49 @@ impl RegistryIndex {
         source_fetcher: &DefaultPackageSourceFetcher,
     ) -> Result<Self> {
         let base_dir = base_dir.as_ref();
+        let mut visited = BTreeSet::new();
+        Self::load_reference_with_fetcher_inner(reference, base_dir, source_fetcher, &mut visited)
+    }
+
+    fn load_reference_with_fetcher_inner(
+        reference: &RegistryReference,
+        base_dir: &Path,
+        source_fetcher: &DefaultPackageSourceFetcher,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<Self> {
+        let key = registry_reference_key(reference, base_dir);
+        if !visited.insert(key) {
+            return Ok(Self {
+                schema: "nenjo.registry.v1".to_string(),
+                packages: BTreeMap::new(),
+            });
+        }
         match reference {
             RegistryReference::Index(reference) => Self::load(reference, base_dir),
-            RegistryReference::Source(source) => {
-                Self::load_registry_source_with_fetcher(source, base_dir, source_fetcher)
-            }
+            RegistryReference::Source(source) => Self::load_registry_source_with_fetcher_inner(
+                source,
+                base_dir,
+                source_fetcher,
+                visited,
+            ),
         }
     }
 
     fn load_registry_source(source: &PackageSource, base_dir: &Path) -> Result<Self> {
-        Self::load_registry_source_with_fetcher(
+        let mut visited = BTreeSet::new();
+        Self::load_registry_source_with_fetcher_inner(
             source,
             base_dir,
             &DefaultPackageSourceFetcher::new(),
+            &mut visited,
         )
     }
 
-    fn load_registry_source_with_fetcher(
+    fn load_registry_source_with_fetcher_inner(
         source: &PackageSource,
         base_dir: &Path,
         source_fetcher: &DefaultPackageSourceFetcher,
+        visited: &mut BTreeSet<String>,
     ) -> Result<Self> {
         let source = normalize_source_paths(source.clone(), base_dir);
         let fetched = source_fetcher
@@ -152,6 +175,7 @@ impl RegistryIndex {
         let resolver =
             LocalPackageResolver::with_registry_path(&fetched.root, &fetched.manifest_path);
         let registry = resolver.load_registry()?;
+        let external_registries = registry.registries.clone();
         let mut packages = BTreeMap::new();
         let repo_scope = package_source_scope(&source);
         for (name, manifest_path) in registry.packages {
@@ -177,6 +201,17 @@ impl RegistryIndex {
                     ),
                     checksum: None,
                 });
+        }
+        for external_reference in &external_registries {
+            let reference = RegistryReference::from(external_reference);
+            let external = Self::load_reference_with_fetcher_inner(
+                &reference,
+                &fetched.root,
+                source_fetcher,
+                visited,
+            )
+            .context("failed to load external registry")?;
+            merge_external_registry_packages(&mut packages, external);
         }
         Ok(Self {
             schema: "nenjo.registry.v1".to_string(),
@@ -219,6 +254,9 @@ impl RegistryIndex {
 }
 
 fn scoped_package_name(scope: Option<&str>, name: &str) -> String {
+    if name.starts_with('@') {
+        return name.to_string();
+    }
     match scope {
         Some(scope) => format!("{scope}/{name}"),
         None => name.to_string(),
@@ -233,6 +271,45 @@ fn scoped_dependencies(
         .iter()
         .map(|(name, requirement)| (scoped_package_name(scope, name), requirement.clone()))
         .collect()
+}
+
+fn merge_external_registry_packages(
+    packages: &mut BTreeMap<String, Vec<RegistryIndexVersion>>,
+    external: RegistryIndex,
+) {
+    for (name, versions) in external.packages {
+        packages.entry(name).or_insert(versions);
+    }
+}
+
+fn registry_reference_key(reference: &RegistryReference, base_dir: &Path) -> String {
+    match reference {
+        RegistryReference::Index(reference) => {
+            let raw = reference.trim();
+            let path = raw
+                .strip_prefix("file://")
+                .or_else(|| raw.strip_prefix("file:"))
+                .unwrap_or(raw);
+            let normalized = if raw.starts_with("http://")
+                || raw.starts_with("https://")
+                || Path::new(path).is_absolute()
+            {
+                raw.to_string()
+            } else {
+                base_dir.join(path).to_string_lossy().to_string()
+            };
+            format!("index:{normalized}")
+        }
+        RegistryReference::Source(source) => {
+            let source = normalize_source_paths(source.clone(), base_dir);
+            format!(
+                "source:{}#{}#{}",
+                source_fetch_key(&source),
+                source.manifest_path().unwrap_or_default(),
+                package_source_scope(&source).unwrap_or_default()
+            )
+        }
+    }
 }
 
 fn source_with_manifest_path(source: &PackageSource, manifest_path: String) -> PackageSource {

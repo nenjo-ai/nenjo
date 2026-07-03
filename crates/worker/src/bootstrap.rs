@@ -9,7 +9,7 @@
 //!   `manifests/context_blocks/{path}/{name}.json`
 //! Other resource types remain as flat JSON arrays.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -678,9 +678,29 @@ pub(crate) async fn sync_platform_packages(
         return Ok(PlatformPackageSyncStatus::UnsupportedSchema);
     }
     let root = nenjo_home.join("platform_pkgs");
-    write_text_if_changed(&root, "nenpm.yml", &packages.nenpm_yml)?;
-    write_text_if_changed(&root, "nenpm.lock.yml", &packages.nenpm_lock_yml)?;
-    let install_root = root.clone();
+    let staging_root = unique_cache_tmp_path(&root, "platform_pkgs");
+    let sync_result = sync_platform_packages_staged(&staging_root, packages).await;
+    if sync_result.is_err()
+        && let Err(error) = remove_cache_path(&staging_root)
+    {
+        warn!(
+            path = %staging_root.display(),
+            error = ?error,
+            "Failed to clean failed platform package staging directory"
+        );
+    }
+    sync_result?;
+    replace_package_cache(&root, &staging_root)?;
+    Ok(PlatformPackageSyncStatus::Applied)
+}
+
+async fn sync_platform_packages_staged(
+    staging_root: &Path,
+    packages: &BootstrapPackages,
+) -> Result<()> {
+    write_text_if_changed(staging_root, "nenpm.yml", &packages.nenpm_yml)?;
+    write_text_if_changed(staging_root, "nenpm.lock.yml", &packages.nenpm_lock_yml)?;
+    let install_root = staging_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         nenjo_nenpm::install(
             nenjo_nenpm::InstallOptions::new(&install_root)
@@ -692,7 +712,65 @@ pub(crate) async fn sync_platform_packages(
     .await
     .context("platform package install task failed")?
     .context("failed to install platform packages")?;
-    Ok(PlatformPackageSyncStatus::Applied)
+    Ok(())
+}
+
+fn replace_package_cache(root: &Path, staging_root: &Path) -> Result<()> {
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create package cache parent {}", parent.display())
+        })?;
+    }
+    let backup = unique_cache_tmp_path(root, "platform_pkgs-prev");
+    let had_root = root.exists();
+    if had_root {
+        std::fs::rename(root, &backup).with_context(|| {
+            format!(
+                "Failed to move current package cache {} to {}",
+                root.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    if let Err(error) = std::fs::rename(staging_root, root) {
+        if had_root && let Err(restore_error) = std::fs::rename(&backup, root) {
+            return Err(anyhow!(
+                "Failed to activate staged package cache {} as {}: {error}; also failed to restore previous cache {}: {restore_error}",
+                staging_root.display(),
+                root.display(),
+                backup.display()
+            ));
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "Failed to activate staged package cache {} as {}",
+                staging_root.display(),
+                root.display()
+            )
+        });
+    }
+
+    if had_root && let Err(error) = remove_cache_path(&backup) {
+        warn!(
+            path = %backup.display(),
+            error = ?error,
+            "Failed to remove previous platform package cache backup"
+        );
+    }
+    Ok(())
+}
+
+fn remove_cache_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("Failed to remove {}", path.display()))
+    } else {
+        std::fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1540,6 +1618,216 @@ mod tests {
         assert!(root.join(".nenpm-index.json").exists());
     }
 
+    #[tokio::test]
+    async fn sync_platform_packages_empty_graph_prunes_cached_packages() {
+        let package_root = tempfile::tempdir().unwrap();
+        write_test_package(package_root.path());
+        let nenpm_yml = test_nenpm_yml(package_root.path());
+        let nenpm_lock_yml = build_test_lockfile(&nenpm_yml);
+        let nenjo_home = tempfile::tempdir().unwrap();
+        let packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_yml,
+            nenpm_lock_yml,
+        };
+        sync_platform_packages(nenjo_home.path(), &packages)
+            .await
+            .unwrap();
+
+        let root = nenjo_home.path().join("platform_pkgs");
+        assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
+
+        let empty_nenpm_yml = empty_test_nenpm_yml();
+        let empty_packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_lock_yml: build_test_lockfile(&empty_nenpm_yml),
+            nenpm_yml: empty_nenpm_yml,
+        };
+        let status = sync_platform_packages(nenjo_home.path(), &empty_packages)
+            .await
+            .unwrap();
+
+        assert_eq!(status, PlatformPackageSyncStatus::Applied);
+        assert!(root.join("nenpm.yml").exists());
+        assert!(root.join("nenpm.lock.yml").exists());
+        assert!(root.join(".nenpm-index.json").exists());
+        assert!(!root.join("@acme/core@0.1.0/context.yaml").exists());
+        assert!(!root.join("@acme").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_platform_packages_failed_update_preserves_existing_cache() {
+        let package_root = tempfile::tempdir().unwrap();
+        write_test_package(package_root.path());
+        let initial_nenpm_yml = test_nenpm_yml(package_root.path());
+        let initial_nenpm_lock_yml = build_test_lockfile(&initial_nenpm_yml);
+        let nenjo_home = tempfile::tempdir().unwrap();
+        let packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_yml: initial_nenpm_yml.clone(),
+            nenpm_lock_yml: initial_nenpm_lock_yml.clone(),
+        };
+        sync_platform_packages(nenjo_home.path(), &packages)
+            .await
+            .unwrap();
+
+        let root = nenjo_home.path().join("platform_pkgs");
+        assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
+
+        let missing_root = tempfile::tempdir().unwrap();
+        let bad_nenpm_yml = format!(
+            r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@acme/missing": "0.1.0"
+
+overrides:
+  "@acme/missing":
+    kind: local
+    root: {}
+    manifest_path: nenjo.package.yaml
+"#,
+            missing_root.path().join("does-not-exist").display()
+        );
+        let bad_packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_yml: bad_nenpm_yml,
+            nenpm_lock_yml: initial_nenpm_lock_yml.clone(),
+        };
+
+        let error = sync_platform_packages(nenjo_home.path(), &bad_packages)
+            .await
+            .expect_err("bad platform package update should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to install platform packages")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("nenpm.yml")).unwrap(),
+            initial_nenpm_yml
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("nenpm.lock.yml")).unwrap(),
+            initial_nenpm_lock_yml
+        );
+        assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_platform_packages_installs_external_registry_dependencies() {
+        let core_root = tempfile::tempdir().unwrap();
+        write_test_file(
+            core_root.path(),
+            "packages.yaml",
+            r#"
+schema: nenjo.registry.v1
+packages:
+  core: packages/core/nenjo.package.yaml
+"#,
+        );
+        write_test_file(
+            core_root.path(),
+            "packages/core/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: core
+version: "0.1.0"
+modules:
+  - path: context/methodology.yaml
+"#,
+        );
+        write_test_file(
+            core_root.path(),
+            "packages/core/context/methodology.yaml",
+            r#"
+schema: nenjo.context_block.v1
+manifest:
+  name: methodology
+  template: Use the external methodology.
+"#,
+        );
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_test_file(
+            app_root.path(),
+            "packages.yaml",
+            &format!(
+                r#"
+schema: nenjo.registry.v1
+registries:
+  - kind: local
+    root: {}
+    manifest_path: packages.yaml
+    scope: "@bar"
+packages:
+  app: packages/app/nenjo.package.yaml
+"#,
+                core_root.path().display()
+            ),
+        );
+        write_test_file(
+            app_root.path(),
+            "packages/app/nenjo.package.yaml",
+            r#"
+schema: nenjo.package.v1
+name: app
+version: "0.1.0"
+dependencies:
+  "@bar/core": "^0.1.0"
+modules:
+  - path: agents/app.yaml
+"#,
+        );
+        write_test_file(
+            app_root.path(),
+            "packages/app/agents/app.yaml",
+            r#"
+schema: nenjo.agent.v1
+manifest:
+  name: App Agent
+"#,
+        );
+
+        let nenpm_yml = format!(
+            r#"
+schema: nenjo.dependencies.v1
+
+dependencies:
+  "@foo/app": "0.1.0"
+  "@bar/core": "0.1.0"
+
+registries:
+  - kind: local
+    root: {}
+    manifest_path: packages.yaml
+    scope: "@foo"
+"#,
+            app_root.path().display()
+        );
+        let nenpm_lock_yml = build_test_lockfile(&nenpm_yml);
+        let nenjo_home = tempfile::tempdir().unwrap();
+        let packages = BootstrapPackages {
+            schema: "nenjo.platform_packages.v1".to_string(),
+            nenpm_yml,
+            nenpm_lock_yml,
+        };
+
+        let status = sync_platform_packages(nenjo_home.path(), &packages)
+            .await
+            .unwrap();
+        assert_eq!(status, PlatformPackageSyncStatus::Applied);
+
+        let root = nenjo_home.path().join("platform_pkgs");
+        assert!(
+            root.join("@bar/core@0.1.0/context/methodology.yaml")
+                .exists()
+        );
+        assert!(root.join("@foo/app@0.1.0/agents/app.yaml").exists());
+        assert!(root.join(".nenpm-index.json").exists());
+    }
+
     fn write_test_package(root: &Path) {
         fs::write(
             root.join("nenjo.package.yaml"),
@@ -1564,6 +1852,14 @@ manifest:
         .unwrap();
     }
 
+    fn write_test_file(root: &Path, path: &str, content: &str) {
+        let path = root.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
     fn test_nenpm_yml(package_root: &Path) -> String {
         format!(
             r#"
@@ -1580,6 +1876,15 @@ overrides:
 "#,
             package_root.display()
         )
+    }
+
+    fn empty_test_nenpm_yml() -> String {
+        r#"
+schema: nenjo.dependencies.v1
+
+dependencies: {}
+"#
+        .to_string()
     }
 
     fn build_test_lockfile(nenpm_yml: &str) -> String {

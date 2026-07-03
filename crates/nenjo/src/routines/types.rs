@@ -390,17 +390,25 @@ pub enum CronSchedule {
 impl CronSchedule {
     /// Compute the next fire time in UTC.
     pub fn next_fire_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.next_fire_after(chrono::Utc::now())
+    }
+
+    /// Compute the next fire time after a specific UTC instant.
+    pub fn next_fire_after(
+        &self,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> chrono::DateTime<chrono::Utc> {
         match self {
             CronSchedule::Interval(d) => {
-                chrono::Utc::now()
+                after
                     + chrono::Duration::from_std(*d)
                         .unwrap_or_else(|_| chrono::Duration::seconds(60))
             }
             CronSchedule::Expression { schedule, timezone } => schedule
-                .upcoming(*timezone)
+                .after(&after.with_timezone(timezone))
                 .next()
                 .map(|value| value.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::seconds(60)),
+                .unwrap_or_else(|| after + chrono::Duration::seconds(60)),
         }
     }
 
@@ -408,7 +416,8 @@ impl CronSchedule {
     /// For fixed intervals this returns the interval directly.
     /// For cron expressions it computes the delay until the next upcoming time.
     pub fn next_delay(&self) -> Duration {
-        let delta = self.next_fire_at() - chrono::Utc::now();
+        let now = chrono::Utc::now();
+        let delta = self.next_fire_after(now) - now;
         delta.to_std().unwrap_or(Duration::from_secs(60))
     }
 }
@@ -540,6 +549,7 @@ impl RoutineMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn edge_condition_parsing() {
@@ -635,6 +645,45 @@ mod tests {
             matches!(s, CronSchedule::Expression { timezone, .. } if timezone == chrono_tz::America::Chicago)
         );
         assert!(parse_schedule_in_timezone("0 9 * * *", Some("Not/AZone")).is_err());
+    }
+
+    #[test]
+    fn cron_schedule_uses_timezone_for_hour_range_boundaries() {
+        let schedule = parse_schedule_in_timezone("0 8-19 * * *", Some("America/Chicago")).unwrap();
+        let chicago = chrono_tz::America::Chicago;
+
+        let before_window = chicago
+            .with_ymd_and_hms(2026, 7, 3, 7, 59, 59)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            schedule
+                .next_fire_after(before_window)
+                .with_timezone(&chicago),
+            chicago.with_ymd_and_hms(2026, 7, 3, 8, 0, 0).unwrap()
+        );
+
+        let before_last_inclusive_hour = chicago
+            .with_ymd_and_hms(2026, 7, 3, 18, 59, 59)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            schedule
+                .next_fire_after(before_last_inclusive_hour)
+                .with_timezone(&chicago),
+            chicago.with_ymd_and_hms(2026, 7, 3, 19, 0, 0).unwrap()
+        );
+
+        let at_last_inclusive_hour = chicago
+            .with_ymd_and_hms(2026, 7, 3, 19, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            schedule
+                .next_fire_after(at_last_inclusive_hour)
+                .with_timezone(&chicago),
+            chicago.with_ymd_and_hms(2026, 7, 4, 8, 0, 0).unwrap()
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ use crate::{
 };
 
 use self::graph::{
-    collect_strings, context_import_name, package_selector, pkg_selector_is_allowed,
+    collect_strings, context_import_name, package_selector_aliases, pkg_selector_is_allowed,
     scan_context_selectors, scan_pkg_selectors, selector_to_package_name, unique_modules,
     validate_context_graph, validate_module_imports,
 };
@@ -136,8 +136,8 @@ fn validate_packages(
 
     progress(PackageRuntimeValidationStage::PromptSelectors);
     for package in packages.values() {
-        let current_selector = match package_selector(&package.name) {
-            Ok(selector) => selector,
+        let current_selectors = match package_selector_aliases(&package.name) {
+            Ok(selectors) => selectors,
             Err(error) => {
                 push_package_error(package, None, None, error, &mut report);
                 continue;
@@ -146,8 +146,9 @@ fn validate_packages(
         let dependency_selectors = match package
             .dependencies()
             .keys()
-            .map(|name| package_selector(name))
-            .collect::<anyhow::Result<BTreeSet<_>>>()
+            .map(|name| package_selector_aliases(name))
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(|selectors| selectors.into_iter().flatten().collect::<BTreeSet<_>>())
         {
             Ok(selectors) => selectors,
             Err(error) => {
@@ -161,7 +162,7 @@ fn validate_packages(
                 module,
                 "prompt selectors",
                 None,
-                || validate_prompt_selectors(module, &current_selector, &dependency_selectors),
+                || validate_prompt_selectors(module, &current_selectors, &dependency_selectors),
                 &mut report,
             );
         }
@@ -265,7 +266,7 @@ fn push_package_error(
 
 fn validate_prompt_selectors(
     module: &ResolvedModule,
-    package_selector: &str,
+    package_selectors: &BTreeSet<String>,
     dependency_selectors: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
     let mut strings = Vec::new();
@@ -279,7 +280,7 @@ fn validate_prompt_selectors(
 
     for value in strings {
         for selector in scan_pkg_selectors(value) {
-            if !pkg_selector_is_allowed(&selector, package_selector, dependency_selectors) {
+            if !pkg_selector_is_allowed(&selector, package_selectors, dependency_selectors) {
                 anyhow::bail!(
                     "{} references pkg selector {}, but {} is not the current package or a package dependency",
                     module.path,
@@ -507,6 +508,14 @@ mod tests {
     use crate::{ModulePackageManifest, ResourceManifest};
 
     fn package(name: &str, modules: Vec<ResolvedModule>) -> ResolvedPackage {
+        package_with_dependencies(name, BTreeMap::new(), modules)
+    }
+
+    fn package_with_dependencies(
+        name: &str,
+        dependencies: BTreeMap<String, String>,
+        modules: Vec<ResolvedModule>,
+    ) -> ResolvedPackage {
         let modules = modules
             .into_iter()
             .flat_map(|module| {
@@ -525,7 +534,7 @@ mod tests {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 description: None,
-                dependencies: BTreeMap::new(),
+                dependencies,
                 modules: Vec::new(),
                 metadata: serde_json::Value::Null,
             },
@@ -559,12 +568,58 @@ mod tests {
             schema: "nenjo.registry.v1".to_string(),
             name: None,
             description: None,
+            registries: Vec::new(),
             packages: BTreeMap::new(),
         };
         let packages = BTreeMap::from([(package.name.clone(), package)]);
         validate_registry_runtime(&registry, &packages)
             .expect_err("validation should fail")
             .to_string()
+    }
+
+    #[test]
+    fn accepts_scoped_official_package_selector_alias() {
+        let agent = module(
+            "agents/app.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "app",
+                "prompt_config": {
+                    "developer_prompt": "{{ pkg.nenjo_ai.packages.context.memory.remembrance }}"
+                }
+            }),
+        );
+        let context = module(
+            "memory/remembrance.yaml",
+            PackageKind::ContextBlock,
+            serde_json::json!({
+                "name": "remembrance",
+                "template": "Remember prior work."
+            }),
+        );
+        let packages = BTreeMap::from([
+            (
+                "app".to_string(),
+                package_with_dependencies(
+                    "app",
+                    BTreeMap::from([("@nenjo-ai/context".to_string(), "^1.0.0".to_string())]),
+                    vec![agent],
+                ),
+            ),
+            (
+                "@nenjo-ai/context".to_string(),
+                package("@nenjo-ai/context", vec![context]),
+            ),
+        ]);
+        let registry = PackageRegistryManifest {
+            schema: "nenjo.registry.v1".to_string(),
+            name: None,
+            description: None,
+            registries: Vec::new(),
+            packages: BTreeMap::new(),
+        };
+
+        validate_registry_runtime(&registry, &packages).unwrap();
     }
 
     #[test]

@@ -2,14 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::Result;
 use anyhow::Context;
 use nenjo_packages::{
-    LocalPackageResolver, ModuleImport, PackageKind, PackageRegistryManifest, ResolvedModule,
-    ResolvedPackage,
+    LocalPackageResolver, ModuleImport, PackageKind, PackageRegistryManifest,
+    PackageRegistryReference, ResolvedModule, ResolvedPackage,
     validation::{PackageRuntimeValidationStage, validate_registry_runtime_with_progress},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::Result;
+use crate::dependency::RegistryReference;
+use crate::install::resolve_registry_records_parallel;
+use crate::registry::{RegistryIndex, RegistryPackageVersion};
+use crate::source::DefaultPackageSourceFetcher;
 
 const PREPARED_SCHEMA: &str = "nenjo.prepared_registry.v1";
 
@@ -123,6 +128,8 @@ pub struct PrepareReport {
 pub struct PreparedRegistry {
     pub schema: String,
     pub registry_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registries: Vec<PackageRegistryReference>,
     pub packages: Vec<PreparedPackage>,
 }
 
@@ -179,7 +186,10 @@ pub fn validate_with_progress(
         }
         packages.insert(name.clone(), package);
     }
-    validate_registry_runtime_with_progress(&registry, &packages, |stage| {
+    let mut validation_packages = packages.clone();
+    resolve_external_registry_dependencies(&root, &registry, &mut validation_packages)
+        .with_context(|| "failed to resolve external registry dependencies")?;
+    validate_registry_runtime_with_progress(&registry, &validation_packages, |stage| {
         progress(ValidateStage::Runtime(stage));
     })
     .with_context(|| "failed package runtime validation")?;
@@ -250,8 +260,102 @@ fn compile_registry(report: &ValidateReport) -> PreparedRegistry {
     PreparedRegistry {
         schema: PREPARED_SCHEMA.to_string(),
         registry_path: report.registry_path.clone(),
+        registries: report.registry.registries.clone(),
         packages,
     }
+}
+
+fn resolve_external_registry_dependencies(
+    root: &Path,
+    registry: &PackageRegistryManifest,
+    packages: &mut BTreeMap<String, ResolvedPackage>,
+) -> Result<()> {
+    let mut stack = packages
+        .values()
+        .flat_map(|package| package.dependencies().iter())
+        .filter(|(name, _)| !packages.contains_key(*name))
+        .map(|(name, requirement)| (name.clone(), requirement.clone()))
+        .collect::<Vec<_>>();
+    if stack.is_empty() {
+        return Ok(());
+    }
+    if registry.registries.is_empty() {
+        let name = stack
+            .last()
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("<unknown>");
+        bail!(
+            "{name} is required by the package registry, but no external registries are declared"
+        );
+    }
+
+    let source_fetcher = DefaultPackageSourceFetcher::new();
+    let registries = registry
+        .registries
+        .iter()
+        .map(|reference| {
+            let reference = RegistryReference::from(reference);
+            RegistryIndex::load_reference_with_fetcher(&reference, root, &source_fetcher)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut registry_records = BTreeMap::<String, RegistryPackageVersion>::new();
+
+    while let Some((name, requirement)) = stack.pop() {
+        if let Some(existing) = packages.get(&name) {
+            ensure_version_satisfies(&name, &existing.version, &requirement)?;
+            continue;
+        }
+        if let Some(existing) = registry_records.get(&name) {
+            ensure_version_satisfies(&name, &existing.version, &requirement)?;
+            continue;
+        }
+
+        let registry = registries
+            .iter()
+            .find(|registry| registry.packages.contains_key(&name))
+            .ok_or_else(|| {
+                crate::NenpmError::Message(format!(
+                    "{name} is required by the package registry, but no external registry contains it"
+                ))
+            })?;
+        let record = registry
+            .resolve_version_matching_all(&name, std::slice::from_ref(&requirement))
+            .with_context(|| format!("failed to resolve {name} from external registry"))?;
+        for (dependency, requirement) in &record.dependencies {
+            stack.push((dependency.clone(), requirement.clone()));
+        }
+        registry_records.insert(name, record);
+    }
+
+    let resolved = resolve_registry_records_parallel(registry_records, &source_fetcher)?;
+    merge_validation_packages(packages, resolved.packages)
+}
+
+fn ensure_version_satisfies(name: &str, version: &str, requirement: &str) -> Result<()> {
+    if !nenjo_packages::version_satisfies(version, requirement) {
+        bail!("{name} resolved to {version}, which does not satisfy {requirement}");
+    }
+    Ok(())
+}
+
+fn merge_validation_packages(
+    target: &mut BTreeMap<String, ResolvedPackage>,
+    source: BTreeMap<String, ResolvedPackage>,
+) -> Result<()> {
+    for (name, package) in source {
+        if let Some(existing) = target.get(&name) {
+            if existing.version != package.version {
+                bail!(
+                    "{name} resolved to both {} and {}",
+                    existing.version,
+                    package.version
+                );
+            }
+            continue;
+        }
+        target.insert(name, package);
+    }
+    Ok(())
 }
 
 fn unique_modules(package: &ResolvedPackage) -> impl Iterator<Item = &ResolvedModule> {

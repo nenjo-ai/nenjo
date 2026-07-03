@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::Result;
 use anyhow::{Context, anyhow};
 use nenjo_packages::{LocalPackageResolver, ResolvedPackage, ResolvedPackageGraph};
 use rayon::prelude::*;
 
-use crate::dependency::{DependencyManifest, LoadedDependencyManifest};
+use crate::dependency::DependencyManifest;
 use crate::lockfile::{LockedSource, NenpmLock, lockfile_from_plan};
 use crate::plan::InstallPlan;
 use crate::registry::{
@@ -95,6 +95,12 @@ impl InstallOptions {
         self
     }
 
+    /// Set the version upgrade policy used when `update` is true.
+    pub fn upgrade_policy(mut self, upgrade_policy: UpgradePolicy) -> Self {
+        self.upgrade_policy = upgrade_policy;
+        self
+    }
+
     /// Require the install to match `nenpm.lock.yml`.
     pub fn locked(mut self, locked: bool) -> Self {
         self.locked = locked;
@@ -106,6 +112,85 @@ impl InstallOptions {
         self.fetch_mode = Some(fetch_mode);
         self
     }
+}
+
+/// Options for resolving a dependency manifest without materializing packages.
+#[derive(Debug, Clone)]
+pub struct ResolveOptions {
+    /// Base directory used to resolve relative local registry/source references.
+    pub base_dir: PathBuf,
+    /// Dependency manifest to resolve.
+    pub manifest: DependencyManifest,
+    /// Existing lockfile used for locked checks or update pinning.
+    pub existing_lockfile: Option<NenpmLock>,
+    /// Re-resolve registry versions instead of preserving lockfile pins.
+    pub update: bool,
+    /// Major-version policy used when `update` is true.
+    pub upgrade_policy: UpgradePolicy,
+    /// Require the resolved graph to match the existing lockfile.
+    pub locked: bool,
+    /// Explicit source fetch mode for git-backed package sources.
+    pub fetch_mode: Option<FetchMode>,
+}
+
+impl ResolveOptions {
+    /// Create resolve options from a base directory and parsed dependency manifest.
+    pub fn new(base_dir: impl Into<PathBuf>, manifest: DependencyManifest) -> Self {
+        Self {
+            base_dir: base_dir.into(),
+            manifest,
+            existing_lockfile: None,
+            update: false,
+            upgrade_policy: UpgradePolicy::Compatible,
+            locked: false,
+            fetch_mode: None,
+        }
+    }
+
+    /// Provide an existing lockfile for locked checks or update pinning.
+    pub fn existing_lockfile(mut self, existing_lockfile: Option<NenpmLock>) -> Self {
+        self.existing_lockfile = existing_lockfile;
+        self
+    }
+
+    /// Re-resolve registry versions instead of preserving lockfile pins.
+    pub fn update(mut self, update: bool) -> Self {
+        self.update = update;
+        self
+    }
+
+    /// Allow `update`/`upgrade` to move locked packages to a new major version.
+    pub fn allow_major_updates(mut self) -> Self {
+        self.upgrade_policy = UpgradePolicy::AllowMajor;
+        self
+    }
+
+    /// Set the version upgrade policy used when `update` is true.
+    pub fn upgrade_policy(mut self, upgrade_policy: UpgradePolicy) -> Self {
+        self.upgrade_policy = upgrade_policy;
+        self
+    }
+
+    /// Require the resolved graph to match the existing lockfile.
+    pub fn locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Override the source fetch mode for git-backed package sources.
+    pub fn fetch_mode(mut self, fetch_mode: FetchMode) -> Self {
+        self.fetch_mode = Some(fetch_mode);
+        self
+    }
+}
+
+/// Result of resolving a dependency manifest.
+#[derive(Debug, Clone)]
+pub struct ResolveReport {
+    /// Resolved install plan.
+    pub plan: InstallPlan,
+    /// Generated lockfile content.
+    pub lockfile: NenpmLock,
 }
 
 /// Result of a dependency manifest install.
@@ -136,6 +221,54 @@ pub struct MaterializationReport {
     pub pruned: usize,
 }
 
+/// Resolve packages from an already-parsed dependency manifest.
+pub fn resolve(options: ResolveOptions) -> Result<ResolveReport> {
+    if options.locked && options.update {
+        bail!("--locked cannot be combined with update");
+    }
+    options
+        .manifest
+        .validate()
+        .context("dependency manifest is invalid")?;
+    let existing_lockfile = if options.update {
+        None
+    } else {
+        options.existing_lockfile.as_ref()
+    };
+    if options.locked && existing_lockfile.is_none() {
+        bail!("locked resolve requires an existing lockfile");
+    }
+    let locked_version_policy = locked_version_policy(options.update, options.upgrade_policy);
+    let locked_versions = match locked_version_policy {
+        LockedVersionPolicy::Ignore => BTreeMap::new(),
+        LockedVersionPolicy::Exact | LockedVersionPolicy::SameMajor => options
+            .existing_lockfile
+            .as_ref()
+            .map(NenpmLock::versions_by_package)
+            .unwrap_or_default(),
+    };
+    let source_fetcher = match options.fetch_mode {
+        Some(fetch_mode) => DefaultPackageSourceFetcher::with_fetch_mode(fetch_mode),
+        None => DefaultPackageSourceFetcher::new(),
+    };
+    let resolved = resolve_dependency_manifest(
+        &options.manifest,
+        &options.base_dir,
+        &locked_versions,
+        locked_version_policy,
+        &source_fetcher,
+    )?;
+    let plan = InstallPlan::from_graph(resolved.graph)?;
+    let lockfile = lockfile_from_plan(&plan, &resolved.sources)?;
+    if let Some(existing_lockfile) = existing_lockfile {
+        verify_lockfile_integrity(existing_lockfile, &lockfile)?;
+        if options.locked && existing_lockfile != &lockfile {
+            bail!("nenpm.lock.yml is out of date; run nenpm install to update it");
+        }
+    }
+    Ok(ResolveReport { plan, lockfile })
+}
+
 /// Install packages from `nenpm.yml` or `nenpm.yaml`.
 pub fn install(options: InstallOptions) -> Result<InstallReport> {
     if options.locked && options.update {
@@ -159,32 +292,25 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
             lockfile_path.display()
         );
     }
-    let locked_version_policy = locked_version_policy(options.update, options.upgrade_policy);
-    let locked_versions = match locked_version_policy {
-        LockedVersionPolicy::Ignore => BTreeMap::new(),
-        LockedVersionPolicy::Exact | LockedVersionPolicy::SameMajor => loaded_lockfile
-            .as_ref()
-            .map(NenpmLock::versions_by_package)
-            .unwrap_or_default(),
-    };
     let source_fetcher = match options.fetch_mode {
         Some(fetch_mode) => DefaultPackageSourceFetcher::with_fetch_mode(fetch_mode),
         None => DefaultPackageSourceFetcher::new(),
     };
-    let resolved = resolve_dependency_manifest(
-        &loaded,
-        &locked_versions,
-        locked_version_policy,
-        &source_fetcher,
+    let manifest_dir = loaded
+        .path
+        .parent()
+        .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?
+        .to_path_buf();
+    let resolved = resolve(
+        ResolveOptions::new(manifest_dir, loaded.manifest.clone())
+            .existing_lockfile(loaded_lockfile.clone())
+            .update(options.update)
+            .upgrade_policy(options.upgrade_policy)
+            .locked(options.locked)
+            .fetch_mode(source_fetcher.fetch_mode()?),
     )?;
-    let plan = InstallPlan::from_graph(resolved.graph)?;
-    let lockfile = lockfile_from_plan(&plan, &resolved.sources)?;
-    if let Some(existing_lockfile) = existing_lockfile {
-        verify_lockfile_integrity(existing_lockfile, &lockfile)?;
-        if options.locked && existing_lockfile != &lockfile {
-            bail!("nenpm.lock.yml is out of date; run nenpm install to update it");
-        }
-    }
+    let plan = resolved.plan;
+    let lockfile = resolved.lockfile;
     let (wrote_lockfile, materialization) = if options.dry_run {
         (false, MaterializationReport::default())
     } else {
@@ -229,21 +355,17 @@ fn locked_version_policy(update: bool, upgrade_policy: UpgradePolicy) -> LockedV
 }
 
 fn resolve_dependency_manifest(
-    loaded: &LoadedDependencyManifest,
+    manifest: &DependencyManifest,
+    manifest_dir: &Path,
     locked_versions: &BTreeMap<String, String>,
     locked_version_policy: LockedVersionPolicy,
     source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<ResolvedInstall> {
-    let manifest_dir = loaded
-        .path
-        .parent()
-        .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?;
-    let registries = ConfiguredRegistries::load(loaded, source_fetcher)?;
+    let registries = ConfiguredRegistries::load(manifest, manifest_dir, source_fetcher)?;
     let mut packages = BTreeMap::new();
     let mut sources = BTreeMap::new();
     let mut registry_records: BTreeMap<String, RegistryPackageVersion> = BTreeMap::new();
-    let mut stack: Vec<(String, String)> = loaded
-        .manifest
+    let mut stack: Vec<(String, String)> = manifest
         .dependencies
         .iter()
         .map(|(name, requirement)| (name.clone(), requirement.clone()))
@@ -263,7 +385,7 @@ fn resolve_dependency_manifest(
     }
 
     while let Some((name, requirement)) = stack.pop() {
-        if loaded.manifest.overrides.contains_key(&name) {
+        if manifest.overrides.contains_key(&name) {
             if let Some(existing) = packages.get(&name) {
                 let existing: &ResolvedPackage = existing;
                 if !nenjo_packages::version_satisfies(&existing.version, &requirement) {
@@ -275,8 +397,7 @@ fn resolve_dependency_manifest(
                 continue;
             }
 
-            let override_source = loaded
-                .manifest
+            let override_source = manifest
                 .overrides
                 .get(&name)
                 .expect("override existence was checked");
@@ -456,7 +577,7 @@ fn merge_resolved_packages(
     Ok(())
 }
 
-fn resolve_registry_records_parallel(
+pub(crate) fn resolve_registry_records_parallel(
     records: BTreeMap<String, RegistryPackageVersion>,
     source_fetcher: &DefaultPackageSourceFetcher,
 ) -> Result<ResolvedPackages> {
@@ -573,7 +694,7 @@ struct ResolvedInstall {
 }
 
 #[derive(Debug)]
-struct ResolvedPackages {
-    packages: BTreeMap<String, ResolvedPackage>,
-    sources: BTreeMap<String, LockedSource>,
+pub(crate) struct ResolvedPackages {
+    pub(crate) packages: BTreeMap<String, ResolvedPackage>,
+    pub(crate) sources: BTreeMap<String, LockedSource>,
 }

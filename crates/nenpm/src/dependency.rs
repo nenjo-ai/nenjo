@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{NenpmError, Result};
 use anyhow::Context;
+use nenjo_packages::{
+    PackageRegistryReference as SchemaRegistryReference,
+    PackageRegistrySource as SchemaRegistrySource,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::source::{PackageSource, validate_package_source};
@@ -121,6 +125,55 @@ impl RegistryReference {
             Self::Source(source) => validate_package_source(source)?,
         }
         Ok(())
+    }
+}
+
+impl From<&SchemaRegistryReference> for RegistryReference {
+    fn from(reference: &SchemaRegistryReference) -> Self {
+        match reference {
+            SchemaRegistryReference::Index(reference) => Self::Index(reference.clone()),
+            SchemaRegistryReference::Source(source) => Self::Source(PackageSource::from(source)),
+        }
+    }
+}
+
+impl From<SchemaRegistryReference> for RegistryReference {
+    fn from(reference: SchemaRegistryReference) -> Self {
+        Self::from(&reference)
+    }
+}
+
+impl From<&SchemaRegistrySource> for PackageSource {
+    fn from(source: &SchemaRegistrySource) -> Self {
+        match source {
+            SchemaRegistrySource::Git {
+                url,
+                reference,
+                manifest_path,
+            } => Self::Git {
+                url: url.clone(),
+                reference: reference.clone(),
+                manifest_path: manifest_path.clone(),
+            },
+            SchemaRegistrySource::Artifact {
+                url,
+                checksum,
+                manifest_path,
+            } => Self::Artifact {
+                url: url.clone(),
+                checksum: checksum.clone(),
+                manifest_path: manifest_path.clone(),
+            },
+            SchemaRegistrySource::Local {
+                root,
+                manifest_path,
+                scope,
+            } => Self::Local {
+                root: PathBuf::from(root),
+                manifest_path: manifest_path.clone(),
+                scope: scope.clone(),
+            },
+        }
     }
 }
 

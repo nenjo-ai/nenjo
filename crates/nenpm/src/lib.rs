@@ -21,12 +21,20 @@ mod registry;
 mod source;
 mod validate;
 
+/// Package manifest and resolved graph primitives used by nenpm.
+pub mod packages {
+    pub use nenjo_packages::*;
+}
+
 pub use dependency::{
     DependencyManifest, DependencyOverride, LoadedDependencyManifest, RegistryReference,
 };
 pub use error::{NenpmError, Result};
 pub use github::GitHubRawFetcher;
-pub use install::{InstallOptions, InstallReport, MaterializationReport, UpgradePolicy, install};
+pub use install::{
+    InstallOptions, InstallReport, MaterializationReport, ResolveOptions, ResolveReport,
+    UpgradePolicy, install, resolve,
+};
 pub use lockfile::{
     LockedModule, LockedPackage, LockedPackageFile, NenpmLock, PackageInstallIndex,
     PackageInstallIndexEntry, package_install_path, package_install_path_in_packages_dir,

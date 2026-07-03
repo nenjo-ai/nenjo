@@ -13,8 +13,10 @@ const SUPPORTED_SCHEMA_KEYS: &[&str] = &[
     "enum",
     "items",
     "maxItems",
+    "maximum",
     "minItems",
     "minLength",
+    "minimum",
     "properties",
     "required",
     "title",
@@ -61,27 +63,67 @@ fn validate_schema_at(schema: &Value, path: &str, root: bool) -> Result<()> {
         }
     }
 
-    let Some(schema_type) = object.get("type").and_then(Value::as_str) else {
-        bail!("{path}.type is required");
-    };
-    if !SUPPORTED_TYPES.contains(&schema_type) {
-        bail!("{path}.type '{schema_type}' is not supported");
-    }
-    if root && schema_type != "object" {
+    let schema_types = schema_types(object, path)?;
+    if root && (schema_types.len() != 1 || schema_types[0] != "object") {
         bail!("metadata.{HANDOFF_SCHEMA_METADATA_KEY}.type must be object");
     }
 
     validate_enum(schema, path)?;
     validate_const(schema, path)?;
 
-    match schema_type {
-        "object" => validate_object_schema(object, path)?,
-        "array" => validate_array_schema(object, path)?,
-        "string" => validate_non_negative_integer(object, path, "minLength")?,
-        _ => {}
+    if schema_types.contains(&"object") {
+        validate_object_schema(object, path)?;
+    }
+    if schema_types.contains(&"array") {
+        validate_array_schema(object, path)?;
+    }
+    if schema_types.contains(&"string") {
+        validate_non_negative_integer(object, path, "minLength")?;
+    }
+    if schema_types
+        .iter()
+        .any(|schema_type| matches!(*schema_type, "number" | "integer"))
+    {
+        validate_number_schema(object, path)?;
     }
 
     Ok(())
+}
+
+fn schema_types<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<Vec<&'a str>> {
+    let Some(value) = object.get("type") else {
+        bail!("{path}.type is required");
+    };
+    let types = match value {
+        Value::String(value) => vec![value.as_str()],
+        Value::Array(values) => {
+            if values.is_empty() {
+                bail!("{path}.type must contain at least one type");
+            }
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("{path}.type entries must be strings"))
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+        _ => bail!("{path}.type must be a string or array of strings"),
+    };
+    let mut seen = HashSet::new();
+    for schema_type in &types {
+        if !SUPPORTED_TYPES.contains(schema_type) {
+            bail!("{path}.type '{schema_type}' is not supported");
+        }
+        if !seen.insert(*schema_type) {
+            bail!("{path}.type contains duplicate type '{schema_type}'");
+        }
+    }
+    Ok(types)
 }
 
 fn validate_object_schema(object: &serde_json::Map<String, Value>, path: &str) -> Result<()> {
@@ -152,6 +194,31 @@ fn validate_non_negative_integer(
     Ok(())
 }
 
+fn validate_number_schema(object: &serde_json::Map<String, Value>, path: &str) -> Result<()> {
+    let minimum = numeric_bound(object, path, "minimum")?;
+    let maximum = numeric_bound(object, path, "maximum")?;
+    if let (Some(minimum), Some(maximum)) = (minimum, maximum)
+        && minimum > maximum
+    {
+        bail!("{path}.minimum must be less than or equal to maximum");
+    }
+    Ok(())
+}
+
+fn numeric_bound(
+    object: &serde_json::Map<String, Value>,
+    path: &str,
+    key: &str,
+) -> Result<Option<f64>> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_f64()
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("{path}.{key} must be a number"))
+}
+
 fn validate_enum(schema: &Value, path: &str) -> Result<()> {
     let Some(values) = schema.get("enum") else {
         return Ok(());
@@ -195,12 +262,9 @@ fn validate_value_at(schema: &Value, value: &Value, path: &str) -> Result<()> {
     let object = schema
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("{path} schema must be an object"))?;
-    let schema_type = object
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("{path} schema is missing type"))?;
+    let schema_types = schema_types(object, &format!("{path} schema"))?;
 
-    validate_value_type(schema_type, value, path)?;
+    validate_value_type(&schema_types, value, path)?;
 
     if let Some(expected) = object.get("const")
         && value != expected
@@ -216,16 +280,27 @@ fn validate_value_at(schema: &Value, value: &Value, path: &str) -> Result<()> {
         );
     }
 
-    match schema_type {
-        "object" => validate_object_value(object, value, path),
-        "array" => validate_array_value(object, value, path),
-        "string" => validate_string_value(object, value, path),
-        _ => Ok(()),
+    if value.is_object() && schema_types.contains(&"object") {
+        return validate_object_value(object, value, path);
     }
+    if value.is_array() && schema_types.contains(&"array") {
+        return validate_array_value(object, value, path);
+    }
+    if value.is_string() && schema_types.contains(&"string") {
+        return validate_string_value(object, value, path);
+    }
+    if value.is_number()
+        && schema_types
+            .iter()
+            .any(|schema_type| matches!(*schema_type, "number" | "integer"))
+    {
+        return validate_number_value(object, value, path);
+    }
+    Ok(())
 }
 
-fn validate_value_type(schema_type: &str, value: &Value, path: &str) -> Result<()> {
-    let valid = match schema_type {
+fn validate_value_type(schema_types: &[&str], value: &Value, path: &str) -> Result<()> {
+    let valid = schema_types.iter().any(|schema_type| match *schema_type {
         "object" => value.is_object(),
         "array" => value.is_array(),
         "string" => value.is_string(),
@@ -234,12 +309,12 @@ fn validate_value_type(schema_type: &str, value: &Value, path: &str) -> Result<(
         "boolean" => value.is_boolean(),
         "null" => value.is_null(),
         _ => false,
-    };
+    });
 
     if valid {
         Ok(())
     } else {
-        bail!("{path} must be {schema_type}")
+        bail!("{path} must be {}", schema_types.join(" or "))
     }
 }
 
@@ -323,6 +398,27 @@ fn validate_string_value(
     Ok(())
 }
 
+fn validate_number_value(
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Result<()> {
+    let Some(value) = value.as_f64() else {
+        bail!("{path} must be number");
+    };
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+        && value < minimum
+    {
+        bail!("{path} must be greater than or equal to {minimum}");
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+        && value > maximum
+    {
+        bail!("{path} must be less than or equal to {maximum}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +464,43 @@ mod tests {
         }))
         .expect_err("schema should fail");
         assert!(error.to_string().contains("oneOf is not supported"));
+    }
+
+    #[test]
+    fn accepts_nullable_union_types_and_numeric_bounds() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "maybe_note": {"type": ["string", "null"], "minLength": 2},
+                "rating": {"type": ["integer", "null"], "minimum": 1, "maximum": 5}
+            },
+            "additionalProperties": false
+        });
+
+        validate_handoff_schema(&schema).expect("schema should validate");
+        validate_handoff_payload(
+            &schema,
+            &serde_json::json!({"maybe_note": null, "rating": 5}),
+        )
+        .expect("nullable payload should validate");
+    }
+
+    #[test]
+    fn rejects_payload_outside_numeric_bounds() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rating": {"type": "integer", "minimum": 1, "maximum": 5}
+            }
+        });
+
+        let error = validate_handoff_payload(&schema, &serde_json::json!({"rating": 6}))
+            .expect_err("payload should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("handoff.rating must be less than or equal to 5")
+        );
     }
 }
