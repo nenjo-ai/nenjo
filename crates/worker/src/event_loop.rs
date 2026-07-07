@@ -79,6 +79,14 @@ pub(crate) fn new_seen_message_ids() -> SeenMessageIds {
     Arc::new(DashMap::new())
 }
 
+fn error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 fn mark_message_seen(seen: &SeenMessageIds, message_id: Uuid) -> bool {
     let now = Instant::now();
     seen.retain(|_, inserted_at| now.duration_since(*inserted_at) <= SEEN_MESSAGE_TTL);
@@ -354,7 +362,8 @@ where
 
                 command_tasks.spawn(async move {
                     if let Err(e) = crate::handlers::route_command(command, ctx).await {
-                        error!(error = %e, "Error handling command");
+                        let chain = error_chain(&e);
+                        error!(error = %e, error_chain = %chain, "Error handling command");
                     }
                 });
             }

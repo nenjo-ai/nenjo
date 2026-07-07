@@ -7,6 +7,7 @@ use crate::manifest::{
     KnowledgePackManifest as ProviderKnowledgePackManifest, KnowledgePackSource, PromptConfig,
 };
 use crate::manifest::{ContextBlockManifest, ManifestLoader, ManifestResource, RoutineManifest};
+use crate::{ArgumentValueType, ResolvedArgumentBinding};
 use std::sync::Arc;
 
 use nenjo_knowledge::tools::KnowledgePackEntry;
@@ -262,7 +263,8 @@ async fn project_context_renders_template_and_knowledge_vars() {
         .instance()
         .build_prompts(&crate::input::AgentRun::chat(crate::input::ChatInput::new(
             "hello",
-        )));
+        )))
+        .unwrap();
 
     assert!(prompts.system.contains("Project p:"));
     assert!(prompts.system.contains("<knowledge_pack"));
@@ -300,7 +302,8 @@ async fn task_prompt_project_context_renders_into_project_xml() {
         .instance()
         .build_prompts(&crate::input::AgentRun::task(
             crate::input::TaskInput::new("Task", "Description").with_project("p"),
-        ));
+        ))
+        .unwrap();
 
     assert!(prompts.user_message.contains("Project p context"));
     assert!(
@@ -360,7 +363,8 @@ async fn task_prompt_does_not_append_routine_handoffs_twice() {
         .build_prompts(&crate::input::AgentRun::task(crate::input::TaskInput::new(
             "Task",
             "Description",
-        )));
+        )))
+        .unwrap();
 
     assert_eq!(prompts.user_message.matches("<handoffs>").count(), 1);
     assert!(!prompts.user_message.contains("# Routine Handoffs"));
@@ -679,6 +683,113 @@ async fn multiple_loaders_merge() {
             .iter()
             .any(|b| b.name == "local_block")
     );
+}
+
+#[tokio::test]
+async fn provider_argument_binding_renders_before_context_blocks() {
+    let mut manifest = test_manifest();
+    manifest.context_blocks.push(ContextBlockManifest {
+        name: "company".into(),
+        path: String::new(),
+        description: None,
+        template: "{{ args.company }}".into(),
+    });
+    manifest.agents[0].prompt_config.system_prompt = "{{ context.company }}".into();
+    let company = ResolvedArgumentBinding::new(
+        "support-app",
+        "company_context",
+        "args.company",
+        ArgumentValueType::Xml,
+        "<company>Acme</company>",
+    )
+    .unwrap();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_argument_bindings([company])
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let prompts = runner
+        .instance()
+        .try_build_prompts(&crate::input::AgentRun::chat(crate::input::ChatInput::new(
+            "hello",
+        )))
+        .unwrap();
+
+    assert_eq!(prompts.system, "<company>Acme</company>");
+}
+
+#[tokio::test]
+async fn execution_argument_binding_renders_user_value() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.system_prompt = "{{ args.profile }}".into();
+    let profile = ResolvedArgumentBinding::new(
+        "support-app",
+        "user_context",
+        "args.profile",
+        ArgumentValueType::Xml,
+        "<user>Ada</user>",
+    )
+    .unwrap();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let run = crate::input::AgentRun::chat(crate::input::ChatInput::new("hello"))
+        .argument_bindings([profile]);
+
+    let prompts = runner.instance().try_build_prompts(&run).unwrap();
+
+    assert_eq!(prompts.system, "<user>Ada</user>");
+}
+
+#[tokio::test]
+async fn missing_argument_binding_fails_prompt_build() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].prompt_config.system_prompt = "{{ args.profile }}".into();
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let error = runner
+        .instance()
+        .try_build_prompts(&crate::input::AgentRun::chat(crate::input::ChatInput::new(
+            "hello",
+        )))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("missing runtime argument"));
 }
 
 #[tokio::test]

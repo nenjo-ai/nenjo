@@ -876,6 +876,124 @@ version: "1.0.0"
 }
 
 #[test]
+fn install_applies_source_scope_to_override_package_names() {
+    let workspace = temp_workspace("source-scoped-override-package-names");
+    let project = workspace.join("project");
+    let repo = workspace.join("repo");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "@foo/app": "1.0.0"
+
+overrides:
+  "@foo/app":
+    kind: local
+    root: ../repo
+    manifest_path: packages/app/nenjo.package.yaml
+    scope: "@foo"
+  "@foo/core":
+    kind: local
+    root: ../repo
+    manifest_path: packages/core/nenjo.package.yaml
+    scope: "@foo"
+"#,
+    );
+    write_file(
+        &repo,
+        "packages/app/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: app
+version: "1.0.0"
+dependencies:
+  core: "^1.0.0"
+"#,
+    );
+    write_file(
+        &repo,
+        "packages/core/nenjo.package.yaml",
+        r#"schema: nenjo.package.v1
+name: core
+version: "1.0.0"
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project).dry_run(true)).unwrap();
+
+    let mut packages = report
+        .lockfile
+        .packages
+        .iter()
+        .map(|package| format!("{}@{}", package.name, package.version))
+        .collect::<Vec<_>>();
+    packages.sort();
+    assert_eq!(
+        packages,
+        vec!["@foo/app@1.0.0".to_string(), "@foo/core@1.0.0".to_string()]
+    );
+    let app = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "@foo/app")
+        .unwrap();
+    assert_eq!(app.dependencies["@foo/core"], "^1.0.0");
+    assert_eq!(app.resolved_dependencies["@foo/core"], "1.0.0");
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn locked_install_uses_lockfile_without_loading_registries() {
+    let workspace = temp_workspace("locked-install-without-registry-resolution");
+    let project = workspace.join("project");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  "@foo/app": "1.0.0"
+
+registries:
+  - kind: local
+    scope: "@foo"
+    root: ../missing-registry
+    manifest_path: packages.yaml
+"#,
+    );
+    write_file(
+        &project,
+        "nenpm.lock.yml",
+        r#"schema: nenjo.lock.v1
+packages:
+  - name: "@foo/app"
+    version: "1.0.0"
+    manifest_path: packages/app/nenjo.package.yaml
+    hash: sha256:app
+    dependencies: {}
+    modules: []
+"#,
+    );
+
+    let report = install(InstallOptions::new(&project).locked(true).dry_run(true)).unwrap();
+
+    assert_eq!(report.lockfile.packages[0].name, "@foo/app");
+    assert_eq!(
+        report
+            .plan
+            .packages()
+            .map(|package| format!("{}@{}", package.name, package.version))
+            .collect::<Vec<_>>(),
+        vec!["@foo/app@1.0.0".to_string()]
+    );
+
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn resolve_accepts_manifest_without_dependency_file() {
     let workspace = temp_workspace("resolve-external-registry");
     let project = workspace.join("project");

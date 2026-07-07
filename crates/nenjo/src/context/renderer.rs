@@ -8,6 +8,8 @@ use std::sync::{Arc, OnceLock};
 
 use regex::{Captures, Regex};
 
+use crate::arguments::scan_argument_selectors;
+
 /// Renders context blocks from templates with template variables.
 ///
 /// Each block is a Jinja template rendered with the same `HashMap<String, String>`
@@ -144,6 +146,18 @@ impl ContextRenderer {
         let templates = self.named_templates();
         let normalized = Self::normalize_context_refs(template, &refs);
         nenjo_xml::template::render_template_with_named_templates(&normalized, vars, &templates)
+    }
+
+    /// Return all `args.*` selectors referenced by context block templates.
+    pub fn argument_selectors(&self) -> Vec<String> {
+        let mut selectors = self
+            .blocks
+            .iter()
+            .flat_map(|block| scan_argument_selectors(&block.template))
+            .collect::<Vec<_>>();
+        selectors.sort();
+        selectors.dedup();
+        selectors
     }
 }
 

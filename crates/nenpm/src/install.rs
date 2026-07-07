@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use crate::registry::{
 };
 use crate::source::{
     DefaultPackageSourceFetcher, FetchMode, PackageSource, PackageSourceFetcher,
-    normalize_source_paths, source_fetch_key,
+    normalize_source_paths, package_source_scope, source_fetch_key,
 };
 
 mod integrity;
@@ -296,21 +296,28 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
         Some(fetch_mode) => DefaultPackageSourceFetcher::with_fetch_mode(fetch_mode),
         None => DefaultPackageSourceFetcher::new(),
     };
-    let manifest_dir = loaded
-        .path
-        .parent()
-        .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?
-        .to_path_buf();
-    let resolved = resolve(
-        ResolveOptions::new(manifest_dir, loaded.manifest.clone())
-            .existing_lockfile(loaded_lockfile.clone())
-            .update(options.update)
-            .upgrade_policy(options.upgrade_policy)
-            .locked(options.locked)
-            .fetch_mode(source_fetcher.fetch_mode()?),
-    )?;
-    let plan = resolved.plan;
-    let lockfile = resolved.lockfile;
+    let (plan, lockfile) = if options.locked && !options.update {
+        let lockfile = loaded_lockfile
+            .clone()
+            .expect("locked install requires a lockfile");
+        verify_locked_dependency_manifest(&loaded.manifest, &lockfile)?;
+        (InstallPlan::from_lockfile(&lockfile)?, lockfile)
+    } else {
+        let manifest_dir = loaded
+            .path
+            .parent()
+            .ok_or_else(|| anyhow!("dependency manifest has no parent directory"))?
+            .to_path_buf();
+        let resolved = resolve(
+            ResolveOptions::new(manifest_dir, loaded.manifest.clone())
+                .existing_lockfile(loaded_lockfile.clone())
+                .update(options.update)
+                .upgrade_policy(options.upgrade_policy)
+                .locked(options.locked)
+                .fetch_mode(source_fetcher.fetch_mode()?),
+        )?;
+        (resolved.plan, resolved.lockfile)
+    };
     let (wrote_lockfile, materialization) = if options.dry_run {
         (false, MaterializationReport::default())
     } else {
@@ -342,6 +349,85 @@ enum LockedVersionPolicy {
     Exact,
     SameMajor,
     Ignore,
+}
+
+fn verify_locked_dependency_manifest(
+    manifest: &DependencyManifest,
+    lockfile: &NenpmLock,
+) -> Result<()> {
+    let locked = lockfile
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let manifest_roots = manifest
+        .dependencies
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let locked_dependency_names = lockfile
+        .packages
+        .iter()
+        .flat_map(|package| package.dependencies.keys().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let locked_roots = lockfile
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .filter(|name| !locked_dependency_names.contains(name))
+        .collect::<BTreeSet<_>>();
+    if !locked_roots.is_subset(&manifest_roots) {
+        bail!("nenpm.lock.yml is out of date; run nenpm install to update it");
+    }
+
+    for (name, requirement) in &manifest.dependencies {
+        let Some(package) = locked.get(name.as_str()) else {
+            bail!(
+                "locked dependency manifest requires {name}, but it is missing from nenpm.lock.yml"
+            );
+        };
+        if !nenjo_packages::version_satisfies(&package.version, requirement) {
+            bail!(
+                "locked dependency manifest requires {name} {requirement}, but nenpm.lock.yml has {}",
+                package.version
+            );
+        }
+    }
+
+    for package in &lockfile.packages {
+        for (dependency, requirement) in &package.dependencies {
+            let Some(locked_dependency) = locked.get(dependency.as_str()) else {
+                bail!(
+                    "locked package {} depends on {dependency}, but it is missing from nenpm.lock.yml",
+                    package.name
+                );
+            };
+            if !nenjo_packages::version_satisfies(&locked_dependency.version, requirement) {
+                bail!(
+                    "locked package {} requires {dependency} {requirement}, but nenpm.lock.yml has {}",
+                    package.name,
+                    locked_dependency.version
+                );
+            }
+        }
+        for (dependency, version) in &package.resolved_dependencies {
+            let Some(locked_dependency) = locked.get(dependency.as_str()) else {
+                bail!(
+                    "locked package {} resolved {dependency}, but it is missing from nenpm.lock.yml",
+                    package.name
+                );
+            };
+            if &locked_dependency.version != version {
+                bail!(
+                    "locked package {} resolved {dependency} {version}, but nenpm.lock.yml has {}",
+                    package.name,
+                    locked_dependency.version
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn locked_version_policy(update: bool, upgrade_policy: UpgradePolicy) -> LockedVersionPolicy {
@@ -533,9 +619,7 @@ fn resolve_override_source(
         let package = resolver
             .resolve_package_manifest(&fetched.manifest_path)
             .with_context(|| format!("failed to resolve override package {name}"))?;
-        if package.name != name {
-            bail!("override for {name} resolved package {}", package.name);
-        }
+        let package = apply_source_scope_to_override_package(&source, name, package)?;
         if !nenjo_packages::version_satisfies(&package.version, requirement) {
             bail!(
                 "{name} resolved to {}, which does not satisfy {requirement}",
@@ -555,6 +639,50 @@ fn resolve_override_source(
         packages.insert(name.to_string(), package);
     }
     Ok(())
+}
+
+fn apply_source_scope_to_override_package(
+    source: &PackageSource,
+    name: &str,
+    mut package: ResolvedPackage,
+) -> Result<ResolvedPackage> {
+    if package.name == name {
+        return Ok(package);
+    }
+    let source_scope = package_source_scope(source);
+    let source_scoped_name = scoped_package_name(source_scope.as_deref(), &package.name);
+    if source_scoped_name != name {
+        bail!("override for {name} resolved package {}", package.name);
+    }
+
+    package.name = source_scoped_name.clone();
+    package.manifest.name = source_scoped_name.clone();
+    package.manifest.dependencies =
+        scoped_dependencies(source_scope.as_deref(), package.dependencies());
+    for module in package.modules.values_mut() {
+        module.package_name = source_scoped_name.clone();
+    }
+    Ok(package)
+}
+
+fn scoped_package_name(scope: Option<&str>, name: &str) -> String {
+    if name.starts_with('@') {
+        return name.to_string();
+    }
+    match scope {
+        Some(scope) => format!("{scope}/{name}"),
+        None => name.to_string(),
+    }
+}
+
+fn scoped_dependencies(
+    scope: Option<&str>,
+    dependencies: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    dependencies
+        .iter()
+        .map(|(name, requirement)| (scoped_package_name(scope, name), requirement.clone()))
+        .collect()
 }
 
 fn merge_resolved_packages(
@@ -660,7 +788,7 @@ fn resolve_registry_record_group(
                 )
             })?;
         verify_registry_package(&record, &package)?;
-        let package = project_registry_package(&record, package);
+        let package = apply_registry_record_to_package(&record, package);
         packages.push((
             record.name,
             package,
@@ -674,7 +802,7 @@ fn resolve_registry_record_group(
     Ok(packages)
 }
 
-fn project_registry_package(
+fn apply_registry_record_to_package(
     record: &RegistryPackageVersion,
     mut package: ResolvedPackage,
 ) -> ResolvedPackage {

@@ -899,7 +899,35 @@ where
         });
     }
 
-    let prompts = sub_instance.build_prompts(&task);
+    let prompts = match sub_instance.build_prompts(&task) {
+        Ok(prompts) => prompts,
+        Err(error) => {
+            let error = format!("ability prompt build failed: {error}");
+            op_handle
+                .complete(
+                    AsyncOpSignal::Failed {
+                        error: truncate(&error, 500),
+                    },
+                    parent_events_tx.clone(),
+                )
+                .await;
+            if let Some(parent_tx) = parent_events_tx {
+                debug!(
+                    ability = ability.name,
+                    ability_tool_name = USE_ABILITY_TOOL_NAME,
+                    "Emitting AbilityCompleted success=false"
+                );
+                let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                    call_id,
+                    ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+                    ability_name: ability.name.clone(),
+                    success: false,
+                    final_output: error,
+                });
+            }
+            return;
+        }
+    };
 
     let tool_names: Vec<&str> = sub_instance
         .runtime
@@ -1542,12 +1570,15 @@ mod tests {
     fn test_sdk_provider() -> ErasedProvider {
         Provider::new_inner(
             Arc::new(Manifest::default()),
-            Arc::new(TestModelFactory),
-            Arc::new(TestToolFactory),
-            None,
-            AgentConfig::default(),
-            Default::default(),
-            Default::default(),
+            crate::provider::ProviderServices {
+                model_factory: Arc::new(TestModelFactory),
+                tool_factory: Arc::new(TestToolFactory),
+                memory: None,
+                agent_config: AgentConfig::default(),
+                render_ctx_extra: Default::default(),
+                argument_bindings: Default::default(),
+                knowledge: Default::default(),
+            },
         )
     }
 
@@ -1624,6 +1655,7 @@ mod tests {
                     }),
                     append_active_domain_addon: true,
                     render_ctx_extra: Default::default(),
+                    argument_bindings: Default::default(),
                 },
                 renderer: ContextRenderer::from_blocks(&[]),
                 memory_vars: Default::default(),
@@ -1666,12 +1698,14 @@ mod tests {
         };
 
         let sub_instance = build_ability_instance(&caller, &ability).await;
-        let prompts = sub_instance.build_prompts(&AgentRun::chat(ChatInput {
-            message: "build an agent".into(),
-            history: vec![],
-            project: None,
-            template_override: None,
-        }));
+        let prompts = sub_instance
+            .build_prompts(&AgentRun::chat(ChatInput {
+                message: "build an agent".into(),
+                history: vec![],
+                project: None,
+                template_override: None,
+            }))
+            .unwrap();
 
         assert_eq!(prompts.system, "caller system");
         assert_eq!(prompts.developer, "ability developer");
@@ -1765,12 +1799,14 @@ mod tests {
         };
 
         let sub_instance = build_ability_instance(&caller, &ability).await;
-        let prompts = sub_instance.build_prompts(&AgentRun::chat(ChatInput {
-            message: "build an agent".into(),
-            history: vec![],
-            project: None,
-            template_override: None,
-        }));
+        let prompts = sub_instance
+            .build_prompts(&AgentRun::chat(ChatInput {
+                message: "build an agent".into(),
+                history: vec![],
+                project: None,
+                template_override: None,
+            }))
+            .unwrap();
 
         assert_eq!(
             prompts.system,

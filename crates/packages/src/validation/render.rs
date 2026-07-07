@@ -10,21 +10,29 @@ use nenjo::context::{
 use crate::{PackageKind, ResolvedModule, ResolvedPackage};
 
 use super::graph::{
-    package_selector_aliases, scan_context_selectors, scan_pkg_reference_selectors,
-    scan_pkg_selectors,
+    package_selector_aliases, scan_arg_selectors, scan_context_selectors,
+    scan_pkg_reference_selectors, scan_pkg_selectors,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct RenderFixture {
     vars: HashMap<String, String>,
     named_templates: HashMap<String, String>,
+    package_arg_selectors: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl RenderFixture {
     pub(crate) fn build(packages: &BTreeMap<String, ResolvedPackage>) -> anyhow::Result<Self> {
         let mut named_templates = HashMap::new();
+        let mut package_arg_selectors = BTreeMap::<String, BTreeSet<String>>::new();
         let referenced_bases = referenced_unscoped_selector_bases(packages);
         for package in packages.values() {
+            for argument in &package.manifest.arguments {
+                package_arg_selectors
+                    .entry(package.name.clone())
+                    .or_default()
+                    .insert(argument.selector.to_string());
+            }
             let selector_bases = selector_bases(package, &referenced_bases)?;
             for module in package.modules.values() {
                 match module.kind {
@@ -81,10 +89,24 @@ impl RenderFixture {
             }
         }
 
-        let vars = synthetic_vars();
+        let mut vars = synthetic_vars();
+        for package in packages.values() {
+            for argument in &package.manifest.arguments {
+                vars.insert(
+                    argument.selector.to_string(),
+                    argument.validation_value().with_context(|| {
+                        format!(
+                            "{} argument '{}' has invalid validation value",
+                            package.path, argument.name
+                        )
+                    })?,
+                );
+            }
+        }
         Ok(Self {
             vars,
             named_templates,
+            package_arg_selectors,
         })
     }
 
@@ -122,6 +144,12 @@ impl RenderFixture {
         let include_key = selector.replace('.', "/");
         self.named_templates.contains_key(selector)
             || self.named_templates.contains_key(&include_key)
+    }
+
+    pub(crate) fn package_arg_selector_exists(&self, package: &str, selector: &str) -> bool {
+        self.package_arg_selectors
+            .get(package)
+            .is_some_and(|selectors| selectors.contains(selector))
     }
 }
 
@@ -273,6 +301,7 @@ fn knowledge_doc_template(doc: &serde_json::Value) -> String {
 
 pub(crate) fn validate_template_selectors(
     fixture: &RenderFixture,
+    module: &ResolvedModule,
     template: &str,
 ) -> anyhow::Result<()> {
     for selector in scan_pkg_selectors(template) {
@@ -289,6 +318,14 @@ pub(crate) fn validate_template_selectors(
         let selector = format!("context.{context}");
         if !fixture.selector_exists(&selector) {
             anyhow::bail!("references unresolved context selector {selector}");
+        }
+    }
+    for selector in scan_arg_selectors(template) {
+        if !fixture.package_arg_selector_exists(&module.package_name, &selector) {
+            anyhow::bail!(
+                "references undeclared runtime argument selector {selector} in package {}",
+                module.package_name
+            );
         }
     }
     Ok(())

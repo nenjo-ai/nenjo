@@ -6,10 +6,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use super::{
-    ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory, ToolFactory,
-    TypedModelProviderFactory,
+    ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory,
+    ProviderServices, ToolFactory, TypedModelProviderFactory,
 };
 use crate::ManifestReader;
+use crate::arguments::ResolvedArgumentBinding;
 use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
@@ -51,6 +52,7 @@ pub struct ProviderBuilder<
     memory: Option<Mem>,
     agent_config: AgentConfig,
     render_ctx_extra: RenderContextVars,
+    argument_bindings: Vec<ResolvedArgumentBinding>,
     knowledge_pack_entries: Vec<KnowledgePackEntry>,
     live_manifest_reader: Option<Arc<dyn ManifestReader>>,
 }
@@ -112,6 +114,7 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             memory: None,
             agent_config: AgentConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
+            argument_bindings: Vec::new(),
             knowledge_pack_entries: Vec::new(),
             live_manifest_reader: None,
         }
@@ -156,6 +159,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
+            argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
         }
@@ -180,6 +184,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
+            argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
         }
@@ -203,6 +208,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: self.memory,
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
+            argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
         }
@@ -227,6 +233,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             memory: Some(memory),
             agent_config: self.agent_config,
             render_ctx_extra: self.render_ctx_extra,
+            argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
         }
@@ -244,6 +251,18 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     /// Set provider-level prompt context vars injected into every agent.
     pub fn with_render_context_vars(mut self, vars: RenderContextVars) -> Self {
         self.render_ctx_extra = vars;
+        self
+    }
+
+    /// Set provider-level argument bindings injected into every execution.
+    ///
+    /// This is intended for stable org/application values. User-specific values
+    /// should be supplied on [`AgentRun`](crate::AgentRun) instead.
+    pub fn with_argument_bindings(
+        mut self,
+        bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
+    ) -> Self {
+        self.argument_bindings.extend(bindings);
         self
     }
 
@@ -323,12 +342,15 @@ where
 
         Ok(Provider::new_inner(
             manifest,
-            Arc::new(model_factory),
-            Arc::new(self.tool_factory),
-            self.memory.map(Arc::new),
-            self.agent_config,
-            render_ctx_extra,
-            knowledge,
+            ProviderServices {
+                model_factory: Arc::new(model_factory),
+                tool_factory: Arc::new(self.tool_factory),
+                memory: self.memory.map(Arc::new),
+                agent_config: self.agent_config,
+                render_ctx_extra,
+                argument_bindings: self.argument_bindings,
+                knowledge,
+            },
         ))
     }
 }
@@ -359,13 +381,17 @@ where
 
         Ok(Provider::new_inner(
             Arc::new(manifest),
-            Arc::new(model_factory) as Arc<dyn ModelProviderFactory>,
-            Arc::new(self.tool_factory) as Arc<dyn ToolFactory>,
-            self.memory
-                .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
-            self.agent_config,
-            render_ctx_extra,
-            knowledge,
+            ProviderServices {
+                model_factory: Arc::new(model_factory) as Arc<dyn ModelProviderFactory>,
+                tool_factory: Arc::new(self.tool_factory) as Arc<dyn ToolFactory>,
+                memory: self
+                    .memory
+                    .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
+                agent_config: self.agent_config,
+                render_ctx_extra,
+                argument_bindings: self.argument_bindings,
+                knowledge,
+            },
         ))
     }
 }

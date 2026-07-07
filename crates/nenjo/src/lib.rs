@@ -17,6 +17,7 @@
 //! ```
 
 pub mod agents;
+pub mod arguments;
 pub mod commands;
 pub mod config;
 pub mod context;
@@ -38,6 +39,10 @@ pub use agents::{
     AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, ExecutionHandle,
     StartAsyncOperation, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnOutput,
     current_async_operation_runtime,
+};
+pub use arguments::{
+    ArgumentName, ArgumentScope, ArgumentSelector, ArgumentValue, ArgumentValueType,
+    PackageArgumentDefinition, ResolvedArgumentBinding,
 };
 pub use commands::{CommandProvider, LoadedCommand};
 pub use config::AgentConfig;

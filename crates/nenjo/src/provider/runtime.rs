@@ -4,6 +4,7 @@ use super::{ProviderError, RoutineRunner, ToolFactory, builder};
 use crate::Slug;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
+use crate::arguments::ResolvedArgumentBinding;
 use crate::hooks::{ResolvedHook, resolve_command_hooks, resolve_skill_hooks};
 use crate::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, DomainManifest, Manifest, ModelManifest,
@@ -95,6 +96,9 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
 
     /// Return a runtime with the same services and a new manifest.
     fn with_manifest(&self, manifest: Manifest) -> Self;
+
+    /// Return a runtime with the same services and new provider-level argument bindings.
+    fn with_argument_bindings(&self, bindings: Vec<ResolvedArgumentBinding>) -> Self;
 
     /// Borrow the runtime's tool factory.
     fn tool_factory(&self) -> &Self::ToolFactory<'_>;

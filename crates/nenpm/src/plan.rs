@@ -3,8 +3,12 @@ use std::path::Path;
 
 use crate::Result;
 use anyhow::{Context, anyhow};
-use nenjo_packages::{LocalPackageResolver, PackageKind, ResolvedPackage, ResolvedPackageGraph};
+use nenjo_packages::{
+    LocalPackageResolver, ModulePackageManifest, PackageKind, PackageModule, ResolvedModule,
+    ResolvedPackage, ResolvedPackageFile, ResolvedPackageGraph, ResourceManifest,
+};
 
+use crate::lockfile::NenpmLock;
 use crate::registry::{PackageRegistry, RegistryPackageResolver};
 use crate::source::DefaultPackageSourceFetcher;
 
@@ -30,6 +34,76 @@ impl InstallPlan {
         let package_order = topo_order_all(&graph)?;
         Ok(Self {
             graph,
+            package_order,
+        })
+    }
+
+    /// Build an install plan from a lockfile without resolving package registries.
+    pub fn from_lockfile(lockfile: &NenpmLock) -> Result<Self> {
+        let mut packages = BTreeMap::new();
+        let mut package_order = Vec::new();
+        for package in &lockfile.packages {
+            package_order.push(package.name.clone());
+            let mut modules = BTreeMap::new();
+            let mut manifest_modules = Vec::new();
+            for module in &package.modules {
+                manifest_modules.push(PackageModule {
+                    path: module.path.clone(),
+                    metadata: serde_json::Value::Null,
+                });
+                let resolved = ResolvedModule {
+                    package_name: package.name.clone(),
+                    package_version: package.version.clone(),
+                    path: module.path.clone(),
+                    source_path: module.source_path.clone(),
+                    hash: module.hash.clone(),
+                    kind: module.kind,
+                    manifest: ResourceManifest {
+                        schema: module.schema.clone(),
+                        slug: None,
+                        root_uri: None,
+                        selector: None,
+                        imports: BTreeMap::new(),
+                        manifest: serde_json::json!({ "name": module.name }),
+                    },
+                    imports: module.imports.clone(),
+                    files: module
+                        .files
+                        .iter()
+                        .map(|file| ResolvedPackageFile {
+                            path: file.path.clone(),
+                            hash: file.hash.clone(),
+                        })
+                        .collect(),
+                };
+                modules.insert(resolved.key(), resolved);
+            }
+            let resolved = ResolvedPackage {
+                name: package.name.clone(),
+                path: package.manifest_path.clone(),
+                version: package.version.clone(),
+                hash: package.hash.clone(),
+                manifest: ModulePackageManifest {
+                    schema: "nenjo.package.v1".to_string(),
+                    name: package.name.clone(),
+                    version: package.version.clone(),
+                    description: None,
+                    dependencies: package.dependencies.clone(),
+                    arguments: Vec::new(),
+                    modules: manifest_modules,
+                    metadata: serde_json::Value::Null,
+                },
+                modules,
+            };
+            if packages.insert(package.name.clone(), resolved).is_some() {
+                bail!("lockfile contains duplicate package {}", package.name);
+            }
+        }
+        Ok(Self {
+            graph: ResolvedPackageGraph {
+                root_package: package_order.last().cloned().unwrap_or_default(),
+                packages,
+            },
             package_order,
         })
     }
