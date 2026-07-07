@@ -23,7 +23,7 @@ use nenjo::manifest::{
     CommandManifest, ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader,
     ManifestResourceKind,
 };
-use nenjo_events::{Capability, EncryptedPayload, ResourceType};
+use nenjo_events::{Capability, EncryptedPayload, PackageArgumentBindingUpdate, ResourceType};
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_platform::{
     PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind, SensitiveContentKind,
@@ -114,6 +114,8 @@ pub struct BootstrapPackages {
     pub schema: String,
     pub nenpm_yml: String,
     pub nenpm_lock_yml: String,
+    #[serde(default)]
+    pub argument_bindings: Vec<PackageArgumentBindingUpdate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,6 +702,9 @@ async fn sync_platform_packages_staged(
 ) -> Result<()> {
     write_text_if_changed(staging_root, "nenpm.yml", &packages.nenpm_yml)?;
     write_text_if_changed(staging_root, "nenpm.lock.yml", &packages.nenpm_lock_yml)?;
+    let argument_bindings = serde_json::to_string_pretty(&packages.argument_bindings)
+        .context("failed to serialize platform package argument bindings")?;
+    write_text_if_changed(staging_root, "argument_bindings.json", &argument_bindings)?;
     let install_root = staging_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         nenjo_nenpm::install(
@@ -1604,6 +1609,13 @@ mod tests {
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_yml,
             nenpm_lock_yml,
+            argument_bindings: vec![PackageArgumentBindingUpdate {
+                package: "@acme/core".to_string(),
+                name: "shop_name".to_string(),
+                selector: "args.shop.name".to_string(),
+                value_type: "text".to_string(),
+                value: "Acme Auto".to_string(),
+            }],
         };
 
         let status = sync_platform_packages(nenjo_home.path(), &packages)
@@ -1614,6 +1626,9 @@ mod tests {
         let root = nenjo_home.path().join("platform_pkgs");
         assert!(root.join("nenpm.yml").exists());
         assert!(root.join("nenpm.lock.yml").exists());
+        assert!(root.join("argument_bindings.json").exists());
+        let argument_bindings = fs::read_to_string(root.join("argument_bindings.json")).unwrap();
+        assert!(argument_bindings.contains("Acme Auto"));
         assert!(root.join("@acme/core@0.1.0/context.yaml").exists());
         assert!(root.join(".nenpm-index.json").exists());
     }
@@ -1629,6 +1644,7 @@ mod tests {
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_yml,
             nenpm_lock_yml,
+            argument_bindings: Vec::new(),
         };
         sync_platform_packages(nenjo_home.path(), &packages)
             .await
@@ -1642,6 +1658,7 @@ mod tests {
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_lock_yml: build_test_lockfile(&empty_nenpm_yml),
             nenpm_yml: empty_nenpm_yml,
+            argument_bindings: Vec::new(),
         };
         let status = sync_platform_packages(nenjo_home.path(), &empty_packages)
             .await
@@ -1650,6 +1667,7 @@ mod tests {
         assert_eq!(status, PlatformPackageSyncStatus::Applied);
         assert!(root.join("nenpm.yml").exists());
         assert!(root.join("nenpm.lock.yml").exists());
+        assert!(root.join("argument_bindings.json").exists());
         assert!(root.join(".nenpm-index.json").exists());
         assert!(!root.join("@acme/core@0.1.0/context.yaml").exists());
         assert!(!root.join("@acme").exists());
@@ -1666,6 +1684,7 @@ mod tests {
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_yml: initial_nenpm_yml.clone(),
             nenpm_lock_yml: initial_nenpm_lock_yml.clone(),
+            argument_bindings: Vec::new(),
         };
         sync_platform_packages(nenjo_home.path(), &packages)
             .await
@@ -1694,6 +1713,7 @@ overrides:
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_yml: bad_nenpm_yml,
             nenpm_lock_yml: initial_nenpm_lock_yml.clone(),
+            argument_bindings: Vec::new(),
         };
 
         let error = sync_platform_packages(nenjo_home.path(), &bad_packages)
@@ -1812,6 +1832,7 @@ registries:
             schema: "nenjo.platform_packages.v1".to_string(),
             nenpm_yml,
             nenpm_lock_yml,
+            argument_bindings: Vec::new(),
         };
 
         let status = sync_platform_packages(nenjo_home.path(), &packages)

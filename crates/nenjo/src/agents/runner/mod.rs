@@ -546,8 +546,9 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         );
 
         // 3. Build prompts.
-        let prompts =
-            inst.build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref());
+        let prompts = inst
+            .build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref())
+            .context("failed to build prompts")?;
 
         let system_prompt = prompts.system;
         let developer_prompt = prompts.developer;

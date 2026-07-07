@@ -42,6 +42,18 @@ pub struct PackageGraphUpdate {
     pub schema: String,
     pub nenpm_yml: String,
     pub nenpm_lock_yml: String,
+    #[serde(default)]
+    pub argument_bindings: Vec<PackageArgumentBindingUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageArgumentBindingUpdate {
+    pub package: String,
+    pub name: String,
+    pub selector: String,
+    #[serde(rename = "type")]
+    pub value_type: String,
+    pub value: String,
 }
 
 /// A command dispatched to an agent harness.
@@ -535,6 +547,7 @@ mod tests {
                     schema: "nenjo.platform_packages.v1".into(),
                     nenpm_yml: "schema: nenjo.dependencies.v1\n".into(),
                     nenpm_lock_yml: "schema: nenjo.lock.v1\n".into(),
+                    argument_bindings: Vec::new(),
                 },
             }
             .delivery(),

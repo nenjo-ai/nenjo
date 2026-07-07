@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use nenjo::Manifest;
+use nenjo::arguments::ResolvedArgumentBinding;
 use tracing::{debug, info, warn};
 
 use crate::{Harness, ProviderRuntime, Result};
@@ -30,6 +31,22 @@ where
     pub async fn replace(&self, manifest: Manifest) -> Result<()> {
         self.harness
             .swap_provider(self.harness.provider().with_manifest(manifest));
+        self.refresh_active_domain_sessions().await;
+        Ok(())
+    }
+
+    /// Replace the running provider manifest and provider-level argument bindings.
+    pub async fn replace_with_argument_bindings(
+        &self,
+        manifest: Manifest,
+        bindings: Vec<ResolvedArgumentBinding>,
+    ) -> Result<()> {
+        let provider = self
+            .harness
+            .provider()
+            .with_manifest(manifest)
+            .with_argument_bindings(bindings);
+        self.harness.swap_provider(provider);
         self.refresh_active_domain_sessions().await;
         Ok(())
     }

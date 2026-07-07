@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::Result;
 use anyhow::Context;
@@ -23,6 +23,8 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_MAX_FILES: usize = 10_000;
 const PROVIDER_MAX_BYTES: usize = 50 * 1024 * 1024;
 const PROVIDER_MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+const PROVIDER_TEMPDIR_PREFIX: &str = "nenjo-provider-";
+const PROVIDER_TEMPDIR_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Strategy for fetching git-backed package sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,8 +455,31 @@ fn fetch_provider_git_source(
     let manifest_path = nenjo_packages::validate_source_path(manifest_path)
         .context("provider source manifest path is invalid")?;
     let client = provider_client()?;
+
+    if let ProviderGitSource::GitHub {
+        owner,
+        repo,
+        reference,
+    } = &source
+    {
+        return fetch_provider_github_archive_source(
+            &client,
+            owner,
+            repo,
+            reference,
+            &manifest_path,
+        );
+    }
+
     let resolved_ref = source.resolve_ref(&client)?;
     let files = source.list_files(&client, &resolved_ref)?;
+    if !files.iter().any(|path| path == &manifest_path) {
+        bail!(
+            "provider source {} at {resolved_ref} does not contain {manifest_path}",
+            source.display_url()
+        );
+    }
+    let files = provider_fetch_file_set(&manifest_path, files);
     if files.len() > PROVIDER_MAX_FILES {
         bail!(
             "provider source {} contains {} files, which exceeds the limit of {}",
@@ -463,14 +488,8 @@ fn fetch_provider_git_source(
             PROVIDER_MAX_FILES
         );
     }
-    if !files.iter().any(|path| path == &manifest_path) {
-        bail!(
-            "provider source {} at {resolved_ref} does not contain {manifest_path}",
-            source.display_url()
-        );
-    }
 
-    let temp_dir = tempfile::tempdir().context("failed to create provider fetch temp dir")?;
+    let temp_dir = provider_tempdir()?;
     let root = temp_dir.path().join("provider");
     fs::create_dir_all(&root).context("failed to create provider fetch dir")?;
 
@@ -508,6 +527,197 @@ fn fetch_provider_git_source(
         manifest_path,
         temp_dir,
     ))
+}
+
+fn fetch_provider_github_archive_source(
+    client: &reqwest::blocking::Client,
+    owner: &str,
+    repo: &str,
+    reference: &str,
+    manifest_path: &str,
+) -> Result<FetchedPackageSource> {
+    let url = format!(
+        "https://codeload.github.com/{owner}/{repo}/tar.gz/{}",
+        encode_path_segment(reference)
+    );
+    let archive = get_bytes(client, &url)
+        .with_context(|| format!("failed to fetch GitHub archive for {owner}/{repo}"))?;
+    if archive.len() > PROVIDER_MAX_BYTES {
+        bail!(
+            "provider source https://github.com/{owner}/{repo}.git archive is {} bytes, which exceeds the fetch limit of {} bytes",
+            archive.len(),
+            PROVIDER_MAX_BYTES
+        );
+    }
+
+    let temp_dir = provider_tempdir()?;
+    let extract_root = temp_dir.path().join("archive");
+    fs::create_dir_all(&extract_root).context("failed to create provider archive dir")?;
+    let decoder = GzDecoder::new(Cursor::new(archive));
+    let mut archive = tar::Archive::new(decoder);
+    archive
+        .unpack(&extract_root)
+        .with_context(|| format!("failed to unpack GitHub archive for {owner}/{repo}"))?;
+
+    let root = single_archive_root(&extract_root)?;
+    validate_provider_source_limits(&root, manifest_path)
+        .with_context(|| format!("failed to validate GitHub archive for {owner}/{repo}"))?;
+
+    Ok(FetchedPackageSource::temporary(
+        root,
+        manifest_path.to_string(),
+        temp_dir,
+    ))
+}
+
+fn single_archive_root(extract_root: &Path) -> Result<PathBuf> {
+    let mut entries = fs::read_dir(extract_root)
+        .with_context(|| format!("failed to read {}", extract_root.display()))?;
+    let first = entries
+        .next()
+        .transpose()
+        .with_context(|| format!("failed to read {}", extract_root.display()))?
+        .ok_or_else(|| anyhow::anyhow!("provider archive was empty"))?
+        .path();
+    if entries.next().transpose()?.is_some() {
+        bail!("provider archive contained multiple root entries");
+    }
+    if !first.is_dir() {
+        bail!("provider archive root was not a directory");
+    }
+    Ok(first)
+}
+
+fn validate_provider_source_limits(root: &Path, manifest_path: &str) -> Result<()> {
+    if !root.join(manifest_path).is_file() {
+        bail!("provider source archive does not contain {manifest_path}");
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+    let mut total_files = 0usize;
+    let mut total_bytes = 0usize;
+    while let Some(dir) = stack.pop() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed to read {}", dir.display()))?;
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to stat {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            total_files += 1;
+            if total_files > PROVIDER_MAX_FILES {
+                bail!("provider source archive contains more than {PROVIDER_MAX_FILES} files");
+            }
+            let file_bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            if file_bytes > PROVIDER_MAX_FILE_BYTES {
+                bail!(
+                    "provider source file {} is {} bytes, which exceeds the per-file limit of {}",
+                    path.display(),
+                    file_bytes,
+                    PROVIDER_MAX_FILE_BYTES
+                );
+            }
+            total_bytes = total_bytes.saturating_add(file_bytes);
+            if total_bytes > PROVIDER_MAX_BYTES {
+                bail!(
+                    "provider source archive exceeds the total fetch limit of {PROVIDER_MAX_BYTES} bytes"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn provider_tempdir() -> Result<TempDir> {
+    let _ = cleanup_stale_provider_tempdirs();
+    tempfile::Builder::new()
+        .prefix(PROVIDER_TEMPDIR_PREFIX)
+        .tempdir()
+        .context("failed to create provider fetch temp dir")
+        .map_err(Into::into)
+}
+
+fn cleanup_stale_provider_tempdirs() -> Result<usize> {
+    cleanup_stale_provider_tempdirs_in(&std::env::temp_dir(), PROVIDER_TEMPDIR_STALE_AFTER)
+}
+
+fn cleanup_stale_provider_tempdirs_in(root: &Path, stale_after: Duration) -> Result<usize> {
+    if !root.is_dir() {
+        return Ok(0);
+    }
+
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("failed to read {}", root.display()))?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with(PROVIDER_TEMPDIR_PREFIX) {
+            continue;
+        }
+
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to stat {}", path.display()))
+                    .map_err(Into::into);
+            }
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to stat {}", path.display()))
+                    .map_err(Into::into);
+            }
+        };
+        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+        if age < stale_after {
+            continue;
+        }
+
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove {}", path.display()))
+                    .map_err(Into::into);
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+fn provider_fetch_file_set(manifest_path: &str, files: Vec<String>) -> Vec<String> {
+    if crate::install::is_registry_manifest_path(manifest_path) {
+        return files;
+    }
+    let Some((prefix, _)) = manifest_path.rsplit_once('/') else {
+        return files;
+    };
+    let prefix = format!("{prefix}/");
+    files
+        .into_iter()
+        .filter(|path| path.starts_with(&prefix))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -552,18 +762,40 @@ impl ProviderGitSource {
     }
 
     fn resolve_ref(&self, client: &reqwest::blocking::Client) -> Result<String> {
+        let reference = match self {
+            Self::GitHub { reference, .. } | Self::GitLab { reference, .. } => reference,
+        };
+        if is_full_git_object_id(reference) {
+            return Ok(reference.to_string());
+        }
+
         match self {
             Self::GitHub {
                 owner,
                 repo,
                 reference,
             } => {
+                if let Some(sha) = resolve_github_git_ref(client, owner, repo, reference, "heads")?
+                {
+                    return Ok(sha);
+                }
+                if let Some(sha) = resolve_github_git_ref(client, owner, repo, reference, "tags")? {
+                    return Ok(sha);
+                }
                 let url = format!(
                     "https://api.github.com/repos/{owner}/{repo}/commits/{}",
                     encode_path_segment(reference)
                 );
-                let value: GitHubCommitResponse = get_json(client, &url)
+                let response = send_provider_get(client, &url)
                     .with_context(|| format!("failed to resolve GitHub ref {reference}"))?;
+                if should_fallback_to_unresolved_ref(response.status()) {
+                    return Ok(reference.to_string());
+                }
+                let value: GitHubCommitResponse = response
+                    .error_for_status()
+                    .with_context(|| format!("failed to fetch {url}"))?
+                    .json()
+                    .with_context(|| format!("failed to parse response body from {url}"))?;
                 Ok(value.sha)
             }
             Self::GitLab {
@@ -651,12 +883,14 @@ impl ProviderGitSource {
         match self {
             Self::GitHub { owner, repo, .. } => {
                 let url = format!(
-                    "https://raw.githubusercontent.com/{owner}/{repo}/{}/{}",
-                    encode_path_segment(resolved_ref),
-                    encode_path(path)
+                    "https://api.github.com/repos/{owner}/{repo}/contents/{}?ref={}",
+                    encode_path(path),
+                    urlencoding::encode(resolved_ref)
                 );
-                Ok(get_bytes(client, &url)
-                    .with_context(|| format!("failed to fetch GitHub file {path}"))?)
+                Ok(
+                    get_bytes_with_accept(client, &url, "application/vnd.github.raw")
+                        .with_context(|| format!("failed to fetch GitHub file {path}"))?,
+                )
             }
             Self::GitLab {
                 host, project_path, ..
@@ -674,9 +908,48 @@ impl ProviderGitSource {
     }
 }
 
+fn resolve_github_git_ref(
+    client: &reqwest::blocking::Client,
+    owner: &str,
+    repo: &str,
+    reference: &str,
+    namespace: &str,
+) -> Result<Option<String>> {
+    let url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/git/ref/{namespace}/{}",
+        encode_path(reference)
+    );
+    let response = send_provider_get(client, &url)
+        .with_context(|| format!("failed to resolve GitHub {namespace} ref {reference}"))?;
+    if should_ignore_ref_probe_status(response.status()) {
+        return Ok(None);
+    }
+    let value: GitHubRefResponse = response
+        .error_for_status()
+        .with_context(|| format!("GitHub {namespace} ref resolution failed for {url}"))?
+        .json()
+        .with_context(|| format!("failed to parse GitHub ref response for {url}"))?;
+    if value.object.kind != "commit" {
+        return Ok(None);
+    }
+    Ok(Some(value.object.sha))
+}
+
 #[derive(Debug, Deserialize)]
 struct GitHubCommitResponse {
     sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRefResponse {
+    object: GitHubRefObject,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRefObject {
+    sha: String,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -717,9 +990,7 @@ fn get_json<T>(client: &reqwest::blocking::Client, url: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    Ok(provider_get(client, url)
-        .send()
-        .with_context(|| format!("failed to request {url}"))?
+    Ok(send_provider_get(client, url)?
         .error_for_status()
         .with_context(|| format!("failed to fetch {url}"))?
         .json()
@@ -727,9 +998,7 @@ where
 }
 
 fn get_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
-    Ok(provider_get(client, url)
-        .send()
-        .with_context(|| format!("failed to request {url}"))?
+    Ok(send_provider_get(client, url)?
         .error_for_status()
         .with_context(|| format!("failed to fetch {url}"))?
         .bytes()
@@ -737,22 +1006,97 @@ fn get_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
         .to_vec())
 }
 
+fn get_bytes_with_accept(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    accept: &'static str,
+) -> Result<Vec<u8>> {
+    Ok(send_provider_get_with_accept(client, url, Some(accept))?
+        .error_for_status()
+        .with_context(|| format!("failed to fetch {url}"))?
+        .bytes()
+        .with_context(|| format!("failed to read response body from {url}"))?
+        .to_vec())
+}
+
+fn send_provider_get(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<reqwest::blocking::Response> {
+    send_provider_get_with_accept(client, url, None)
+}
+
+fn send_provider_get_with_accept(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    accept: Option<&'static str>,
+) -> Result<reqwest::blocking::Response> {
+    let request = provider_get(client, url, true, accept);
+    let response = request
+        .send()
+        .with_context(|| format!("failed to request {url}"))?;
+    if should_retry_provider_without_auth(response.status()) && github_url_uses_token(url) {
+        return provider_get(client, url, false, accept)
+            .send()
+            .with_context(|| format!("failed to retry unauthenticated request {url}"))
+            .map_err(Into::into);
+    }
+    Ok(response)
+}
+
 fn provider_get(
     client: &reqwest::blocking::Client,
     url: &str,
+    allow_auth: bool,
+    accept: Option<&'static str>,
 ) -> reqwest::blocking::RequestBuilder {
-    let request = client.get(url);
-    if (url.contains("github.com/") || url.contains("githubusercontent.com/"))
+    let mut request = client.get(url);
+    if let Some(accept) = accept {
+        request = request.header(reqwest::header::ACCEPT, accept);
+    }
+    if allow_auth
+        && github_url_uses_token(url)
         && let Some(token) = env_token(["GITHUB_TOKEN", "GH_TOKEN"])
     {
         return request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    if url.contains("gitlab.com/")
+    if allow_auth
+        && url.contains("gitlab.com/")
         && let Some(token) = env_token(["GITLAB_TOKEN", "GL_TOKEN"])
     {
         return request.header("PRIVATE-TOKEN", token);
     }
     request
+}
+
+fn should_retry_provider_without_auth(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+    )
+}
+
+fn should_ignore_ref_probe_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+    )
+}
+
+fn should_fallback_to_unresolved_ref(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    )
+}
+
+fn github_url_uses_token(url: &str) -> bool {
+    (url.contains("github.com/") || url.contains("githubusercontent.com/"))
+        && env_token(["GITHUB_TOKEN", "GH_TOKEN"]).is_some()
 }
 
 fn env_token<const N: usize>(names: [&str; N]) -> Option<String> {
@@ -823,6 +1167,10 @@ fn encode_gitlab_project_path(path: &str) -> String {
 
 fn encode_gitlab_file_path(path: &str) -> String {
     urlencoding::encode(path).into_owned()
+}
+
+fn is_full_git_object_id(reference: &str) -> bool {
+    matches!(reference.len(), 40 | 64) && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn fetch_artifact_source(
@@ -969,6 +1317,7 @@ fn write_synthetic_claude_plugin_package(root: &Path) -> Result<()> {
             .unwrap_or_else(|| "0.1.0".to_string()),
         description: plugin.description.clone(),
         dependencies: Default::default(),
+        arguments: Vec::new(),
         modules,
         metadata: json!({
             "adapter": "claude_plugin",
@@ -1201,6 +1550,41 @@ mod tests {
     }
 
     #[test]
+    fn provider_auth_retry_covers_forbidden_token_failures() {
+        assert!(should_retry_provider_without_auth(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(should_retry_provider_without_auth(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(should_retry_provider_without_auth(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+    }
+
+    #[test]
+    fn provider_ref_probe_failures_are_non_fatal() {
+        assert!(should_ignore_ref_probe_status(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(should_ignore_ref_probe_status(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(should_ignore_ref_probe_status(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+        assert!(should_fallback_to_unresolved_ref(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(should_fallback_to_unresolved_ref(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(!should_fallback_to_unresolved_ref(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+    }
+
+    #[test]
     fn parses_fetch_modes() {
         assert_eq!(FetchMode::parse("git").unwrap(), FetchMode::Git);
         assert_eq!(FetchMode::parse("provider").unwrap(), FetchMode::Provider);
@@ -1272,6 +1656,117 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn provider_mode_treats_full_commit_ids_as_resolved_refs() {
+        let sha = "1066222a55aa0af5eebfabcd550fdf8e97726956";
+        let source = ProviderGitSource::parse(
+            "https://github.com/nenjo-ai/packages.git",
+            sha,
+            "packages.yaml",
+        )
+        .unwrap();
+        let client = provider_client().unwrap();
+
+        assert_eq!(source.resolve_ref(&client).unwrap(), sha);
+    }
+
+    #[test]
+    fn recognizes_only_full_git_object_ids() {
+        assert!(is_full_git_object_id(
+            "1066222a55aa0af5eebfabcd550fdf8e97726956"
+        ));
+        assert!(is_full_git_object_id(
+            "1066222a55aa0af5eebfabcd550fdf8e977269561066222a55aa0af5eebfabcd"
+        ));
+        assert!(!is_full_git_object_id("1066222"));
+        assert!(!is_full_git_object_id(
+            "1066222a55aa0af5eebfabcd550fdf8e9772695g"
+        ));
+        assert!(!is_full_git_object_id("main"));
+    }
+
+    #[test]
+    fn provider_fetch_file_set_limits_direct_package_sources_to_package_dir() {
+        let files = provider_fetch_file_set(
+            "agenticauto/nenjo.package.yaml",
+            vec![
+                "README.md".to_string(),
+                "packages.yaml".to_string(),
+                "agenticauto/nenjo.package.yaml".to_string(),
+                "agenticauto/agents/sms-agent.yaml".to_string(),
+                "docs/notes.md".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            files,
+            vec![
+                "agenticauto/nenjo.package.yaml".to_string(),
+                "agenticauto/agents/sms-agent.yaml".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_fetch_file_set_keeps_registry_and_root_package_sources_broad() {
+        let files = vec![
+            "README.md".to_string(),
+            "packages.yaml".to_string(),
+            "agenticauto/nenjo.package.yaml".to_string(),
+        ];
+        assert_eq!(
+            provider_fetch_file_set("packages.yaml", files.clone()),
+            files
+        );
+        assert_eq!(
+            provider_fetch_file_set("nenjo.package.yaml", files.clone()),
+            files
+        );
+    }
+
+    #[test]
+    fn provider_archive_validation_requires_manifest_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo-ref");
+        std::fs::create_dir_all(root.join("agenticauto")).unwrap();
+        std::fs::write(root.join("agenticauto/nenjo.package.yaml"), "schema: test").unwrap();
+
+        validate_provider_source_limits(&root, "agenticauto/nenjo.package.yaml")
+            .expect("manifest path exists");
+        let err = validate_provider_source_limits(&root, "packages.yaml")
+            .expect_err("missing manifest path fails");
+
+        assert!(err.to_string().contains("does not contain packages.yaml"));
+    }
+
+    #[test]
+    fn provider_temp_cleanup_removes_only_prefixed_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let stale_provider_dir = temp.path().join(format!("{PROVIDER_TEMPDIR_PREFIX}old"));
+        let unrelated_dir = temp.path().join("other-temp");
+        fs::create_dir_all(&stale_provider_dir).unwrap();
+        fs::create_dir_all(&unrelated_dir).unwrap();
+
+        let removed = cleanup_stale_provider_tempdirs_in(temp.path(), Duration::ZERO).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!stale_provider_dir.exists());
+        assert!(unrelated_dir.exists());
+    }
+
+    #[test]
+    fn provider_tempdir_uses_provider_prefix() {
+        let temp_dir = provider_tempdir().unwrap();
+        let name = temp_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(name.starts_with(PROVIDER_TEMPDIR_PREFIX));
     }
 
     #[test]

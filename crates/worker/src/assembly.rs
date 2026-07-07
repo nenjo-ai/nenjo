@@ -1,13 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use nenjo::Manifest;
+use nenjo::arguments::{ArgumentValueType, ResolvedArgumentBinding};
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{HasManifestSlug, MediaRequirement};
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
 use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
+use nenjo_events::PackageArgumentBindingUpdate;
 use nenjo_harness::Harness;
 use nenjo_platform::PlatformManifestClient;
 use nenjo_platform::api_client::PayloadCodec;
@@ -169,6 +171,7 @@ pub(crate) async fn build_provider(
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
     let live_manifest_reader = loader.clone();
+    let argument_bindings = load_platform_package_argument_bindings(config)?;
 
     let provider = Provider::builder()
         .with_loader(global_package_manifest_loader(config))
@@ -179,6 +182,7 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
+        .with_argument_bindings(argument_bindings)
         .with_live_manifest_reader(live_manifest_reader)
         .build()
         .await
@@ -200,6 +204,51 @@ pub(crate) async fn load_runtime_manifest(config: &Config) -> Result<Manifest> {
     manifest.merge(ManifestLoader::load(&loader).await?);
     manifest.merge(workspace_package_manifest_loader(config).load().await?);
     Ok(manifest)
+}
+
+pub(crate) fn load_platform_package_argument_bindings(
+    config: &Config,
+) -> Result<Vec<ResolvedArgumentBinding>> {
+    load_platform_package_argument_bindings_from(&config.config_dir.join("platform_pkgs"))
+}
+
+fn load_platform_package_argument_bindings_from(
+    root: &Path,
+) -> Result<Vec<ResolvedArgumentBinding>> {
+    let path = root.join("argument_bindings.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let bindings: Vec<PackageArgumentBindingUpdate> = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    bindings
+        .into_iter()
+        .map(resolved_platform_package_argument_binding)
+        .collect()
+}
+
+fn resolved_platform_package_argument_binding(
+    binding: PackageArgumentBindingUpdate,
+) -> Result<ResolvedArgumentBinding> {
+    let value_type = match binding.value_type.as_str() {
+        "text" => ArgumentValueType::Text,
+        "markdown" => ArgumentValueType::Markdown,
+        "xml" => ArgumentValueType::Xml,
+        "json" => ArgumentValueType::Json,
+        other => bail!("unsupported package argument type '{other}'"),
+    };
+    ResolvedArgumentBinding::new(
+        binding.package,
+        binding.name,
+        binding.selector,
+        value_type,
+        binding.value,
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) async fn load_package_overlay_manifest(config: &Config) -> Result<Manifest> {
@@ -411,6 +460,32 @@ mod tests {
                 .iter()
                 .any(|provider| provider.slug == Slug::derive("xai_video"))
         );
+    }
+
+    #[test]
+    fn loads_platform_package_argument_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("platform_pkgs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("argument_bindings.json"),
+            serde_json::to_string(&vec![PackageArgumentBindingUpdate {
+                package: "@acme/app".to_string(),
+                name: "shop_hours".to_string(),
+                selector: "args.shop.hours".to_string(),
+                value_type: "markdown".to_string(),
+                value: "Mon-Fri 9-5".to_string(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let bindings = load_platform_package_argument_bindings_from(&root).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].package, "@acme/app");
+        assert_eq!(bindings[0].selector.as_str(), "args.shop.hours");
+        assert_eq!(bindings[0].render_value().unwrap(), "Mon-Fri 9-5");
     }
 
     #[test]

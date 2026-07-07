@@ -9,8 +9,6 @@ use serde::Deserialize;
 
 use crate::{PackageKind, ResolvedModule, ResolvedPackage, validate_source_path};
 
-use super::assignments::find_module_by_source_path;
-
 pub(crate) fn validate_routine_manifest(
     packages: &std::collections::BTreeMap<String, ResolvedPackage>,
     module: &ResolvedModule,
@@ -20,7 +18,7 @@ pub(crate) fn validate_routine_manifest(
     }
     let routine: PackageRoutineManifest = serde_json::from_value(module.manifest.manifest.clone())
         .with_context(|| format!("{} routine manifest has invalid shape", module.path))?;
-    validate_routine_references(packages, &routine)?;
+    validate_routine_references(packages, module, &routine)?;
     let graph = package_routine_graph(&routine).with_context(|| {
         format!(
             "{} could not be adapted to the canonical routine graph contract",
@@ -78,6 +76,7 @@ struct PackageRoutineEdge {
 
 fn validate_routine_references(
     packages: &std::collections::BTreeMap<String, ResolvedPackage>,
+    module: &ResolvedModule,
     routine: &PackageRoutineManifest,
 ) -> anyhow::Result<()> {
     for step in &routine.steps {
@@ -92,17 +91,7 @@ fn validate_routine_references(
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            let path = validate_source_path(agent)?;
-            let target = find_module_by_source_path(packages, &path)
-                .map(Ok)
-                .unwrap_or_else(|| find_agent_by_name(packages, agent))?;
-            if target.kind != PackageKind::Agent {
-                anyhow::bail!(
-                    "routine step '{}' references {path}, but it is {} not agent",
-                    step.step_ref,
-                    target.kind.as_str()
-                );
-            }
+            resolve_routine_agent_reference(packages, module, &step.step_ref, agent)?;
         }
         if let Some(council) = step
             .council
@@ -115,30 +104,85 @@ fn validate_routine_references(
     Ok(())
 }
 
-fn find_agent_by_name<'a>(
+fn resolve_routine_agent_reference<'a>(
     packages: &'a std::collections::BTreeMap<String, ResolvedPackage>,
-    name: &str,
+    routine_module: &ResolvedModule,
+    step_ref: &str,
+    reference: &str,
 ) -> anyhow::Result<&'a ResolvedModule> {
-    let matches = packages
-        .values()
-        .flat_map(|package| {
-            package
-                .modules
-                .iter()
-                .filter(|(key, module)| *key == &module.key())
-                .map(|(_, module)| module)
-        })
-        .filter(|module| module.kind == PackageKind::Agent && module.name() == name)
-        .collect::<Vec<_>>();
+    let reference = reference.trim();
+    let path = validate_source_path(reference)?;
+
+    if let Some(target) =
+        find_module_by_path_reference(packages, &routine_module.package_name, &path)
+    {
+        if target.kind != PackageKind::Agent {
+            anyhow::bail!(
+                "routine step '{}' references {path}, but it is {} not agent",
+                step_ref,
+                target.kind.as_str()
+            );
+        }
+        return Ok(target);
+    }
+
+    let Ok(slug) = Slug::parse(reference) else {
+        anyhow::bail!(
+            "routine step '{}' references package agent path '{path}', but no resolved package agent has that path",
+            step_ref
+        );
+    };
+    let mut matches = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for package in packages.values() {
+        for candidate in package.modules.values() {
+            let key = (
+                candidate.package_name.as_str(),
+                candidate.source_path.as_str(),
+            );
+            if candidate.kind == PackageKind::Agent
+                && candidate.name() == slug.as_str()
+                && seen.insert(key)
+            {
+                matches.push(candidate);
+            }
+        }
+    }
+
     match matches.as_slice() {
-        [module] => Ok(module),
+        [target] => Ok(*target),
         [] => anyhow::bail!(
-            "routine step references agent '{name}', but no resolved package agent has that name"
+            "routine step '{}' references package agent slug '{}', but no resolved package defines an agent with that slug",
+            step_ref,
+            slug.as_str(),
         ),
         _ => anyhow::bail!(
-            "routine step references agent '{name}', but multiple resolved package agents have that name"
+            "routine step '{}' references package agent slug '{}', but the resolved package graph defines multiple agents with that slug; use a package path instead",
+            step_ref,
+            slug.as_str(),
         ),
     }
+}
+
+fn find_module_by_path_reference<'a>(
+    packages: &'a std::collections::BTreeMap<String, ResolvedPackage>,
+    package_name: &str,
+    path: &str,
+) -> Option<&'a ResolvedModule> {
+    packages
+        .get(package_name)
+        .and_then(|package| {
+            package
+                .modules
+                .values()
+                .find(|module| module.path == path || module.source_path == path)
+        })
+        .or_else(|| {
+            packages
+                .values()
+                .flat_map(|package| package.modules.values())
+                .find(|module| module.source_path == path)
+        })
 }
 
 fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<RoutineGraph> {

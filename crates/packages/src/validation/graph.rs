@@ -277,6 +277,10 @@ pub(crate) fn scan_context_selectors(value: &str) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn scan_arg_selectors(value: &str) -> Vec<String> {
+    nenjo::arguments::scan_argument_selectors(value)
+}
+
 fn scan_selector_path(value: &str, prefix: &str) -> Vec<Vec<String>> {
     let bytes = value.as_bytes();
     let mut out = Vec::new();

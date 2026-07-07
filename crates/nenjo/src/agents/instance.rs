@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::agents::async_ops::AsyncOpManager;
 use crate::agents::prompts::PromptContext;
+use crate::arguments::{merge_argument_bindings, scan_argument_selectors};
 use crate::config::AgentConfig;
 use crate::hooks::HookRuntime;
 use crate::input::{AgentRun, AgentRunKind, render_context_from_agent_run};
@@ -276,6 +277,13 @@ impl<P: ProviderRuntime> AgentInstance<P> {
     /// (from the DB) are rendered first, then merged into the vars so
     /// `{{ context.* }}` references resolve in the final prompts.
     pub fn build_prompts(&self, run: &AgentRun) -> BuiltPrompts {
+        self.try_build_prompts(run)
+            .expect("prompt argument bindings should be valid")
+    }
+
+    /// Fallible prompt builder used by the execution path so missing/conflicting
+    /// runtime arguments fail before the model call.
+    pub fn try_build_prompts(&self, run: &AgentRun) -> anyhow::Result<BuiltPrompts> {
         self.build_prompts_with_vars(run, None, None)
     }
 
@@ -284,7 +292,7 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         run: &AgentRun,
         memory_vars: Option<&HashMap<String, String>>,
         artifact_vars: Option<&HashMap<String, String>>,
-    ) -> BuiltPrompts {
+    ) -> anyhow::Result<BuiltPrompts> {
         // 1. Build the render context from the run input + extras
         let mut ctx = render_context_from_agent_run(run);
         let ex = &self.prompt.context.render_ctx_extra;
@@ -362,8 +370,25 @@ impl<P: ProviderRuntime> AgentInstance<P> {
 
         // 3. Build the vars HashMap once
         let mut vars = ctx.to_vars();
+        let argument_vars = merge_argument_bindings(
+            &self.prompt.context.argument_bindings,
+            &run.execution.argument_bindings,
+        )?;
+        vars.extend(argument_vars);
 
         // 4. Render context blocks and merge into vars
+        validate_argument_references(
+            &vars,
+            [
+                prompt_config.system_prompt.as_str(),
+                prompt_config.developer_prompt.as_str(),
+                prompt_config.templates.chat_task.as_str(),
+                prompt_config.templates.task_execution.as_str(),
+                prompt_config.templates.gate_eval.as_str(),
+                prompt_config.templates.heartbeat_task.as_str(),
+            ],
+            self.prompt.renderer.argument_selectors(),
+        )?;
         let rendered_blocks = self.prompt.renderer.render_all(&vars);
         vars.extend(rendered_blocks);
 
@@ -436,11 +461,33 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         let developer = self.prompt.renderer.render_template(&developer, &vars);
         let user_message = self.prompt.renderer.render_template(task_template, &vars);
 
-        BuiltPrompts {
+        Ok(BuiltPrompts {
             system,
             developer,
             user_message,
+        })
+    }
+}
+
+fn validate_argument_references<'a>(
+    vars: &HashMap<String, String>,
+    prompt_templates: impl IntoIterator<Item = &'a str>,
+    context_selectors: Vec<String>,
+) -> anyhow::Result<()> {
+    let mut missing = Vec::new();
+    for selector in prompt_templates
+        .into_iter()
+        .flat_map(scan_argument_selectors)
+        .chain(context_selectors)
+    {
+        if !vars.contains_key(&selector) && !missing.contains(&selector) {
+            missing.push(selector);
         }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("missing runtime argument bindings: {}", missing.join(", "))
     }
 }
 

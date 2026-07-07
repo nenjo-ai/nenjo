@@ -24,6 +24,7 @@ pub use tool_factory::{NoopToolFactory, ToolContext, ToolFactory};
 
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::{self as prompts, PromptContext};
+use crate::arguments::ResolvedArgumentBinding;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::manifest::{
@@ -384,12 +385,13 @@ fn manifest_knowledge_selector(manifest: &KnowledgePackManifest) -> Option<Strin
 }
 
 pub(crate) struct ProviderServices<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
-    model_factory: Arc<ModelFactory>,
-    tool_factory: Arc<ToolFactoryImpl>,
-    memory: Option<Arc<Mem>>,
-    agent_config: AgentConfig,
-    render_ctx_extra: RenderContextVars,
-    knowledge: ProviderKnowledgeState,
+    pub(crate) model_factory: Arc<ModelFactory>,
+    pub(crate) tool_factory: Arc<ToolFactoryImpl>,
+    pub(crate) memory: Option<Arc<Mem>>,
+    pub(crate) agent_config: AgentConfig,
+    pub(crate) render_ctx_extra: RenderContextVars,
+    pub(crate) argument_bindings: Vec<ResolvedArgumentBinding>,
+    pub(crate) knowledge: ProviderKnowledgeState,
 }
 
 impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
@@ -402,6 +404,7 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
             render_ctx_extra: self.render_ctx_extra.clone(),
+            argument_bindings: self.argument_bindings.clone(),
             knowledge: self.knowledge.clone(),
         }
     }
@@ -422,21 +425,8 @@ where
 {
     pub(crate) fn new_inner(
         manifest: Arc<Manifest>,
-        model_factory: Arc<ModelFactory>,
-        tool_factory: Arc<ToolFactoryImpl>,
-        memory: Option<Arc<Mem>>,
-        agent_config: AgentConfig,
-        render_ctx_extra: RenderContextVars,
-        knowledge: ProviderKnowledgeState,
+        services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem>,
     ) -> Self {
-        let services = ProviderServices {
-            model_factory,
-            tool_factory,
-            memory,
-            agent_config,
-            render_ctx_extra,
-            knowledge,
-        };
         Self::from_services(manifest, services)
     }
 
@@ -487,6 +477,13 @@ where
     /// Used by the harness to hot-swap bootstrap data without rebuilding factories.
     pub fn with_manifest(&self, manifest: Manifest) -> Self {
         Self::from_services(Arc::new(manifest), self.inner.services.clone())
+    }
+
+    /// Create a new Provider with the same manifest and updated provider-level argument bindings.
+    pub fn with_argument_bindings(&self, bindings: Vec<ResolvedArgumentBinding>) -> Self {
+        let mut services = self.inner.services.clone();
+        services.argument_bindings = bindings;
+        Self::from_services(self.inner.manifest.manifest.clone(), services)
     }
 
     /// Access the memory backend, if configured.
@@ -687,6 +684,7 @@ where
             active_domain: None,
             append_active_domain_addon: true,
             render_ctx_extra,
+            argument_bindings: self.inner.services.argument_bindings.clone(),
         }
     }
 
@@ -756,6 +754,10 @@ where
 
     fn with_manifest(&self, manifest: Manifest) -> Self {
         Provider::with_manifest(self, manifest)
+    }
+
+    fn with_argument_bindings(&self, bindings: Vec<ResolvedArgumentBinding>) -> Self {
+        Provider::with_argument_bindings(self, bindings)
     }
 
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {

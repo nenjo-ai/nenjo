@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use nenjo_models::ChatMessage;
 use uuid::Uuid;
 
+use crate::arguments::ResolvedArgumentBinding;
 use crate::routines::types::{CronSchedule, SessionBinding, StepResult};
 use crate::types::GitContext;
 use crate::{IntoSlug, Slug};
@@ -244,6 +245,8 @@ pub struct ExecutionOptions {
     pub session_binding: Option<SessionBinding>,
     /// Optional runtime location prepared by the host, such as a task worktree.
     pub project_location: Option<ProjectLocation>,
+    /// Runtime argument bindings resolved by the host for this execution.
+    pub argument_bindings: Vec<ResolvedArgumentBinding>,
 }
 
 impl ExecutionOptions {
@@ -259,6 +262,14 @@ impl ExecutionOptions {
 
     pub fn project_location(mut self, location: ProjectLocation) -> Self {
         self.project_location = Some(location);
+        self
+    }
+
+    pub fn argument_bindings(
+        mut self,
+        bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
+    ) -> Self {
+        self.argument_bindings.extend(bindings);
         self
     }
 }
@@ -308,6 +319,14 @@ impl AgentRun {
         self.execution.project_location = Some(location);
         self
     }
+
+    pub fn argument_bindings(
+        mut self,
+        bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
+    ) -> Self {
+        self.execution.argument_bindings.extend(bindings);
+        self
+    }
 }
 
 /// Routine execution input.
@@ -350,6 +369,14 @@ impl RoutineRun {
 
     pub fn project_location(mut self, location: ProjectLocation) -> Self {
         self.execution.project_location = Some(location);
+        self
+    }
+
+    pub fn argument_bindings(
+        mut self,
+        bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
+    ) -> Self {
+        self.execution.argument_bindings.extend(bindings);
         self
     }
 }

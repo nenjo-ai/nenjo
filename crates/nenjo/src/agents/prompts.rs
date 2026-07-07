@@ -1,6 +1,7 @@
 use crate::context::types::RenderContextBlock;
 pub use crate::manifest::PromptConfig;
 
+use crate::arguments::ResolvedArgumentBinding;
 use crate::manifest::{ContextBlockManifest, ProjectManifest};
 use crate::types::{ActiveDomain, RenderContextVars};
 
@@ -18,6 +19,8 @@ pub struct PromptContext {
     pub append_active_domain_addon: bool,
     /// Routine/project-level context fields injected by the executor.
     pub render_ctx_extra: RenderContextVars,
+    /// Provider-level argument bindings, usually org-scoped values.
+    pub argument_bindings: Vec<ResolvedArgumentBinding>,
 }
 pub fn render_context_block(b: &ContextBlockManifest) -> RenderContextBlock {
     RenderContextBlock {

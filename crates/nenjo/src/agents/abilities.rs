@@ -1542,12 +1542,15 @@ mod tests {
     fn test_sdk_provider() -> ErasedProvider {
         Provider::new_inner(
             Arc::new(Manifest::default()),
-            Arc::new(TestModelFactory),
-            Arc::new(TestToolFactory),
-            None,
-            AgentConfig::default(),
-            Default::default(),
-            Default::default(),
+            crate::provider::ProviderServices {
+                model_factory: Arc::new(TestModelFactory),
+                tool_factory: Arc::new(TestToolFactory),
+                memory: None,
+                agent_config: AgentConfig::default(),
+                render_ctx_extra: Default::default(),
+                argument_bindings: Default::default(),
+                knowledge: Default::default(),
+            },
         )
     }
 
@@ -1624,6 +1627,7 @@ mod tests {
                     }),
                     append_active_domain_addon: true,
                     render_ctx_extra: Default::default(),
+                    argument_bindings: Default::default(),
                 },
                 renderer: ContextRenderer::from_blocks(&[]),
                 memory_vars: Default::default(),

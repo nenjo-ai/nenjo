@@ -31,8 +31,8 @@ use crate::{
 
 use self::graph::{
     collect_strings, context_import_name, package_selector_aliases, pkg_selector_is_allowed,
-    scan_context_selectors, scan_pkg_selectors, selector_to_package_name, unique_modules,
-    validate_context_graph, validate_module_imports,
+    scan_arg_selectors, scan_context_selectors, scan_pkg_selectors, selector_to_package_name,
+    unique_modules, validate_context_graph, validate_module_imports,
 };
 use self::render::{RenderFixture, validate_template_selectors};
 
@@ -136,6 +136,16 @@ fn validate_packages(
 
     progress(PackageRuntimeValidationStage::PromptSelectors);
     for package in packages.values() {
+        if let Err(error) = validate_package_arguments(package) {
+            push_package_error(
+                package,
+                None,
+                Some("manifest.arguments"),
+                error,
+                &mut report,
+            );
+            continue;
+        }
         let current_selectors = match package_selector_aliases(&package.name) {
             Ok(selectors) => selectors,
             Err(error) => {
@@ -162,7 +172,14 @@ fn validate_packages(
                 module,
                 "prompt selectors",
                 None,
-                || validate_prompt_selectors(module, &current_selectors, &dependency_selectors),
+                || {
+                    validate_prompt_selectors(
+                        package,
+                        module,
+                        &current_selectors,
+                        &dependency_selectors,
+                    )
+                },
                 &mut report,
             );
         }
@@ -265,6 +282,7 @@ fn push_package_error(
 }
 
 fn validate_prompt_selectors(
+    package: &ResolvedPackage,
     module: &ResolvedModule,
     package_selectors: &BTreeSet<String>,
     dependency_selectors: &BTreeSet<String>,
@@ -296,6 +314,53 @@ fn validate_prompt_selectors(
                     module.path
                 );
             }
+        }
+        for selector in scan_arg_selectors(value) {
+            if !package
+                .manifest
+                .arguments
+                .iter()
+                .any(|argument| argument.selector.as_str() == selector)
+            {
+                anyhow::bail!(
+                    "{} references {}, but it is not declared in package arguments",
+                    module.path,
+                    selector
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_package_arguments(package: &ResolvedPackage) -> anyhow::Result<()> {
+    let mut names = BTreeSet::new();
+    let mut selectors = BTreeSet::new();
+    for argument in &package.manifest.arguments {
+        if !names.insert(argument.name.clone()) {
+            anyhow::bail!("declares duplicate argument name '{}'", argument.name);
+        }
+        if !selectors.insert(argument.selector.clone()) {
+            anyhow::bail!(
+                "declares duplicate argument selector '{}'",
+                argument.selector
+            );
+        }
+        if let Some(default) = &argument.default {
+            argument
+                .value_type
+                .coerce_render_value(default)
+                .with_context(|| {
+                    format!("argument '{}' has invalid default value", argument.name)
+                })?;
+        }
+        if let Some(sample) = &argument.sample {
+            argument
+                .value_type
+                .coerce_render_value(sample)
+                .with_context(|| {
+                    format!("argument '{}' has invalid sample value", argument.name)
+                })?;
         }
     }
     Ok(())
@@ -386,7 +451,7 @@ fn validate_rendered_fields(
     report: &mut PackageRuntimeValidationReport,
 ) {
     for (field_path, template) in rendered_fields(module) {
-        let selector_result = validate_template_selectors(fixture, template);
+        let selector_result = validate_template_selectors(fixture, module, template);
         let render_result =
             selector_result.and_then(|_| fixture.render_field(module, &field_path, template));
         if let Err(error) = render_result {
@@ -535,6 +600,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: None,
                 dependencies,
+                arguments: Vec::new(),
                 modules: Vec::new(),
                 metadata: serde_json::Value::Null,
             },
@@ -575,6 +641,18 @@ mod tests {
         validate_registry_runtime(&registry, &packages)
             .expect_err("validation should fail")
             .to_string()
+    }
+
+    fn validate_single_ok(package: ResolvedPackage) {
+        let registry = PackageRegistryManifest {
+            schema: "nenjo.registry.v1".to_string(),
+            name: None,
+            description: None,
+            registries: Vec::new(),
+            packages: BTreeMap::new(),
+        };
+        let packages = BTreeMap::from([(package.name.clone(), package)]);
+        validate_registry_runtime(&registry, &packages).expect("validation should pass");
     }
 
     #[test]
@@ -678,6 +756,60 @@ mod tests {
     }
 
     #[test]
+    fn accepts_declared_runtime_argument_selector() {
+        let ability = module(
+            "abilities/build.yaml",
+            PackageKind::Ability,
+            serde_json::json!({
+                "name": "build",
+                "prompt_config": {
+                    "developer_prompt": "{{ args.company }}"
+                }
+            }),
+        );
+        let mut package = package("pkg", vec![ability]);
+        package.manifest.arguments = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "company_context",
+                "selector": "args.company",
+                "scope": "org",
+                "type": "xml",
+                "required": true,
+                "sample": "<company>Acme</company>"
+            }))
+            .unwrap(),
+        ];
+        let registry = PackageRegistryManifest {
+            schema: "nenjo.registry.v1".to_string(),
+            name: None,
+            description: None,
+            registries: Vec::new(),
+            packages: BTreeMap::new(),
+        };
+        let packages = BTreeMap::from([(package.name.clone(), package)]);
+
+        validate_registry_runtime(&registry, &packages).unwrap();
+    }
+
+    #[test]
+    fn rejects_undeclared_runtime_argument_selector() {
+        let ability = module(
+            "abilities/build.yaml",
+            PackageKind::Ability,
+            serde_json::json!({
+                "name": "build",
+                "prompt_config": {
+                    "developer_prompt": "{{ args.company }}"
+                }
+            }),
+        );
+
+        let error = validate_single(package("pkg", vec![ability]));
+
+        assert!(error.contains("undeclared runtime argument selector"));
+    }
+
+    #[test]
     fn rejects_assignment_with_wrong_kind() {
         let agent = module(
             "agent.yaml",
@@ -701,6 +833,80 @@ mod tests {
         let error = validate_single(package("pkg", vec![agent, context]));
 
         assert!(error.contains("not ability"));
+    }
+
+    #[test]
+    fn accepts_routine_agent_reference_by_slug() {
+        let routine = module(
+            "routines/review.yaml",
+            PackageKind::Routine,
+            serde_json::json!({
+                "name": "review",
+                "trigger": "task",
+                "entry_steps": ["start"],
+                "steps": [
+                    {"ref": "start", "type": "agent", "agent": "reviewer"},
+                    {"ref": "done", "type": "terminal"}
+                ],
+                "edges": [
+                    {
+                        "from": "start",
+                        "to": "done",
+                        "condition": "always",
+                        "metadata": {
+                            "handoff_schema": {"type": "object"}
+                        }
+                    }
+                ],
+            }),
+        );
+        let reviewer = module(
+            "agents/reviewer.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "reviewer",
+                "prompt_config": {}
+            }),
+        );
+
+        validate_single_ok(package("pkg", vec![routine, reviewer]));
+    }
+
+    #[test]
+    fn rejects_ambiguous_routine_agent_reference_by_slug() {
+        let routine = module(
+            "routines/review.yaml",
+            PackageKind::Routine,
+            serde_json::json!({
+                "name": "review",
+                "trigger": "task",
+                "entry_steps": ["start"],
+                "steps": [
+                    {"ref": "start", "type": "agent", "agent": "reviewer"}
+                ],
+                "edges": []
+            }),
+        );
+        let reviewer = module(
+            "agents/reviewer.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "reviewer",
+                "prompt_config": {}
+            }),
+        );
+        let duplicate = module(
+            "agents/other-reviewer.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "reviewer",
+                "prompt_config": {}
+            }),
+        );
+
+        let error = validate_single(package("pkg", vec![routine, reviewer, duplicate]));
+
+        assert!(error.contains("defines multiple agents with that slug"));
     }
 
     #[test]

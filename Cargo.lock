@@ -1961,6 +1961,7 @@ dependencies = [
  "nenjo-models",
  "nenjo-tool-api",
  "nenjo-xml",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
@@ -2147,6 +2148,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "thiserror 2.0.18",
+ "urlencoding",
  "uuid",
 ]
 

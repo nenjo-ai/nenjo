@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Result;
 use anyhow::Context;
+use nenjo::arguments::PackageArgumentDefinition;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::parse_package_file_schema;
@@ -284,6 +285,9 @@ pub struct ModulePackageManifest {
     /// Package-level dependency requirements keyed by package name.
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    /// Package-local runtime argument contracts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<PackageArgumentDefinition>,
     /// Manifest modules included by this package.
     #[serde(default)]
     pub modules: Vec<PackageModule>,
@@ -311,6 +315,7 @@ impl ModulePackageManifest {
             validate_package_name(name)
                 .with_context(|| format!("{path} has invalid dependency '{name}'"))?;
         }
+        validate_package_arguments(path, &self.arguments)?;
         let mut module_paths = BTreeSet::new();
         for module in &self.modules {
             validate_source_path(&module.path)
@@ -321,6 +326,48 @@ impl ModulePackageManifest {
         }
         Ok(())
     }
+}
+
+fn validate_package_arguments(path: &str, arguments: &[PackageArgumentDefinition]) -> Result<()> {
+    let mut names = BTreeSet::new();
+    let mut selectors = BTreeSet::new();
+    for argument in arguments {
+        if !names.insert(argument.name.clone()) {
+            bail!(
+                "{path} declares duplicate argument name '{}'",
+                argument.name
+            );
+        }
+        if !selectors.insert(argument.selector.clone()) {
+            bail!(
+                "{path} declares duplicate argument selector '{}'",
+                argument.selector
+            );
+        }
+        if let Some(default) = &argument.default {
+            argument
+                .value_type
+                .coerce_render_value(default)
+                .with_context(|| {
+                    format!(
+                        "{path} argument '{}' has invalid default value",
+                        argument.name
+                    )
+                })?;
+        }
+        if let Some(sample) = &argument.sample {
+            argument
+                .value_type
+                .coerce_render_value(sample)
+                .with_context(|| {
+                    format!(
+                        "{path} argument '{}' has invalid sample value",
+                        argument.name
+                    )
+                })?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
