@@ -105,10 +105,10 @@ impl ExecutionHandle {
 
     /// Wait for the final output.
     pub async fn output(mut self) -> Result<TurnOutput> {
-        self.join
-            .take()
-            .expect("execution join handle should be present")
-            .await
+        let Some(join) = self.join.take() else {
+            return Err(anyhow::anyhow!("execution output was already taken"));
+        };
+        join.await
             .map_err(|e| anyhow::anyhow!("execution task panicked: {e}"))?
     }
 }
@@ -333,10 +333,16 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
 
+        let session_id = instance
+            .prompt
+            .context
+            .active_domain
+            .as_ref()
+            .map(|domain| domain.session_id);
         debug!(
             agent = instance.name(),
             domain = domain_name,
-            session_id = %instance.prompt.context.active_domain.as_ref().unwrap().session_id,
+            ?session_id,
             "Domain expansion started"
         );
 

@@ -263,7 +263,8 @@ async fn project_context_renders_template_and_knowledge_vars() {
         .instance()
         .build_prompts(&crate::input::AgentRun::chat(crate::input::ChatInput::new(
             "hello",
-        )));
+        )))
+        .unwrap();
 
     assert!(prompts.system.contains("Project p:"));
     assert!(prompts.system.contains("<knowledge_pack"));
@@ -301,7 +302,8 @@ async fn task_prompt_project_context_renders_into_project_xml() {
         .instance()
         .build_prompts(&crate::input::AgentRun::task(
             crate::input::TaskInput::new("Task", "Description").with_project("p"),
-        ));
+        ))
+        .unwrap();
 
     assert!(prompts.user_message.contains("Project p context"));
     assert!(
@@ -361,7 +363,8 @@ async fn task_prompt_does_not_append_routine_handoffs_twice() {
         .build_prompts(&crate::input::AgentRun::task(crate::input::TaskInput::new(
             "Task",
             "Description",
-        )));
+        )))
+        .unwrap();
 
     assert_eq!(prompts.user_message.matches("<handoffs>").count(), 1);
     assert!(!prompts.user_message.contains("# Routine Handoffs"));

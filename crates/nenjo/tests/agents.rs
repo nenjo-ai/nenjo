@@ -368,7 +368,7 @@ async fn instance_builds_prompts() {
         template_override: None,
     });
 
-    let prompts = runner.instance().build_prompts(&task);
+    let prompts = runner.instance().build_prompts(&task).unwrap();
 
     assert!(
         prompts.system.contains("helpful coding assistant"),
@@ -418,7 +418,7 @@ async fn instance_uses_heartbeat_template_for_heartbeat_runs() {
         execution: nenjo::ExecutionOptions::default(),
     };
 
-    let prompts = runner.instance().build_prompts(&run);
+    let prompts = runner.instance().build_prompts(&run).unwrap();
 
     assert!(
         prompts
@@ -459,7 +459,7 @@ async fn instance_renders_self_prompt_var() {
         project: None,
         template_override: None,
     });
-    let prompts = runner.instance().build_prompts(&task);
+    let prompts = runner.instance().build_prompts(&task).unwrap();
 
     assert!(prompts.system.contains("<agent "));
     assert!(prompts.system.contains("slug=\"test-coder\""));
@@ -895,7 +895,8 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
             history: vec![],
             project: None,
             template_override: None,
-        }));
+        }))
+        .unwrap();
     assert!(
         prompts.developer.contains("Ops mode"),
         "domain developer prompt addon must be rendered before the turn loop starts, got: {}",

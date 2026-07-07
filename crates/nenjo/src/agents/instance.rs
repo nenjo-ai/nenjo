@@ -276,15 +276,14 @@ impl<P: ProviderRuntime> AgentInstance<P> {
     /// `HashMap<String, String>` of template variables. Context blocks
     /// (from the DB) are rendered first, then merged into the vars so
     /// `{{ context.* }}` references resolve in the final prompts.
-    pub fn build_prompts(&self, run: &AgentRun) -> BuiltPrompts {
-        self.try_build_prompts(run)
-            .expect("prompt argument bindings should be valid")
+    pub fn build_prompts(&self, run: &AgentRun) -> anyhow::Result<BuiltPrompts> {
+        self.build_prompts_with_vars(run, None, None)
     }
 
     /// Fallible prompt builder used by the execution path so missing/conflicting
     /// runtime arguments fail before the model call.
     pub fn try_build_prompts(&self, run: &AgentRun) -> anyhow::Result<BuiltPrompts> {
-        self.build_prompts_with_vars(run, None, None)
+        self.build_prompts(run)
     }
 
     pub(crate) fn build_prompts_with_vars(
