@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0](https://github.com/nenjo-ai/nenjo/compare/v0.24.0...v0.25.0) - 2026-07-07
+
+### Added
+
+- Package runtime arguments for package-authored prompts, including typed `text`, `markdown`, `xml`, and `json` values, declared `args.*` selectors, provider-level bindings, and per-run bindings ([#83](https://github.com/nenjo-ai/nenjo/pull/83)).
+- Worker package graph argument sync so platform-supplied org bindings are persisted with installed platform packages and loaded into the runtime provider after `package.graph_changed` ([#83](https://github.com/nenjo-ai/nenjo/pull/83)).
+- External package dependency resolution across registries, including scoped dependency names, package source overrides, and package graph validation for external dependencies ([#82](https://github.com/nenjo-ai/nenjo/pull/82)).
+- Routine package validation support for slug-based agent step references with ambiguity checks ([#83](https://github.com/nenjo-ai/nenjo/pull/83)).
+
+### Changed
+
+- Hardened `nenpm` provider source fetching for GitHub-backed registries with archive downloads, fetch limits, stale temporary directory cleanup, branch/tag ref handling, and unauthenticated retry behavior for public repositories ([#83](https://github.com/nenjo-ai/nenjo/pull/83)).
+- Locked installs can now materialize from `nenpm.lock.yml` without reloading package registries, reducing drift between platform and worker package graph installs ([#83](https://github.com/nenjo-ai/nenjo/pull/83)).
+- Prompt construction now returns errors instead of panicking when runtime argument bindings are missing or invalid.
+
+### Fixed
+
+- Updated Rayon's transitive Crossbeam dependencies so `crossbeam-epoch` resolves to `0.9.20` instead of the vulnerable `0.9.18`.
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.24.0](https://github.com/nenjo-ai/nenjo/compare/v0.23.0...v0.24.0) - 2026-07-01
 
 ### Fixed
