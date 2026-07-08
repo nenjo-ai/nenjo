@@ -39,7 +39,9 @@ use nenjo_knowledge::tools::{
     CompositeKnowledgeRegistry, KnowledgePackEntry, KnowledgePackSummary, KnowledgeRef,
     KnowledgeRegistry,
 };
-use nenjo_knowledge::{FilesystemKnowledgePack, KnowledgePack, PackageKnowledgePack};
+use nenjo_knowledge::{
+    FilesystemKnowledgePack, KnowledgePack, KnowledgeSearchService, PackageKnowledgePack,
+};
 use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
@@ -200,7 +202,13 @@ fn manifest_knowledge_pack_entry(manifest: &KnowledgePackManifest) -> Option<Kno
                 );
                 None
             })?;
-            Some(KnowledgePackEntry::new(knowledge_ref, pack))
+            let writable =
+                matches!(manifest.source_type, KnowledgePackSource::Library) && !manifest.read_only;
+            Some(
+                KnowledgePackEntry::new(knowledge_ref, pack)
+                    .with_writable(writable)
+                    .with_metadata(manifest.name.clone(), manifest.description.clone()),
+            )
         }
         KnowledgePackSource::Package => {
             let root = manifest.root_path.as_ref().or_else(|| {
@@ -222,7 +230,11 @@ fn manifest_knowledge_pack_entry(manifest: &KnowledgePackManifest) -> Option<Kno
                 })
                 .ok()?;
             let knowledge_ref = package_manifest_knowledge_ref(manifest, &pack)?;
-            Some(KnowledgePackEntry::new(knowledge_ref, pack))
+            Some(
+                KnowledgePackEntry::new(knowledge_ref, pack)
+                    .with_writable(false)
+                    .with_metadata(manifest.name.clone(), manifest.description.clone()),
+            )
         }
         KnowledgePackSource::Connector => {
             warn!(
@@ -285,6 +297,7 @@ fn package_manifest_knowledge_ref(
 pub(crate) struct ProviderKnowledgeState {
     pack_entries: Vec<KnowledgePackEntry>,
     live_manifest_reader: Option<Arc<dyn ManifestReader>>,
+    search_service: Arc<KnowledgeSearchService>,
 }
 
 impl Clone for ProviderKnowledgeState {
@@ -292,6 +305,7 @@ impl Clone for ProviderKnowledgeState {
         Self {
             pack_entries: self.pack_entries.clone(),
             live_manifest_reader: self.live_manifest_reader.clone(),
+            search_service: self.search_service.clone(),
         }
     }
 }
@@ -328,59 +342,11 @@ impl ManifestBackedKnowledgeRegistry {
 #[async_trait::async_trait]
 impl KnowledgeRegistry for ManifestBackedKnowledgeRegistry {
     async fn list_packs(&self) -> anyhow::Result<Vec<KnowledgePackSummary>> {
-        let mut summaries = self
-            .manifest
-            .knowledge_packs
-            .iter()
-            .filter_map(manifest_knowledge_pack_summary)
-            .collect::<Vec<_>>();
-        if let Some(reader) = &self.live_manifest_reader {
-            match reader.list_knowledge_packs().await {
-                Ok(packs) => {
-                    summaries.extend(packs.iter().filter_map(manifest_knowledge_pack_summary));
-                }
-                Err(error) => {
-                    warn!(error = %error, "Failed to refresh live knowledge pack manifest");
-                }
-            }
-        }
-        summaries.extend(
-            self.explicit_entries
-                .iter()
-                .map(|entry| KnowledgePackSummary::new(entry.selector(), entry.pack().manifest())),
-        );
-        summaries.sort_by(|left, right| left.selector.cmp(&right.selector));
-        summaries.dedup_by(|left, right| left.selector == right.selector);
-        Ok(summaries)
+        self.registry().await.list_packs().await
     }
 
     async fn resolve_pack(&self, selector: &str) -> anyhow::Result<Arc<dyn KnowledgePack>> {
         self.registry().await.resolve_pack(selector).await
-    }
-}
-
-fn manifest_knowledge_pack_summary(
-    manifest: &KnowledgePackManifest,
-) -> Option<KnowledgePackSummary> {
-    let selector = manifest_knowledge_selector(manifest)?;
-    Some(KnowledgePackSummary::from_parts(
-        selector,
-        manifest.slug.as_str(),
-        manifest.version.clone().unwrap_or_else(|| "1".to_string()),
-        manifest.root_uri.clone(),
-        0,
-    ))
-}
-
-fn manifest_knowledge_selector(manifest: &KnowledgePackManifest) -> Option<String> {
-    if manifest.selector.parse::<KnowledgeRef>().is_ok() {
-        return Some(manifest.selector.clone());
-    }
-    match manifest.source_type {
-        KnowledgePackSource::Library => Some(format!("lib:{}", manifest.slug)),
-        KnowledgePackSource::Local => Some(format!("local:{}", manifest.slug)),
-        KnowledgePackSource::Package => Some(format!("pkg:{}", manifest.slug)),
-        KnowledgePackSource::Connector => None,
     }
 }
 
@@ -637,7 +603,12 @@ where
             registry.clone(),
         )];
         if knowledge.live_manifest_reader.is_some() || !self.knowledge_pack_entries().is_empty() {
-            tools.extend(nenjo_knowledge::tools::knowledge_traversal_tools(registry));
+            tools.extend(
+                nenjo_knowledge::tools::knowledge_traversal_tools_with_search(
+                    registry,
+                    knowledge.search_service.clone(),
+                ),
+            );
         }
         tools
     }

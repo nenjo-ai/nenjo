@@ -513,6 +513,90 @@ async fn manifest_knowledge_pack_provides_prompt_vars_and_lazy_doc_reads() {
 }
 
 #[tokio::test]
+async fn package_knowledge_pack_summary_uses_loaded_manifest_doc_count() {
+    let temp = tempfile::tempdir().unwrap();
+    let pack_dir = temp.path().join("package");
+    let docs_dir = pack_dir.join("docs/package");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(
+        docs_dir.join("body-search.md"),
+        "# Package Body Search\n\nLoaded from package.",
+    )
+    .unwrap();
+    std::fs::write(
+        pack_dir.join("manifest.yaml"),
+        r#"
+schema: nenjo.knowledge.v1
+manifest:
+  pack_id: nenjo.package
+  selector: pkg:nenjo-ai.packages.knowledge.search_test
+  version: 0.1.0
+  docs:
+    - selector: package.body_search
+      source_path: docs/package/body-search.md
+      title: Package Body Search
+      summary: Package-backed knowledge document.
+      kind: reference
+      tags: [package:test]
+      related: []
+"#,
+    )
+    .unwrap();
+
+    let mut manifest = test_manifest();
+    manifest
+        .knowledge_packs
+        .push(ProviderKnowledgePackManifest {
+            slug: crate::Slug::derive("pkg:nenjo-ai.packages.knowledge.search_test"),
+            name: "Package Search Test".to_string(),
+            description: Some("Searchable package docs".to_string()),
+            source_type: KnowledgePackSource::Package,
+            selector: "pkg:nenjo-ai.packages.knowledge.search_test".to_string(),
+            version: Some("0.1.0".to_string()),
+            root_uri: "pkg://nenjo.package/".to_string(),
+            root_path: Some(pack_dir.join("manifest.yaml")),
+            read_only: true,
+            metadata: serde_json::Value::Null,
+        });
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let list_tool = provider
+        .create_knowledge_tools()
+        .into_iter()
+        .find(|tool| tool.name() == "list_knowledge_packs")
+        .unwrap();
+    let packs: Vec<serde_json::Value> = serde_json::from_str(
+        &list_tool
+            .execute(serde_json::json!({}))
+            .await
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+
+    assert_eq!(
+        packs[0]["selector"],
+        "pkg:nenjo-ai.packages.knowledge.search_test"
+    );
+    assert_eq!(packs[0]["name"], "Package Search Test");
+    assert_eq!(packs[0]["description"], "Searchable package docs");
+    assert_eq!(packs[0]["source"], "package");
+    assert_eq!(packs[0]["writable"], false);
+    assert_eq!(packs[0]["document_count"], 1);
+    assert!(packs[0].get("slug").is_none());
+    assert!(packs[0].get("pack").is_none());
+    assert!(packs[0].get("pack_id").is_none());
+    assert!(packs[0].get("root_uri").is_none());
+    assert!(packs[0].get("version").is_none());
+}
+
+#[tokio::test]
 async fn provider_exposes_list_knowledge_packs_without_registered_packs() {
     let provider = Provider::builder()
         .with_manifest(test_manifest())
@@ -537,6 +621,33 @@ async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
     let temp = tempfile::tempdir().unwrap();
     let store = crate::manifest::local::LocalManifestStore::new(temp.path().join("manifests"));
     let pack_dir = temp.path().join("library").join("live");
+    let docs_dir = pack_dir.join("docs");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(docs_dir.join("live.md"), "# Live\n\nLoaded live.").unwrap();
+    std::fs::write(
+        pack_dir.join("manifest.json"),
+        r#"{
+          "pack_id": "live",
+          "version": "1",
+          "schema_version": 1,
+          "root_uri": "library://live/",
+          "content_hash": "",
+          "docs": [
+            {
+              "id": "live",
+              "selector": "live",
+              "source_path": "docs/live.md",
+              "title": "Live",
+              "summary": "Live summary",
+              "kind": "reference",
+              "tags": [],
+              "related": [],
+              "updated_at": ""
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
 
     let provider = Provider::builder()
         .with_manifest(test_manifest())
@@ -570,13 +681,13 @@ async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
             ProviderKnowledgePackManifest {
                 slug: crate::Slug::derive("live"),
                 name: "Live".to_string(),
-                description: None,
+                description: Some("Live library docs".to_string()),
                 source_type: KnowledgePackSource::Library,
                 selector: "lib:live".to_string(),
                 version: Some("1".to_string()),
                 root_uri: "library://live/".to_string(),
                 root_path: Some(pack_dir),
-                read_only: true,
+                read_only: false,
                 metadata: serde_json::Value::Null,
             },
         ))
@@ -592,6 +703,16 @@ async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
     )
     .unwrap();
     assert_eq!(packs[0]["selector"], "lib:live");
+    assert_eq!(packs[0]["name"], "Live");
+    assert_eq!(packs[0]["description"], "Live library docs");
+    assert_eq!(packs[0]["slug"], "live");
+    assert_eq!(packs[0]["source"], "library");
+    assert_eq!(packs[0]["writable"], true);
+    assert_eq!(packs[0]["document_count"], 1);
+    assert!(packs[0].get("pack").is_none());
+    assert!(packs[0].get("pack_id").is_none());
+    assert!(packs[0].get("root_uri").is_none());
+    assert!(packs[0].get("version").is_none());
 }
 
 #[tokio::test]

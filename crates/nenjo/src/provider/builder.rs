@@ -406,6 +406,7 @@ fn finalize_knowledge_state(
         super::ProviderKnowledgeState {
             pack_entries: knowledge_pack_entries,
             live_manifest_reader,
+            search_service: Default::default(),
         },
     )
 }

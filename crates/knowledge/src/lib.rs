@@ -10,7 +10,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod search;
 pub mod tools;
+
+pub use search::{
+    KnowledgeIndexBuildStats, KnowledgeIndexKey, KnowledgeSearchService, KnowledgeSearchStats,
+};
 
 /// Shared read-only metadata contract for any knowledge pack manifest.
 ///
@@ -510,7 +515,7 @@ impl<'de> Deserialize<'de> for KnowledgeDocKind {
     }
 }
 
-fn search_pack<P: KnowledgePack + ?Sized>(
+pub(crate) fn search_pack<P: KnowledgePack + ?Sized>(
     pack: &P,
     query: &str,
     filter: KnowledgeDocFilter,
@@ -548,7 +553,7 @@ fn search_pack<P: KnowledgePack + ?Sized>(
     hits
 }
 
-fn matches_filter<P: KnowledgePack + ?Sized>(
+pub(crate) fn matches_filter<P: KnowledgePack + ?Sized>(
     pack: &P,
     doc: &KnowledgeDocManifest,
     filter: &KnowledgeDocFilter,

@@ -15,6 +15,7 @@ use nenjo_tool_api::{Tool, ToolCategory, ToolOrigin, ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::search::KnowledgeSearchService;
 use crate::{
     KnowledgeDocFilter, KnowledgeDocManifest, KnowledgeDocNeighbor, KnowledgeDocSearchHit,
     KnowledgePack, KnowledgePackManifest,
@@ -179,14 +180,32 @@ impl FromStr for KnowledgeRef {
 pub struct KnowledgePackEntry {
     knowledge_ref: KnowledgeRef,
     pack: Arc<dyn KnowledgePack>,
+    name: Option<String>,
+    description: Option<String>,
+    writable: bool,
 }
 
 impl KnowledgePackEntry {
     pub fn new(knowledge_ref: KnowledgeRef, pack: impl KnowledgePack + 'static) -> Self {
+        let writable = matches!(knowledge_ref, KnowledgeRef::Library { .. });
         Self {
             knowledge_ref,
             pack: Arc::new(pack),
+            name: None,
+            description: None,
+            writable,
         }
+    }
+
+    pub fn with_writable(mut self, writable: bool) -> Self {
+        self.writable = writable;
+        self
+    }
+
+    pub fn with_metadata(mut self, name: impl Into<String>, description: Option<String>) -> Self {
+        self.name = Some(name.into());
+        self.description = description;
+        self
     }
 
     pub fn library(pack_name: impl AsRef<str>, pack: impl KnowledgePack + 'static) -> Result<Self> {
@@ -216,14 +235,23 @@ impl KnowledgePackEntry {
         &self.pack
     }
 
-    fn into_parts(self) -> (KnowledgeRef, Arc<dyn KnowledgePack>) {
-        (self.knowledge_ref, self.pack)
+    pub fn writable(&self) -> bool {
+        self.writable
     }
 }
 
 #[derive(Clone, Default)]
 pub struct StaticKnowledgeRegistry {
-    packs: Arc<HashMap<String, Arc<dyn KnowledgePack>>>,
+    packs: Arc<HashMap<String, KnowledgePackRegistration>>,
+}
+
+#[derive(Clone)]
+struct KnowledgePackRegistration {
+    selector: String,
+    pack: Arc<dyn KnowledgePack>,
+    name: Option<String>,
+    description: Option<String>,
+    writable: bool,
 }
 
 impl StaticKnowledgeRegistry {
@@ -232,13 +260,38 @@ impl StaticKnowledgeRegistry {
     }
 
     pub fn with_pack(mut self, selector: impl Into<String>, pack: Arc<dyn KnowledgePack>) -> Self {
-        Arc::make_mut(&mut self.packs).insert(selector.into(), pack);
+        let selector = selector.into();
+        let writable = selector
+            .parse::<KnowledgeRef>()
+            .map(|knowledge_ref| matches!(knowledge_ref, KnowledgeRef::Library { .. }))
+            .unwrap_or(false);
+        Arc::make_mut(&mut self.packs).insert(
+            selector.clone(),
+            KnowledgePackRegistration {
+                selector,
+                pack,
+                name: None,
+                description: None,
+                writable,
+            },
+        );
         self
     }
 
     pub fn with_entry(self, entry: KnowledgePackEntry) -> Self {
-        let (knowledge_ref, pack) = entry.into_parts();
-        self.with_pack(knowledge_ref.selector(), pack)
+        let mut registry = self;
+        let selector = entry.selector();
+        Arc::make_mut(&mut registry.packs).insert(
+            selector.clone(),
+            KnowledgePackRegistration {
+                selector,
+                pack: entry.pack.clone(),
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                writable: entry.writable,
+            },
+        );
+        registry
     }
 
     pub fn with_entries(mut self, entries: impl IntoIterator<Item = KnowledgePackEntry>) -> Self {
@@ -313,7 +366,7 @@ impl KnowledgeRegistry for CompositeKnowledgeRegistry {
         packs.extend(self.library.list_packs().await?);
         packs.extend(self.package.list_packs().await?);
         packs.extend(self.local.list_packs().await?);
-        packs.sort_by(|a, b| a.pack.cmp(&b.pack));
+        packs.sort_by(|a, b| a.selector.cmp(&b.selector));
         Ok(packs)
     }
 
@@ -329,17 +382,25 @@ impl KnowledgeRegistry for StaticKnowledgeRegistry {
     async fn list_packs(&self) -> Result<Vec<KnowledgePackSummary>> {
         let mut packs = self
             .packs
-            .iter()
-            .map(|(selector, pack)| KnowledgePackSummary::new(selector, pack.manifest()))
+            .values()
+            .map(|entry| {
+                KnowledgePackSummary::new(
+                    entry.selector.clone(),
+                    entry.pack.manifest(),
+                    entry.name.clone(),
+                    entry.description.clone(),
+                    entry.writable,
+                )
+            })
             .collect::<Vec<_>>();
-        packs.sort_by(|a, b| a.pack.cmp(&b.pack));
+        packs.sort_by(|a, b| a.selector.cmp(&b.selector));
         Ok(packs)
     }
 
     async fn resolve_pack(&self, selector: &str) -> Result<Arc<dyn KnowledgePack>> {
         self.packs
             .get(selector)
-            .cloned()
+            .map(|entry| entry.pack.clone())
             .ok_or_else(|| anyhow!("unknown knowledge pack '{selector}'"))
     }
 }
@@ -348,43 +409,53 @@ impl KnowledgeRegistry for StaticKnowledgeRegistry {
 pub struct KnowledgePackSummary {
     /// Canonical pack selector to pass as the `pack` argument to knowledge tools.
     pub selector: String,
-    /// Backwards-compatible alias for `selector`.
-    pub pack: String,
-    pub pack_id: String,
-    pub version: String,
-    pub root_uri: String,
+    /// Human-readable pack name for selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Human-readable pack description for selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Stable Library pack slug to pass to Library CRUD tools when writable is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Source namespace for the selector: library, package, or local.
+    pub source: String,
+    /// Whether Library CRUD tools can mutate this pack.
+    pub writable: bool,
     pub document_count: usize,
 }
 
 impl KnowledgePackSummary {
-    pub fn new(pack: impl Into<String>, manifest: &dyn KnowledgePackManifest) -> Self {
-        let selector = pack.into();
+    pub fn new(
+        selector: impl Into<String>,
+        manifest: &dyn KnowledgePackManifest,
+        name: Option<String>,
+        description: Option<String>,
+        writable: bool,
+    ) -> Self {
+        let selector = selector.into();
+        let (source, slug) = summary_source_and_slug(&selector, writable);
         Self {
-            pack: selector.clone(),
             selector,
-            pack_id: manifest.pack_id().to_string(),
-            version: manifest.version().to_string(),
-            root_uri: manifest.root_uri().to_string(),
+            name,
+            description,
+            slug,
+            source,
+            writable,
             document_count: manifest.docs().len(),
         }
     }
+}
 
-    pub fn from_parts(
-        selector: impl Into<String>,
-        pack_id: impl Into<String>,
-        version: impl Into<String>,
-        root_uri: impl Into<String>,
-        document_count: usize,
-    ) -> Self {
-        let selector = selector.into();
-        Self {
-            pack: selector.clone(),
-            selector,
-            pack_id: pack_id.into(),
-            version: version.into(),
-            root_uri: root_uri.into(),
-            document_count,
-        }
+fn summary_source_and_slug(selector: &str, writable: bool) -> (String, Option<String>) {
+    match selector.parse::<KnowledgeRef>() {
+        Ok(KnowledgeRef::Library { pack }) => (
+            "library".to_string(),
+            writable.then(|| pack.as_str().to_string()),
+        ),
+        Ok(KnowledgeRef::Package { .. }) => ("package".to_string(), None),
+        Ok(KnowledgeRef::Local { .. }) => ("local".to_string(), None),
+        Err(_) => ("unknown".to_string(), None),
     }
 }
 
@@ -817,7 +888,7 @@ fn prompt_doc_selector(doc: &KnowledgeDocManifest) -> String {
 fn pack_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "description": "Canonical knowledge pack selector. Use exactly the selector returned by list_knowledge_packs or the pack attribute in seeded knowledge metadata, such as pkg:<source>.<repo>.<package>.<pack>."
+        "description": "Canonical knowledge pack selector. Use exactly the selector returned by list_knowledge_packs or the pack attribute in seeded knowledge metadata, such as lib:<pack> or pkg:<source>.<repo>.<package>.<pack>."
     })
 }
 
@@ -886,7 +957,7 @@ pub fn knowledge_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_knowledge_packs".into(),
-            description: "List locally available knowledge packs. Copy the returned selector value into the pack argument for read_knowledge_doc, search_knowledge, and list_knowledge_neighbors.".into(),
+            description: "List locally available knowledge packs with selector, name, description, source, writable status, and document count. Copy selector into the pack argument for read_knowledge_doc, search_knowledge, and list_knowledge_neighbors. For writable library packs, copy slug into Library CRUD tools when creating documents.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {},
@@ -951,32 +1022,63 @@ pub fn knowledge_list_packs_tool(registry: Arc<dyn KnowledgeRegistry>) -> Arc<dy
     Arc::new(KnowledgeTool::new(
         knowledge_tool_spec("list_knowledge_packs"),
         registry,
+        Arc::new(KnowledgeSearchService::new()),
     ))
 }
 
 /// Read and traversal tools that require at least one registered knowledge pack.
 pub fn knowledge_traversal_tools(registry: Arc<dyn KnowledgeRegistry>) -> Vec<Arc<dyn Tool>> {
+    knowledge_traversal_tools_with_search(registry, Arc::new(KnowledgeSearchService::new()))
+}
+
+pub fn knowledge_traversal_tools_with_search(
+    registry: Arc<dyn KnowledgeRegistry>,
+    search_service: Arc<KnowledgeSearchService>,
+) -> Vec<Arc<dyn Tool>> {
     knowledge_tools()
         .into_iter()
         .filter(|spec| spec.name != "list_knowledge_packs")
-        .map(|spec| Arc::new(KnowledgeTool::new(spec, registry.clone())) as Arc<dyn Tool>)
+        .map(|spec| {
+            Arc::new(KnowledgeTool::new(
+                spec,
+                registry.clone(),
+                search_service.clone(),
+            )) as Arc<dyn Tool>
+        })
         .collect()
 }
 
 pub fn knowledge_toolbelt(registry: Arc<dyn KnowledgeRegistry>) -> Vec<Arc<dyn Tool>> {
-    let mut tools = vec![knowledge_list_packs_tool(registry.clone())];
-    tools.extend(knowledge_traversal_tools(registry));
+    let search_service = Arc::new(KnowledgeSearchService::new());
+    let mut tools = vec![Arc::new(KnowledgeTool::new(
+        knowledge_tool_spec("list_knowledge_packs"),
+        registry.clone(),
+        search_service.clone(),
+    )) as Arc<dyn Tool>];
+    tools.extend(knowledge_traversal_tools_with_search(
+        registry,
+        search_service,
+    ));
     tools
 }
 
 struct KnowledgeTool {
     spec: ToolSpec,
     registry: Arc<dyn KnowledgeRegistry>,
+    search_service: Arc<KnowledgeSearchService>,
 }
 
 impl KnowledgeTool {
-    fn new(spec: ToolSpec, registry: Arc<dyn KnowledgeRegistry>) -> Self {
-        Self { spec, registry }
+    fn new(
+        spec: ToolSpec,
+        registry: Arc<dyn KnowledgeRegistry>,
+        search_service: Arc<KnowledgeSearchService>,
+    ) -> Self {
+        Self {
+            spec,
+            registry,
+            search_service,
+        }
     }
 }
 
@@ -1028,8 +1130,10 @@ impl Tool for KnowledgeTool {
                 let args: KnowledgeSearchArgs = serde_json::from_value(args)?;
                 let pack = self.registry.resolve_pack(&args.pack).await?;
                 let filter = knowledge_filter(args.filter)?;
-                let hits = pack
-                    .search(&args.query, filter)
+                let hits = self
+                    .search_service
+                    .search(args.pack.clone(), pack.clone(), args.query, filter)
+                    .await
                     .into_iter()
                     .map(|hit| knowledge_search_result(args.pack.clone(), pack.as_ref(), hit))
                     .collect::<Vec<_>>();
@@ -1073,6 +1177,7 @@ mod tests {
         CompositeKnowledgeRegistry, KnowledgeDocReadResult, KnowledgePackEntry, KnowledgeRef,
         KnowledgeRegistry, knowledge_document_var_key, knowledge_list_packs_tool,
         knowledge_neighbors_result, knowledge_search_result, knowledge_tools,
+        knowledge_traversal_tools,
     };
     use crate::{
         KnowledgeDocEdge, KnowledgeDocEdgeType, KnowledgeDocKind, KnowledgeDocManifest,
@@ -1102,6 +1207,13 @@ mod tests {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("test future unexpectedly yielded"),
         }
+    }
+
+    fn block_on_tokio<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
     }
 
     fn test_doc(
@@ -1227,10 +1339,17 @@ mod tests {
         let summary = super::KnowledgePackSummary::new(
             "pkg:nenjo-ai.packages.knowledge.core",
             pack.manifest(),
+            Some("Core Knowledge".into()),
+            Some("Core package docs".into()),
+            false,
         );
 
         assert_eq!(summary.selector, "pkg:nenjo-ai.packages.knowledge.core");
-        assert_eq!(summary.pack, summary.selector);
+        assert_eq!(summary.name.as_deref(), Some("Core Knowledge"));
+        assert_eq!(summary.description.as_deref(), Some("Core package docs"));
+        assert_eq!(summary.source, "package");
+        assert!(!summary.writable);
+        assert_eq!(summary.slug, None);
     }
 
     #[test]
@@ -1363,6 +1482,38 @@ mod tests {
         );
         assert!(value[0].get("content").is_none());
         assert!(value[0]["document"].get("aliases").is_none());
+    }
+
+    #[test]
+    fn search_knowledge_tool_finds_body_only_terms() {
+        block_on_tokio(async {
+            let registry = std::sync::Arc::new(
+                CompositeKnowledgeRegistry::new()
+                    .with_entry(KnowledgePackEntry::library("docs", test_pack()).unwrap()),
+            );
+            let tool = knowledge_traversal_tools(registry)
+                .into_iter()
+                .find(|tool| tool.name() == "search_knowledge")
+                .expect("search_knowledge tool");
+
+            let result = tool
+                .execute(json!({
+                    "pack": "lib:docs",
+                    "query": "body"
+                }))
+                .await
+                .unwrap();
+            let value: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+
+            assert!(!value.is_empty());
+            assert!(
+                value[0]["matched"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("content"))
+            );
+            assert!(value[0].get("content").is_none());
+        });
     }
 
     #[test]
