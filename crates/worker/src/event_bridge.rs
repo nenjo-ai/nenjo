@@ -31,6 +31,23 @@ fn bounded_json_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+fn parsed_tool_output(output: &str) -> Option<serde_json::Value> {
+    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let serialized = serde_json::to_vec(&value).ok()?;
+    (serialized.len() <= PREVIEW_MAX_CHARS).then_some(value)
+}
+
+fn with_parsed_tool_output(mut payload: serde_json::Value, output: &str) -> serde_json::Value {
+    let Some(parsed) = parsed_tool_output(output) else {
+        return payload;
+    };
+    let Some(payload_object) = payload.as_object_mut() else {
+        return payload;
+    };
+    payload_object.insert("output".to_string(), parsed);
+    payload
+}
+
 fn merge_tool_payload(
     mut payload: serde_json::Value,
     metadata: Option<&serde_json::Value>,
@@ -196,12 +213,15 @@ pub fn turn_event_to_stream_events(
             parent_call_id: parent_tool_name.clone(),
             success: result.success,
             payload: Some(merge_tool_payload(
-                serde_json::json!({
-                    "tool_name": tool_name,
-                    "tool_args": event_text_preview(tool_args),
-                    "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
-                    "error_preview": result.error.as_deref().and_then(summarize_preview),
-                }),
+                with_parsed_tool_output(
+                    serde_json::json!({
+                        "tool_name": tool_name,
+                        "tool_args": event_text_preview(tool_args),
+                        "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
+                        "error_preview": result.error.as_deref().and_then(summarize_preview),
+                    }),
+                    &result.output,
+                ),
                 metadata.as_ref(),
             )),
             encrypted_payload: None,
@@ -1033,10 +1053,13 @@ pub fn turn_event_to_workflow_step_response(
                 ]),
             ),
             Some(merge_tool_payload(
-                serde_json::json!({
-                    "output_preview": task_output_preview(&result.output, context.summarize_outputs),
-                    "error": result.error.as_deref().map(event_text_preview),
-                }),
+                with_parsed_tool_output(
+                    serde_json::json!({
+                        "output_preview": task_output_preview(&result.output, context.summarize_outputs),
+                        "error": result.error.as_deref().map(event_text_preview),
+                    }),
+                    &result.output,
+                ),
                 metadata.as_ref(),
             )),
         )),
@@ -1512,6 +1535,15 @@ mod tests {
                         .and_then(|payload| payload.get("output_preview"))
                         .and_then(serde_json::Value::as_str),
                     Some(output.as_str()),
+                );
+                assert_eq!(
+                    payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("output"))
+                        .and_then(|output| output.get("models"))
+                        .and_then(serde_json::Value::as_array)
+                        .map(Vec::len),
+                    Some(2),
                 );
             }
             other => panic!("unexpected stream events: {other:?}"),
@@ -2132,5 +2164,113 @@ mod tests {
 
         let (_, _, step) = expect_workflow_step(response);
         assert_eq!(step.payload.unwrap()["output_preview"], output);
+    }
+
+    #[test]
+    fn workflow_tool_output_includes_structured_json_when_available() {
+        let output = serde_json::json!([
+            {
+                "document": {
+                    "selector": "resources.agents",
+                    "title": "Agents"
+                },
+                "matched": ["title"],
+                "score": 100
+            }
+        ])
+        .to_string();
+        let response = turn_event_to_workflow_step_response(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "search_knowledge".to_string(),
+                tool_args: r#"{"pack":"pkg:core","query":"agents"}"#.to_string(),
+                result: nenjo::ToolResult {
+                    success: true,
+                    output: output.clone(),
+                    error: None,
+                },
+                metadata: None,
+            },
+            &TaskTurnEventContext {
+                execution_run_id: Uuid::new_v4(),
+                task_id: Some(Uuid::new_v4()),
+                agent: None,
+                routine_step: None,
+                agent_duration_ms: None,
+                emit_done: true,
+                summarize_outputs: false,
+            },
+        )
+        .expect("tool completion should bridge");
+
+        let (_, _, step) = expect_workflow_step(response);
+        let payload = step.payload.expect("payload");
+        assert_eq!(payload["output_preview"], output);
+        assert_eq!(
+            payload["output"][0]["document"]["selector"],
+            "resources.agents"
+        );
+    }
+
+    #[test]
+    fn oversized_structured_tool_output_stays_as_string_preview() {
+        let output = serde_json::Value::Array(
+            (0..8)
+                .map(|index| {
+                    serde_json::json!({
+                        "document": {
+                            "selector": format!("doc.{index}"),
+                            "summary": "x".repeat(PREVIEW_MAX_CHARS + 100),
+                            "related": (0..8)
+                                .map(|related| serde_json::json!({ "target": format!("doc.{related}") }))
+                                .collect::<Vec<_>>()
+                        },
+                        "matched": ["content"],
+                        "score": index
+                    })
+                })
+                .collect(),
+        )
+        .to_string();
+
+        let events = turn_event_to_stream_events(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "search_knowledge".to_string(),
+                tool_args: r#"{"pack":"pkg:core","query":"workflow"}"#.to_string(),
+                result: nenjo::ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                },
+                metadata: None,
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        let [StreamEvent::ToolCallCompleted { payload, .. }] = events.as_slice() else {
+            panic!("unexpected stream events: {events:?}");
+        };
+        assert!(
+            payload
+                .as_ref()
+                .and_then(|payload| payload.get("output"))
+                .is_none()
+        );
+        let output_preview = payload
+            .as_ref()
+            .and_then(|payload| payload.get("output_preview"))
+            .and_then(serde_json::Value::as_str)
+            .expect("output preview");
+        assert!(
+            output_preview.ends_with("..."),
+            "oversized JSON should remain a truncated string preview"
+        );
     }
 }
