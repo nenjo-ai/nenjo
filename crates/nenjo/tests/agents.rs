@@ -146,6 +146,7 @@ fn test_manifest() -> Manifest {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };
@@ -542,6 +543,7 @@ fn manifest_with_abilities_and_domains(
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };

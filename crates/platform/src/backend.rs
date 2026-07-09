@@ -580,7 +580,7 @@ where
             metadata: serde_json::json!({}),
         };
         self.local_store
-            .upsert_resource(&ManifestResource::Ability(hydrated.clone()))
+            .cache_resource(&ManifestResource::Ability(hydrated.clone()))
             .await?;
         Ok(hydrated)
     }
@@ -670,7 +670,7 @@ where
             .to_document();
         let hydrated = local_domain_from_document(remote);
         self.local_store
-            .upsert_resource(&ManifestResource::Domain(hydrated.clone()))
+            .cache_resource(&ManifestResource::Domain(hydrated.clone()))
             .await?;
         Ok(hydrated)
     }
@@ -1846,6 +1846,7 @@ where
             model: created.summary.model.clone(),
             model_provider: created.summary.model_provider.clone(),
             temperature: created.temperature,
+            context_window: created.context_window,
             base_url: created.base_url.clone(),
             native_tools: created.native_tools.clone(),
         };
@@ -1871,6 +1872,12 @@ where
                 .model_provider
                 .or_else(|| Some(existing.model_provider.clone())),
             temperature: params.data.temperature.or(existing.temperature),
+            context_window: Some(
+                params
+                    .data
+                    .context_window
+                    .unwrap_or(existing.context_window),
+            ),
             base_url: Some(params.data.base_url.unwrap_or(existing.base_url.clone())),
             native_tools: params
                 .data
@@ -1891,6 +1898,7 @@ where
             model: updated.summary.model.clone(),
             model_provider: updated.summary.model_provider.clone(),
             temperature: updated.temperature,
+            context_window: updated.context_window,
             base_url: updated.base_url.clone(),
             native_tools: updated.native_tools.clone(),
         };

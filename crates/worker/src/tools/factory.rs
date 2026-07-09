@@ -2,22 +2,26 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
-use crate::config::Config;
-use crate::external_mcp::ExternalMcpPool;
-use crate::media::MediaProviderResolver;
-use crate::providers::ModelProviderRegistry;
-use crate::skills::{LocalSkillProvider, SkillRegistry};
 use async_trait::async_trait;
 use nenjo::manifest::AgentManifest;
 use nenjo::skills::{SkillProvider, SkillRuntimeState};
 use nenjo::{ToolAutonomy, ToolContext, ToolFactory, ToolSecurity};
 use nenjo_platform::{
-    ManifestAccessPolicy, ManifestMcpBackend,
+    ManifestAccessPolicy, ManifestMcpBackend, PlatformResourceIdStore, PlatformResourceKind,
     tools::{
         PlatformNotificationEmitter, PlatformNotificationToolsBackend, add_manifest_tools,
         add_notification_tools, add_project_rest_tools,
     },
 };
+
+use crate::bootstrap::{
+    load_cached_agent_model_assignments, load_cached_capability_defaults, load_cached_model_runtime,
+};
+use crate::config::Config;
+use crate::external_mcp::ExternalMcpPool;
+use crate::media::{ModelAssignmentResolver, ResourceRef};
+use crate::providers::ModelProviderRegistry;
+use crate::skills::{LocalSkillProvider, SkillRegistry};
 
 use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
@@ -329,18 +333,33 @@ where
     }
 
     fn add_native_media_tools(&self, agent: &AgentManifest, tools: &mut Vec<Arc<dyn Tool>>) {
-        if agent.media.is_empty() {
+        let resource_id = PlatformResourceIdStore::new(&self.config.manifests_dir)
+            .get(PlatformResourceKind::Agent, &agent.slug)
+            .ok()
+            .flatten();
+        let resource = ResourceRef {
+            resource_type: "agent",
+            resource_id,
+            resource_slug: Some(agent.slug.as_str()),
+        };
+
+        let resolver = ModelAssignmentResolver::new(
+            load_cached_model_runtime(&self.config.manifests_dir),
+            load_cached_agent_model_assignments(&self.config.manifests_dir),
+            load_cached_capability_defaults(&self.config.manifests_dir),
+        );
+
+        // Agent native media tools come from model_assignments only.
+        // Org defaults apply only during resolve of a declared capability — they
+        // do not invent tools for agents with no assignment declaration.
+        let declared: Vec<nenjo_models::MediaOperation> = resolver.assigned_capabilities(resource);
+        if declared.is_empty() {
             return;
         }
 
-        let resolver = MediaProviderResolver::new(
-            self.config.media_providers.clone(),
-            self.provider_registry.as_ref(),
-        );
         let mut tool_names = std::collections::HashSet::new();
 
-        for requirement in &agent.media {
-            let capability = requirement.capability();
+        for capability in declared {
             let Some(name) = tool_name(capability) else {
                 tracing::warn!(
                     capability = ?capability,
@@ -358,11 +377,12 @@ where
                 continue;
             }
 
-            match resolver.resolve(requirement) {
-                Ok(resolved) => {
-                    if let Some(tool) =
-                        NativeMediaTool::new(resolved, self.provider_registry.clone())
-                    {
+            match resolver.resolve(resource, capability) {
+                Ok(endpoint) => {
+                    if let Some(tool) = NativeMediaTool::new(
+                        endpoint.to_media_provider(),
+                        self.provider_registry.clone(),
+                    ) {
                         tools.push(Arc::new(tool));
                     }
                 }

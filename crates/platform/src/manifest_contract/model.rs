@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::{ModelManifest, model_manifest_slug};
-use nenjo_models::NativeModelToolId;
+use nenjo_models::{ModelCapabilityId, ModelExecutionMode, ModelModality, NativeModelToolId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,9 +23,21 @@ pub struct ModelRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_tools: Vec<NativeModelToolId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ModelCapabilityId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_modes: Vec<ModelExecutionMode>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub voice_options: serde_json::Value,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -44,6 +56,7 @@ impl ModelRecord {
             model: self.model.clone(),
             model_provider: self.model_provider.clone(),
             temperature: self.temperature,
+            context_window: self.context_window,
             base_url: self.base_url.clone(),
             native_tools: self.native_tools.clone(),
         }

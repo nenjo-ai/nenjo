@@ -21,7 +21,7 @@ struct NativeChatRequest {
     messages: Vec<NativeMessage>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<NativeToolSpec>>,
+    tools: Option<Vec<ProviderToolSpec>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,7 +49,7 @@ enum NativeContentOut {
 }
 
 #[derive(Debug, Serialize)]
-struct NativeToolSpec {
+struct ProviderToolSpec {
     name: String,
     description: String,
     input_schema: serde_json::Value,
@@ -125,7 +125,7 @@ impl AnthropicProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
+    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
         let items = tools?;
         if items.is_empty() {
             return None;
@@ -133,7 +133,7 @@ impl AnthropicProvider {
         Some(
             items
                 .iter()
-                .map(|tool| NativeToolSpec {
+                .map(|tool| ProviderToolSpec {
                     name: crate::sanitize_tool_name(&tool.name),
                     description: tool.description.clone(),
                     input_schema: tool.parameters.clone(),

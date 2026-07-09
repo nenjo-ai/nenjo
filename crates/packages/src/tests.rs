@@ -321,6 +321,19 @@ manifest:
     assert_eq!(media[1].capability, "reference_to_video");
     assert_eq!(media[1].provider.as_deref(), Some("xai"));
     assert_eq!(media[1].model.as_deref(), Some("grok-imagine-video"));
+
+    // Dual-read: legacy media maps into model_requirements with preferred_models.
+    let requirements = manifest.model_requirements().unwrap();
+    assert_eq!(requirements.len(), 2);
+    assert_eq!(requirements[0].capability, "generate_image");
+    assert!(requirements[0].preferred_models.is_empty());
+    assert_eq!(requirements[1].capability, "reference_to_video");
+    assert_eq!(requirements[1].preferred_models.len(), 1);
+    assert_eq!(requirements[1].preferred_models[0].provider, "xai");
+    assert_eq!(
+        requirements[1].preferred_models[0].model,
+        "grok-imagine-video"
+    );
 }
 
 #[test]
@@ -359,6 +372,157 @@ manifest:
     let err = manifest.media_requirements().unwrap_err().to_string();
 
     assert!(err.contains("duplicate media requirement"));
+}
+
+#[test]
+fn reads_resource_manifest_model_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: brand-designer
+  model_requirements:
+    - capability: generate_image
+      preferred_models:
+        - provider: xai
+          model: grok-2-image
+        - provider: openai
+          model: gpt-image-1
+    - capability: transcribe_audio
+    - generate_speech
+"#,
+    )
+    .unwrap();
+
+    let requirements = manifest.model_requirements().unwrap();
+    assert_eq!(requirements.len(), 3);
+    assert_eq!(requirements[0].capability, "generate_image");
+    assert_eq!(requirements[0].preferred_models.len(), 2);
+    assert_eq!(requirements[0].preferred_models[0].provider, "xai");
+    assert_eq!(requirements[0].preferred_models[0].model, "grok-2-image");
+    assert_eq!(requirements[0].preferred_models[1].provider, "openai");
+    assert_eq!(requirements[0].preferred_models[1].model, "gpt-image-1");
+    assert_eq!(requirements[1].capability, "transcribe_audio");
+    assert!(requirements[1].preferred_models.is_empty());
+    assert_eq!(requirements[2].capability, "generate_speech");
+
+    // Dual-serve: media_requirements projects first preferred model.
+    let media = manifest.media_requirements().unwrap();
+    assert_eq!(media.len(), 3);
+    assert_eq!(media[0].capability, "generate_image");
+    assert_eq!(media[0].provider.as_deref(), Some("xai"));
+    assert_eq!(media[0].model.as_deref(), Some("grok-2-image"));
+    assert_eq!(media[1].capability, "transcribe_audio");
+    assert_eq!(media[1].provider, None);
+    assert_eq!(media[1].model, None);
+}
+
+#[test]
+fn prefers_model_requirements_over_media() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: dual-agent
+  model_requirements:
+    - capability: generate_image
+  media:
+    - transcribe_audio
+"#,
+    )
+    .unwrap();
+
+    let requirements = manifest.model_requirements().unwrap();
+    assert_eq!(requirements.len(), 1);
+    assert_eq!(requirements[0].capability, "generate_image");
+}
+
+#[test]
+fn rejects_chat_in_model_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: chatty
+  model_requirements:
+    - chat
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.model_requirements().unwrap_err().to_string();
+    assert!(err.contains("chat is not allowed"));
+}
+
+#[test]
+fn rejects_non_operation_capability_in_model_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: unsupported-agent
+  model_requirements:
+    - capability: tool_calling
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.model_requirements().unwrap_err().to_string();
+    assert!(err.contains("unknown model requirement capability"));
+}
+
+#[test]
+fn rejects_unknown_capability_in_model_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: mystery
+  model_requirements:
+    - make_poster
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.model_requirements().unwrap_err().to_string();
+    assert!(err.contains("unknown model requirement capability"));
+}
+
+#[test]
+fn rejects_duplicate_model_requirements() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: dup
+  model_requirements:
+    - generate_image
+    - capability: generate_image
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.model_requirements().unwrap_err().to_string();
+    assert!(err.contains("duplicate model requirement"));
+}
+
+#[test]
+fn rejects_preferred_model_without_provider() {
+    let manifest: ResourceManifest = parse_json_or_yaml_as(
+        r#"
+schema: nenjo.agent.v1
+manifest:
+  name: bad-preferred
+  model_requirements:
+    - capability: generate_image
+      preferred_models:
+        - model: gpt-image-1
+"#,
+    )
+    .unwrap();
+
+    let err = manifest.model_requirements().unwrap_err().to_string();
+    assert!(err.contains("provider is required"));
 }
 
 #[test]

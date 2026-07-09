@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use directories::UserDirs;
 use nenjo::{AgentConfig, Slug};
 use nenjo_events::Capability;
-use nenjo_models::NativeOperation;
+use nenjo_models::MediaOperation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -114,7 +114,7 @@ pub struct MediaProviderConfig {
     pub provider: String,
     pub model: String,
     #[serde(default)]
-    pub capabilities: Vec<NativeOperation>,
+    pub capabilities: Vec<MediaOperation>,
 }
 
 // ── Browser (friendly-service browsing only) ───────────────────
@@ -994,7 +994,7 @@ impl Config {
 mod tests {
     use super::{Config, MediaProviderConfig, SecureBusConfig, SecurityConfig, SessionConfig};
     use nenjo::Slug;
-    use nenjo_models::NativeOperation;
+    use nenjo_models::MediaOperation;
 
     #[test]
     fn secure_bus_config_requires_secured_commands_by_default() {
@@ -1056,7 +1056,7 @@ capabilities = ["generate_video", "reference_to_video"]
 
         config.media_providers[0]
             .capabilities
-            .push(NativeOperation::GenerateVideo);
+            .push(MediaOperation::GenerateVideo);
         config.validate().unwrap();
     }
 

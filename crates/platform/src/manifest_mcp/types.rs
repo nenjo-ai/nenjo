@@ -934,6 +934,8 @@ pub struct ModelDocument {
     #[serde(flatten)]
     pub summary: ModelSummary,
     pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_tools: Vec<NativeModelToolId>,
@@ -949,6 +951,8 @@ pub struct ModelCreateDocument {
     pub model_provider: Option<String>,
     #[serde(default)]
     pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -969,6 +973,8 @@ pub struct ModelUpdateDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<Option<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_tools: Option<Vec<NativeModelToolId>>,
@@ -985,6 +991,7 @@ impl From<ModelManifest> for ModelDocument {
                 model_provider: model.model_provider,
             },
             temperature: model.temperature,
+            context_window: model.context_window,
             base_url: model.base_url,
             native_tools: model.native_tools,
         }

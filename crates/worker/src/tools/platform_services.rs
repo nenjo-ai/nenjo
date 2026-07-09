@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use nenjo::Manifest;
-use nenjo::manifest::local::LocalManifestStore;
 use nenjo_platform::{
     PlatformManifestBackend, PlatformManifestClient, PlatformResourceIdStore,
     tools::PlatformProjectToolsBackend,
 };
 use uuid::Uuid;
 
+use crate::bootstrap::WorkerManifestStore;
+
 use super::platform_payload::PlatformPayloadEncoder;
 
 #[derive(Clone, Default)]
 pub(crate) struct PlatformToolServices {
     pub manifest_backend:
-        Option<Arc<PlatformManifestBackend<LocalManifestStore, PlatformPayloadEncoder>>>,
+        Option<Arc<PlatformManifestBackend<WorkerManifestStore, PlatformPayloadEncoder>>>,
     pub project_backend:
-        Option<PlatformProjectToolsBackend<LocalManifestStore, PlatformPayloadEncoder>>,
+        Option<PlatformProjectToolsBackend<WorkerManifestStore, PlatformPayloadEncoder>>,
     pub platform_client: Option<Arc<PlatformManifestClient>>,
     pub payload_encoder: Option<PlatformPayloadEncoder>,
     pub cached_org_id: Option<Uuid>,
@@ -23,7 +24,7 @@ pub(crate) struct PlatformToolServices {
 
 impl PlatformToolServices {
     pub(crate) fn new(
-        manifest_store: Arc<LocalManifestStore>,
+        manifest_store: Arc<WorkerManifestStore>,
         platform_client: Option<Arc<PlatformManifestClient>>,
         payload_encoder: PlatformPayloadEncoder,
         cached_org_id: Option<Uuid>,

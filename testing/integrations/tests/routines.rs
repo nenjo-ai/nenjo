@@ -43,6 +43,7 @@ fn make_model() -> ModelManifest {
         model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     }

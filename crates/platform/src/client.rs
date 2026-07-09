@@ -1775,6 +1775,7 @@ impl PlatformManifestClient {
             "model": model.model,
             "model_provider": model.model_provider.clone().unwrap_or_else(|| "openai".into()),
             "temperature": model.temperature.unwrap_or(0.7),
+            "context_window": model.context_window,
             "base_url": model.base_url,
             "native_tools": model.native_tools.clone(),
         });

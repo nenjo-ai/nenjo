@@ -3,10 +3,20 @@
 //! This module provides a single implementation that works for all of them.
 
 use crate::ToolSpec;
+use crate::audio_data_uri::decode_base64_data_uri;
+use crate::native::{
+    MediaCapabilitiesProvider, MediaExecutionMode, MediaInputAsset, MediaOperation,
+    MediaToolSpec as NativeMediaToolSpec, ModelMediaCapabilities, NativeMediaRequest,
+    NativeMediaResponse, ProviderMediaCapabilities, TranscribeAudioRequest, TranscriptSegment,
+};
+use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Client;
+use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use tracing::warn;
 
 /// A provider that speaks the OpenAI-compatible chat completions API.
@@ -131,6 +141,19 @@ impl OpenAiCompatibleProvider {
             format!("{normalized_base}/v1/responses")
         }
     }
+
+    fn audio_transcriptions_url(&self) -> String {
+        if self.path_ends_with("/audio/transcriptions") {
+            return self.base_url.clone();
+        }
+
+        let normalized_base = self.base_url.trim_end_matches('/');
+        if self.has_explicit_api_path() {
+            format!("{normalized_base}/audio/transcriptions")
+        } else {
+            format!("{normalized_base}/v1/audio/transcriptions")
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -141,7 +164,7 @@ struct NativeChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<NativeToolSpec>>,
+    tools: Option<Vec<ProviderToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
 }
@@ -155,20 +178,6 @@ struct Message {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<NativeToolCall>>,
-}
-
-#[derive(Debug, Serialize)]
-struct NativeToolSpec {
-    #[serde(rename = "type")]
-    kind: String,
-    function: NativeToolFunctionSpec,
-}
-
-#[derive(Debug, Serialize)]
-struct NativeToolFunctionSpec {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -266,6 +275,37 @@ struct ResponsesContent {
     text: Option<String>,
 }
 
+#[derive(Debug)]
+struct DecodedAudioDataUri {
+    mime_type: String,
+    bytes: Vec<u8>,
+    filename: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioTranscriptionResponse {
+    text: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    segments: Vec<AudioTranscriptionSegment>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioTranscriptionSegment {
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    text: String,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
 fn first_nonempty(text: Option<&str>) -> Option<String> {
     text.and_then(|value| {
         let trimmed = value.trim();
@@ -303,12 +343,135 @@ fn extract_responses_text(response: ResponsesResponse) -> Option<String> {
     None
 }
 
+fn compatible_transcribe_audio_tool_spec() -> NativeMediaToolSpec {
+    let capability = MediaOperation::TranscribeAudio;
+    NativeMediaToolSpec {
+        capability,
+        tool_name: capability.tool_name().unwrap().to_string(),
+        description:
+            "Transcribe an audio data URI with the configured OpenAI-compatible transcription model."
+                .to_string(),
+        execution: MediaExecutionMode::Immediate,
+        parameters_schema: json!({
+            "type": "object",
+            "properties": {
+                "audio": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"const": "data_uri"},
+                        "data_uri": {"type": "string"}
+                    },
+                    "required": ["type", "data_uri"]
+                },
+                "language": {"type": "string"},
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional transcription guidance or vocabulary context."
+                },
+                "provider_options": {
+                    "type": "object",
+                    "properties": {
+                        "response_format": {
+                            "type": "string",
+                            "enum": ["json", "verbose_json"]
+                        },
+                        "temperature": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "required": ["audio"]
+        }),
+    }
+}
+
+fn provider_option_str<'a>(options: &'a Value, key: &str) -> Option<&'a str> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_option_f64(options: &Value, key: &str) -> Option<f64> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_f64)
+}
+
+fn audio_file_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/webm" | "video/webm" => "webm",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/ogg" => "ogg",
+        _ => "audio",
+    }
+}
+
+fn prepare_compatible_audio_data_uri(data_uri: &str) -> anyhow::Result<DecodedAudioDataUri> {
+    let decoded = decode_base64_data_uri(data_uri)?;
+    let mime_type = decoded.mime_type;
+    let valid_audio_mime = mime_type.starts_with("audio/")
+        || matches!(
+            mime_type.as_str(),
+            "video/webm" | "video/mp4" | "application/octet-stream"
+        );
+    if !valid_audio_mime {
+        anyhow::bail!("audio data URI MIME type '{mime_type}' is not supported");
+    }
+
+    let filename = format!("audio.{}", audio_file_extension(&mime_type));
+    Ok(DecodedAudioDataUri {
+        mime_type,
+        bytes: decoded.bytes,
+        filename,
+    })
+}
+
+fn compatible_audio_part(asset: &MediaInputAsset) -> anyhow::Result<Part> {
+    match asset {
+        MediaInputAsset::DataUri { data_uri } => {
+            let decoded = prepare_compatible_audio_data_uri(data_uri)?;
+            Part::bytes(decoded.bytes)
+                .file_name(decoded.filename)
+                .mime_str(&decoded.mime_type)
+                .context("failed to build OpenAI-compatible audio upload part")
+        }
+        MediaInputAsset::Url { .. } => {
+            anyhow::bail!(
+                "OpenAI-compatible audio transcription requires a data_uri input; worker-side URL fetching is not supported"
+            )
+        }
+        MediaInputAsset::ProviderFileId { .. } => {
+            anyhow::bail!(
+                "OpenAI-compatible audio transcription requires a data_uri input; provider file ids are not supported"
+            )
+        }
+    }
+}
+
+fn json_object_or_none(object: Map<String, Value>) -> Option<Value> {
+    if object.is_empty() {
+        None
+    } else {
+        Some(Value::Object(object))
+    }
+}
+
 impl OpenAiCompatibleProvider {
     fn apply_auth_header(
         &self,
         req: reqwest::RequestBuilder,
         api_key: &str,
     ) -> reqwest::RequestBuilder {
+        if api_key.trim().is_empty() {
+            return req;
+        }
+
         match &self.auth_header {
             AuthStyle::Bearer => req.header("Authorization", format!("Bearer {api_key}")),
             AuthStyle::XApiKey => req.header("x-api-key", api_key),
@@ -316,20 +479,8 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
-        tools.map(|items| {
-            items
-                .iter()
-                .map(|tool| NativeToolSpec {
-                    kind: "function".to_string(),
-                    function: NativeToolFunctionSpec {
-                        name: crate::sanitize_tool_name(&tool.name),
-                        description: tool.description.clone(),
-                        parameters: tool.parameters.clone(),
-                    },
-                })
-                .collect()
-        })
+    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
+        convert_tools(tools, crate::sanitize_tool_name)
     }
 
     /// Reconstruct native OpenAI-compatible messages from the turn loop's
@@ -445,6 +596,78 @@ impl OpenAiCompatibleProvider {
 
         extract_responses_text(responses)
             .ok_or_else(|| anyhow::anyhow!("No response from {} Responses API", self.name))
+    }
+
+    async fn transcribe_audio(
+        &self,
+        request: TranscribeAudioRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let api_key = self.api_key.as_deref().unwrap_or("");
+        let response_format =
+            provider_option_str(&request.provider_options, "response_format").unwrap_or("json");
+        if !matches!(response_format, "json" | "verbose_json") {
+            anyhow::bail!(
+                "{} transcription response_format must be 'json' or 'verbose_json'",
+                self.name
+            );
+        }
+
+        let requested_language = request
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut form = Form::new()
+            .text("model", request.model.clone())
+            .text("response_format", response_format.to_string())
+            .part("file", compatible_audio_part(&request.audio)?);
+
+        if let Some(language) = requested_language.as_ref() {
+            form = form.text("language", language.clone());
+        }
+        if let Some(prompt) = request
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+        {
+            form = form.text("prompt", prompt.to_string());
+        }
+        if let Some(temperature) = provider_option_f64(&request.provider_options, "temperature") {
+            form = form.text("temperature", temperature.to_string());
+        }
+
+        let url = self.audio_transcriptions_url();
+        let response = self
+            .apply_auth_header(self.client.post(&url), api_key)
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(crate::api_error(&self.name, response).await);
+        }
+
+        let transcription: AudioTranscriptionResponse = response.json().await?;
+        let segments = transcription
+            .segments
+            .into_iter()
+            .map(|segment| TranscriptSegment {
+                start_seconds: segment.start,
+                end_seconds: segment.end,
+                text: segment.text,
+                metadata: json_object_or_none(segment.extra),
+            })
+            .collect();
+
+        Ok(NativeMediaResponse::Transcript {
+            text: transcription.text,
+            language: transcription.language.or(requested_language),
+            duration_seconds: transcription.duration,
+            segments,
+            metadata: json_object_or_none(transcription.extra),
+        })
     }
 }
 
@@ -615,10 +838,76 @@ impl ModelProvider for OpenAiCompatibleProvider {
         true
     }
 
+    fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
+        Some(MediaCapabilitiesProvider::media_capabilities(self))
+    }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        MediaCapabilitiesProvider::submit_media(self, request).await
+    }
+
     fn supports_developer_role(&self, _model: &str) -> bool {
         // A generic compatible endpoint does not identify the server-side chat
         // template. Use `system`, which is the portable role across these APIs.
         false
+    }
+}
+
+#[async_trait]
+impl MediaCapabilitiesProvider for OpenAiCompatibleProvider {
+    fn media_capabilities(&self) -> ProviderMediaCapabilities {
+        ProviderMediaCapabilities {
+            provider: self.name.clone(),
+            model_tools: Vec::new(),
+            models: vec![ModelMediaCapabilities {
+                model_pattern: "*".to_string(),
+                tools: vec![compatible_transcribe_audio_tool_spec()],
+            }],
+        }
+    }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let operation = request.operation();
+        match request {
+            NativeMediaRequest::TranscribeAudio(request) => self.transcribe_audio(request).await,
+            NativeMediaRequest::GenerateImage(_)
+            | NativeMediaRequest::EditImage(_)
+            | NativeMediaRequest::GenerateVideo(_)
+            | NativeMediaRequest::EditVideo(_)
+            | NativeMediaRequest::ImageToVideo(_)
+            | NativeMediaRequest::ReferenceToVideo(_)
+            | NativeMediaRequest::ExtendVideo(_)
+            | NativeMediaRequest::GenerateSpeech(_) => {
+                anyhow::bail!(
+                    "{} does not support media operation {}",
+                    self.name,
+                    operation.as_str()
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod media_capability_tests {
+    use super::*;
+
+    #[test]
+    fn transcription_tool_exposes_a_top_level_prompt() {
+        let schema = compatible_transcribe_audio_tool_spec().parameters_schema;
+
+        assert_eq!(schema["properties"]["prompt"]["type"], "string");
+        assert!(
+            schema["properties"]["provider_options"]["properties"]
+                .get("prompt")
+                .is_none()
+        );
     }
 }
 

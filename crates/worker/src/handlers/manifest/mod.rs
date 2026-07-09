@@ -28,7 +28,12 @@ where
 {
     pub client: Arc<ApiClient>,
     pub store: StoreRt,
+    /// The worker's canonical bootstrap cache, which retains platform ids and
+    /// model routing details outside the core harness manifest.
+    pub bootstrap_cache: Option<Arc<crate::bootstrap::WorkerManifestCache>>,
     pub mcp: Option<McpRt>,
+    /// Serializes each worker's read-modify-write cache update and provider swap.
+    pub change_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct ManifestChangedCommand {
@@ -75,6 +80,7 @@ where
         ctx: &ManifestCommandContext<StoreRt, McpRt>,
         command: ManifestChangedCommand,
     ) -> Result<()> {
+        let _change_guard = ctx.change_lock.lock().await;
         let ManifestChangedCommand {
             resource_type,
             resource_id,
@@ -87,6 +93,7 @@ where
         let result = apply_manifest_change(
             ctx.client.as_ref(),
             &ctx.store,
+            ctx.bootstrap_cache.as_deref(),
             ctx.mcp.as_ref(),
             &self.manifests().snapshot(),
             ManifestChange {

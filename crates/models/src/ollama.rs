@@ -4,6 +4,7 @@
 //! Supports native tool calling (Ollama ≥ 0.3.0).
 
 use crate::ToolSpec;
+use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -21,7 +22,7 @@ struct NativeChatRequest {
     stream: bool,
     options: Options,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<NativeToolSpec>>,
+    tools: Option<Vec<ProviderToolSpec>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,22 +39,6 @@ struct Message {
 #[derive(Debug, Serialize)]
 struct Options {
     temperature: f64,
-}
-
-// ── Tool spec types (OpenAI-compatible format used by Ollama) ───
-
-#[derive(Debug, Serialize)]
-struct NativeToolSpec {
-    #[serde(rename = "type")]
-    kind: String,
-    function: NativeToolFunctionSpec,
-}
-
-#[derive(Debug, Serialize)]
-struct NativeToolFunctionSpec {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,20 +86,8 @@ impl OllamaProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
-        tools.map(|items| {
-            items
-                .iter()
-                .map(|tool| NativeToolSpec {
-                    kind: "function".to_string(),
-                    function: NativeToolFunctionSpec {
-                        name: crate::sanitize_tool_name_lenient(&tool.name),
-                        description: tool.description.clone(),
-                        parameters: tool.parameters.clone(),
-                    },
-                })
-                .collect()
-        })
+    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
+        convert_tools(tools, crate::sanitize_tool_name_lenient)
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> Vec<Message> {

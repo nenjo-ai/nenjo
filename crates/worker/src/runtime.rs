@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::api_client::ApiClient;
 use crate::assembly::{WorkerAssembly, WorkerHarness, WorkerProvider};
+use crate::bootstrap::WorkerManifestCache;
 use crate::config::{Config, SessionConfig};
 use crate::crypto::WorkerAuthProvider;
 use crate::event_loop::{self, ResponseSender, SeenMessageIds, WorkerEventLoopContext};
@@ -25,6 +26,7 @@ use crate::external_mcp::ExternalMcpPool;
 use crate::handlers::cron::WorkerCronHarnessExt;
 use crate::handlers::crypto::AccountKeyStore;
 use crate::handlers::heartbeat::{HeartbeatRestoreRequest, WorkerHeartbeatHarnessExt};
+use crate::providers::ModelProviderRegistry;
 use crate::sessions::{
     CronSessionRecovery, DomainSessionRecovery, HeartbeatSessionRecovery,
     WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
@@ -76,6 +78,7 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 pub struct CommandContext {
     pub harness: WorkerHarness,
     pub api: Arc<ApiClient>,
+    pub provider_registry: Arc<ModelProviderRegistry>,
     pub actor_user_id: Uuid,
     pub response_tx: ResponseSender,
     pub org_response_tx: ResponseSender,
@@ -86,6 +89,8 @@ pub struct CommandContext {
     pub config: Config,
     pub domains: DomainRegistry<WorkerProvider>,
     pub git_locks: GitLocks,
+    pub manifest_cache: Arc<WorkerManifestCache>,
+    pub manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,12 +102,15 @@ pub struct WorkerRuntime {
     harness: WorkerHarness,
     config: Config,
     api: Arc<ApiClient>,
+    provider_registry: Arc<ModelProviderRegistry>,
     auth_provider: Arc<WorkerAuthProvider>,
     external_mcp: Arc<ExternalMcpPool>,
     skill_registry: Arc<SkillRegistry>,
     worker_name: String,
     session_runtime: WorkerSessionRuntime,
     git_locks: GitLocks,
+    manifest_cache: Arc<WorkerManifestCache>,
+    manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
     seen_message_ids: SeenMessageIds,
     shutdown: CancellationToken,
 }
@@ -204,12 +212,15 @@ impl WorkerRuntime {
             harness: assembly.harness,
             config,
             api: Arc::new(assembly.api),
+            provider_registry: assembly.provider_registry,
             auth_provider: assembly.auth_provider,
             external_mcp: assembly.external_mcp,
             skill_registry: assembly.skill_registry,
             worker_name,
             session_runtime: assembly.session_runtime,
             git_locks: Arc::new(DashMap::new()),
+            manifest_cache: assembly.manifest_cache,
+            manifest_change_lock: assembly.manifest_change_lock,
             seen_message_ids,
             shutdown,
         })
@@ -224,6 +235,7 @@ impl WorkerRuntime {
         CommandContext {
             harness: self.harness.clone(),
             api: self.api.clone(),
+            provider_registry: self.provider_registry.clone(),
             actor_user_id,
             response_tx,
             org_response_tx,
@@ -234,6 +246,8 @@ impl WorkerRuntime {
             config: self.config.clone(),
             domains: self.harness.domains(),
             git_locks: self.git_locks.clone(),
+            manifest_cache: self.manifest_cache.clone(),
+            manifest_change_lock: self.manifest_change_lock.clone(),
         }
     }
 
@@ -344,10 +358,12 @@ fn run_session_cleanup(stores: &WorkerSessionStores, retention_days: u64, reason
 
 #[cfg(test)]
 mod tests {
-    use crate::assembly::{WorkerAssembly, build_provider};
+    use crate::assembly::{ProviderBuildContext, WorkerAssembly, build_provider};
+    use crate::bootstrap::ManifestRefreshHandle;
     use crate::config::Config;
     use crate::crypto::WorkerAuthProvider;
     use crate::external_mcp::ExternalMcpPool;
+    use crate::providers::ModelProviderRegistry;
     use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
     use crate::skills::SkillRegistry;
     use nenjo::LocalManifestStore;
@@ -355,7 +371,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    use super::WorkerRuntime;
+    use super::{WorkerManifestCache, WorkerRuntime};
 
     #[tokio::test]
     async fn worker_runtime_constructs_from_assembly() {
@@ -374,13 +390,29 @@ mod tests {
         let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let skill_registry = Arc::new(SkillRegistry::default());
-        let provider = build_provider(
-            &config,
-            LocalManifestStore::new(&config.manifests_dir),
-            auth_provider.clone(),
-            external_mcp.clone(),
-            skill_registry.clone(),
-        )
+        let provider_registry = Arc::new(ModelProviderRegistry::new(
+            &config.model_provider_api_keys,
+            &config.reliability,
+        ));
+        let manifest_cache = Arc::new(WorkerManifestCache {
+            manifests_dir: config.manifests_dir.clone(),
+            workspace_dir: config.workspace_dir.clone(),
+            state_dir: config.state_dir.clone(),
+            config_dir: config.config_dir.clone(),
+        });
+        let manifest_change_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let expected_manifest_cache = manifest_cache.clone();
+        let expected_manifest_change_lock = manifest_change_lock.clone();
+        let provider = build_provider(ProviderBuildContext {
+            config: &config,
+            loader: LocalManifestStore::new(&config.manifests_dir),
+            auth_provider: auth_provider.clone(),
+            external_mcp: external_mcp.clone(),
+            skill_registry: skill_registry.clone(),
+            provider_registry: provider_registry.clone(),
+            manifest_cache: manifest_cache.clone(),
+            manifest_refresh: ManifestRefreshHandle::default(),
+        })
         .await
         .unwrap();
         let session_stores = WorkerSessionStores::new(&config.state_dir);
@@ -394,11 +426,14 @@ mod tests {
             WorkerAssembly {
                 harness,
                 api,
+                provider_registry,
                 auth_provider,
                 session_runtime,
                 session_stores,
                 external_mcp,
                 skill_registry,
+                manifest_cache,
+                manifest_change_lock,
             },
             config,
         )
@@ -407,5 +442,13 @@ mod tests {
 
         assert_eq!(runtime.worker_name, "embedded-worker");
         assert!(runtime.provider().manifest().agents.is_empty());
+        assert!(Arc::ptr_eq(
+            &runtime.manifest_cache,
+            &expected_manifest_cache
+        ));
+        assert!(Arc::ptr_eq(
+            &runtime.manifest_change_lock,
+            &expected_manifest_change_lock
+        ));
     }
 }

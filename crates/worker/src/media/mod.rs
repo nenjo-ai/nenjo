@@ -3,6 +3,7 @@
 pub mod resolver;
 
 pub use resolver::{
-    MediaCapabilitySource, MediaProviderResolver, MediaResolutionError, ResolvedMediaProvider,
-    validate_agent_media,
+    AgentModelAssignments, AssignmentSource, MediaCapabilitySource, MediaProviderResolver,
+    MediaResolutionError, ModelAssignmentResolveError, ModelAssignmentResolver, ModelRuntimeConfig,
+    ResolvedMediaProvider, ResolvedModelEndpoint, ResourceRef, validate_agent_media,
 };

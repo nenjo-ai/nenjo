@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
-use nenjo_models::{NativeModelToolId, NativeOperation};
+use nenjo_models::{MediaOperation, NativeModelToolId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -652,6 +652,12 @@ pub struct ModelManifest {
     pub model_provider: String,
     /// Optional sampling temperature for calls using this model.
     pub temperature: Option<f64>,
+    /// Provider-advertised maximum context window in tokens.
+    ///
+    /// When present, the turn loop uses this instead of provider model-name
+    /// heuristics to calculate its compaction budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     /// Optional provider base URL override.
     pub base_url: Option<String>,
     /// Provider-native tools enabled for this model configuration.
@@ -681,12 +687,12 @@ pub fn model_manifest_slug(model_provider: &str, model: &str) -> Slug {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MediaRequirement {
-    Capability(NativeOperation),
+    Capability(MediaOperation),
     Binding(MediaBindingRequirement),
 }
 
 impl MediaRequirement {
-    pub fn capability(&self) -> NativeOperation {
+    pub fn capability(&self) -> MediaOperation {
         match self {
             Self::Capability(capability) => *capability,
             Self::Binding(binding) => binding.capability,
@@ -711,7 +717,7 @@ impl MediaRequirement {
 /// A media capability requirement with optional provider/model constraints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaBindingRequirement {
-    pub capability: NativeOperation,
+    pub capability: MediaOperation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1279,10 +1285,10 @@ mod tests {
         ]))
         .unwrap();
 
-        assert_eq!(requirements[0].capability(), NativeOperation::GenerateImage);
+        assert_eq!(requirements[0].capability(), MediaOperation::GenerateImage);
         assert_eq!(
             requirements[1].capability(),
-            NativeOperation::ReferenceToVideo
+            MediaOperation::ReferenceToVideo
         );
         assert_eq!(requirements[1].provider(), Some("xai"));
         assert_eq!(requirements[1].model(), Some("grok-imagine-video"));

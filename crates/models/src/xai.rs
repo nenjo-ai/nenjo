@@ -3,21 +3,24 @@
 //! Chat uses xAI's OpenAI-compatible chat completions surface. Provider-native
 //! media operations use xAI-specific endpoints under `https://api.x.ai/v1`.
 
+use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
+use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
+use crate::audio_data_uri::decode_base64_data_uri;
 use crate::compatible::{AuthStyle, OpenAiCompatibleProvider};
 use crate::native::{
     EditImageRequest, EditVideoRequest, ExtendVideoRequest, GenerateVideoRequest,
-    ImageToVideoRequest, MediaInputAsset, MediaOutputAsset, MediaOutputFormat,
-    ModelNativeCapabilities, NativeCapabilitiesProvider, NativeExecutionMode, NativeMediaJob,
-    NativeMediaJobStatus, NativeMediaRequest, NativeMediaResponse, NativeModelToolId,
-    NativeOperation, NativeToolSpec, ProviderNativeCapabilities, ProviderNativeModelToolSpec,
-    ReferenceToVideoRequest, media_input_schema,
+    ImageToVideoRequest, MediaCapabilitiesProvider, MediaExecutionMode, MediaInputAsset,
+    MediaOperation, MediaOutputAsset, MediaOutputFormat, MediaToolSpec, ModelMediaCapabilities,
+    NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest, NativeMediaResponse,
+    NativeModelToolId, ProviderMediaCapabilities, ProviderNativeModelToolSpec,
+    ReferenceToVideoRequest, TranscribeAudioRequest, TranscriptSegment, media_input_schema,
 };
 use crate::traits::{
     ChatMessage, ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, ProviderToolTrace,
@@ -88,6 +91,19 @@ struct XaiMediaInput {
     file_id: Option<String>,
 }
 
+#[derive(Debug)]
+struct DecodedAudioDataUri {
+    mime_type: String,
+    bytes: Vec<u8>,
+    filename: String,
+}
+
+#[derive(Debug)]
+enum XaiSttAudioInput {
+    File(Box<Part>),
+    Url(String),
+}
+
 #[derive(Debug, Deserialize)]
 struct ImageGenerationResponse {
     data: Vec<ImageGenerationData>,
@@ -130,6 +146,44 @@ struct XaiError {
     code: Option<String>,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XaiSttResponse {
+    text: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    words: Vec<XaiSttWord>,
+    #[serde(default)]
+    channels: Vec<XaiSttChannel>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct XaiSttWord {
+    text: String,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    #[serde(default)]
+    speaker: Option<i64>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct XaiSttChannel {
+    index: u32,
+    text: String,
+    #[serde(default)]
+    words: Vec<XaiSttWord>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,7 +303,7 @@ fn xai_media_input(asset: MediaInputAsset, image_edit_input: bool) -> XaiMediaIn
     }
 }
 
-fn xai_image_tool_spec(operation: NativeOperation) -> NativeToolSpec {
+fn xai_image_tool_spec(operation: MediaOperation) -> MediaToolSpec {
     let mut properties = json!({
         "prompt": {"type": "string"},
         "n": {"type": "integer", "minimum": 1},
@@ -269,22 +323,22 @@ fn xai_image_tool_spec(operation: NativeOperation) -> NativeToolSpec {
         }
     });
     let required = match operation {
-        NativeOperation::GenerateImage => vec!["prompt"],
-        NativeOperation::EditImage => {
+        MediaOperation::GenerateImage => vec!["prompt"],
+        MediaOperation::EditImage => {
             properties["image"] = media_input_schema();
             vec!["prompt", "image"]
         }
         other => panic!("unsupported xAI image operation {other:?}"),
     };
 
-    NativeToolSpec {
+    MediaToolSpec {
         capability: operation,
         tool_name: operation.tool_name().unwrap().to_string(),
         description: match operation {
-            NativeOperation::GenerateImage => {
+            MediaOperation::GenerateImage => {
                 "Generate an image with the configured xAI image model."
             }
-            NativeOperation::EditImage => "Edit an image with the configured xAI image model.",
+            MediaOperation::EditImage => "Edit an image with the configured xAI image model.",
             _ => unreachable!(),
         }
         .to_string(),
@@ -293,7 +347,7 @@ fn xai_image_tool_spec(operation: NativeOperation) -> NativeToolSpec {
             "properties": properties,
             "required": required
         }),
-        execution: NativeExecutionMode::Immediate,
+        execution: MediaExecutionMode::Immediate,
     }
 }
 
@@ -320,15 +374,15 @@ fn xai_video_base_properties() -> Value {
     })
 }
 
-fn xai_video_tool_spec(operation: NativeOperation) -> NativeToolSpec {
+fn xai_video_tool_spec(operation: MediaOperation) -> MediaToolSpec {
     let mut properties = xai_video_base_properties();
     let required = match operation {
-        NativeOperation::GenerateVideo => vec!["prompt"],
-        NativeOperation::ImageToVideo => {
+        MediaOperation::GenerateVideo => vec!["prompt"],
+        MediaOperation::ImageToVideo => {
             properties["image"] = media_input_schema();
             vec!["prompt", "image"]
         }
-        NativeOperation::ReferenceToVideo => {
+        MediaOperation::ReferenceToVideo => {
             properties["reference_images"] = json!({
                 "type": "array",
                 "items": media_input_schema(),
@@ -338,7 +392,7 @@ fn xai_video_tool_spec(operation: NativeOperation) -> NativeToolSpec {
             properties["duration_seconds"]["maximum"] = json!(10);
             vec!["prompt", "reference_images"]
         }
-        NativeOperation::EditVideo => {
+        MediaOperation::EditVideo => {
             properties = json!({
                 "prompt": {"type": "string"},
                 "video": media_input_schema(),
@@ -346,7 +400,7 @@ fn xai_video_tool_spec(operation: NativeOperation) -> NativeToolSpec {
             });
             vec!["prompt", "video"]
         }
-        NativeOperation::ExtendVideo => {
+        MediaOperation::ExtendVideo => {
             properties = json!({
                 "prompt": {"type": "string"},
                 "video": media_input_schema(),
@@ -362,15 +416,15 @@ fn xai_video_tool_spec(operation: NativeOperation) -> NativeToolSpec {
         other => panic!("unsupported xAI video operation {other:?}"),
     };
 
-    NativeToolSpec {
+    MediaToolSpec {
         capability: operation,
         tool_name: operation.tool_name().unwrap().to_string(),
         description: match operation {
-            NativeOperation::GenerateVideo => "Start an asynchronous xAI video generation job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call generate_video again for the same prompt unless the user explicitly asks for another independent video.",
-            NativeOperation::EditVideo => "Start an asynchronous xAI video editing job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call edit_video again for the same request unless the user explicitly asks for another independent edit.",
-            NativeOperation::ImageToVideo => "Start an asynchronous xAI image-to-video job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call image_to_video again for the same request unless the user explicitly asks for another independent video.",
-            NativeOperation::ReferenceToVideo => "Start an asynchronous xAI reference-to-video job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call reference_to_video again for the same request unless the user explicitly asks for another independent video.",
-            NativeOperation::ExtendVideo => "Start an asynchronous xAI video extension job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call extend_video again for the same request unless the user explicitly asks for another independent extension.",
+            MediaOperation::GenerateVideo => "Start an asynchronous xAI video generation job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call generate_video again for the same prompt unless the user explicitly asks for another independent video.",
+            MediaOperation::EditVideo => "Start an asynchronous xAI video editing job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call edit_video again for the same request unless the user explicitly asks for another independent edit.",
+            MediaOperation::ImageToVideo => "Start an asynchronous xAI image-to-video job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call image_to_video again for the same request unless the user explicitly asks for another independent video.",
+            MediaOperation::ReferenceToVideo => "Start an asynchronous xAI reference-to-video job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call reference_to_video again for the same request unless the user explicitly asks for another independent video.",
+            MediaOperation::ExtendVideo => "Start an asynchronous xAI video extension job. A successful call means the render was queued, not finished; use wait_operations with kind=media for the returned operation_id until it completes. Do not call extend_video again for the same request unless the user explicitly asks for another independent extension.",
             _ => unreachable!(),
         }
         .to_string(),
@@ -379,7 +433,7 @@ fn xai_video_tool_spec(operation: NativeOperation) -> NativeToolSpec {
             "properties": properties,
             "required": required
         }),
-        execution: NativeExecutionMode::AsyncJob {
+        execution: MediaExecutionMode::AsyncJob {
             poll_supported: true,
         },
     }
@@ -404,6 +458,188 @@ fn first_nonempty(text: Option<&str>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn provider_option_str<'a>(options: &'a Value, key: &str) -> Option<&'a str> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_option_bool(options: &Value, key: &str) -> Option<bool> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_bool)
+}
+
+fn provider_option_u64(options: &Value, key: &str) -> Option<u64> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_u64)
+}
+
+fn provider_option_string_array(options: &Value, key: &str) -> Vec<String> {
+    options
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn audio_file_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/wave" | "audio/x-wav" => "wav",
+        "audio/ogg" | "audio/opus" => "ogg",
+        "audio/flac" => "flac",
+        "audio/aac" => "aac",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "video/mp4" => "m4a",
+        "video/x-matroska" | "audio/x-matroska" => "mkv",
+        _ => "audio",
+    }
+}
+
+fn prepare_xai_audio_data_uri(data_uri: &str) -> anyhow::Result<DecodedAudioDataUri> {
+    let decoded = decode_base64_data_uri(data_uri)?;
+    let mime_type = decoded.mime_type;
+
+    let valid_audio_mime = mime_type.starts_with("audio/")
+        || matches!(
+            mime_type.as_str(),
+            "video/mp4" | "video/x-matroska" | "application/octet-stream"
+        );
+    if !valid_audio_mime {
+        anyhow::bail!("audio data URI MIME type '{mime_type}' is not supported by xAI STT");
+    }
+
+    let filename = format!("audio.{}", audio_file_extension(&mime_type));
+    Ok(DecodedAudioDataUri {
+        mime_type,
+        bytes: decoded.bytes,
+        filename,
+    })
+}
+
+fn xai_stt_audio_input(asset: &MediaInputAsset) -> anyhow::Result<XaiSttAudioInput> {
+    match asset {
+        MediaInputAsset::DataUri { data_uri } => {
+            let decoded = prepare_xai_audio_data_uri(data_uri)?;
+            let file = Part::bytes(decoded.bytes)
+                .file_name(decoded.filename)
+                .mime_str(&decoded.mime_type)
+                .context("failed to build xAI STT audio upload part")?;
+            Ok(XaiSttAudioInput::File(Box::new(file)))
+        }
+        MediaInputAsset::Url { url } => Ok(XaiSttAudioInput::Url(url.clone())),
+        MediaInputAsset::ProviderFileId { .. } => {
+            anyhow::bail!(
+                "xAI STT requires a data_uri or url input; provider file ids are not supported"
+            )
+        }
+    }
+}
+
+fn json_object_or_none(object: Map<String, Value>) -> Option<Value> {
+    if object.is_empty() {
+        None
+    } else {
+        Some(Value::Object(object))
+    }
+}
+
+fn xai_stt_word_metadata(mut extra: Map<String, Value>, speaker: Option<i64>) -> Option<Value> {
+    if let Some(speaker) = speaker {
+        extra.insert("speaker".to_string(), json!(speaker));
+    }
+    json_object_or_none(extra)
+}
+
+fn xai_stt_segments(response: &XaiSttResponse) -> Vec<TranscriptSegment> {
+    if !response.channels.is_empty() {
+        return response
+            .channels
+            .iter()
+            .flat_map(|channel| {
+                channel.words.iter().map(|word| {
+                    let mut metadata = word.extra.clone();
+                    metadata.insert("channel_index".to_string(), json!(channel.index));
+                    if !channel.text.trim().is_empty() {
+                        metadata.insert("channel_text".to_string(), json!(channel.text));
+                    }
+                    for (key, value) in &channel.extra {
+                        metadata.insert(format!("channel_{key}"), value.clone());
+                    }
+                    TranscriptSegment {
+                        start_seconds: word.start,
+                        end_seconds: word.end,
+                        text: word.text.clone(),
+                        metadata: xai_stt_word_metadata(metadata, word.speaker),
+                    }
+                })
+            })
+            .collect();
+    }
+
+    response
+        .words
+        .iter()
+        .map(|word| TranscriptSegment {
+            start_seconds: word.start,
+            end_seconds: word.end,
+            text: word.text.clone(),
+            metadata: xai_stt_word_metadata(word.extra.clone(), word.speaker),
+        })
+        .collect()
+}
+
+fn xai_stt_tool_spec() -> MediaToolSpec {
+    let capability = MediaOperation::TranscribeAudio;
+    MediaToolSpec {
+        capability,
+        tool_name: capability.tool_name().unwrap().to_string(),
+        description: "Transcribe an audio data URI or URL with xAI Speech to Text.".to_string(),
+        execution: MediaExecutionMode::Immediate,
+        parameters_schema: json!({
+            "type": "object",
+            "properties": {
+                "audio": media_input_schema(),
+                "language": {"type": "string"},
+                "provider_options": {
+                    "type": "object",
+                    "properties": {
+                        "format": {"type": "boolean"},
+                        "diarize": {"type": "boolean"},
+                        "filler_words": {"type": "boolean"},
+                        "multichannel": {"type": "boolean"},
+                        "channels": {"type": "integer", "minimum": 2, "maximum": 8},
+                        "audio_format": {"type": "string", "enum": ["pcm", "mulaw", "alaw"]},
+                        "sample_rate": {
+                            "type": "integer",
+                            "enum": [8000, 16000, 22050, 24000, 44100, 48000]
+                        },
+                        "keyterms": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": 50},
+                            "maxItems": 100
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "required": ["audio"]
+        }),
+    }
 }
 
 fn xai_native_model_tool_specs() -> Vec<ProviderNativeModelToolSpec> {
@@ -1046,6 +1282,94 @@ impl XAiProvider {
         })
     }
 
+    async fn transcribe_audio(
+        &self,
+        request: TranscribeAudioRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let api_key = self.api_key()?;
+        let requested_language = request
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let mut form = Form::new();
+
+        if let Some(language) = requested_language.as_ref() {
+            form = form.text("language", language.clone());
+        }
+        if let Some(format) = provider_option_bool(&request.provider_options, "format") {
+            if format && requested_language.is_none() {
+                anyhow::bail!("xAI STT format=true requires a language code");
+            }
+            form = form.text("format", format.to_string());
+        }
+        if let Some(diarize) = provider_option_bool(&request.provider_options, "diarize") {
+            form = form.text("diarize", diarize.to_string());
+        }
+        if let Some(filler_words) = provider_option_bool(&request.provider_options, "filler_words")
+        {
+            form = form.text("filler_words", filler_words.to_string());
+        }
+        if let Some(multichannel) = provider_option_bool(&request.provider_options, "multichannel")
+        {
+            form = form.text("multichannel", multichannel.to_string());
+        }
+        if let Some(channels) = provider_option_u64(&request.provider_options, "channels") {
+            form = form.text("channels", channels.to_string());
+        }
+        if let Some(audio_format) = provider_option_str(&request.provider_options, "audio_format") {
+            form = form.text("audio_format", audio_format.to_string());
+        }
+        if let Some(sample_rate) = provider_option_u64(&request.provider_options, "sample_rate") {
+            form = form.text("sample_rate", sample_rate.to_string());
+        }
+        for keyterm in provider_option_string_array(&request.provider_options, "keyterms") {
+            form = form.text("keyterm", keyterm);
+        }
+
+        form = match xai_stt_audio_input(&request.audio)? {
+            XaiSttAudioInput::File(file) => form.part("file", *file),
+            XaiSttAudioInput::Url(url) => form.text("url", url),
+        };
+
+        let response = self
+            .client
+            .post(self.endpoint("/stt"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(crate::api_error("xAI", response).await);
+        }
+
+        let transcription: XaiSttResponse = response.json().await?;
+        if transcription.text.trim().is_empty() {
+            anyhow::bail!("xAI STT returned an empty transcript");
+        }
+
+        let segments = xai_stt_segments(&transcription);
+        let mut metadata = transcription.extra.clone();
+        if !transcription.channels.is_empty() {
+            metadata.insert(
+                "channels".to_string(),
+                serde_json::to_value(&transcription.channels)?,
+            );
+        }
+        metadata.insert("model".to_string(), json!(request.model));
+
+        Ok(NativeMediaResponse::Transcript {
+            text: transcription.text,
+            language: transcription.language.or(requested_language),
+            duration_seconds: transcription.duration,
+            segments,
+            metadata: json_object_or_none(metadata),
+        })
+    }
+
     async fn generate_image(
         &self,
         request: crate::native::GenerateImageRequest,
@@ -1182,7 +1506,7 @@ impl XAiProvider {
     async fn start_video_job<T: Serialize + ?Sized>(
         &self,
         path: &str,
-        operation: NativeOperation,
+        operation: MediaOperation,
         model: &str,
         body: &T,
     ) -> anyhow::Result<NativeMediaResponse> {
@@ -1228,7 +1552,7 @@ impl XAiProvider {
         };
         self.start_video_job(
             "/videos/generations",
-            NativeOperation::GenerateVideo,
+            MediaOperation::GenerateVideo,
             &request.model,
             &body,
         )
@@ -1251,7 +1575,7 @@ impl XAiProvider {
         };
         self.start_video_job(
             "/videos/generations",
-            NativeOperation::ImageToVideo,
+            MediaOperation::ImageToVideo,
             &request.model,
             &body,
         )
@@ -1280,7 +1604,7 @@ impl XAiProvider {
         };
         self.start_video_job(
             "/videos/generations",
-            NativeOperation::ReferenceToVideo,
+            MediaOperation::ReferenceToVideo,
             &request.model,
             &body,
         )
@@ -1300,7 +1624,7 @@ impl XAiProvider {
         };
         self.start_video_job(
             "/videos/edits",
-            NativeOperation::EditVideo,
+            MediaOperation::EditVideo,
             &request.model,
             &body,
         )
@@ -1323,7 +1647,7 @@ impl XAiProvider {
         };
         self.start_video_job(
             "/videos/extensions",
-            NativeOperation::ExtendVideo,
+            MediaOperation::ExtendVideo,
             &request.model,
             &body,
         )
@@ -1386,19 +1710,19 @@ impl ModelProvider for XAiProvider {
         self.chat.supports_developer_role(model)
     }
 
-    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
-        Some(NativeCapabilitiesProvider::native_capabilities(self))
+    fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
+        Some(MediaCapabilitiesProvider::media_capabilities(self))
     }
 
     async fn submit_media(
         &self,
         request: NativeMediaRequest,
     ) -> anyhow::Result<NativeMediaResponse> {
-        NativeCapabilitiesProvider::submit_media(self, request).await
+        MediaCapabilitiesProvider::submit_media(self, request).await
     }
 
     async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
-        NativeCapabilitiesProvider::poll_media_job(self, job).await
+        MediaCapabilitiesProvider::poll_media_job(self, job).await
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {
@@ -1407,28 +1731,32 @@ impl ModelProvider for XAiProvider {
 }
 
 #[async_trait]
-impl NativeCapabilitiesProvider for XAiProvider {
-    fn native_capabilities(&self) -> ProviderNativeCapabilities {
-        ProviderNativeCapabilities {
+impl MediaCapabilitiesProvider for XAiProvider {
+    fn media_capabilities(&self) -> ProviderMediaCapabilities {
+        ProviderMediaCapabilities {
             provider: "xai".to_string(),
             model_tools: xai_native_model_tool_specs(),
             models: vec![
-                ModelNativeCapabilities {
-                    model_pattern: "grok-imagine-image-quality".to_string(),
+                ModelMediaCapabilities {
+                    model_pattern: "grok-imagine-image*".to_string(),
                     tools: vec![
-                        xai_image_tool_spec(NativeOperation::GenerateImage),
-                        xai_image_tool_spec(NativeOperation::EditImage),
+                        xai_image_tool_spec(MediaOperation::GenerateImage),
+                        xai_image_tool_spec(MediaOperation::EditImage),
                     ],
                 },
-                ModelNativeCapabilities {
+                ModelMediaCapabilities {
                     model_pattern: "grok-imagine-video*".to_string(),
                     tools: vec![
-                        xai_video_tool_spec(NativeOperation::GenerateVideo),
-                        xai_video_tool_spec(NativeOperation::EditVideo),
-                        xai_video_tool_spec(NativeOperation::ImageToVideo),
-                        xai_video_tool_spec(NativeOperation::ReferenceToVideo),
-                        xai_video_tool_spec(NativeOperation::ExtendVideo),
+                        xai_video_tool_spec(MediaOperation::GenerateVideo),
+                        xai_video_tool_spec(MediaOperation::EditVideo),
+                        xai_video_tool_spec(MediaOperation::ImageToVideo),
+                        xai_video_tool_spec(MediaOperation::ReferenceToVideo),
+                        xai_video_tool_spec(MediaOperation::ExtendVideo),
                     ],
+                },
+                ModelMediaCapabilities {
+                    model_pattern: "xai-stt*".to_string(),
+                    tools: vec![xai_stt_tool_spec()],
                 },
             ],
         }
@@ -1447,9 +1775,10 @@ impl NativeCapabilitiesProvider for XAiProvider {
             NativeMediaRequest::ImageToVideo(request) => self.image_to_video(request).await,
             NativeMediaRequest::ReferenceToVideo(request) => self.reference_to_video(request).await,
             NativeMediaRequest::ExtendVideo(request) => self.extend_video(request).await,
-            NativeMediaRequest::GenerateSpeech(_) | NativeMediaRequest::TranscribeAudio(_) => {
+            NativeMediaRequest::TranscribeAudio(request) => self.transcribe_audio(request).await,
+            NativeMediaRequest::GenerateSpeech(_) => {
                 anyhow::bail!(
-                    "xAI native operation {operation:?} is declared but not implemented in this pass"
+                    "xAI media operation {operation:?} is declared but not implemented in this pass"
                 )
             }
         }
@@ -1515,7 +1844,7 @@ mod tests {
     #[test]
     fn capabilities_include_xai_video_modes() {
         let provider = XAiProvider::new(None);
-        let capabilities = NativeCapabilitiesProvider::native_capabilities(&provider);
+        let capabilities = MediaCapabilitiesProvider::media_capabilities(&provider);
         let video = capabilities
             .models
             .iter()
@@ -1525,18 +1854,93 @@ mod tests {
         assert!(
             video
                 .operations()
-                .any(|op| op == NativeOperation::ImageToVideo)
+                .any(|op| op == MediaOperation::ImageToVideo)
         );
         assert!(
             video
                 .operations()
-                .any(|op| op == NativeOperation::ReferenceToVideo)
+                .any(|op| op == MediaOperation::ReferenceToVideo)
         );
         assert!(
             video
                 .operations()
-                .any(|op| op == NativeOperation::ExtendVideo)
+                .any(|op| op == MediaOperation::ExtendVideo)
         );
+    }
+
+    #[test]
+    fn capabilities_include_all_xai_image_model_variants() {
+        let provider = XAiProvider::new(None);
+        let capabilities = MediaCapabilitiesProvider::media_capabilities(&provider);
+        let image = capabilities
+            .models
+            .iter()
+            .find(|model| model.model_pattern == "grok-imagine-image*")
+            .expect("image capability");
+
+        assert!(
+            image
+                .operations()
+                .any(|op| op == MediaOperation::GenerateImage)
+        );
+        assert!(image.operations().any(|op| op == MediaOperation::EditImage));
+    }
+
+    #[test]
+    fn capabilities_include_xai_stt_modes_without_reclassifying_voice_agents() {
+        let provider = XAiProvider::new(None);
+        let capabilities = MediaCapabilitiesProvider::media_capabilities(&provider);
+        let stt = capabilities
+            .models
+            .iter()
+            .find(|model| model.model_pattern == "xai-stt*")
+            .expect("STT capability");
+
+        assert!(
+            stt.operations()
+                .any(|op| op == MediaOperation::TranscribeAudio)
+        );
+        assert!(
+            capabilities
+                .models
+                .iter()
+                .all(|model| model.model_pattern != "grok-voice*")
+        );
+    }
+
+    #[test]
+    fn xai_stt_response_words_become_transcript_segments() {
+        let response: XaiSttResponse = serde_json::from_value(json!({
+            "text": "Hello world",
+            "language": "English",
+            "duration": 1.25,
+            "words": [
+                {"text": "Hello", "start": 0.0, "end": 0.5},
+                {"text": "world", "start": 0.6, "end": 1.0, "speaker": 1}
+            ]
+        }))
+        .expect("stt response should parse");
+
+        let segments = xai_stt_segments(&response);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "Hello");
+        assert_eq!(segments[0].start_seconds, Some(0.0));
+        assert_eq!(segments[1].text, "world");
+        assert_eq!(
+            segments[1].metadata.as_ref().unwrap()["speaker"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[test]
+    fn xai_audio_data_uri_decodes_supported_audio_mime_type() {
+        let decoded = prepare_xai_audio_data_uri("data:audio/ogg;base64,YXVkaW8=")
+            .expect("valid audio data uri");
+
+        assert_eq!(decoded.mime_type, "audio/ogg");
+        assert_eq!(decoded.bytes, b"audio");
+        assert_eq!(decoded.filename, "audio.ogg");
     }
 
     #[test]

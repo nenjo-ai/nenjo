@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, error, info, warn};
 
@@ -21,10 +22,17 @@ use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
     CommandManifest, ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader,
-    ManifestResourceKind,
+    ManifestResource, ManifestResourceKind,
 };
-use nenjo_events::{Capability, EncryptedPayload, PackageArgumentBindingUpdate, ResourceType};
+use nenjo::{LocalManifestStore, ManifestReader, ManifestWriter};
+use nenjo_events::{
+    Capability, EncryptedPayload, ManifestResourcePayload, ModelAssignmentBinding,
+    ModelAssignmentsManifestUpdate, ModelCapabilityDefaultBinding,
+    ModelCapabilityDefaultsManifestUpdate, PackageArgumentBindingUpdate, ResourceAction,
+    ResourceType,
+};
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
+use nenjo_platform::manifest_contract::ModelRecord;
 use nenjo_platform::{
     PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind, SensitiveContentKind,
 };
@@ -34,6 +42,7 @@ use uuid::Uuid;
 
 use crate::config::MediaProviderConfig;
 use crate::handlers::manifest::ManifestStore;
+use crate::media::{AgentModelAssignments, ModelRuntimeConfig};
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -46,6 +55,8 @@ struct BootstrapManifestResponse {
     models: Vec<BootstrapModelManifest>,
     #[serde(default)]
     media_providers: Vec<MediaProviderConfig>,
+    #[serde(default)]
+    capability_defaults: Vec<ModelCapabilityDefaultBinding>,
     #[serde(default)]
     agents: Vec<BootstrapAgentManifest>,
     #[serde(default)]
@@ -77,6 +88,9 @@ struct HydratedBootstrap {
     manifest: Manifest,
     resource_ids: PlatformResourceIdSnapshot,
     media_providers: Vec<MediaProviderConfig>,
+    cached_models: Vec<CachedModelManifest>,
+    cached_agents: Vec<CachedAgentManifest>,
+    capability_defaults: Vec<ModelCapabilityDefaultBinding>,
     nats: BootstrapNatsConfig,
     packages: Option<BootstrapPackages>,
 }
@@ -198,11 +212,30 @@ struct BootstrapAuthEnvelope {
     auth: BootstrapAuth,
 }
 
-#[derive(Debug, Deserialize)]
-struct BootstrapModelManifest {
-    id: Uuid,
+/// Canonical worker cache entry for a configured model.
+///
+/// Extra routing fields are stored alongside the core manifest fields in
+/// `models.json`; generic manifest loaders safely ignore them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedModelManifest {
+    pub id: Uuid,
+    /// Assignable operation capability IDs from the platform models inventory.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(flatten)]
-    manifest: nenjo::manifest::ModelManifest,
+    pub manifest: nenjo::manifest::ModelManifest,
+}
+
+type BootstrapModelManifest = CachedModelManifest;
+
+/// Canonical worker cache entry for an agent and its configured model bindings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedAgentManifest {
+    pub id: Uuid,
+    #[serde(flatten)]
+    pub manifest: nenjo::manifest::AgentManifest,
+    #[serde(default)]
+    pub model_assignments: Vec<ModelAssignmentBinding>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +247,8 @@ struct BootstrapAgentManifest {
     description: Option<String>,
     color: Option<String>,
     model: Option<Slug>,
+    #[serde(default)]
+    model_assignments: Vec<ModelAssignmentBinding>,
     #[serde(default)]
     domains: Vec<Slug>,
     #[serde(default)]
@@ -455,6 +490,43 @@ pub async fn sync(
         }
     };
 
+    sync_bootstrap_manifest(api, manifests_dir, state_dir, nenjo_home, bootstrap).await
+}
+
+/// Fetch and apply bootstrap data, failing when the worker cannot observe the
+/// platform state it just wrote.
+///
+/// Startup uses [`sync`] so an offline worker can continue from its cache.
+/// Callers that have already committed a platform mutation use this strict
+/// variant instead: reporting success while retaining an old provider snapshot
+/// would make the mutation appear to have been lost until pub/sub catches up.
+pub async fn sync_required(
+    api: &ApiClient,
+    manifests_dir: &Path,
+    state_dir: &Path,
+    nenjo_home: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(manifests_dir).with_context(|| {
+        format!(
+            "Failed to create manifests directory: {}",
+            manifests_dir.display()
+        )
+    })?;
+    let bootstrap = api
+        .fetch_manifest_json()
+        .await
+        .context("Bootstrap fetch failed after a platform mutation")?;
+
+    sync_bootstrap_manifest(api, manifests_dir, state_dir, nenjo_home, bootstrap).await
+}
+
+async fn sync_bootstrap_manifest(
+    api: &ApiClient,
+    manifests_dir: &Path,
+    state_dir: &Path,
+    nenjo_home: &Path,
+    bootstrap: serde_json::Value,
+) -> Result<()> {
     let auth: BootstrapAuthEnvelope = serde_json::from_value(bootstrap.clone())
         .context("Failed to deserialize bootstrap auth response")?;
     ensure_worker_ack(
@@ -486,11 +558,17 @@ pub async fn sync(
     atomic_write_json(manifests_dir, "auth.json", &data.auth)?;
     atomic_write_json(manifests_dir, "nats.json", &data.nats)?;
     atomic_write_json(manifests_dir, "media_providers.json", &data.media_providers)?;
+    atomic_write_json(
+        manifests_dir,
+        "capability_defaults.json",
+        &data.capability_defaults,
+    )?;
     PlatformResourceIdStore::new(manifests_dir).replace(&data.resource_ids)?;
     atomic_write_json(manifests_dir, "projects.json", &manifest.projects)?;
     atomic_write_json(manifests_dir, "routines.json", &manifest.routines)?;
-    atomic_write_json(manifests_dir, "models.json", &manifest.models)?;
-    atomic_write_json(manifests_dir, "agents.json", &manifest.agents)?;
+    atomic_write_json(manifests_dir, "models.json", &data.cached_models)?;
+    atomic_write_json(manifests_dir, "agents.json", &data.cached_agents)?;
+    remove_legacy_model_cache_files(manifests_dir)?;
     atomic_write_json(manifests_dir, "councils.json", &manifest.councils)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)?;
     atomic_write_json(manifests_dir, "commands.json", &manifest.commands)?;
@@ -537,12 +615,15 @@ async fn hydrate_bootstrap_manifest(
     let mut resource_ids = PlatformResourceIdSnapshot::default();
 
     let mut models = Vec::with_capacity(bootstrap.models.len());
+    let mut cached_models = Vec::with_capacity(bootstrap.models.len());
     for model in bootstrap.models {
         resource_ids.insert(PlatformResourceKind::Model, &model.manifest.slug, model.id);
-        models.push(model.manifest);
+        models.push(model.manifest.clone());
+        cached_models.push(model);
     }
 
     let mut agents = Vec::with_capacity(bootstrap.agents.len());
+    let mut cached_agents = Vec::with_capacity(bootstrap.agents.len());
     for agent in bootstrap.agents {
         let prompt_config = resolve_bootstrap_prompt_config(api, &agent, state_dir).await?;
         let slug = agent
@@ -550,7 +631,7 @@ async fn hydrate_bootstrap_manifest(
             .clone()
             .unwrap_or_else(|| Slug::derive(&agent.name));
         resource_ids.insert(PlatformResourceKind::Agent, &slug, agent.id);
-        agents.push(nenjo::manifest::AgentManifest {
+        let manifest = nenjo::manifest::AgentManifest {
             name: agent.name,
             slug,
             description: agent.description,
@@ -567,7 +648,13 @@ async fn hydrate_bootstrap_manifest(
             heartbeat: agent.heartbeat,
             source_type: agent.source_type,
             metadata: agent.metadata,
+        };
+        cached_agents.push(CachedAgentManifest {
+            id: agent.id,
+            manifest: manifest.clone(),
+            model_assignments: agent.model_assignments,
         });
+        agents.push(manifest);
     }
 
     let mut domains = Vec::with_capacity(bootstrap.domains.len());
@@ -669,6 +756,9 @@ async fn hydrate_bootstrap_manifest(
         },
         resource_ids,
         media_providers: bootstrap.media_providers,
+        cached_models,
+        cached_agents,
+        capability_defaults: bootstrap.capability_defaults,
         nats: bootstrap.nats,
         packages: bootstrap.packages,
     })
@@ -833,18 +923,85 @@ pub fn load_cached_nats_config(manifests_dir: &Path) -> Option<BootstrapNatsConf
 }
 
 pub fn load_cached_media_providers(manifests_dir: &Path) -> Vec<MediaProviderConfig> {
-    let path = manifests_dir.join("media_providers.json");
+    load_cached_json_vec(manifests_dir, "media_providers.json")
+}
+
+/// Load the canonical configured model inventory cached in `models.json`.
+pub fn load_cached_models(manifests_dir: &Path) -> Vec<CachedModelManifest> {
+    load_cached_json_vec(manifests_dir, "models.json")
+}
+
+/// Derive the runtime model inventory from the canonical models cache.
+pub fn load_cached_model_runtime(manifests_dir: &Path) -> Vec<ModelRuntimeConfig> {
+    load_cached_models(manifests_dir)
+        .into_iter()
+        .map(|model| ModelRuntimeConfig {
+            id: model.id,
+            slug: model.manifest.slug,
+            model: model.manifest.model,
+            model_provider: model.manifest.model_provider,
+            base_url: model
+                .manifest
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            capabilities: model
+                .capabilities
+                .into_iter()
+                .map(|capability| capability.trim().to_owned())
+                .filter(|capability| !capability.is_empty())
+                .collect(),
+        })
+        .collect()
+}
+
+/// Load agent-owned configured model assignments from `agents.json`.
+pub fn load_cached_agent_model_assignments(manifests_dir: &Path) -> Vec<AgentModelAssignments> {
+    load_cached_json_vec::<CachedAgentManifest>(manifests_dir, "agents.json")
+        .into_iter()
+        .map(|agent| AgentModelAssignments {
+            agent_id: agent.id,
+            agent_slug: agent.manifest.slug,
+            assignments: agent.model_assignments,
+        })
+        .collect()
+}
+
+/// Load bootstrap org capability defaults.
+pub fn load_cached_capability_defaults(manifests_dir: &Path) -> Vec<ModelCapabilityDefaultBinding> {
+    load_cached_json_vec(manifests_dir, "capability_defaults.json")
+}
+
+fn load_cached_json_vec<T>(manifests_dir: &Path, filename: &str) -> Vec<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let path = manifests_dir.join(filename);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(_) => return Vec::new(),
     };
-    match serde_json::from_str::<Vec<MediaProviderConfig>>(&content) {
-        Ok(providers) => providers,
+    match serde_json::from_str::<Vec<T>>(&content) {
+        Ok(items) => items,
         Err(error) => {
-            warn!(file = %path.display(), %error, "Failed to parse cached media provider config");
+            warn!(file = %path.display(), %error, "Failed to parse cached bootstrap file");
             Vec::new()
         }
     }
+}
+
+fn remove_legacy_model_cache_files(manifests_dir: &Path) -> Result<()> {
+    for filename in ["model_runtime.json", "model_assignments.json"] {
+        let path = manifests_dir.join(filename);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| {
+                format!("Failed to remove legacy cache file {}", path.display())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_json::Error) {
@@ -884,6 +1041,7 @@ fn log_bootstrap_deserialize_failure(bootstrap: &serde_json::Value, err: &serde_
     check_section!("routines", Vec<BootstrapRoutineManifest>);
     check_section!("models", Vec<BootstrapModelManifest>);
     check_section!("media_providers", Vec<MediaProviderConfig>);
+    check_section!("capability_defaults", Vec<ModelCapabilityDefaultBinding>);
     check_section!("agents", Vec<BootstrapAgentManifest>);
     check_section!("councils", Vec<nenjo::manifest::CouncilManifest>);
     check_section!("domains", Vec<BootstrapDomainManifest>);
@@ -942,19 +1100,147 @@ pub struct WorkerManifestCache {
     pub config_dir: PathBuf,
 }
 
+/// Refreshes the provider snapshot after a worker-local platform mutation.
+///
+/// The platform backend commits first, then the manifest writer calls this
+/// hook before returning control to the tool. This closes the interval where
+/// the local cache has changed but the running provider is still stale while
+/// waiting for the corresponding manifest event.
+#[async_trait::async_trait]
+pub(crate) trait ManifestSnapshotRefresher: Send + Sync {
+    async fn refresh_provider_manifest(&self) -> Result<()>;
+}
+
+/// A two-phase handle used because platform tools are assembled before their
+/// owning harness exists. Worker assembly binds it immediately after creating
+/// the harness, before the worker accepts any commands.
+#[derive(Clone, Default)]
+pub(crate) struct ManifestRefreshHandle {
+    refresher: Arc<tokio::sync::OnceCell<Arc<dyn ManifestSnapshotRefresher>>>,
+}
+
+impl ManifestRefreshHandle {
+    pub(crate) fn bind(&self, refresher: Arc<dyn ManifestSnapshotRefresher>) -> Result<()> {
+        self.refresher
+            .set(refresher)
+            .map_err(|_| anyhow!("provider manifest refresher was already bound"))
+    }
+
+    async fn refresh_provider_manifest(&self) -> Result<()> {
+        let refresher = self.refresher.get().context(
+            "provider manifest refresher is unavailable while worker assembly is incomplete",
+        )?;
+        refresher.refresh_provider_manifest().await
+    }
+}
+
+/// Manifest reader/writer exposed to worker-local platform tools.
+///
+/// Core SDK manifests remain readable through the generic local store, while
+/// the platform remains authoritative for every mutation. The writer refreshes
+/// the canonical bootstrap cache and the running provider snapshot instead of
+/// applying a potentially incomplete tool response to local JSON files.
+#[derive(Clone)]
+pub struct WorkerManifestStore {
+    cache: Arc<WorkerManifestCache>,
+    manifest_refresher: ManifestRefreshHandle,
+}
+
+impl WorkerManifestStore {
+    pub(crate) fn new(
+        cache: Arc<WorkerManifestCache>,
+        manifest_refresher: ManifestRefreshHandle,
+    ) -> Self {
+        Self {
+            cache,
+            manifest_refresher,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.cache.manifests_dir
+    }
+
+    fn local_store(&self) -> LocalManifestStore {
+        LocalManifestStore::new(&self.cache.manifests_dir)
+    }
+
+    fn persist_noncanonical_resources(&self, manifest: &Manifest) -> Result<()> {
+        let store = self.local_store();
+        for kind in [
+            ManifestResourceKind::Project,
+            ManifestResourceKind::Routine,
+            ManifestResourceKind::Council,
+            ManifestResourceKind::Domain,
+            ManifestResourceKind::McpServer,
+            ManifestResourceKind::Ability,
+            ManifestResourceKind::ContextBlock,
+            ManifestResourceKind::Skill,
+            ManifestResourceKind::Command,
+            ManifestResourceKind::Hook,
+            ManifestResourceKind::ScriptTool,
+            ManifestResourceKind::KnowledgePack,
+        ] {
+            store.persist_resource_kind(manifest, kind)?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_provider_manifest(&self) -> Result<()> {
+        self.manifest_refresher.refresh_provider_manifest().await
+    }
+}
+
 impl WorkerManifestCache {
-    pub fn persist_resource(
+    /// Upsert one configured model in the canonical `models.json` cache.
+    pub fn upsert_model(&self, model: &CachedModelManifest) -> Result<()> {
+        let mut models = load_cached_models(&self.manifests_dir);
+        if let Some(position) = models.iter().position(|existing| existing.id == model.id) {
+            models[position] = model.clone();
+        } else {
+            models.push(model.clone());
+        }
+        atomic_write_json(&self.manifests_dir, "models.json", &models)
+    }
+
+    /// Remove a configured model from the canonical `models.json` cache.
+    pub fn remove_model(&self, model_id: Uuid) -> Result<()> {
+        let mut models = load_cached_models(&self.manifests_dir);
+        models.retain(|model| model.id != model_id);
+        atomic_write_json(&self.manifests_dir, "models.json", &models)
+    }
+
+    fn persist_agent_assignment_snapshot(
+        &self,
+        agent_id: Uuid,
+        assignments: Vec<ModelAssignmentBinding>,
+    ) -> Result<()> {
+        let mut agents =
+            load_cached_json_vec::<CachedAgentManifest>(&self.manifests_dir, "agents.json");
+        let agent = agents
+            .iter_mut()
+            .find(|agent| agent.id == agent_id)
+            .ok_or_else(|| anyhow!("agent {} is missing from the cached manifest", agent_id))?;
+        agent.model_assignments = assignments;
+        atomic_write_json(&self.manifests_dir, "agents.json", &agents)
+    }
+
+    fn persist_capability_default_snapshot(
+        &self,
+        defaults: Vec<ModelCapabilityDefaultBinding>,
+    ) -> Result<()> {
+        atomic_write_json(&self.manifests_dir, "capability_defaults.json", &defaults)
+    }
+
+    fn persist_manifest_resource(
         &self,
         manifest: &nenjo::Manifest,
         resource_type: ResourceType,
     ) -> Result<()> {
         let manifests_dir = &self.manifests_dir;
         match resource_type {
-            ResourceType::Model => {
-                atomic_write_json(manifests_dir, "models.json", &manifest.models)
-            }
-            ResourceType::Agent => nenjo::LocalManifestStore::new(manifests_dir)
-                .persist_resource_kind(manifest, ManifestResourceKind::Agent),
+            ResourceType::Model => Ok(()),
+            ResourceType::Agent => self.persist_agents(manifest),
             ResourceType::Routine => {
                 atomic_write_json(manifests_dir, "routines.json", &manifest.routines)
             }
@@ -978,6 +1264,7 @@ impl WorkerManifestCache {
                 atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)
             }
             ResourceType::Domain => sync_tree(&manifests_dir.join("domains"), &manifest.domains),
+            ResourceType::ModelAssignment | ResourceType::ModelCapabilityDefault => Ok(()),
             ResourceType::Document => Ok(()),
             ResourceType::KnowledgePack => atomic_write_json(
                 manifests_dir,
@@ -987,8 +1274,172 @@ impl WorkerManifestCache {
         }
     }
 
+    /// Apply the resource-specific portion of a manifest event to the
+    /// canonical bootstrap cache.
+    ///
+    /// The generic [`ManifestStore`] contract persists manifest resources from
+    /// a completed `Manifest`. These three cache entries contain platform ids
+    /// and routing data that are intentionally not part of that core type, so
+    /// their event snapshots are applied here at the worker boundary.
+    pub(crate) fn persist_manifest_event(
+        &self,
+        resource_type: ResourceType,
+        action: ResourceAction,
+        resource_id: Option<Uuid>,
+        resource: &nenjo::Slug,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        match resource_type {
+            ResourceType::Model => {
+                self.persist_model_change(action, resource_id, resource, payload)
+            }
+            ResourceType::ModelAssignment => {
+                self.persist_model_assignment_change(action, resource_id, resource, payload)
+            }
+            ResourceType::ModelCapabilityDefault => {
+                self.persist_capability_default_change(action, payload)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn persist_model_change(
+        &self,
+        action: ResourceAction,
+        resource_id: Option<Uuid>,
+        resource: &nenjo::Slug,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        if action == ResourceAction::Deleted {
+            let Some(model_id) = resource_id else {
+                warn!(%resource, "Model delete event is missing a model id");
+                return Ok(());
+            };
+            return self.remove_model(model_id);
+        }
+
+        let Some(record) = payload
+            .and_then(ManifestResourcePayload::<ModelRecord>::parse)
+            .map(|payload| payload.data)
+        else {
+            warn!(%resource, "Model update is missing a valid inline snapshot");
+            return Ok(());
+        };
+        self.upsert_model(&CachedModelManifest {
+            id: record.id,
+            manifest: record.to_manifest(),
+            capabilities: record
+                .capabilities
+                .iter()
+                .map(|capability| capability.as_str().trim().to_owned())
+                .filter(|capability| !capability.is_empty())
+                .collect(),
+        })
+    }
+
+    fn persist_model_assignment_change(
+        &self,
+        action: ResourceAction,
+        resource_id: Option<Uuid>,
+        resource: &nenjo::Slug,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let update = if action == ResourceAction::Deleted {
+            let Some(agent_id) = resource_id else {
+                warn!(%resource, "Model assignment delete event is missing an agent id");
+                return Ok(());
+            };
+            ModelAssignmentsManifestUpdate {
+                agent_id,
+                assignments: Vec::new(),
+            }
+        } else {
+            let Some(update) = payload
+                .and_then(ManifestResourcePayload::<ModelAssignmentsManifestUpdate>::parse)
+                .map(|payload| payload.data)
+            else {
+                warn!(%resource, ?action, "Model assignment update is missing a valid inline snapshot");
+                return Ok(());
+            };
+            if let Some(event_agent_id) = resource_id
+                && event_agent_id != update.agent_id
+            {
+                warn!(
+                    %resource,
+                    %event_agent_id,
+                    update_agent_id = %update.agent_id,
+                    "Model assignment update agent id does not match its event"
+                );
+                return Ok(());
+            }
+            update
+        };
+        self.persist_agent_assignment_snapshot(update.agent_id, update.assignments)
+    }
+
+    fn persist_capability_default_change(
+        &self,
+        action: ResourceAction,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let defaults = if action == ResourceAction::Deleted {
+            Vec::new()
+        } else {
+            let Some(update) = payload
+                .and_then(ManifestResourcePayload::<ModelCapabilityDefaultsManifestUpdate>::parse)
+                .map(|payload| payload.data)
+            else {
+                warn!(
+                    ?action,
+                    "Capability defaults update is missing a valid inline snapshot"
+                );
+                return Ok(());
+            };
+            update.defaults
+        };
+        self.persist_capability_default_snapshot(defaults)
+    }
+
+    fn persist_agents(&self, manifest: &nenjo::Manifest) -> Result<()> {
+        let existing =
+            load_cached_json_vec::<CachedAgentManifest>(&self.manifests_dir, "agents.json");
+        let ids = PlatformResourceIdStore::new(&self.manifests_dir).load()?;
+        let agents = manifest
+            .agents
+            .iter()
+            .map(|manifest| {
+                let existing = existing
+                    .iter()
+                    .find(|agent| agent.manifest.slug == manifest.slug);
+                let id = existing
+                    .map(|agent| agent.id)
+                    .or_else(|| ids.get(PlatformResourceKind::Agent, &manifest.slug))
+                    .ok_or_else(|| anyhow!("agent '{}' is missing a platform id", manifest.slug))?;
+                Ok(CachedAgentManifest {
+                    id,
+                    manifest: manifest.clone(),
+                    model_assignments: existing
+                        .map(|agent| agent.model_assignments.clone())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        atomic_write_json(&self.manifests_dir, "agents.json", &agents)
+    }
+
     pub async fn full_refresh(&self, api: &ApiClient) -> Result<nenjo::Manifest> {
         sync(api, &self.manifests_dir, &self.state_dir, &self.config_dir).await?;
+        let loader = nenjo::LocalManifestStore::new(&self.manifests_dir);
+        nenjo::ManifestLoader::load(&loader).await
+    }
+
+    /// Rebuild the canonical cache after a successful platform write.
+    ///
+    /// Unlike startup refreshes, this does not hide a failed bootstrap fetch:
+    /// the tool must not claim success while its provider still sees the old
+    /// configuration.
+    pub async fn refresh_after_platform_write(&self, api: &ApiClient) -> Result<nenjo::Manifest> {
+        sync_required(api, &self.manifests_dir, &self.state_dir, &self.config_dir).await?;
         let loader = nenjo::LocalManifestStore::new(&self.manifests_dir);
         nenjo::ManifestLoader::load(&loader).await
     }
@@ -1009,7 +1460,7 @@ impl ManifestStore for WorkerManifestCache {
         manifest: &nenjo::Manifest,
         resource_type: ResourceType,
     ) -> Result<()> {
-        WorkerManifestCache::persist_resource(self, manifest, resource_type)
+        self.persist_manifest_resource(manifest, resource_type)
     }
 
     async fn remove_resource(
@@ -1018,7 +1469,7 @@ impl ManifestStore for WorkerManifestCache {
         resource_type: ResourceType,
         _resource: &nenjo::Slug,
     ) -> Result<()> {
-        WorkerManifestCache::persist_resource(self, manifest, resource_type)
+        self.persist_manifest_resource(manifest, resource_type)
     }
 
     async fn cleanup_deleted_resource(
@@ -1166,6 +1617,126 @@ impl ManifestStore for WorkerManifestCache {
     ) -> Result<()> {
         let pack_dir = self.library_root().join(pack.as_str());
         crate::local_documents::write_document_content(&pack_dir, relative_path, content)
+    }
+}
+
+#[async_trait::async_trait]
+impl ManifestReader for WorkerManifestStore {
+    async fn load_manifest(&self) -> Result<Manifest> {
+        self.local_store().load_manifest().await
+    }
+
+    async fn list_agents(&self) -> Result<Vec<nenjo::manifest::AgentManifest>> {
+        self.local_store().list_agents().await
+    }
+
+    async fn get_agent(&self, slug: &Slug) -> Result<Option<nenjo::manifest::AgentManifest>> {
+        self.local_store().get_agent(slug).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<nenjo::manifest::ModelManifest>> {
+        self.local_store().list_models().await
+    }
+
+    async fn get_model(&self, slug: &Slug) -> Result<Option<nenjo::manifest::ModelManifest>> {
+        self.local_store().get_model(slug).await
+    }
+
+    async fn list_routines(&self) -> Result<Vec<nenjo::manifest::RoutineManifest>> {
+        self.local_store().list_routines().await
+    }
+
+    async fn get_routine(&self, slug: &Slug) -> Result<Option<nenjo::manifest::RoutineManifest>> {
+        self.local_store().get_routine(slug).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<nenjo::manifest::ProjectManifest>> {
+        self.local_store().list_projects().await
+    }
+
+    async fn get_project(&self, slug: &Slug) -> Result<Option<nenjo::manifest::ProjectManifest>> {
+        self.local_store().get_project(slug).await
+    }
+
+    async fn list_councils(&self) -> Result<Vec<nenjo::manifest::CouncilManifest>> {
+        self.local_store().list_councils().await
+    }
+
+    async fn get_council(&self, slug: &Slug) -> Result<Option<nenjo::manifest::CouncilManifest>> {
+        self.local_store().get_council(slug).await
+    }
+
+    async fn list_domains(&self) -> Result<Vec<nenjo::manifest::DomainManifest>> {
+        self.local_store().list_domains().await
+    }
+
+    async fn get_domain(&self, slug: &Slug) -> Result<Option<nenjo::manifest::DomainManifest>> {
+        self.local_store().get_domain(slug).await
+    }
+
+    async fn list_mcp_servers(&self) -> Result<Vec<nenjo::manifest::McpServerManifest>> {
+        self.local_store().list_mcp_servers().await
+    }
+
+    async fn get_mcp_server(
+        &self,
+        slug: &Slug,
+    ) -> Result<Option<nenjo::manifest::McpServerManifest>> {
+        self.local_store().get_mcp_server(slug).await
+    }
+
+    async fn list_abilities(&self) -> Result<Vec<nenjo::manifest::AbilityManifest>> {
+        self.local_store().list_abilities().await
+    }
+
+    async fn get_ability(&self, slug: &Slug) -> Result<Option<nenjo::manifest::AbilityManifest>> {
+        self.local_store().get_ability(slug).await
+    }
+
+    async fn list_context_blocks(&self) -> Result<Vec<nenjo::manifest::ContextBlockManifest>> {
+        self.local_store().list_context_blocks().await
+    }
+
+    async fn get_context_block(
+        &self,
+        slug: &Slug,
+    ) -> Result<Option<nenjo::manifest::ContextBlockManifest>> {
+        self.local_store().get_context_block(slug).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ManifestWriter for WorkerManifestStore {
+    async fn replace_manifest(&self, manifest: &Manifest) -> Result<()> {
+        let current = self.load_manifest().await?;
+        if serde_json::to_value(&manifest.models)? != serde_json::to_value(&current.models)?
+            || serde_json::to_value(&manifest.agents)? != serde_json::to_value(&current.agents)?
+        {
+            anyhow::bail!(
+                "worker manifest store cannot replace configured models or agents; refresh bootstrap instead"
+            );
+        }
+        self.persist_noncanonical_resources(manifest)
+    }
+
+    async fn upsert_resource(&self, resource: &ManifestResource) -> Result<ManifestResource> {
+        self.refresh_provider_manifest().await?;
+        Ok(resource.clone())
+    }
+
+    async fn cache_resource(&self, resource: &ManifestResource) -> Result<ManifestResource> {
+        // Models and agents carry worker-owned bootstrap metadata (platform
+        // ids, capabilities, and model assignments). A read-through response
+        // lacks that envelope, so only bootstrap may update those entries.
+        match resource.kind() {
+            ManifestResourceKind::Model | ManifestResourceKind::Agent => Ok(resource.clone()),
+            _ => self.local_store().upsert_resource(resource).await,
+        }
+    }
+
+    async fn delete_resource(&self, kind: ManifestResourceKind, slug: &Slug) -> Result<()> {
+        let _ = (kind, slug);
+        self.refresh_provider_manifest().await
     }
 }
 
@@ -1603,6 +2174,403 @@ fn unique_cache_tmp_path(target: &Path, filename: &str) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct RecordingManifestRefresher {
+        refreshes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ManifestSnapshotRefresher for RecordingManifestRefresher {
+        async fn refresh_provider_manifest(&self) -> Result<()> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bootstrap_model_keeps_catalog_context_window() {
+        let model: BootstrapModelManifest = serde_json::from_value(serde_json::json!({
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "name": "Catalog model",
+            "slug": "openrouter-openai-gpt-4-1",
+            "model": "openai/gpt-4.1",
+            "model_provider": "openrouter",
+            "context_window": 1_000_000,
+        }))
+        .unwrap();
+
+        assert_eq!(model.manifest.context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn bootstrap_agent_assignments_deserialize_with_configured_model_ids() {
+        let assignment_id = Uuid::from_u128(1);
+        let model_id = Uuid::from_u128(2);
+        let bootstrap: BootstrapManifestResponse = serde_json::from_value(serde_json::json!({
+            "auth": {
+                "user_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "org_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            },
+            "agents": [{
+                "agent_id": assignment_id,
+                "id": assignment_id,
+                "name": "voice-agent",
+                "model_assignments": [{
+                    "capability": "transcribe_audio",
+                    "model_id": model_id,
+                    "assignment_source": "local"
+                }]
+            }],
+            "capability_defaults": [{
+                "capability": "generate_speech",
+                "model_id": model_id
+            }]
+        }))
+        .unwrap();
+
+        let [agent] = bootstrap.agents.as_slice() else {
+            panic!("expected one agent")
+        };
+        let [assignment] = agent.model_assignments.as_slice() else {
+            panic!("expected one model assignment")
+        };
+        assert_eq!(assignment.model_id, model_id);
+        assert_eq!(assignment.capability, "transcribe_audio");
+        let [default] = bootstrap.capability_defaults.as_slice() else {
+            panic!("expected one capability default")
+        };
+        assert_eq!(default.model_id, model_id);
+    }
+
+    #[tokio::test]
+    async fn manifest_event_cache_updates_only_the_target_assignment_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let agent_id = Uuid::from_u128(1);
+        let other_agent_id = Uuid::from_u128(2);
+        atomic_write_json(
+            &cache.manifests_dir,
+            "agents.json",
+            &vec![
+                cached_agent(
+                    agent_id,
+                    "voice-agent",
+                    vec![ModelAssignmentBinding {
+                        capability: "transcribe_audio".into(),
+                        model_id: Uuid::from_u128(3),
+                        assignment_source: "local".into(),
+                    }],
+                ),
+                cached_agent(
+                    other_agent_id,
+                    "other-agent",
+                    vec![ModelAssignmentBinding {
+                        capability: "generate_image".into(),
+                        model_id: Uuid::from_u128(4),
+                        assignment_source: "local".into(),
+                    }],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let assignment_resource = Slug::derive("voice-agent");
+        let assignment_payload = ManifestResourcePayload::new(ModelAssignmentsManifestUpdate {
+            agent_id,
+            assignments: vec![nenjo_events::ModelAssignmentBinding {
+                capability: "transcribe_audio".into(),
+                model_id: Uuid::from_u128(5),
+                assignment_source: "local".into(),
+            }],
+        })
+        .into_value();
+        cache
+            .persist_manifest_event(
+                ResourceType::ModelAssignment,
+                ResourceAction::Updated,
+                Some(agent_id),
+                &assignment_resource,
+                Some(&assignment_payload),
+            )
+            .unwrap();
+
+        let defaults_resource = Slug::derive("organization-defaults");
+        let defaults_payload =
+            ManifestResourcePayload::new(ModelCapabilityDefaultsManifestUpdate {
+                defaults: vec![nenjo_events::ModelCapabilityDefaultBinding {
+                    capability: "generate_speech".into(),
+                    model_id: Uuid::from_u128(6),
+                }],
+            })
+            .into_value();
+        cache
+            .persist_manifest_event(
+                ResourceType::ModelCapabilityDefault,
+                ResourceAction::Updated,
+                None,
+                &defaults_resource,
+                Some(&defaults_payload),
+            )
+            .unwrap();
+
+        let assignments = load_cached_agent_model_assignments(&cache.manifests_dir);
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments.iter().any(|agent| {
+            agent.agent_id == other_agent_id && agent.assignments[0].model_id == Uuid::from_u128(4)
+        }));
+        assert!(assignments.iter().any(|agent| {
+            agent.agent_id == agent_id && agent.assignments[0].model_id == Uuid::from_u128(5)
+        }));
+        let defaults = load_cached_capability_defaults(&cache.manifests_dir);
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].model_id, Uuid::from_u128(6));
+    }
+
+    #[test]
+    fn inline_model_updates_replace_the_canonical_model_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let model_id = Uuid::from_u128(7);
+        atomic_write_json(
+            &cache.manifests_dir,
+            "models.json",
+            &vec![CachedModelManifest {
+                id: model_id,
+                manifest: nenjo::manifest::ModelManifest {
+                    slug: Slug::derive("old-model"),
+                    name: "old-model".into(),
+                    description: None,
+                    model: "old-model-id".into(),
+                    model_provider: "openai-compatible".into(),
+                    temperature: None,
+                    context_window: None,
+                    base_url: Some("http://127.0.0.1:8080/v1".into()),
+                    native_tools: Vec::new(),
+                },
+                capabilities: vec!["chat".into()],
+            }],
+        )
+        .unwrap();
+
+        cache
+            .upsert_model(&CachedModelManifest {
+                id: model_id,
+                manifest: nenjo::manifest::ModelManifest {
+                    slug: Slug::derive("updated-model"),
+                    name: "updated-model".into(),
+                    description: None,
+                    model: "updated-model-id".into(),
+                    model_provider: "openai-compatible".into(),
+                    temperature: None,
+                    context_window: None,
+                    base_url: Some("http://127.0.0.1:11434/v1".into()),
+                    native_tools: Vec::new(),
+                },
+                capabilities: vec!["chat".into(), "transcribe_audio".into()],
+            })
+            .unwrap();
+
+        let runtime = load_cached_model_runtime(&cache.manifests_dir);
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].id, model_id);
+        assert_eq!(runtime[0].slug, Slug::derive("updated-model"));
+        assert_eq!(
+            runtime[0].base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert_eq!(runtime[0].capabilities, ["chat", "transcribe_audio"]);
+
+        cache.remove_model(model_id).unwrap();
+        assert!(load_cached_model_runtime(&cache.manifests_dir).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_cache_drops_legacy_model_sidecars() {
+        let root = tempfile::tempdir().unwrap();
+        let manifests_dir = root.path().join("manifests");
+        fs::create_dir_all(&manifests_dir).unwrap();
+        fs::write(manifests_dir.join("model_runtime.json"), "[]").unwrap();
+        fs::write(manifests_dir.join("model_assignments.json"), "[]").unwrap();
+
+        remove_legacy_model_cache_files(&manifests_dir).unwrap();
+
+        assert!(!manifests_dir.join("model_runtime.json").exists());
+        assert!(!manifests_dir.join("model_assignments.json").exists());
+    }
+
+    #[tokio::test]
+    async fn worker_manifest_store_never_rewrites_canonical_model_or_agent_envelopes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Arc::new(WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        });
+        let model_id = Uuid::from_u128(1);
+        let agent_id = Uuid::from_u128(2);
+        atomic_write_json(
+            &cache.manifests_dir,
+            "models.json",
+            &vec![CachedModelManifest {
+                id: model_id,
+                manifest: nenjo::manifest::ModelManifest {
+                    slug: Slug::derive("speech-model"),
+                    name: "speech model".into(),
+                    description: None,
+                    model: "speech-model".into(),
+                    model_provider: "openai-compatible".into(),
+                    temperature: None,
+                    context_window: None,
+                    base_url: Some("http://127.0.0.1:8080/v1".into()),
+                    native_tools: Vec::new(),
+                },
+                capabilities: vec!["transcribe_audio".into()],
+            }],
+        )
+        .unwrap();
+        atomic_write_json(
+            &cache.manifests_dir,
+            "agents.json",
+            &vec![cached_agent(
+                agent_id,
+                "voice-agent",
+                vec![ModelAssignmentBinding {
+                    capability: "transcribe_audio".into(),
+                    model_id,
+                    assignment_source: "local".into(),
+                }],
+            )],
+        )
+        .unwrap();
+
+        let store = WorkerManifestStore::new(cache.clone(), ManifestRefreshHandle::default());
+        let manifest = store.load_manifest().await.unwrap();
+        store.replace_manifest(&manifest).await.unwrap();
+
+        let models = load_cached_models(&cache.manifests_dir);
+        let [model] = models.as_slice() else {
+            panic!("expected canonical model cache entry")
+        };
+        assert_eq!(model.id, model_id);
+        assert_eq!(model.capabilities, ["transcribe_audio"]);
+        let agents = load_cached_agent_model_assignments(&cache.manifests_dir);
+        let [agent] = agents.as_slice() else {
+            panic!("expected canonical agent cache entry")
+        };
+        assert_eq!(agent.agent_id, agent_id);
+        assert_eq!(agent.assignments[0].model_id, model_id);
+
+        let mut incompatible = manifest;
+        incompatible.models[0].name = "not a canonical update".into();
+        assert!(store.replace_manifest(&incompatible).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_manifest_store_refreshes_provider_after_every_direct_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Arc::new(WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        });
+        let refresher = Arc::new(RecordingManifestRefresher::default());
+        let refresh_handle = ManifestRefreshHandle::default();
+        refresh_handle.bind(refresher.clone()).unwrap();
+        let store = WorkerManifestStore::new(cache.clone(), refresh_handle);
+        let project = nenjo::manifest::ProjectManifest {
+            name: "Live project".into(),
+            slug: Slug::derive("live-project"),
+            description: None,
+            settings: serde_json::json!({}),
+        };
+        let model = nenjo::manifest::ModelManifest {
+            slug: Slug::derive("live-model"),
+            name: "Live model".into(),
+            description: None,
+            model: "live-model".into(),
+            model_provider: "openai-compatible".into(),
+            temperature: None,
+            context_window: None,
+            base_url: None,
+            native_tools: Vec::new(),
+        };
+
+        store
+            .upsert_resource(&ManifestResource::Project(project))
+            .await
+            .unwrap();
+        store
+            .upsert_resource(&ManifestResource::Model(model))
+            .await
+            .unwrap();
+        store
+            .delete_resource(ManifestResourceKind::Project, &Slug::derive("live-project"))
+            .await
+            .unwrap();
+
+        assert_eq!(refresher.refreshes.load(Ordering::SeqCst), 3);
+        assert!(store.load_manifest().await.unwrap().projects.is_empty());
+
+        store
+            .cache_resource(&ManifestResource::Project(
+                nenjo::manifest::ProjectManifest {
+                    name: "Read-through project".into(),
+                    slug: Slug::derive("read-through-project"),
+                    description: None,
+                    settings: serde_json::json!({}),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refresher.refreshes.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            store.load_manifest().await.unwrap().projects[0].slug,
+            Slug::derive("read-through-project")
+        );
+    }
+
+    fn cached_agent(
+        id: Uuid,
+        name: &str,
+        model_assignments: Vec<ModelAssignmentBinding>,
+    ) -> CachedAgentManifest {
+        CachedAgentManifest {
+            id,
+            manifest: nenjo::manifest::AgentManifest {
+                name: name.into(),
+                slug: Slug::derive(name),
+                description: None,
+                prompt_config: PromptConfig::default(),
+                color: None,
+                model: None,
+                domains: Vec::new(),
+                platform_scopes: Vec::new(),
+                mcp_servers: Vec::new(),
+                script_tools: Vec::new(),
+                media: Vec::new(),
+                abilities: Vec::new(),
+                prompt_locked: false,
+                heartbeat: None,
+                source_type: None,
+                metadata: serde_json::json!({}),
+            },
+            model_assignments,
+        }
+    }
 
     #[tokio::test]
     async fn sync_platform_packages_writes_lockfile_and_installs_locked_tree() {

@@ -3,6 +3,7 @@ use nenjo::Manifest;
 use nenjo::Slug;
 use nenjo_events::ResourceType;
 use nenjo_platform::api_client::ApiClient;
+use nenjo_platform::manifest_contract::ModelRecord;
 use tracing::debug;
 
 /// Fetch a single resource from the API and upsert it into the manifest.
@@ -11,7 +12,7 @@ pub(super) async fn apply_upsert(
     client: &ApiClient,
     rt: ResourceType,
     resource: &Slug,
-) -> Result<()> {
+) -> Result<Option<ModelRecord>> {
     macro_rules! upsert {
         ($field:ident, $fetch:ident, $slug:expr) => {{
             match client.$fetch(resource).await? {
@@ -60,11 +61,28 @@ pub(super) async fn apply_upsert(
                 debug!(%rt, %resource, "Resource returned 404, removing");
             }
         },
-        ResourceType::Model => {
-            upsert!(models, fetch_model, |r: &nenjo::manifest::ModelManifest| {
-                r.slug.clone()
-            })
-        }
+        ResourceType::Model => match client.fetch_model_record(resource).await? {
+            Some(record) => {
+                let item = record.to_manifest();
+                let item_slug = item.slug.clone();
+                if let Some(pos) = manifest
+                    .models
+                    .iter()
+                    .position(|model| model.slug == item_slug)
+                {
+                    manifest.models[pos] = item;
+                    debug!(%rt, %item_slug, "Updated existing resource");
+                } else {
+                    manifest.models.push(item);
+                    debug!(%rt, %item_slug, "Added new resource");
+                }
+                return Ok(Some(record));
+            }
+            None => {
+                manifest.models.retain(|model| model.slug != *resource);
+                debug!(%rt, %resource, "Resource returned 404, removing");
+            }
+        },
         ResourceType::Routine => match client.fetch_routine(resource).await? {
             Some(record) => {
                 let item = record.to_manifest();
@@ -178,9 +196,11 @@ pub(super) async fn apply_upsert(
                 nenjo::manifest::domain_slug(&r.path, &r.name)
             }
         ),
-        ResourceType::Document => return Ok(()),
-        ResourceType::KnowledgePack => return Ok(()),
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document
+        | ResourceType::KnowledgePack => return Ok(None),
     }
 
-    Ok(())
+    Ok(None)
 }

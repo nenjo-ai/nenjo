@@ -44,6 +44,7 @@ fn make_model() -> ModelManifest {
         model: "deepseek/deepseek-v4-flash".into(),
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     }

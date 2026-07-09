@@ -29,7 +29,10 @@ pub(in crate::handlers::manifest) fn apply_inline_upsert(
         ResourceType::ContextBlock => apply_context_block_inline(manifest, rt, data),
         ResourceType::McpServer => apply_mcp_server_inline(manifest, rt, data),
         ResourceType::Domain => apply_domain_inline(manifest, rt, data),
-        ResourceType::Document | ResourceType::KnowledgePack => false,
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document
+        | ResourceType::KnowledgePack => false,
     }
 }
 

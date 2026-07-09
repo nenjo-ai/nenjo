@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::native::{
     NativeMediaJob, NativeMediaRequest, NativeMediaResponse, NativeModelToolId,
-    ProviderNativeCapabilities,
+    ProviderMediaCapabilities,
 };
 
 /// A single message in a conversation.
@@ -182,29 +182,29 @@ pub trait ModelProvider: Send + Sync {
         false
     }
 
-    /// Provider-native capabilities outside the chat/tool turn loop.
+    /// Provider media capabilities outside the chat/tool turn loop.
     ///
     /// Examples include direct image generation, async video rendering,
     /// text-to-speech, and speech-to-text endpoints.
-    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
+    fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
         None
     }
 
-    /// Submit a provider-native media operation.
+    /// Submit a provider media operation.
     async fn submit_media(
         &self,
         request: NativeMediaRequest,
     ) -> anyhow::Result<NativeMediaResponse> {
         anyhow::bail!(
-            "provider does not support native media operation {:?}",
+            "provider does not support media operation {:?}",
             request.operation()
         )
     }
 
-    /// Poll an async provider-native media job.
+    /// Poll an async provider media job.
     async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
         let _ = job;
-        anyhow::bail!("provider does not support polling native media jobs")
+        anyhow::bail!("provider does not support polling media jobs")
     }
 
     /// Warm up the HTTP connection pool (TLS handshake, DNS, HTTP/2 setup).

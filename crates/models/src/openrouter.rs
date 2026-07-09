@@ -2,13 +2,19 @@
 //! multiple upstream models with provider-order pinning.
 
 use crate::ToolSpec;
+use crate::native::{
+    MediaInputAsset, NativeMediaRequest, NativeMediaResponse, TranscribeAudioRequest,
+};
+use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
 use reqwest::header::ACCEPT_ENCODING;
 use serde::{Deserialize, Serialize};
 
 const OPENROUTER_MAX_TRANSPORT_ATTEMPTS: u32 = 3;
+const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 pub struct OpenRouterProvider {
     api_key: Option<String>,
@@ -24,7 +30,7 @@ struct NativeChatRequest {
     messages: Vec<NativeMessage>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<NativeToolSpec>>,
+    tools: Option<Vec<ProviderToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,17 +55,28 @@ struct NativeMessage {
 }
 
 #[derive(Debug, Serialize)]
-struct NativeToolSpec {
-    #[serde(rename = "type")]
-    kind: String,
-    function: NativeToolFunctionSpec,
+struct OpenRouterTranscriptionRequest {
+    model: String,
+    messages: Vec<OpenRouterAudioMessage>,
 }
 
 #[derive(Debug, Serialize)]
-struct NativeToolFunctionSpec {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
+struct OpenRouterAudioMessage {
+    role: &'static str,
+    content: Vec<OpenRouterAudioContentPart>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenRouterAudioContentPart {
+    Text { text: String },
+    InputAudio { input_audio: OpenRouterAudioInput },
+}
+
+#[derive(Debug, Serialize)]
+struct OpenRouterAudioInput {
+    data: String,
+    format: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,24 +161,8 @@ impl OpenRouterProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
-        let items = tools?;
-        if items.is_empty() {
-            return None;
-        }
-        Some(
-            items
-                .iter()
-                .map(|tool| NativeToolSpec {
-                    kind: "function".to_string(),
-                    function: NativeToolFunctionSpec {
-                        name: crate::sanitize_tool_name(&tool.name),
-                        description: tool.description.clone(),
-                        parameters: tool.parameters.clone(),
-                    },
-                })
-                .collect(),
-        )
+    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
+        convert_tools(tools, crate::sanitize_tool_name).filter(|items| !items.is_empty())
     }
 
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
@@ -261,6 +262,147 @@ impl OpenRouterProvider {
                 .map(|endpoint| endpoint.provider.clone())
         })
     }
+
+    fn transcription_request(
+        request: &TranscribeAudioRequest,
+    ) -> anyhow::Result<OpenRouterTranscriptionRequest> {
+        let prompt = request
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OpenRouter transcription requires a prompt"))?;
+
+        Ok(OpenRouterTranscriptionRequest {
+            model: request.model.clone(),
+            messages: vec![OpenRouterAudioMessage {
+                role: "user",
+                content: vec![
+                    OpenRouterAudioContentPart::Text {
+                        text: prompt.to_string(),
+                    },
+                    OpenRouterAudioContentPart::InputAudio {
+                        input_audio: openrouter_audio_input(&request.audio)?,
+                    },
+                ],
+            }],
+        })
+    }
+
+    async fn transcribe_audio(
+        &self,
+        request: TranscribeAudioRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("OpenRouter API key not set. Set OPENROUTER_API_KEY env var.")
+        })?;
+        let native_request = Self::transcription_request(&request)?;
+
+        let response = self
+            .client
+            .post(OPENROUTER_CHAT_COMPLETIONS_URL)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("HTTP-Referer", "https://github.com/nenjo-ai/nenjo")
+            .header("X-Title", "Nenjo")
+            .header(ACCEPT_ENCODING, "identity")
+            .json(&native_request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(crate::api_error("OpenRouter", response).await);
+        }
+
+        let body_text = response.text().await?;
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+            && let Some(error) = value.get("error")
+        {
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            anyhow::bail!("OpenRouter returned an error in a 200 response: {message}");
+        }
+
+        let native_response: NativeChatResponse =
+            serde_json::from_str(&body_text).map_err(|error| {
+                anyhow::anyhow!(
+                    "OpenRouter transcription response decode error: {error}\\nBody: {}",
+                    &body_text[..body_text.len().min(500)]
+                )
+            })?;
+        let text = native_response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OpenRouter transcription returned no text"))?;
+
+        Ok(NativeMediaResponse::Transcript {
+            text,
+            language: request.language,
+            duration_seconds: None,
+            segments: Vec::new(),
+            metadata: Some(serde_json::json!({
+                "transport": "chat_completions",
+                "input_modality": "audio",
+            })),
+        })
+    }
+}
+
+fn openrouter_audio_input(asset: &MediaInputAsset) -> anyhow::Result<OpenRouterAudioInput> {
+    let MediaInputAsset::DataUri { data_uri } = asset else {
+        anyhow::bail!(
+            "OpenRouter audio transcription requires a base64 data_uri input; URLs and provider file ids are not supported"
+        );
+    };
+    let (metadata, encoded) = data_uri
+        .split_once(',')
+        .ok_or_else(|| anyhow::anyhow!("audio data URI must contain metadata and base64 data"))?;
+    let metadata = metadata
+        .strip_prefix("data:")
+        .ok_or_else(|| anyhow::anyhow!("audio input must be a data URI"))?;
+    let mut metadata_parts = metadata.split(';');
+    let mime_type = metadata_parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_ascii_lowercase();
+    if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        anyhow::bail!("audio data URI must be base64 encoded");
+    }
+
+    let format = match mime_type.as_str() {
+        "audio/wav" | "audio/wave" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/webm" | "video/webm" => "webm",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "video/mp4" => "m4a",
+        "audio/aac" => "aac",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        "audio/aiff" | "audio/x-aiff" => "aiff",
+        "audio/pcm" | "audio/l16" => "pcm16",
+        other => anyhow::bail!("audio data URI MIME type '{other}' is not supported"),
+    };
+    let encoded = encoded.trim();
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(encoded))
+        .or_else(|_| general_purpose::URL_SAFE.decode(encoded))
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(encoded))
+        .map_err(|error| anyhow::anyhow!("invalid base64 audio data URI: {error}"))?;
+    if bytes.is_empty() {
+        anyhow::bail!("audio data URI cannot be empty");
+    }
+
+    Ok(OpenRouterAudioInput {
+        data: encoded.to_string(),
+        format: format.to_string(),
+    })
 }
 
 #[async_trait]
@@ -504,11 +646,25 @@ impl ModelProvider for OpenRouterProvider {
                 || m.contains("/gpt-4.5")
                 || m.contains("/gpt-4.1"))
     }
+
+    async fn submit_media(
+        &self,
+        request: NativeMediaRequest,
+    ) -> anyhow::Result<NativeMediaResponse> {
+        match request {
+            NativeMediaRequest::TranscribeAudio(request) => self.transcribe_audio(request).await,
+            request => anyhow::bail!(
+                "OpenRouter does not implement media operation {}",
+                request.operation()
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::{MediaInputAsset, TranscribeAudioRequest};
     use crate::traits::{ChatMessage, ChatRequest, ModelProvider};
 
     #[test]
@@ -521,6 +677,89 @@ mod tests {
     fn creates_without_key() {
         let provider = OpenRouterProvider::new(None);
         assert!(provider.api_key.is_none());
+    }
+
+    #[test]
+    fn transcription_request_uses_openrouter_audio_chat_shape() {
+        let request = OpenRouterProvider::transcription_request(&TranscribeAudioRequest {
+            model: "google/gemini-3.5-flash".to_string(),
+            audio: MediaInputAsset::DataUri {
+                data_uri: "data:audio/webm;base64,YXVkaW8=".to_string(),
+            },
+            language: Some("en".to_string()),
+            prompt: Some("Transcribe the attached English audio faithfully.".to_string()),
+            provider_options: serde_json::Value::Null,
+        })
+        .expect("valid OpenRouter transcription request");
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(value["model"], "google/gemini-3.5-flash");
+        assert_eq!(value["messages"][0]["role"], "user");
+        assert_eq!(value["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            value["messages"][0]["content"][0]["text"],
+            "Transcribe the attached English audio faithfully."
+        );
+        assert_eq!(
+            value["messages"][0]["content"][1],
+            serde_json::json!({
+                "type": "input_audio",
+                "input_audio": {"data": "YXVkaW8=", "format": "webm"},
+            })
+        );
+    }
+
+    #[test]
+    fn transcription_request_rejects_non_audio_data() {
+        let error = OpenRouterProvider::transcription_request(&TranscribeAudioRequest {
+            model: "google/gemini-3.5-flash".to_string(),
+            audio: MediaInputAsset::DataUri {
+                data_uri: "data:text/plain;base64,YXVkaW8=".to_string(),
+            },
+            language: None,
+            prompt: Some("Transcribe the attached audio.".to_string()),
+            provider_options: serde_json::Value::Null,
+        })
+        .expect_err("non-audio content must be rejected");
+
+        assert!(error.to_string().contains("MIME type 'text/plain'"));
+    }
+
+    #[tokio::test]
+    async fn transcribe_media_dispatches_to_openrouter_adapter() {
+        let provider = OpenRouterProvider::new(None);
+        let error = provider
+            .submit_media(NativeMediaRequest::TranscribeAudio(
+                TranscribeAudioRequest {
+                    model: "google/gemini-3.5-flash".to_string(),
+                    audio: MediaInputAsset::DataUri {
+                        data_uri: "data:audio/webm;base64,YXVkaW8=".to_string(),
+                    },
+                    language: None,
+                    prompt: Some("Transcribe the attached audio.".to_string()),
+                    provider_options: serde_json::Value::Null,
+                },
+            ))
+            .await
+            .expect_err("the adapter must require an OpenRouter key");
+
+        assert!(error.to_string().contains("OpenRouter API key not set"));
+    }
+
+    #[test]
+    fn transcription_request_requires_caller_supplied_prompt() {
+        let error = OpenRouterProvider::transcription_request(&TranscribeAudioRequest {
+            model: "google/gemini-3.5-flash".to_string(),
+            audio: MediaInputAsset::DataUri {
+                data_uri: "data:audio/webm;base64,YXVkaW8=".to_string(),
+            },
+            language: None,
+            prompt: None,
+            provider_options: serde_json::Value::Null,
+        })
+        .expect_err("OpenRouter must not inject a transcription instruction");
+
+        assert!(error.to_string().contains("requires a prompt"));
     }
 
     #[tokio::test]

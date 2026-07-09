@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::types::ActiveAgentHeartbeatState;
 use crate::SensitiveContentKind;
-use crate::manifest_contract::ProjectDetailRecord;
+use crate::manifest_contract::{ModelRecord, ProjectDetailRecord};
 use async_trait::async_trait;
 use nenjo_events::EncryptedPayload;
 use reqwest::{Client, StatusCode, header};
@@ -162,6 +162,12 @@ impl ApiClient {
     // -----------------------------------------------------------------------
 
     pub async fn fetch_model(&self, resource: &Slug) -> Result<Option<ModelManifest>> {
+        self.fetch_resource(&format!("/api/v1/models/{resource}"))
+            .await
+    }
+
+    /// Fetch a configured model with platform-only runtime metadata.
+    pub async fn fetch_model_record(&self, resource: &Slug) -> Result<Option<ModelRecord>> {
         self.fetch_resource(&format!("/api/v1/models/{resource}"))
             .await
     }

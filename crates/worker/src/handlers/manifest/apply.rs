@@ -1,7 +1,7 @@
 use anyhow::Result;
 use nenjo::manifest::{HasManifestSlug, context_block_slug, domain_slug};
 use nenjo::{Manifest, Slug};
-use nenjo_events::{EncryptedPayload, ResourceAction, ResourceType};
+use nenjo_events::{EncryptedPayload, ManifestResourcePayload, ResourceAction, ResourceType};
 use nenjo_platform::api_client::ApiClient;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -13,6 +13,8 @@ use super::knowledge::{document_edges_source, parse_knowledge_document_payload};
 use super::payload::parse_decrypted_manifest_payload;
 use super::services::{ManifestStore, McpRuntime};
 use nenjo_platform::PlatformResourceKind;
+
+use crate::bootstrap::WorkerManifestCache;
 
 #[derive(Debug, Clone)]
 pub(super) struct ManifestChange {
@@ -78,6 +80,7 @@ impl ManifestPayloadState {
 pub(super) async fn apply_manifest_change<StoreRt, McpRt>(
     client: &ApiClient,
     store: &StoreRt,
+    cache: Option<&WorkerManifestCache>,
     mcp: Option<&McpRt>,
     current: &Manifest,
     change: ManifestChange,
@@ -123,6 +126,34 @@ where
         payload_state = payload_state.as_str(),
         "Manifest resource change details"
     );
+
+    if resource_type == ResourceType::ModelAssignment {
+        persist_model_cache_event(
+            cache,
+            resource_type,
+            action,
+            resource_id,
+            &resource,
+            payload.as_ref(),
+        );
+        return Ok(ManifestChangeResult {
+            manifest: current.clone(),
+        });
+    }
+
+    if resource_type == ResourceType::ModelCapabilityDefault {
+        persist_model_cache_event(
+            cache,
+            resource_type,
+            action,
+            resource_id,
+            &resource,
+            payload.as_ref(),
+        );
+        return Ok(ManifestChangeResult {
+            manifest: current.clone(),
+        });
+    }
 
     if let Some(kind) = platform_resource_kind(resource_type) {
         let sidecar_result = if action == ResourceAction::Deleted {
@@ -180,6 +211,7 @@ where
     let mut manifest = current.clone();
     let mut source = ManifestApplySource::Ignored;
     let mut applied_inline = false;
+    let mut fetched_payload = None;
 
     if action == ResourceAction::Deleted {
         apply_delete(&mut manifest, resource_type, &resource, resource_id);
@@ -225,22 +257,27 @@ where
             ) {
                 source = ManifestApplySource::Ignored;
             } else {
-                if let Err(e) = apply_upsert(&mut manifest, client, resource_type, &resource).await
-                {
-                    warn!(
-                        error = %e,
-                        %resource_type,
-                        %resource,
-                        resource_id = ?resource_id,
-                        "Incremental fetch failed, falling back to full refresh"
-                    );
-                    manifest = store.full_refresh(client).await?;
-                    if let Some(mcp) = mcp {
-                        mcp.reconcile_mcp(&manifest.mcp_servers).await;
+                match apply_upsert(&mut manifest, client, resource_type, &resource).await {
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            %resource_type,
+                            %resource,
+                            resource_id = ?resource_id,
+                            "Incremental fetch failed, falling back to full refresh"
+                        );
+                        manifest = store.full_refresh(client).await?;
+                        if let Some(mcp) = mcp {
+                            mcp.reconcile_mcp(&manifest.mcp_servers).await;
+                        }
+                        source = ManifestApplySource::FullRefresh;
                     }
-                    source = ManifestApplySource::FullRefresh;
-                } else {
-                    source = ManifestApplySource::FetchedResource;
+                    Ok(fetched_model) => {
+                        fetched_payload = fetched_model
+                            .map(ManifestResourcePayload::new)
+                            .map(ManifestResourcePayload::into_value);
+                        source = ManifestApplySource::FetchedResource;
+                    }
                 }
             }
         }
@@ -284,7 +321,19 @@ where
             }
         }
         ResourceType::Project => {}
+        ResourceType::ModelAssignment | ResourceType::ModelCapabilityDefault => {}
         _ => {}
+    }
+
+    if resource_type == ResourceType::Model {
+        persist_model_cache_event(
+            cache,
+            resource_type,
+            action,
+            resource_id,
+            &resource,
+            cache_event_payload(payload.as_ref(), fetched_payload.as_ref()),
+        );
     }
 
     let persist_result = if action == ResourceAction::Deleted {
@@ -294,13 +343,48 @@ where
     } else {
         store.persist_resource(&manifest, resource_type).await
     };
-
-    if let Err(e) = persist_result {
-        warn!(error = %e, rt = %resource_type, "Failed to persist resource cache");
+    if let Err(error) = persist_result {
+        warn!(%error, rt = %resource_type, "Failed to persist resource cache");
     }
 
     debug!(?source, %resource_type, %resource, resource_id = ?resource_id, "Manifest change applied");
     Ok(ManifestChangeResult { manifest })
+}
+
+fn cache_event_payload<'a>(
+    event_payload: Option<&'a serde_json::Value>,
+    fetched_payload: Option<&'a serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    fetched_payload.or_else(|| {
+        event_payload.map(|payload| {
+            parse_decrypted_manifest_payload(payload)
+                .and_then(|decrypted| decrypted.inline_payload)
+                .unwrap_or(payload)
+        })
+    })
+}
+
+fn persist_model_cache_event(
+    cache: Option<&WorkerManifestCache>,
+    resource_type: ResourceType,
+    action: ResourceAction,
+    resource_id: Option<Uuid>,
+    resource: &Slug,
+    payload: Option<&serde_json::Value>,
+) {
+    let Some(cache) = cache else {
+        return;
+    };
+    if let Err(error) =
+        cache.persist_manifest_event(resource_type, action, resource_id, resource, payload)
+    {
+        warn!(
+            %error,
+            %resource_type,
+            %resource,
+            "Failed to persist model bootstrap cache event"
+        );
+    }
 }
 
 fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourceKind> {
@@ -315,7 +399,10 @@ fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourc
         ResourceType::Model => Some(PlatformResourceKind::Model),
         ResourceType::Council => Some(PlatformResourceKind::Council),
         ResourceType::McpServer => Some(PlatformResourceKind::McpServer),
-        ResourceType::Document | ResourceType::KnowledgePack => None,
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document
+        | ResourceType::KnowledgePack => None,
     }
 }
 
@@ -493,6 +580,9 @@ fn resource_id_from_manifest(
             .iter()
             .find(|item| domain_slug(&item.path, &item.name) == *resource)
             .map(|_| crate::resource_resolver::stable_resource_id("domain", resource)),
-        ResourceType::Document | ResourceType::KnowledgePack => None,
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document
+        | ResourceType::KnowledgePack => None,
     }
 }
