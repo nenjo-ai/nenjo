@@ -199,6 +199,8 @@ fn agent(_id: Uuid, name: &str, prompt: &str) -> AgentManifest {
         abilities: Vec::new(),
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     }
 }
 

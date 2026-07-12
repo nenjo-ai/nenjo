@@ -107,10 +107,32 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest>;
 
     /// Find an ability manifest by exact assigned ability name.
+    ///
+    /// Default index uses highest-semver when multiple package versions coexist.
     fn find_ability(&self, name: &str) -> Option<&AbilityManifest>;
+
+    /// Find an ability under a multi-version package content policy.
+    fn find_ability_with_policy(
+        &self,
+        name: &str,
+        policy: &crate::package_resolve::PkgResolvePolicy,
+    ) -> Option<&AbilityManifest> {
+        let _ = policy;
+        self.find_ability(name)
+    }
 
     /// Find a domain manifest by slug, name, or command selector.
     fn find_domain(&self, selector: &str) -> Option<&DomainManifest>;
+
+    /// Find a domain under a multi-version package content policy.
+    fn find_domain_with_policy(
+        &self,
+        selector: &str,
+        policy: &crate::package_resolve::PkgResolvePolicy,
+    ) -> Option<&DomainManifest> {
+        let _ = policy;
+        self.find_domain(selector)
+    }
 
     /// Find a project manifest by slug.
     fn find_project(&self, slug: &Slug) -> Option<&ProjectManifest>;
@@ -127,8 +149,17 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
         resolve_skill_hooks(&manifest.hooks, skill)
     }
 
-    /// Create provider-level knowledge tools.
+    /// Create provider-level knowledge tools (highest-semver pack selection).
     fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>>;
+
+    /// Create knowledge tools that resolve multi-version packs under `policy`.
+    fn create_knowledge_tools_with_policy(
+        &self,
+        policy: crate::package_resolve::PkgResolvePolicy,
+    ) -> Vec<Arc<dyn Tool>> {
+        let _ = policy;
+        self.create_knowledge_tools()
+    }
 
     /// Build prompt context for an agent manifest.
     fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext;

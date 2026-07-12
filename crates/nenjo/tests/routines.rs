@@ -489,6 +489,8 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     }
 }
 

@@ -1794,6 +1794,8 @@ mod tests {
                 abilities: Vec::new(),
                 prompt_locked: false,
                 heartbeat: None,
+                source_type: None,
+                metadata: serde_json::json!({}),
             }],
             councils: Vec::new(),
             domains: Vec::new(),

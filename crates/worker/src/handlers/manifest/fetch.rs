@@ -125,7 +125,7 @@ pub(super) async fn apply_upsert(
         ResourceType::Ability => upsert!(
             abilities,
             fetch_ability,
-            |r: &nenjo::manifest::AbilityManifest| { Slug::derive(&r.name) }
+            |r: &nenjo::manifest::AbilityManifest| { r.slug() }
         ),
         ResourceType::Command => {
             anyhow::bail!("command incremental fetch is not supported")

@@ -179,6 +179,8 @@ fn test_manifest() -> Manifest {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     Manifest {
@@ -569,6 +571,8 @@ fn manifest_with_abilities_and_domains(
         abilities: agent_abilities,
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     Manifest {

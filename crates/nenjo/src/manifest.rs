@@ -840,6 +840,14 @@ pub struct AgentManifest {
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     pub heartbeat: Option<AgentHeartbeatManifest>,
+    /// `native` or `package` (when known).
+    #[serde(default)]
+    #[builder(default, setter(strip_option))]
+    pub source_type: Option<String>,
+    /// Install / package metadata (includes `resolved_dependencies` for package agents).
+    #[serde(default)]
+    #[builder(default)]
+    pub metadata: serde_json::Value,
 }
 
 impl AgentManifest {
@@ -980,7 +988,7 @@ fn default_ability_source_type() -> String {
 
 impl HasManifestSlug for AbilityManifest {
     fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
+        ability_slug(self.path.as_deref(), &self.name)
     }
 }
 
@@ -988,6 +996,20 @@ impl AbilityManifest {
     /// Create a builder for an ability manifest.
     pub fn builder() -> AbilityManifestBuilder {
         AbilityManifestBuilder::default()
+    }
+
+    /// Stable path-aware identity for multi-version coexistence.
+    pub fn slug(&self) -> Slug {
+        ability_slug(self.path.as_deref(), &self.name)
+    }
+}
+
+/// Ability identity for manifest merge: path+name when path is set (package
+/// multi-version), otherwise name-only (native abilities).
+pub fn ability_slug(path: Option<&str>, name: &str) -> Slug {
+    match path {
+        Some(path) if !path.trim().is_empty() => domain_slug(path, name),
+        _ => Slug::derive(name),
     }
 }
 

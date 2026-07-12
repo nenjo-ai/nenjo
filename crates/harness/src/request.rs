@@ -385,9 +385,10 @@ mod tests {
         assert_eq!(generated.agent.as_str(), "code_reviewer");
 
         let session_id = Uuid::new_v4();
+        // Whitespace → kebab-case (`Slug::derive`).
         let explicit = ChatRequest::new("Code Reviewer", "review this").with_session(session_id);
         assert_eq!(explicit.session_id, session_id);
-        assert_eq!(explicit.agent.as_str(), "code_reviewer");
+        assert_eq!(explicit.agent.as_str(), "code-reviewer");
     }
 
     #[test]
@@ -397,9 +398,10 @@ mod tests {
         assert_eq!(generated.project.as_str(), "demo_project");
 
         let task_id = Uuid::new_v4();
+        // Whitespace → kebab-case (`Slug::derive`).
         let explicit =
             TaskRequest::new("Demo Project", "Title", "Description").with_task_id(task_id);
         assert_eq!(explicit.task_id, task_id);
-        assert_eq!(explicit.project.as_str(), "demo_project");
+        assert_eq!(explicit.project.as_str(), "demo-project");
     }
 }

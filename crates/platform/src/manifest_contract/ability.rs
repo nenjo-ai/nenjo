@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
-use nenjo::manifest::{AbilityManifest, AbilityPromptConfig};
+use nenjo::manifest::{AbilityManifest, AbilityPromptConfig, ability_slug};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -60,8 +60,16 @@ pub struct AbilityPromptRecord {
 }
 
 impl AbilityRecord {
+    /// Path-aware ability identity matching DB `nenjo_path_resource_slug` and
+    /// runtime [`ability_slug`]. Name-only when path is empty (native abilities).
+    pub fn slug_for_path_name(path: &str, name: &str) -> String {
+        let path = path.trim();
+        ability_slug(if path.is_empty() { None } else { Some(path) }, name).into_string()
+    }
+
+    /// Name-only slug (native abilities / legacy callers).
     pub fn slug_for_name(name: &str) -> String {
-        Slug::derive(name).into_string()
+        Self::slug_for_path_name("", name)
     }
 
     pub fn to_manifest(&self, prompt_config: AbilityPromptConfig) -> AbilityManifest {
@@ -120,5 +128,27 @@ impl PlatformRecord for AbilityRecord {
 
     fn slug(&self) -> &str {
         &self.slug
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_for_path_name_matches_runtime_ability_slug() {
+        assert_eq!(
+            AbilityRecord::slug_for_path_name("", "code_review"),
+            ability_slug(None, "code_review").into_string()
+        );
+        assert_eq!(
+            AbilityRecord::slug_for_path_name("pkg/nenjo_ai/abilities/v1_0_0", "code_review"),
+            ability_slug(Some("pkg/nenjo_ai/abilities/v1_0_0"), "code_review").into_string()
+        );
+        // Multi-version packages get distinct slugs for the same ability name.
+        assert_ne!(
+            AbilityRecord::slug_for_path_name("pkg/acme/v1_0_0/abilities", "review"),
+            AbilityRecord::slug_for_path_name("pkg/acme/v1_0_1/abilities", "review")
+        );
     }
 }

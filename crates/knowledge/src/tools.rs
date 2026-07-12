@@ -238,6 +238,14 @@ impl KnowledgePackEntry {
     pub fn writable(&self) -> bool {
         self.writable
     }
+
+    pub fn display_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn display_description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
 }
 
 #[derive(Clone, Default)]

@@ -175,7 +175,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .provider_runtime
             .as_ref()
             .filter(|_| instance.runtime.execution_mode.can_use_abilities())
-            .map(|provider| resolve_active_abilities(provider, &instance.manifest.abilities, None))
+            .map(|provider| resolve_active_abilities(provider, &instance.manifest, None))
             .filter(|abilities| !abilities.is_empty())
         {
             let base_instance = Arc::new(instance.clone());
@@ -279,8 +279,13 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .ok_or_else(|| {
                 super::error::AgentError::MissingManifest(self.instance.name().into())
             })?;
+        let domain_policy = crate::package_resolve::policy_from_agent_metadata(
+            self.instance.manifest.source_type.as_deref(),
+            Some(&self.instance.manifest.metadata),
+        );
         let domain = provider
-            .find_domain(domain_name)
+            .find_domain_with_policy(domain_name, &domain_policy)
+            .or_else(|| provider.find_domain(domain_name))
             .filter(|domain| domain_is_assigned(&self.instance.manifest.domains, domain))
             .with_context(|| {
                 let available: Vec<&str> = self
@@ -288,7 +293,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                     .manifest
                     .domains
                     .iter()
-                    .filter_map(|domain_slug| provider.find_domain(domain_slug.as_str()))
+                    .filter_map(|domain_slug| {
+                        provider
+                            .find_domain_with_policy(domain_slug.as_str(), &domain_policy)
+                            .or_else(|| provider.find_domain(domain_slug.as_str()))
+                    })
                     .map(|domain| domain.name.as_str())
                     .collect();
                 format!("domain '{domain_name}' not found. Available: {available:?}")
@@ -313,11 +322,8 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             }
         }
 
-        let active_abilities = resolve_active_abilities(
-            provider,
-            &instance.manifest.abilities,
-            Some(&session_manifest),
-        );
+        let active_abilities =
+            resolve_active_abilities(provider, &instance.manifest, Some(&session_manifest));
 
         // Rebuild ability broker tools so the visible set matches the
         // effective domain-expanded ability assignments.
@@ -649,22 +655,31 @@ fn domain_is_assigned(assigned_domains: &[Slug], domain: &DomainManifest) -> boo
 
 fn resolve_active_abilities<P: ProviderRuntime>(
     provider: &P,
-    agent_abilities: &[String],
+    agent: &crate::manifest::AgentManifest,
     active_domain: Option<&DomainManifest>,
 ) -> Vec<AbilityManifest> {
-    let mut abilities = agent_abilities.to_vec();
+    let policy = crate::package_resolve::policy_from_agent_metadata(
+        agent.source_type.as_deref(),
+        Some(&agent.metadata),
+    );
+    let mut ability_names = agent.abilities.clone();
 
     if let Some(domain) = active_domain {
         for ability_name in &domain.abilities {
-            if !abilities.contains(ability_name) {
-                abilities.push(ability_name.clone());
+            if !ability_names.contains(ability_name) {
+                ability_names.push(ability_name.clone());
             }
         }
     }
 
-    abilities
+    ability_names
         .into_iter()
-        .filter_map(|ability_name| provider.find_ability(&ability_name).cloned())
+        .filter_map(|ability_name| {
+            provider
+                .find_ability_with_policy(&ability_name, &policy)
+                .or_else(|| provider.find_ability(&ability_name))
+                .cloned()
+        })
         .collect()
 }
 
