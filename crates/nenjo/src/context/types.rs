@@ -363,6 +363,26 @@ pub struct RenderContextBlock {
     pub name: String,
     pub path: String,
     pub template: String,
+    /// Owning package name when known (e.g. `@nenjo-ai/context`).
+    pub package_name: Option<String>,
+    /// Package version when known (e.g. `1.0.4`).
+    pub package_version: Option<String>,
+}
+
+impl RenderContextBlock {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        template: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            template: template.into(),
+            package_name: None,
+            package_version: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

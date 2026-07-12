@@ -25,6 +25,7 @@ pub mod hooks;
 pub mod input;
 pub mod manifest;
 pub mod memory;
+pub mod package_resolve;
 pub mod provider;
 pub mod repo_manifest;
 pub mod routines;
@@ -55,6 +56,11 @@ pub use manifest::{
     ManifestResourceKind,
     local::LocalManifestStore,
     store::{ManifestReader, ManifestWriter},
+};
+pub use package_resolve::{
+    PkgResolvePolicy, VersionedCandidate, logical_dotted_key, logical_path, pick_version_winner,
+    policy_from_agent_metadata, prefer_highest_semver, resolve_all_logical_winners,
+    resolve_logical_key,
 };
 pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,

@@ -1607,6 +1607,8 @@ mod tests {
                 abilities: vec![],
                 prompt_locked: false,
                 heartbeat: None,
+                source_type: None,
+                metadata: serde_json::json!({}),
             },
             model_manifest: crate::manifest::ModelManifest {
                 name: "mock".into(),
@@ -1774,11 +1776,15 @@ mod tests {
                 name: "methodology".into(),
                 path: "pkg/nenjo/core".into(),
                 template: "<methodology>{{ agent.name }}</methodology>".into(),
+                package_name: None,
+                package_version: None,
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
                 path: "pkg/nenjo/core".into(),
                 template: "<tool_usage>{{ agent.name }}</tool_usage>".into(),
+                package_name: None,
+                package_version: None,
             },
         ]);
         let ability = AbilityManifest {

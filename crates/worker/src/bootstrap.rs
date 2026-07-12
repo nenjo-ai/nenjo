@@ -229,6 +229,10 @@ struct BootstrapAgentManifest {
     #[serde(default)]
     prompt_locked: bool,
     #[serde(default)]
+    source_type: Option<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    #[serde(default)]
     heartbeat: Option<nenjo::manifest::AgentHeartbeatManifest>,
     #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
@@ -561,6 +565,8 @@ async fn hydrate_bootstrap_manifest(
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
             heartbeat: agent.heartbeat,
+            source_type: agent.source_type,
+            metadata: agent.metadata,
         });
     }
 

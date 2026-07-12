@@ -452,13 +452,18 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             "Selected task template"
         );
 
-        // 7. Render all three prompts with the same vars
-        let system = self
-            .prompt
-            .renderer
-            .render_template(&prompt_config.system_prompt, &vars);
-        let developer = self.prompt.renderer.render_template(&developer, &vars);
-        let user_message = self.prompt.renderer.render_template(task_template, &vars);
+        // 7. Render all three prompts with the same vars.
+        // Multi-version package content resolves under this agent's policy.
+        let renderer =
+            self.prompt
+                .renderer
+                .with_policy(crate::package_resolve::policy_from_agent_metadata(
+                    self.manifest.source_type.as_deref(),
+                    Some(&self.manifest.metadata),
+                ));
+        let system = renderer.render_template(&prompt_config.system_prompt, &vars);
+        let developer = renderer.render_template(&developer, &vars);
+        let user_message = renderer.render_template(task_template, &vars);
 
         Ok(BuiltPrompts {
             system,

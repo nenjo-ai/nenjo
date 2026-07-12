@@ -334,7 +334,11 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                     },
                 )
                 .await;
-            provider_tools.extend(provider.create_knowledge_tools());
+            let knowledge_policy = crate::package_resolve::policy_from_agent_metadata(
+                agent.source_type.as_deref(),
+                Some(&agent.metadata),
+            );
+            provider_tools.extend(provider.create_knowledge_tools_with_policy(knowledge_policy));
             provider_tools.extend(self.tools);
             self.tools = provider_tools;
         }

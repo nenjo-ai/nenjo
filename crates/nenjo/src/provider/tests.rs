@@ -78,6 +78,8 @@ fn test_manifest() -> Manifest {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
     Manifest {
         agents: vec![agent],
@@ -958,6 +960,8 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
     let updated_agent = AgentManifest {
         name: "agent-new".into(),
@@ -977,6 +981,8 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
     let routine = RoutineManifest {
         name: "routine".into(),
@@ -1042,5 +1048,217 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
     assert_eq!(
         updated_runner.provider().manifest().agents[0].name,
         "agent-new"
+    );
+}
+
+#[tokio::test]
+async fn multi_version_abilities_coexist_and_resolve_under_policy() {
+    use crate::package_resolve::PkgResolvePolicy;
+    use std::collections::BTreeMap;
+
+    let mut manifest = test_manifest();
+    let old = AbilityManifest {
+        name: "code_review".into(),
+        path: Some("pkg/nenjo_ai/abilities/v1_0_0".into()),
+        description: Some("old".into()),
+        activation_condition: "review".into(),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: "old prompt".into(),
+        },
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        media: vec![],
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::json!({
+            "package": { "name": "@nenjo-ai/abilities", "version": "1.0.0" }
+        }),
+    };
+    let new = AbilityManifest {
+        name: "code_review".into(),
+        path: Some("pkg/nenjo_ai/abilities/v1_0_1".into()),
+        description: Some("new".into()),
+        activation_condition: "review".into(),
+        prompt_config: AbilityPromptConfig {
+            developer_prompt: "new prompt".into(),
+        },
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![],
+        media: vec![],
+        source_type: "package".into(),
+        read_only: true,
+        metadata: serde_json::json!({
+            "package": { "name": "@nenjo-ai/abilities", "version": "1.0.1" }
+        }),
+    };
+    // Path-based slugs allow both versions to coexist.
+    assert_ne!(old.slug(), new.slug());
+    manifest.abilities.push(old);
+    manifest.abilities.push(new);
+    assert_eq!(manifest.abilities.len(), 2);
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    // Default lookup prefers highest semver.
+    assert_eq!(
+        provider
+            .find_ability("code_review")
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("new")
+    );
+
+    let mut lock = BTreeMap::new();
+    lock.insert("abilities".to_string(), "1.0.0".to_string());
+    let policy = PkgResolvePolicy::DependencyLock(lock);
+    assert_eq!(
+        provider
+            .find_ability_with_policy("code_review", &policy)
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("old")
+    );
+}
+
+#[tokio::test]
+async fn multi_version_knowledge_packs_resolve_under_policy() {
+    use crate::package_resolve::PkgResolvePolicy;
+    use std::collections::BTreeMap;
+
+    fn write_pack(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let docs_dir = dir.join("docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("intro.md"), body).unwrap();
+        let manifest_path = dir.join("manifest.yaml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema: nenjo.knowledge.v1
+manifest:
+  pack_id: nenjo.core
+  selector: pkg:nenjo_ai.knowledge.core
+  version: 0.1.0
+  docs:
+    - selector: intro
+      source_path: docs/intro.md
+      title: Intro
+      summary: Intro document.
+      kind: note
+      tags: []
+      related: []
+"#,
+        )
+        .unwrap();
+        manifest_path
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let v100 = write_pack(&root.path().join("v1_0_0"), "content from 1.0.0");
+    let v101 = write_pack(&root.path().join("v1_0_1"), "content from 1.0.1");
+
+    let mut manifest = test_manifest();
+    for (version, path) in [("1.0.0", &v100), ("1.0.1", &v101)] {
+        manifest
+            .knowledge_packs
+            .push(ProviderKnowledgePackManifest {
+                slug: crate::Slug::derive(format!("core-v{}", version.replace('.', "_"))),
+                name: "Core".into(),
+                description: Some(format!("v{version}")),
+                source_type: KnowledgePackSource::Package,
+                selector: "pkg:nenjo_ai.knowledge.core".into(),
+                version: Some(version.into()),
+                root_uri: format!("pkg://core@{version}/"),
+                root_path: Some(path.clone()),
+                read_only: true,
+                metadata: serde_json::json!({
+                    "package": { "name": "@nenjo-ai/knowledge", "version": version }
+                }),
+            });
+    }
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    // Highest-semver tools: list shows one logical pack.
+    let tools = provider.create_knowledge_tools();
+    let list = tools
+        .iter()
+        .find(|t| t.name() == "list_knowledge_packs")
+        .unwrap();
+    let packs: Vec<serde_json::Value> =
+        serde_json::from_str(&list.execute(serde_json::json!({})).await.unwrap().output).unwrap();
+    let matching: Vec<_> = packs
+        .iter()
+        .filter(|p| p["selector"] == "pkg:nenjo_ai.knowledge.core")
+        .collect();
+    assert_eq!(matching.len(), 1, "list should dedupe logical selector");
+
+    // Lock policy selects older pack content.
+    let mut lock = BTreeMap::new();
+    lock.insert("knowledge".to_string(), "1.0.0".to_string());
+    let lock_tools =
+        provider.create_knowledge_tools_with_policy(PkgResolvePolicy::DependencyLock(lock));
+    let read = lock_tools
+        .iter()
+        .find(|t| t.name() == "read_knowledge_doc")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(
+        &read
+            .execute(serde_json::json!({
+                "pack": "pkg:nenjo_ai.knowledge.core",
+                "selector": "intro"
+            }))
+            .await
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1.0.0"),
+        "expected locked 1.0.0 content, got {result}"
+    );
+
+    // Highest-semver reads the newer pack.
+    let highest_tools =
+        provider.create_knowledge_tools_with_policy(PkgResolvePolicy::HighestSemver);
+    let read = highest_tools
+        .iter()
+        .find(|t| t.name() == "read_knowledge_doc")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(
+        &read
+            .execute(serde_json::json!({
+                "pack": "pkg:nenjo_ai.knowledge.core",
+                "selector": "intro"
+            }))
+            .await
+            .unwrap()
+            .output,
+    )
+    .unwrap();
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1.0.1"),
+        "expected highest 1.0.1 content, got {result}"
     );
 }

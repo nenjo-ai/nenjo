@@ -2672,6 +2672,8 @@ Original user message: {{ chat.message }}
                 abilities: Vec::new(),
                 prompt_locked: false,
                 heartbeat: None,
+                source_type: None,
+                metadata: serde_json::json!({}),
             }],
             projects: vec![ProjectManifest {
                 name: "Demo Project".to_string(),
@@ -2751,6 +2753,8 @@ Original user message: {{ chat.message }}
                 abilities: Vec::new(),
                 prompt_locked: false,
                 heartbeat: None,
+                source_type: None,
+                metadata: serde_json::json!({}),
             }],
             projects: vec![ProjectManifest {
                 name: "Demo Project".to_string(),

@@ -46,6 +46,13 @@ impl Slug {
         Self::derive_with_fallback(value, "slug")
     }
 
+    /// Build a slug from free-form text.
+    ///
+    /// - lowercase alphanumerics kept
+    /// - `_` and `-` kept
+    /// - whitespace becomes `-` (kebab-case)
+    /// - other characters dropped
+    /// - consecutive separators collapsed
     pub fn derive_with_fallback(value: impl AsRef<str>, fallback: &str) -> Self {
         let mut slug = String::new();
         let mut previous_separator = false;
@@ -55,7 +62,7 @@ impl Slug {
             } else if ch == '_' || ch == '-' {
                 Some(ch)
             } else if ch.is_whitespace() {
-                Some('_')
+                Some('-')
             } else {
                 None
             };
@@ -91,7 +98,7 @@ impl Slug {
 
     pub fn with_slug_suffix(&self, suffix: impl AsRef<str>) -> Self {
         let suffix = Self::derive_with_fallback(suffix, "suffix");
-        let suffix = format!("_{}", suffix.as_str());
+        let suffix = format!("-{}", suffix.as_str());
         let base_len = Self::MAX_LEN.saturating_sub(suffix.len());
         let mut base = self.0.chars().take(base_len).collect::<String>();
         while base.ends_with(['_', '-']) {
@@ -113,7 +120,7 @@ impl Slug {
 /// Ergonomic conversion into a manifest slug for public SDK APIs.
 ///
 /// `Slug` remains the internal resource identity type, but callers can pass
-/// simple string literals such as `"code_reviewer"` at API boundaries.
+/// simple string literals such as `"code-reviewer"` at API boundaries.
 pub trait IntoSlug {
     fn into_slug(self) -> Slug;
 }
@@ -220,7 +227,15 @@ mod tests {
     fn derives_lossy_slug() {
         assert_eq!(
             Slug::derive_with_fallback("Core Pack!", "fallback").as_str(),
-            "core_pack"
+            "core-pack"
+        );
+        assert_eq!(
+            Slug::derive_with_fallback("nenjo-ai", "fallback").as_str(),
+            "nenjo-ai"
+        );
+        assert_eq!(
+            Slug::derive_with_fallback("Shared Agent", "fallback").as_str(),
+            "shared-agent"
         );
         assert_eq!(
             Slug::derive_with_fallback("!!!", "fallback").as_str(),
@@ -232,15 +247,15 @@ mod tests {
     fn appends_suffix_with_max_length_preserved() {
         let slug = Slug::derive("a".repeat(64)).with_slug_suffix("ABC 123");
         assert_eq!(slug.as_str().len(), Slug::MAX_LEN);
-        assert!(slug.as_str().ends_with("_abc_123"));
+        assert!(slug.as_str().ends_with("-abc-123"));
     }
 
     #[test]
     fn into_slug_accepts_owned_and_borrowed_inputs() {
-        let parsed = Slug::parse("code_reviewer").unwrap();
+        let parsed = Slug::parse("code-reviewer").unwrap();
         assert_eq!(parsed.clone().into_slug(), parsed);
         assert_eq!((&parsed).into_slug(), parsed);
-        assert_eq!("Code Reviewer".into_slug().as_str(), "code_reviewer");
+        assert_eq!("Code Reviewer".into_slug().as_str(), "code-reviewer");
         assert_eq!(
             String::from("demo_project").into_slug().as_str(),
             "demo_project"

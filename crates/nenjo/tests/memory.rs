@@ -103,6 +103,8 @@ fn test_manifest() -> Manifest {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let project = ProjectManifest {
@@ -658,6 +660,8 @@ async fn ability_inherits_memory_vars() {
         abilities: vec![ability.name.clone()],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let project = nenjo::manifest::ProjectManifest {
@@ -782,6 +786,8 @@ async fn domain_expansion_preserves_memory() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let project = nenjo::manifest::ProjectManifest {

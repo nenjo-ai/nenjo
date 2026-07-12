@@ -36,8 +36,7 @@ use crate::tools::Tool;
 use crate::types::RenderContextVars;
 use crate::{IntoSlug, ManifestReader, Slug};
 use nenjo_knowledge::tools::{
-    CompositeKnowledgeRegistry, KnowledgePackEntry, KnowledgePackSummary, KnowledgeRef,
-    KnowledgeRegistry,
+    KnowledgePackEntry, KnowledgePackSummary, KnowledgeRef, KnowledgeRegistry,
 };
 use nenjo_knowledge::{
     FilesystemKnowledgePack, KnowledgePack, KnowledgeSearchService, PackageKnowledgePack,
@@ -158,27 +157,183 @@ fn index_by_manifest_slug<T: HasManifestSlug>(items: &[T]) -> HashMap<Slug, usiz
     index
 }
 
+fn ability_version_candidate(item: &AbilityManifest) -> crate::package_resolve::VersionedCandidate {
+    use crate::package_resolve::VersionedCandidate;
+    let path = item.path.clone().unwrap_or_default();
+    VersionedCandidate {
+        package_name: item
+            .metadata
+            .pointer("/package/name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        package_version: item
+            .metadata
+            .pointer("/package/version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| crate::package_resolve::version_label_from_path(&path)),
+        path,
+        name: item.name.clone(),
+    }
+}
+
+fn knowledge_pack_version_candidate(
+    manifest: &KnowledgePackManifest,
+) -> crate::package_resolve::VersionedCandidate {
+    use crate::package_resolve::VersionedCandidate;
+    let path = manifest
+        .root_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            manifest
+                .metadata
+                .pointer("/package/module_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| manifest.root_uri.clone());
+    let name = manifest
+        .selector
+        .rsplit([':', '.', '/'])
+        .next()
+        .unwrap_or(manifest.name.as_str())
+        .to_string();
+    VersionedCandidate {
+        package_name: manifest
+            .metadata
+            .pointer("/package/name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        package_version: manifest.version.clone().or_else(|| {
+            manifest
+                .metadata
+                .pointer("/package/version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }),
+        path,
+        name,
+    }
+}
+
 fn index_abilities_by_name(items: &[AbilityManifest]) -> HashMap<String, usize> {
-    let mut index = HashMap::new();
+    use crate::package_resolve::{PkgResolvePolicy, pick_version_winner};
+    let mut by_name: HashMap<String, Vec<(usize, crate::package_resolve::VersionedCandidate)>> =
+        HashMap::new();
     for (position, item) in items.iter().enumerate() {
-        index.entry(item.name.clone()).or_insert(position);
+        by_name
+            .entry(item.name.clone())
+            .or_default()
+            .push((position, ability_version_candidate(item)));
+    }
+    let mut index = HashMap::new();
+    for (name, group) in by_name {
+        if let Some(pos) = pick_version_winner(&group, &PkgResolvePolicy::HighestSemver) {
+            index.insert(name, pos);
+        }
     }
     index
 }
 
+/// Resolve one ability by logical name under a multi-version policy.
+pub(crate) fn resolve_ability_by_name<'a>(
+    abilities: &'a [AbilityManifest],
+    name: &str,
+    policy: &crate::package_resolve::PkgResolvePolicy,
+) -> Option<&'a AbilityManifest> {
+    use crate::package_resolve::pick_version_winner;
+    let matching: Vec<(usize, crate::package_resolve::VersionedCandidate)> = abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| ability.name == name)
+        .map(|(idx, ability)| (idx, ability_version_candidate(ability)))
+        .collect();
+    pick_version_winner(&matching, policy).map(|idx| &abilities[idx])
+}
+
+/// Resolve a domain by name/slug/command under a multi-version policy.
+pub(crate) fn resolve_domain_by_selector<'a>(
+    domains: &'a [DomainManifest],
+    selector: &str,
+    policy: &crate::package_resolve::PkgResolvePolicy,
+) -> Option<&'a DomainManifest> {
+    use crate::package_resolve::{VersionedCandidate, pick_version_winner};
+    let want = Slug::derive(selector);
+    let matching: Vec<(usize, VersionedCandidate)> = domains
+        .iter()
+        .enumerate()
+        .filter(|(_, domain)| {
+            domain.command == selector
+                || domain.slug() == want
+                || Slug::derive(&domain.name) == want
+                || domain.name == selector
+        })
+        .map(|(idx, domain)| {
+            (
+                idx,
+                VersionedCandidate {
+                    package_name: None,
+                    package_version: crate::package_resolve::version_label_from_path(&domain.path),
+                    path: domain.path.clone(),
+                    name: domain.name.clone(),
+                },
+            )
+        })
+        .collect();
+    pick_version_winner(&matching, policy).map(|idx| &domains[idx])
+}
+
 fn index_domains_by_slug(items: &[DomainManifest]) -> HashMap<Slug, usize> {
-    let mut index = HashMap::new();
+    use crate::package_resolve::{VersionedCandidate, prefer_highest_semver};
+    // Prefer highest version when multiple domains share a logical slug/name.
+    let mut by_key: HashMap<Slug, Vec<(usize, VersionedCandidate)>> = HashMap::new();
     for (position, item) in items.iter().enumerate() {
-        index.entry(item.manifest_slug()).or_insert(position);
-        index.entry(Slug::derive(&item.name)).or_insert(position);
+        let cand = VersionedCandidate {
+            package_name: None,
+            package_version: crate::package_resolve::version_label_from_path(&item.path),
+            path: item.path.clone(),
+            name: item.name.clone(),
+        };
+        by_key
+            .entry(item.manifest_slug())
+            .or_default()
+            .push((position, cand.clone()));
+        by_key
+            .entry(Slug::derive(&item.name))
+            .or_default()
+            .push((position, cand));
+    }
+    let mut index = HashMap::new();
+    for (key, group) in by_key {
+        if let Some((pos, _)) = prefer_highest_semver(group) {
+            index.insert(key, pos);
+        }
     }
     index
 }
 
 fn index_domains_by_command(items: &[DomainManifest]) -> HashMap<String, usize> {
-    let mut index = HashMap::new();
+    use crate::package_resolve::{VersionedCandidate, prefer_highest_semver};
+    let mut by_cmd: HashMap<String, Vec<(usize, VersionedCandidate)>> = HashMap::new();
     for (position, item) in items.iter().enumerate() {
-        index.entry(item.command.clone()).or_insert(position);
+        let cand = VersionedCandidate {
+            package_name: None,
+            package_version: crate::package_resolve::version_label_from_path(&item.path),
+            path: item.path.clone(),
+            name: item.name.clone(),
+        };
+        by_cmd
+            .entry(item.command.clone())
+            .or_default()
+            .push((position, cand));
+    }
+    let mut index = HashMap::new();
+    for (cmd, group) in by_cmd {
+        if let Some((pos, _)) = prefer_highest_semver(group) {
+            index.insert(cmd, pos);
+        }
     }
     index
 }
@@ -314,39 +469,137 @@ struct ManifestBackedKnowledgeRegistry {
     manifest: Arc<Manifest>,
     explicit_entries: Vec<KnowledgePackEntry>,
     live_manifest_reader: Option<Arc<dyn ManifestReader>>,
+    policy: crate::package_resolve::PkgResolvePolicy,
 }
 
 impl ManifestBackedKnowledgeRegistry {
-    async fn registry(&self) -> CompositeKnowledgeRegistry {
-        let mut entries = self
-            .manifest
-            .knowledge_packs
-            .iter()
-            .filter_map(manifest_knowledge_pack_entry)
-            .collect::<Vec<_>>();
+    async fn collect_pack_manifests(&self) -> Vec<KnowledgePackManifest> {
+        let mut packs = self.manifest.knowledge_packs.clone();
         if let Some(reader) = &self.live_manifest_reader {
             match reader.list_knowledge_packs().await {
-                Ok(packs) => {
-                    entries.extend(packs.iter().filter_map(manifest_knowledge_pack_entry));
+                Ok(live) => {
+                    for pack in live {
+                        // Keep multi-version coexistence: upsert by versioned slug identity.
+                        if let Some(existing) = packs
+                            .iter_mut()
+                            .find(|item| item.manifest_slug() == pack.manifest_slug())
+                        {
+                            *existing = pack;
+                        } else {
+                            packs.push(pack);
+                        }
+                    }
                 }
                 Err(error) => {
                     warn!(error = %error, "Failed to refresh live knowledge pack manifest");
                 }
             }
         }
-        entries.extend(self.explicit_entries.iter().cloned());
-        CompositeKnowledgeRegistry::from_entries(entries)
+        packs
+    }
+
+    fn entry_for_manifest(
+        &self,
+        manifest: &KnowledgePackManifest,
+    ) -> Option<(
+        KnowledgePackEntry,
+        crate::package_resolve::VersionedCandidate,
+    )> {
+        let entry = manifest_knowledge_pack_entry(manifest)?;
+        let candidate = knowledge_pack_version_candidate(manifest);
+        Some((entry, candidate))
+    }
+
+    async fn all_versioned_entries(
+        &self,
+    ) -> Vec<(
+        KnowledgePackEntry,
+        crate::package_resolve::VersionedCandidate,
+    )> {
+        let mut out = Vec::new();
+        for pack in self.collect_pack_manifests().await {
+            if let Some(pair) = self.entry_for_manifest(&pack) {
+                out.push(pair);
+            }
+        }
+        for entry in &self.explicit_entries {
+            // Explicit packs have no package version metadata; treat as unversioned.
+            out.push((
+                entry.clone(),
+                crate::package_resolve::VersionedCandidate {
+                    package_name: None,
+                    package_version: None,
+                    path: entry.selector(),
+                    name: entry.selector(),
+                },
+            ));
+        }
+        out
+    }
+
+    /// Deduplicate by selector under policy so agents see one logical pack.
+    async fn resolved_entries(&self) -> Vec<KnowledgePackEntry> {
+        use crate::package_resolve::pick_version_winner;
+        use std::collections::BTreeMap;
+
+        let all = self.all_versioned_entries().await;
+        let mut by_selector: BTreeMap<
+            String,
+            Vec<(usize, crate::package_resolve::VersionedCandidate)>,
+        > = BTreeMap::new();
+        for (idx, (entry, cand)) in all.iter().enumerate() {
+            by_selector
+                .entry(entry.selector())
+                .or_default()
+                .push((idx, cand.clone()));
+        }
+        let mut winners = Vec::new();
+        for (_selector, group) in by_selector {
+            if let Some(idx) = pick_version_winner(&group, &self.policy) {
+                winners.push(all[idx].0.clone());
+            }
+        }
+        winners
     }
 }
 
 #[async_trait::async_trait]
 impl KnowledgeRegistry for ManifestBackedKnowledgeRegistry {
     async fn list_packs(&self) -> anyhow::Result<Vec<KnowledgePackSummary>> {
-        self.registry().await.list_packs().await
+        let mut packs = self
+            .resolved_entries()
+            .await
+            .into_iter()
+            .map(|entry| {
+                KnowledgePackSummary::new(
+                    entry.selector(),
+                    entry.pack().manifest(),
+                    entry.display_name().map(str::to_string),
+                    entry.display_description().map(str::to_string),
+                    entry.writable(),
+                )
+            })
+            .collect::<Vec<_>>();
+        packs.sort_by(|a, b| a.selector.cmp(&b.selector));
+        Ok(packs)
     }
 
     async fn resolve_pack(&self, selector: &str) -> anyhow::Result<Arc<dyn KnowledgePack>> {
-        self.registry().await.resolve_pack(selector).await
+        use crate::package_resolve::pick_version_winner;
+
+        let all = self.all_versioned_entries().await;
+        let matching: Vec<(usize, crate::package_resolve::VersionedCandidate)> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, (entry, _))| entry.selector() == selector)
+            .map(|(idx, (_, cand))| (idx, cand.clone()))
+            .collect();
+        if matching.is_empty() {
+            return Err(anyhow::anyhow!("unknown knowledge pack '{selector}'"));
+        }
+        let idx = pick_version_winner(&matching, &self.policy)
+            .ok_or_else(|| anyhow::anyhow!("unknown knowledge pack '{selector}'"))?;
+        Ok(all[idx].0.pack().clone())
     }
 }
 
@@ -593,11 +846,21 @@ where
     }
 
     pub(crate) fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.create_knowledge_tools_with_policy(
+            crate::package_resolve::PkgResolvePolicy::HighestSemver,
+        )
+    }
+
+    pub(crate) fn create_knowledge_tools_with_policy(
+        &self,
+        policy: crate::package_resolve::PkgResolvePolicy,
+    ) -> Vec<Arc<dyn Tool>> {
         let knowledge = &self.inner.services.knowledge;
         let registry = Arc::new(ManifestBackedKnowledgeRegistry {
             manifest: self.inner.manifest.manifest.clone(),
             explicit_entries: knowledge.pack_entries.clone(),
             live_manifest_reader: knowledge.live_manifest_reader.clone(),
+            policy,
         });
         let mut tools = vec![nenjo_knowledge::tools::knowledge_list_packs_tool(
             registry.clone(),
@@ -660,7 +923,9 @@ where
     }
 
     fn refresh_knowledge_prompt_vars(&self) -> std::collections::HashMap<String, String> {
-        let entries = self.knowledge_pack_entries();
+        let entries = self.knowledge_pack_entries_resolved(
+            &crate::package_resolve::PkgResolvePolicy::HighestSemver,
+        );
         if entries.is_empty() {
             self.inner.services.render_ctx_extra.knowledge_vars.clone()
         } else {
@@ -679,6 +944,47 @@ where
                 .filter_map(manifest_knowledge_pack_entry),
         );
         entries
+    }
+
+    /// Knowledge packs after multi-version policy selection (one entry per selector).
+    fn knowledge_pack_entries_resolved(
+        &self,
+        policy: &crate::package_resolve::PkgResolvePolicy,
+    ) -> Vec<KnowledgePackEntry> {
+        use crate::package_resolve::pick_version_winner;
+        use std::collections::BTreeMap;
+
+        let mut loaded_entries: Vec<(
+            KnowledgePackEntry,
+            crate::package_resolve::VersionedCandidate,
+        )> = Vec::new();
+        for pack in &self.inner.manifest.manifest.knowledge_packs {
+            if let Some(entry) = manifest_knowledge_pack_entry(pack) {
+                let cand = knowledge_pack_version_candidate(pack);
+                loaded_entries.push((entry, cand));
+            }
+        }
+
+        let mut by_selector: BTreeMap<
+            String,
+            Vec<(usize, crate::package_resolve::VersionedCandidate)>,
+        > = BTreeMap::new();
+        for (idx, (entry, cand)) in loaded_entries.iter().enumerate() {
+            by_selector
+                .entry(entry.selector())
+                .or_default()
+                .push((idx, cand.clone()));
+        }
+
+        let mut winners = Vec::new();
+        for (_selector, group) in by_selector {
+            if let Some(idx) = pick_version_winner(&group, policy) {
+                winners.push(loaded_entries[idx].0.clone());
+            }
+        }
+        // Explicit packs (library etc.) always included.
+        winners.extend(self.inner.services.knowledge.pack_entries.iter().cloned());
+        winners
     }
 
     async fn create_model_provider(
@@ -753,6 +1059,30 @@ where
 
     fn create_knowledge_tools(&self) -> Vec<Arc<dyn Tool>> {
         Provider::create_knowledge_tools(self)
+    }
+
+    fn create_knowledge_tools_with_policy(
+        &self,
+        policy: crate::package_resolve::PkgResolvePolicy,
+    ) -> Vec<Arc<dyn Tool>> {
+        Provider::create_knowledge_tools_with_policy(self, policy)
+    }
+
+    fn find_ability_with_policy(
+        &self,
+        name: &str,
+        policy: &crate::package_resolve::PkgResolvePolicy,
+    ) -> Option<&AbilityManifest> {
+        resolve_ability_by_name(&self.inner.manifest.manifest.abilities, name, policy)
+    }
+
+    fn find_domain_with_policy(
+        &self,
+        selector: &str,
+        policy: &crate::package_resolve::PkgResolvePolicy,
+    ) -> Option<&DomainManifest> {
+        resolve_domain_by_selector(&self.inner.manifest.manifest.domains, selector, policy)
+            .or_else(|| self.find_domain(selector))
     }
 
     fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext {

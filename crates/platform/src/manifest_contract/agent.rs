@@ -105,6 +105,8 @@ impl AgentRecord {
             abilities: self.abilities.clone(),
             prompt_locked: self.prompt_locked,
             heartbeat: self.heartbeat.clone(),
+            source_type: Some(self.source_type.clone()),
+            metadata: self.metadata.clone(),
         }
     }
 

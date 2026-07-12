@@ -84,6 +84,8 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
         media: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     }
 }
 

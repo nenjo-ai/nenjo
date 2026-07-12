@@ -95,6 +95,8 @@ async fn worker_factory_always_exposes_use_skill_tool() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -155,6 +157,8 @@ async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory
@@ -225,6 +229,8 @@ async fn worker_factory_exposes_agent_native_media_tools() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -333,6 +339,8 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -423,6 +431,8 @@ async fn scoped_backend() -> (
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
     let hidden_agent = AgentManifest {
         name: "hidden-agent".into(),
@@ -439,6 +449,8 @@ async fn scoped_backend() -> (
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let visible_ability = AbilityManifest {
@@ -566,6 +578,8 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -679,6 +693,8 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -727,6 +743,8 @@ async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let tools = factory.create_tools(&agent).await;
@@ -807,6 +825,8 @@ async fn worker_factory_resolves_registered_notification_emitter_from_context() 
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
 
     let step_session_id = uuid::Uuid::new_v4();
@@ -978,6 +998,8 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
     };
     let package_ability = AbilityManifest {
         name: "package_ability".into(),

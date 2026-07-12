@@ -661,8 +661,28 @@ fn push_package_knowledge_resource(
         })
         .unwrap_or_else(|| format!("pkg://{}/", pack_id.trim().trim_matches('/')));
 
+    let package_version = resource_manifest
+        .fields
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| context.package_version.to_string());
+    // Versioned slug so multi-version packs coexist under the same logical selector.
+    let version_label = format!(
+        "v{}",
+        package_version
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .replace('.', "_")
+    );
+    let slug = Slug::derive(format!(
+        "{}-{}",
+        selector.trim_start_matches("pkg:"),
+        version_label
+    ));
+
     manifest.knowledge_packs.push(KnowledgePackManifest {
-        slug: Slug::derive(&selector),
+        slug,
         name: resource_manifest.name,
         description: resource_manifest
             .fields
@@ -671,12 +691,7 @@ fn push_package_knowledge_resource(
             .map(str::to_string),
         source_type: KnowledgePackSource::Package,
         selector,
-        version: resource_manifest
-            .fields
-            .get("version")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| Some(context.package_version.to_string())),
+        version: Some(package_version),
         root_uri,
         root_path: Some(context.package_root.join(context.module_path)),
         read_only: true,
@@ -791,10 +806,13 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| Value::Bool(true));
         }
         PackageKind::Ability => {
+            // Same pkg/<scope>/<version>/<package>/... convention as context blocks.
             object.insert(
                 "path".to_string(),
-                Value::String(derived_resource_path(
+                Value::String(derived_package_content_path(
                     defaults.package_name,
+                    defaults.package_version,
+                    defaults.package_source,
                     defaults.module_path,
                 )),
             );
@@ -812,8 +830,10 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
         PackageKind::Domain => {
             object.insert(
                 "path".to_string(),
-                Value::String(derived_resource_path(
+                Value::String(derived_package_content_path(
                     defaults.package_name,
+                    defaults.package_version,
+                    defaults.package_source,
                     defaults.module_path,
                 )),
             );
@@ -836,8 +856,9 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
         PackageKind::ContextBlock => {
             object.insert(
                 "path".to_string(),
-                Value::String(derived_package_context_path(
+                Value::String(derived_package_content_path(
                     defaults.package_name,
+                    defaults.package_version,
                     defaults.package_source,
                     defaults.module_path,
                 )),
@@ -1268,29 +1289,40 @@ fn ensure_ability_prompt_config(object: &mut serde_json::Map<String, Value>) {
     }
 }
 
-fn package_path(package_name: &str) -> String {
-    package_name
-        .trim_start_matches('@')
-        .replace('/', ".")
-        .replace('-', "_")
-}
-
 fn package_selector_segments(package_name: &str, source: Option<&PackageSource>) -> Vec<String> {
-    let mut segments = source
-        .and_then(package_source_selector_segments)
-        .unwrap_or_else(|| {
-            package_name
-                .trim_start_matches('@')
-                .split('/')
-                .filter(|segment| !segment.trim().is_empty())
-                .map(selector_segment)
-                .collect()
-        });
+    let mut segments = package_source_path_segments(package_name, source);
     let leaf = package_leaf_segment(package_name);
     if segments.last().is_none_or(|segment| segment != &leaf) {
         segments.push(leaf);
     }
     segments
+}
+
+/// Registry/source path segments without the package leaf (mirrors platform).
+fn package_source_path_segments(package_name: &str, source: Option<&PackageSource>) -> Vec<String> {
+    if let Some(segments) = source.and_then(package_source_selector_segments) {
+        return segments;
+    }
+    let mut segments = package_name
+        .trim_start_matches('@')
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty())
+        .map(selector_segment)
+        .collect::<Vec<_>>();
+    // Drop package leaf so version is inserted before it.
+    if segments.len() > 1 {
+        segments.pop();
+    }
+    segments
+}
+
+/// Normalized version segment (`1.0.4` → `v1_0_4`).
+fn package_version_label(version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty() {
+        return None;
+    }
+    Some(format!("v{}", selector_segment(version)))
 }
 
 fn package_source_selector_segments(source: &PackageSource) -> Option<Vec<String>> {
@@ -1347,28 +1379,41 @@ fn package_leaf_segment(package_name: &str) -> String {
         .unwrap_or_else(|| "package".to_string())
 }
 
-fn derived_resource_path(package_name: &str, module_path: &str) -> String {
-    module_path
-        .rsplit_once('/')
-        .map(|(dir, _)| dir)
-        .filter(|dir| !dir.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| package_path(package_name))
-}
-
-fn derived_package_context_path(
+/// Content path for package abilities/domains/context blocks.
+///
+/// Shape: `pkg/<source>/<version>/<package>/<module-dir...>`
+/// e.g. `pkg/nenjo_ai/packages/v1_0_4/nenji/capabilities/build`
+fn derived_package_content_path(
     package_name: &str,
+    package_version: &str,
     package_source: Option<&PackageSource>,
     module_path: &str,
 ) -> String {
     let mut segments = vec!["pkg".to_string()];
-    segments.extend(package_selector_segments(package_name, package_source));
+    segments.extend(package_source_path_segments(package_name, package_source));
+    if let Some(version) = package_version_label(package_version) {
+        segments.push(version);
+    }
+    let leaf = package_leaf_segment(package_name);
+    if segments.last().is_none_or(|segment| segment != &leaf) {
+        segments.push(leaf.clone());
+    }
     if let Some((dir, _)) = module_path.rsplit_once('/') {
-        segments.extend(
-            dir.split('/')
-                .filter(|segment| !segment.trim().is_empty())
-                .map(selector_segment),
-        );
+        let mut module_segments = dir
+            .split('/')
+            .filter(|segment| !segment.trim().is_empty())
+            .map(selector_segment)
+            .collect::<Vec<_>>();
+        // Some lockfiles carry paths relative to the registry root rather than
+        // the package root (for example `nenji/capabilities/build/...`). The
+        // package leaf is already part of the canonical pkg path above.
+        if module_segments
+            .first()
+            .is_some_and(|segment| segment == &leaf)
+        {
+            module_segments.remove(0);
+        }
+        segments.extend(module_segments);
     }
     segments.join("/")
 }
@@ -1413,7 +1458,7 @@ mod tests {
         );
         let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
         assert_eq!(block.name, "guide");
-        assert_eq!(block.path, "pkg/nenjo/core/context");
+        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core/context");
         assert_eq!(block.template, "Use the guide.");
     }
 
@@ -1437,7 +1482,7 @@ mod tests {
             },
         );
         let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo/core/context/shared");
+        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core/context/shared");
     }
 
     #[test]
@@ -1464,7 +1509,7 @@ mod tests {
             },
         );
         let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo_ai/packages/context/memory");
+        assert_eq!(block.path, "pkg/nenjo_ai/packages/v0_1_0/context/memory");
     }
 
     #[test]
@@ -1486,7 +1531,10 @@ mod tests {
             },
         );
         let ability: AbilityManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(ability.path.as_deref(), Some("nenji/abilities/design"));
+        assert_eq!(
+            ability.path.as_deref(),
+            Some("pkg/nenjo/v0_2_0/nenji/abilities/design")
+        );
         assert!(ability.read_only);
         assert_eq!(ability.source_type, "package");
         assert_eq!(ability.metadata["package"]["version"], "0.2.0");
@@ -1511,7 +1559,24 @@ mod tests {
             },
         );
         let domain: DomainManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(domain.path, "nenji/domains");
+        assert_eq!(domain.path, "pkg/nenjo/v0_1_0/nenji/domains");
+    }
+
+    #[test]
+    fn package_content_path_inserts_version_after_scope() {
+        assert_eq!(
+            derived_package_content_path(
+                "@nenjo-ai/nenji",
+                "1.0.4",
+                Some(&PackageSource::Git {
+                    url: "https://github.com/nenjo-ai/packages.git".to_string(),
+                    reference: "main".to_string(),
+                    manifest_path: "packages.yaml".to_string(),
+                }),
+                "nenji/capabilities/build/build_ability.yaml",
+            ),
+            "pkg/nenjo_ai/packages/v1_0_4/nenji/capabilities/build"
+        );
     }
 
     #[test]
@@ -1533,7 +1598,7 @@ mod tests {
             },
         );
         let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo/core_knowledge");
+        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core_knowledge");
     }
 
     #[test]
@@ -1660,7 +1725,52 @@ mod tests {
             manifest.knowledge_packs[0].selector,
             "pkg:nenjo_ai.knowledge.nenjo_core"
         );
+        // Logical selector is unversioned; slug includes version for coexistence.
+        assert!(
+            manifest.knowledge_packs[0].slug.as_str().contains("v0_1_0"),
+            "slug should embed version label, got {}",
+            manifest.knowledge_packs[0].slug
+        );
         assert_eq!(manifest.knowledge_packs[0].root_uri, "pkg://nenjo/core/");
+        assert_eq!(
+            manifest.knowledge_packs[0].version.as_deref(),
+            Some("0.1.0")
+        );
+    }
+
+    #[test]
+    fn package_knowledge_multi_version_coexists_with_versioned_slugs() {
+        let mut manifest = Manifest::default();
+        for version in ["1.0.0", "1.0.1"] {
+            push_package_resource(
+                &mut manifest,
+                PackageResourceContext {
+                    package_name: "@nenjo-ai/knowledge",
+                    package_version: version,
+                    package_source: None,
+                    package_root: Path::new("/package-root"),
+                    module_path: "core/manifest.yaml",
+                    source_path: "nenjo/knowledge/core/manifest.yaml",
+                    kind: PackageKind::Knowledge,
+                },
+                RuntimeResourceManifest {
+                    name: "Nenjo Core".to_string(),
+                    selector: Some("pkg:nenjo_ai.knowledge.core".to_string()),
+                    root_uri: Some("pkg://nenjo/core/".to_string()),
+                    fields: serde_json::Map::new(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(manifest.knowledge_packs.len(), 2);
+        assert_eq!(
+            manifest.knowledge_packs[0].selector,
+            manifest.knowledge_packs[1].selector
+        );
+        assert_ne!(
+            manifest.knowledge_packs[0].slug,
+            manifest.knowledge_packs[1].slug
+        );
     }
 
     #[test]
@@ -2154,7 +2264,10 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         let block = &manifest.context_blocks[0];
         assert_eq!(block.name, "guide");
         assert_eq!(block.template, "# Guide\nUse the native package guide.");
-        assert_eq!(block.path, "pkg/native_tools/context_blocks");
+        assert_eq!(
+            block.path,
+            "pkg/native_tools/v0_1_0/native_tools/context_blocks"
+        );
 
         assert_eq!(manifest.mcp_servers.len(), 1);
         let mcp = &manifest.mcp_servers[0];
