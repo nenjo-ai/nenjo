@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0](https://github.com/nenjo-ai/nenjo/compare/v0.26.0...v0.27.0) - 2026-07-12
+
+### Fixed
+
+- allow coexistence of multiple versions of a package ([#87](https://github.com/nenjo-ai/nenjo/pull/87))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.26.0](https://github.com/nenjo-ai/nenjo/compare/v0.25.0...v0.26.0) - 2026-07-08
 
 ### Added
