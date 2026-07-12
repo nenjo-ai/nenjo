@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.2](https://github.com/nenjo-ai/nenjo/compare/v0.27.1...v0.27.2) - 2026-07-12
+
+### Fixed
+
+- use user role instead of developer for steering ([#93](https://github.com/nenjo-ai/nenjo/pull/93))
+
 ## [0.27.1](https://github.com/nenjo-ai/nenjo/compare/v0.27.0...v0.27.1) - 2026-07-12
 
 ### Fixed

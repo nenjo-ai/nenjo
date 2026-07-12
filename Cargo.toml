@@ -24,29 +24,29 @@ members = [
 ]
 
 [workspace.package]
-version = "0.27.1"
+version = "0.27.2"
 edition = "2024"
 authors = ["Boon Labs"]
 license = "Apache-2.0"
 repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
-nenjo = { path = "crates/nenjo", version = "0.27.1" }
-nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.27.1" }
-nenjo-platform = { path = "crates/platform", version = "0.27.1" }
-nenjo-packages = { path = "crates/packages", version = "0.27.1" }
-nenjo-xml = { path = "crates/xml", version = "0.27.1" }
-nenjo-models = { path = "crates/models", version = "0.27.1" }
-nenjo-nenpm = { path = "crates/nenpm", version = "0.27.1" }
-nenjo-updater = { path = "crates/updater", version = "0.27.1" }
-nenjo-events = { path = "crates/events", version = "0.27.1" }
-nenjo-eventbus = { path = "crates/eventbus", version = "0.27.1" }
-nenjo-harness = { path = "crates/harness", version = "0.27.1" }
-nenjo-knowledge = { path = "crates/knowledge", version = "0.27.1" }
-nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.27.1" }
-nenjo-sessions = { path = "crates/sessions", version = "0.27.1" }
-nenjo-worker = { path = "crates/worker", version = "0.27.1" }
-nenjo-tool-api = { path = "crates/tool-api", version = "0.27.1" }
+nenjo = { path = "crates/nenjo", version = "0.27.2" }
+nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.27.2" }
+nenjo-platform = { path = "crates/platform", version = "0.27.2" }
+nenjo-packages = { path = "crates/packages", version = "0.27.2" }
+nenjo-xml = { path = "crates/xml", version = "0.27.2" }
+nenjo-models = { path = "crates/models", version = "0.27.2" }
+nenjo-nenpm = { path = "crates/nenpm", version = "0.27.2" }
+nenjo-updater = { path = "crates/updater", version = "0.27.2" }
+nenjo-events = { path = "crates/events", version = "0.27.2" }
+nenjo-eventbus = { path = "crates/eventbus", version = "0.27.2" }
+nenjo-harness = { path = "crates/harness", version = "0.27.2" }
+nenjo-knowledge = { path = "crates/knowledge", version = "0.27.2" }
+nenjo-secure-envelope = { path = "crates/secure-envelope", version = "0.27.2" }
+nenjo-sessions = { path = "crates/sessions", version = "0.27.2" }
+nenjo-worker = { path = "crates/worker", version = "0.27.2" }
+nenjo-tool-api = { path = "crates/tool-api", version = "0.27.2" }
 
 aes-gcm = "0.10"
 anyhow = "1.0.103"
