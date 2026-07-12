@@ -394,10 +394,13 @@ impl OpenAiCompatibleProvider {
 
                 // Regular message (system, user, plain assistant)
                 Message {
-                    // Most OpenAI-compatible chat templates (including MLX/Qwen)
-                    // accept `system` but not OpenAI's newer `developer` role.
+                    // Generic compatible endpoints cannot reliably accept OpenAI's
+                    // `developer` role. These instructions are typically injected
+                    // mid-conversation, where MLX/Qwen templates also reject a
+                    // `system` message; a user message preserves the valid turn
+                    // sequence after the preceding assistant response.
                     role: if m.role == "developer" && !supports_developer_role {
-                        "system".to_string()
+                        "user".to_string()
                     } else {
                         m.role.clone()
                     },
@@ -711,11 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn developer_role_is_mapped_to_system() {
+    fn developer_role_is_mapped_to_user_for_generic_compatible_endpoints() {
         let messages = vec![ChatMessage::developer("Use the response tool")];
         let converted = OpenAiCompatibleProvider::convert_messages(&messages, false);
 
-        assert_eq!(converted[0].role, "system");
+        assert_eq!(converted[0].role, "user");
         assert_eq!(
             converted[0].content.as_deref(),
             Some("Use the response tool")
