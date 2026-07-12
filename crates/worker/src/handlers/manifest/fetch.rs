@@ -62,7 +62,7 @@ pub(super) async fn apply_upsert(
         },
         ResourceType::Model => {
             upsert!(models, fetch_model, |r: &nenjo::manifest::ModelManifest| {
-                nenjo::manifest::model_manifest_slug(&r.model_provider, &r.model)
+                r.slug.clone()
             })
         }
         ResourceType::Routine => match client.fetch_routine(resource).await? {
