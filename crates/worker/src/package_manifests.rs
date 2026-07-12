@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nenjo::Slug;
-use nenjo::manifest::{
-    KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader, model_manifest_slug,
-};
+use nenjo::manifest::{KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader};
 use nenjo_nenpm::{
     LockedModule, NenpmLock, PackageInstallIndex, PackageSource,
     package_install_path_in_packages_dir,
@@ -80,7 +78,12 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
             }
         }
         let modules = modules_by_key.into_values().collect::<Vec<_>>();
-        let assignment_index = build_assignment_index(&modules, &locked_source_paths);
+        let assignment_index = build_assignment_index(
+            &modules,
+            &locked_source_paths,
+            &package.name,
+            package.source.as_ref(),
+        );
         for module in modules {
             let mut resource = RuntimeResourceManifest::from_resource_manifest(&module.manifest)?;
             resource.apply_package_assignments(module.kind, &assignment_index)?;
@@ -136,12 +139,19 @@ fn locked_module_keys(modules: &[LockedModule]) -> BTreeSet<(String, String)> {
 fn build_assignment_index(
     modules: &[nenjo_packages::ResolvedModule],
     locked_source_paths: &BTreeMap<(String, String), Vec<String>>,
+    package_name: &str,
+    package_source: Option<&PackageSource>,
 ) -> BTreeMap<String, PackageAssignmentTarget> {
     let mut index = BTreeMap::new();
     for module in modules {
         let target = PackageAssignmentTarget {
             kind: module.kind,
-            name: module.name().to_string(),
+            name: match module.kind {
+                PackageKind::McpServer => {
+                    package_runtime_slug(package_name, package_source, module.name())
+                }
+                _ => module.name().to_string(),
+            },
         };
         insert_assignment_target(&mut index, &module.path, target.clone());
         insert_assignment_target(&mut index, &module.source_path, target.clone());
@@ -740,7 +750,7 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
     object
         .entry("id")
         .or_insert_with(|| Value::String(defaults.id.to_string()));
-    ensure_slug(object, defaults.kind);
+    ensure_slug(object, &defaults);
     object
         .entry("source_type")
         .or_insert_with(|| Value::String("package".to_string()));
@@ -767,11 +777,6 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .and_then(Value::as_str)
                 .unwrap_or("openai")
                 .to_string();
-            let model = object
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
             object
                 .entry("model_provider")
                 .or_insert_with(|| Value::String(model_provider.clone()));
@@ -781,9 +786,13 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
             object
                 .entry("native_tools")
                 .or_insert_with(|| serde_json::json!([]));
-            object.entry("slug").or_insert_with(|| {
-                Value::String(model_manifest_slug(&model_provider, &model).into_string())
-            });
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("package_model");
+            let slug = package_runtime_slug(defaults.package_name, defaults.package_source, name);
+            object.insert("name".to_string(), Value::String(slug.clone()));
+            object.insert("slug".to_string(), Value::String(slug));
         }
         PackageKind::Agent => {
             ensure_agent_prompt_config(object);
@@ -875,7 +884,15 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .to_string();
             object
                 .entry("display_name")
-                .or_insert_with(|| Value::String(name));
+                .or_insert_with(|| Value::String(name.clone()));
+            object.insert(
+                "name".to_string(),
+                Value::String(package_runtime_slug(
+                    defaults.package_name,
+                    defaults.package_source,
+                    &name,
+                )),
+            );
             object
                 .entry("transport")
                 .or_insert_with(|| Value::String("stdio".to_string()));
@@ -885,6 +902,7 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
             ensure_mcp_runtime_metadata(object, defaults.package_root);
         }
         PackageKind::Skill => {
+            scope_hook_references(object, &defaults);
             let root_path = skill_root_path(object, defaults.source_path);
             object
                 .entry("root_path")
@@ -925,6 +943,7 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Command => {
+            scope_hook_references(object, &defaults);
             let (root_path, entry_path) =
                 command_content_paths(object, defaults.module_path, defaults.source_path);
             object.insert("root_path".to_string(), Value::String(root_path.clone()));
@@ -958,6 +977,22 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Hook => {
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("package_hook")
+                .to_string();
+            object
+                .entry("display_name")
+                .or_insert_with(|| Value::String(name.clone()));
+            object.insert(
+                "name".to_string(),
+                Value::String(package_runtime_slug(
+                    defaults.package_name,
+                    defaults.package_source,
+                    &name,
+                )),
+            );
             if let Some(plugin_root_path) = skill_plugin_root_path(object) {
                 object
                     .entry("plugin_root_path")
@@ -995,21 +1030,83 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
     value
 }
 
-fn ensure_slug(object: &mut serde_json::Map<String, Value>, kind: PackageKind) {
-    if object.contains_key("slug") {
+fn ensure_slug(object: &mut serde_json::Map<String, Value>, defaults: &PackageDefaults<'_>) {
+    if !matches!(defaults.kind, PackageKind::Agent | PackageKind::Routine) {
         return;
     }
+    let local = object
+        .get("slug")
+        .or_else(|| object.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("resource");
+    object.insert(
+        "slug".to_string(),
+        Value::String(package_runtime_slug(
+            defaults.package_name,
+            defaults.package_source,
+            local,
+        )),
+    );
+}
 
-    let slug = match kind {
-        PackageKind::Agent | PackageKind::Routine => {
-            object.get("name").and_then(Value::as_str).map(Slug::derive)
-        }
-        _ => None,
+fn scope_hook_references(
+    object: &mut serde_json::Map<String, Value>,
+    defaults: &PackageDefaults<'_>,
+) {
+    let Some(hooks) = object.get_mut("hooks").and_then(Value::as_array_mut) else {
+        return;
     };
-
-    if let Some(slug) = slug {
-        object.insert("slug".to_string(), Value::String(slug.to_string()));
+    for hook in hooks {
+        let Some(local_name) = hook.as_str().map(str::to_string) else {
+            continue;
+        };
+        *hook = Value::String(package_runtime_slug(
+            defaults.package_name,
+            defaults.package_source,
+            &local_name,
+        ));
     }
+}
+
+fn package_runtime_slug(
+    package_name: &str,
+    package_source: Option<&PackageSource>,
+    local_name: &str,
+) -> String {
+    let scope = package_runtime_scope(package_name, package_source);
+    let local = Slug::derive(local_name).into_string();
+    if local == scope || local.starts_with(&format!("{scope}-")) {
+        local
+    } else {
+        format!("{scope}-{local}")
+    }
+}
+
+fn package_runtime_scope(package_name: &str, package_source: Option<&PackageSource>) -> String {
+    let source_scope = package_source.and_then(|source| match source {
+        PackageSource::Git { url, .. } => github_owner_repo_from_url(url).map(|(owner, _)| owner),
+        PackageSource::Local {
+            scope: Some(scope), ..
+        } => scope.split('.').next().map(str::to_string),
+        PackageSource::Local { scope: None, .. }
+        | PackageSource::Artifact { .. }
+        | PackageSource::Remote { .. } => None,
+    });
+    let package_scope = package_name
+        .trim_start_matches('@')
+        .split_once('/')
+        .map(|(scope, _)| scope.to_string());
+    let fallback = package_name
+        .trim_start_matches('@')
+        .rsplit('/')
+        .next()
+        .unwrap_or("package");
+    Slug::derive(
+        source_scope
+            .or(package_scope)
+            .unwrap_or_else(|| fallback.to_string()),
+    )
+    .into_string()
 }
 
 fn skill_root_path(object: &serde_json::Map<String, Value>, source_path: &str) -> String {
@@ -2097,7 +2194,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ralph_loop__stop_ralph_loop_stop"]
+            vec!["ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"]
         );
 
         assert_eq!(manifest.skills.len(), 1);
@@ -2115,12 +2212,15 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ralph_loop__stop_ralph_loop_stop"]
+            vec!["ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"]
         );
 
         assert_eq!(manifest.hooks.len(), 1);
         let hook = &manifest.hooks[0];
-        assert_eq!(hook.name, "ralph_loop__stop_ralph_loop_stop");
+        assert_eq!(
+            hook.name,
+            "ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"
+        );
         assert_eq!(hook.event, "Stop");
         assert_eq!(
             hook.plugin_root_dir.as_deref(),
@@ -2235,7 +2335,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         assert_eq!(agent.domains, vec![nenjo::Slug::derive("creator")]);
         assert_eq!(
             agent.mcp_servers,
-            vec![nenjo::Slug::derive("review_server")]
+            vec![nenjo::Slug::derive("native_tools-review_server")]
         );
         assert_eq!(agent.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
 
@@ -2246,7 +2346,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         assert!(ability.read_only);
         assert_eq!(
             ability.mcp_servers,
-            vec![nenjo::Slug::derive("review_server")]
+            vec![nenjo::Slug::derive("native_tools-review_server")]
         );
         assert_eq!(ability.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
 
@@ -2256,7 +2356,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         assert_eq!(domain.abilities, vec!["review_changes"]);
         assert_eq!(
             domain.mcp_servers,
-            vec![nenjo::Slug::derive("review_server")]
+            vec![nenjo::Slug::derive("native_tools-review_server")]
         );
         assert_eq!(domain.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
 
@@ -2271,7 +2371,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
 
         assert_eq!(manifest.mcp_servers.len(), 1);
         let mcp = &manifest.mcp_servers[0];
-        assert_eq!(mcp.name, "review_server");
+        assert_eq!(mcp.name, "native_tools-review_server");
         assert_eq!(mcp.source_type, "package");
         assert!(mcp.read_only);
 
@@ -2301,7 +2401,10 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
 
         assert_eq!(manifest.hooks.len(), 1);
         let hook = &manifest.hooks[0];
-        assert_eq!(hook.name, "ralph_loop__stop_ralph_loop_stop");
+        assert_eq!(
+            hook.name,
+            "ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"
+        );
         assert_eq!(hook.event, "Stop");
         assert_eq!(hook.plugin_root_dir.as_deref(), Some(plugin_root.as_path()));
     }
@@ -3041,6 +3144,28 @@ manifest:
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn package_runtime_slugs_are_scoped_and_not_versioned() {
+        let source = PackageSource::Git {
+            url: "https://github.com/acme/runtime.git".to_string(),
+            reference: "main".to_string(),
+            manifest_path: "packages.yaml".to_string(),
+        };
+
+        assert_eq!(
+            package_runtime_slug("@acme/runtime", Some(&source), "Review Server"),
+            "acme-review-server"
+        );
+        assert_eq!(
+            package_runtime_slug("@acme/runtime", Some(&source), "review-server"),
+            "acme-review-server"
+        );
+        assert_eq!(
+            package_runtime_slug("@acme/runtime", None, "review-server"),
+            "acme-review-server"
+        );
     }
 
     #[test]

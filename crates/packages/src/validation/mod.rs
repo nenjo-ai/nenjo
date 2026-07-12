@@ -39,7 +39,8 @@ use self::render::{RenderFixture, validate_template_selectors};
 pub fn validate_package_runtime(
     graph: &ResolvedPackageGraph,
 ) -> crate::Result<PackageRuntimeValidationReport> {
-    let report = validate_packages(&graph.packages, |_| {});
+    let mut report = validate_packages(&graph.packages, |_| {});
+    validate_non_reusable_dependency_resources(graph, &mut report);
     finish_report(report)
 }
 
@@ -244,6 +245,43 @@ fn validate_packages(
     }
 
     report
+}
+
+/// Routines, hooks, MCP servers, and models are package-local runtime
+/// configuration. They have stable registry-scoped identities, but are not
+/// reusable exports from a dependency package.
+fn validate_non_reusable_dependency_resources(
+    graph: &ResolvedPackageGraph,
+    report: &mut PackageRuntimeValidationReport,
+) {
+    for (package_name, package) in &graph.packages {
+        if package_name == &graph.root_package {
+            continue;
+        }
+        for module in unique_modules(package) {
+            if !matches!(
+                module.kind,
+                PackageKind::Routine
+                    | PackageKind::Hook
+                    | PackageKind::McpServer
+                    | PackageKind::Model
+            ) {
+                continue;
+            }
+            report.diagnostics.push(PackageValidationDiagnostic::error(
+                &package.name,
+                &module.source_path,
+                Some(module.kind),
+                None,
+                format!(
+                    "dependency package '{}' exports {}, but {} resources must be installed by the root package",
+                    package_name,
+                    module.kind.as_str(),
+                    module.kind.as_str(),
+                ),
+            ));
+        }
+    }
 }
 
 fn validate_one(
@@ -653,6 +691,60 @@ mod tests {
         };
         let packages = BTreeMap::from([(package.name.clone(), package)]);
         validate_registry_runtime(&registry, &packages).expect("validation should pass");
+    }
+
+    #[test]
+    fn rejects_runtime_configuration_resources_from_dependency_packages() {
+        let root = package_with_dependencies(
+            "app",
+            BTreeMap::from([("shared-runtime".to_string(), "^1.0.0".to_string())]),
+            Vec::new(),
+        );
+        let dependency = package(
+            "shared-runtime",
+            vec![
+                module(
+                    "models/review.yaml",
+                    PackageKind::Model,
+                    serde_json::json!({ "name": "review" }),
+                ),
+                module(
+                    "mcp/review.yaml",
+                    PackageKind::McpServer,
+                    serde_json::json!({ "name": "review-server" }),
+                ),
+                module(
+                    "hooks/review.yaml",
+                    PackageKind::Hook,
+                    serde_json::json!({ "name": "review-hook" }),
+                ),
+                module(
+                    "routines/review.yaml",
+                    PackageKind::Routine,
+                    serde_json::json!({ "name": "review" }),
+                ),
+            ],
+        );
+        let graph = ResolvedPackageGraph {
+            root_package: "app".to_string(),
+            packages: BTreeMap::from([
+                (root.name.clone(), root),
+                (dependency.name.clone(), dependency),
+            ]),
+        };
+
+        let error = validate_package_runtime(&graph)
+            .expect_err("dependency model must be rejected")
+            .to_string();
+
+        for kind in ["model", "mcp_server", "hook", "routine"] {
+            assert!(
+                error.contains(&format!(
+                    "dependency package 'shared-runtime' exports {kind}"
+                )),
+                "missing dependency validation error for {kind}: {error}"
+            );
+        }
     }
 
     #[test]
