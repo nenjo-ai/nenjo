@@ -338,7 +338,7 @@ impl OpenAiCompatibleProvider {
     /// Assistant messages with `tool_calls` JSON are converted into native
     /// tool call messages. Tool result messages with `tool_call_id` JSON
     /// are converted into native tool result messages.
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<Message> {
+    fn convert_messages(messages: &[ChatMessage], supports_developer_role: bool) -> Vec<Message> {
         messages
             .iter()
             .map(|m| {
@@ -394,7 +394,13 @@ impl OpenAiCompatibleProvider {
 
                 // Regular message (system, user, plain assistant)
                 Message {
-                    role: m.role.clone(),
+                    // Most OpenAI-compatible chat templates (including MLX/Qwen)
+                    // accept `system` but not OpenAI's newer `developer` role.
+                    role: if m.role == "developer" && !supports_developer_role {
+                        "system".to_string()
+                    } else {
+                        m.role.clone()
+                    },
                     content: Some(m.content.clone()),
                     tool_call_id: None,
                     tool_calls: None,
@@ -457,7 +463,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let tools = Self::convert_tools(request.tools);
         let chat_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(request.messages, self.supports_developer_role(model)),
             temperature,
             stream: Some(false),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
@@ -606,14 +612,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
         true
     }
 
-    fn supports_developer_role(&self, model: &str) -> bool {
-        let m = model.to_lowercase();
-        m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4")
-            || m.starts_with("gpt-5")
-            || m.starts_with("gpt-4.5")
-            || m.starts_with("gpt-4.1")
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        // A generic compatible endpoint does not identify the server-side chat
+        // template. Use `system`, which is the portable role across these APIs.
+        false
     }
 }
 
@@ -646,11 +648,11 @@ mod tests {
     }
 
     #[test]
-    fn developer_role_supported_for_openai_style_newer_models() {
+    fn developer_role_is_not_assumed_for_generic_compatible_endpoints() {
         let p = make_provider("OpenAI-compatible", "https://example.com", None);
-        assert!(p.supports_developer_role("gpt-5.1"));
-        assert!(p.supports_developer_role("gpt-4.1"));
-        assert!(p.supports_developer_role("o4-mini"));
+        assert!(!p.supports_developer_role("gpt-5.1"));
+        assert!(!p.supports_developer_role("gpt-4.1"));
+        assert!(!p.supports_developer_role("o4-mini"));
         assert!(!p.supports_developer_role("gpt-4o"));
         assert!(!p.supports_developer_role("llama-3.3-70b"));
     }
@@ -706,6 +708,26 @@ mod tests {
         assert!(!json.contains("tool_call_id"));
         assert!(!json.contains("tool_calls"));
         assert!(!json.contains("tool_choice"));
+    }
+
+    #[test]
+    fn developer_role_is_mapped_to_system() {
+        let messages = vec![ChatMessage::developer("Use the response tool")];
+        let converted = OpenAiCompatibleProvider::convert_messages(&messages, false);
+
+        assert_eq!(converted[0].role, "system");
+        assert_eq!(
+            converted[0].content.as_deref(),
+            Some("Use the response tool")
+        );
+    }
+
+    #[test]
+    fn developer_role_is_preserved_when_supported() {
+        let messages = vec![ChatMessage::developer("Use the response tool")];
+        let converted = OpenAiCompatibleProvider::convert_messages(&messages, true);
+
+        assert_eq!(converted[0].role, "developer");
     }
 
     #[test]
