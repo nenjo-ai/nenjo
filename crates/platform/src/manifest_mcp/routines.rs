@@ -66,7 +66,7 @@ fn routine_edge_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "required": ["source_step", "target_step", "condition"],
-        "description": "Routine graphs must be acyclic after removing on_fail edges. Use on_fail only from gate steps for failure recovery, retry loops, or remediation paths; always and on_pass edges must not create cycles.",
+        "description": "Routine graphs must be acyclic after removing on_fail edges. source_step, target_step, and condition are top-level edge fields, not metadata fields. Use on_fail only from gate steps for failure recovery, retry loops, or remediation paths; always and on_pass edges must not create cycles.",
         "properties": {
             "source_step": {
                 "type": "string",
@@ -83,11 +83,37 @@ fn routine_edge_schema() -> serde_json::Value {
             },
             "metadata": {
                 "type": "object",
-                "description": "Optional edge metadata. Use purpose to explain why the route exists. Use handoff_instructions to tell the source agent what information to pass to this target when it calls route_next_steps. For an on_fail retry edge from a gate step, use max_attempts to bound retries; retry exhaustion fails the routine directly.",
+                "description": "Optional edge metadata. Every edge leaving an agent or gate step must define handoff_schema: the JSON Schema contract for the target-specific payload passed through route_next_steps. Use purpose to explain why the route exists. Use handoff_instructions to tell the source agent what information to pass to this target. For an on_fail retry edge from a gate step, use max_attempts to bound retries; retry exhaustion fails the routine directly.",
                 "properties": {
                     "purpose": {
                         "type": "string",
                         "description": "Why this route exists."
+                    },
+                    "handoff_schema": {
+                        "type": "object",
+                        "required": ["type"],
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["object"],
+                                "description": "Required root JSON Schema type. It must be object."
+                            },
+                            "properties": {
+                                "type": "object",
+                                "description": "Properties of the handoff payload."
+                            },
+                            "required": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Payload properties required by the downstream step."
+                            },
+                            "additionalProperties": {
+                                "type": "boolean",
+                                "description": "Whether handoff payload fields outside properties are allowed."
+                            }
+                        },
+                        "additionalProperties": true,
+                        "description": "Required for every edge whose source step is agent or gate. A runtime-enforced JSON Schema object for the handoff payload; its root type must be object. Keep this object inside metadata.handoff_schema; purpose, handoff_instructions, and max_attempts are sibling fields in metadata. For example {\"type\":\"object\",\"required\":[\"work\"],\"properties\":{\"work\":{\"type\":\"string\"}},\"additionalProperties\":false}."
                     },
                     "handoff_instructions": {
                         "type": "string",
@@ -164,10 +190,11 @@ fn routine_trigger_schema(description: &str) -> Value {
 }
 
 fn routine_graph_field_schema(description: &str) -> Value {
-    json!({
-        "description": description,
-        "allOf": [routine_graph_schema()]
-    })
+    let mut schema = routine_graph_schema();
+    schema["description"] = Value::String(format!(
+        "{description} Pass graph as a JSON object with entry_steps, steps, and edges; do not serialize that object into a string."
+    ));
+    schema
 }
 
 fn cron_task_schema() -> Value {

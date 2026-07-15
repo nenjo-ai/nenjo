@@ -10,11 +10,14 @@
 //! - Reliability wrappers: [`ReliableProvider`] (retry/fallback), [`RouterProvider`] (model routing)
 
 pub mod anthropic;
+mod audio_data_uri;
+pub mod capabilities;
 pub mod compatible;
 pub mod gemini;
 pub mod native;
 pub mod ollama;
 pub mod openai;
+mod openai_tools;
 pub mod openrouter;
 pub mod reliable;
 pub mod router;
@@ -22,14 +25,19 @@ pub mod traits;
 pub mod xai;
 
 // Re-export core types at crate root.
+pub use capabilities::{
+    ASSIGNABLE_OPERATION_CAPABILITIES, CapabilityModalityHints, ModelCapabilityId,
+    ModelExecutionMode, ModelModality, assignable_operation_modality_hints,
+    is_assignable_operation_capability, is_known_capability, validate_model_capabilities,
+};
 pub use native::{
     EditImageRequest, EditVideoRequest, ExtendVideoRequest, GenerateImageRequest,
-    GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaInputAsset,
-    MediaOutputAsset, MediaOutputFormat, ModelNativeCapabilities, NativeCapabilitiesProvider,
-    NativeExecutionMode, NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest,
-    NativeMediaResponse, NativeModelToolId, NativeOperation, NativeToolSpec,
-    ProviderNativeCapabilities, ProviderNativeModelToolSpec, ReferenceToVideoRequest,
-    TranscribeAudioRequest,
+    GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaCapabilitiesProvider,
+    MediaExecutionMode, MediaInputAsset, MediaOperation, MediaOutputAsset, MediaOutputFormat,
+    MediaToolSpec, ModelMediaCapabilities, NativeMediaJob, NativeMediaJobStatus,
+    NativeMediaRequest, NativeMediaResponse, NativeModelToolId, ProviderMediaCapabilities,
+    ProviderNativeModelToolSpec, ReferenceToVideoRequest, TranscribeAudioRequest,
+    TranscriptSegment,
 };
 pub use nenjo_tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
 pub use traits::{

@@ -891,6 +891,7 @@ where
                 .model_provider
                 .unwrap_or_else(|| "openai".into()),
             temperature: Some(params.data.temperature.unwrap_or(0.7)),
+            context_window: params.data.context_window,
             base_url: params.data.base_url,
             native_tools: params.data.native_tools,
         };
@@ -919,6 +920,9 @@ where
         }
         if let Some(temperature) = params.data.temperature {
             model.temperature = Some(temperature);
+        }
+        if let Some(context_window) = params.data.context_window {
+            model.context_window = context_window;
         }
         if let Some(base_url) = params.data.base_url {
             model.base_url = base_url;
@@ -1226,6 +1230,7 @@ mod tests {
             model: "gpt-4o".into(),
             model_provider: "openai".into(),
             temperature: Some(0.3),
+            context_window: None,
             base_url: None,
             native_tools: vec![],
         };
@@ -1237,6 +1242,7 @@ mod tests {
             model: "gpt-5".into(),
             model_provider: "openai".into(),
             temperature: Some(0.2),
+            context_window: None,
             base_url: Some("https://api.example.com".into()),
             native_tools: vec![],
         };
@@ -2517,6 +2523,7 @@ mod tests {
                     model: None,
                     model_provider: None,
                     temperature: Some(0.4),
+                    context_window: None,
                     base_url: None,
                     native_tools: None,
                 },
@@ -2549,6 +2556,7 @@ mod tests {
                     model: None,
                     model_provider: None,
                     temperature: None,
+                    context_window: None,
                     base_url: Some(None),
                     native_tools: None,
                 },

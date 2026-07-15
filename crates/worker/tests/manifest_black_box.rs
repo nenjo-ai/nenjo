@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,8 +12,16 @@ use nenjo::manifest::{
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
-use nenjo_events::{ResourceAction, ResourceType};
+use nenjo_events::{
+    ManifestResourcePayload, ModelAssignmentBinding, ModelAssignmentsManifestUpdate,
+    ModelCapabilityDefaultBinding, ModelCapabilityDefaultsManifestUpdate, ResourceAction,
+    ResourceType,
+};
 use nenjo_harness::Harness;
+use nenjo_worker::bootstrap::{
+    CachedAgentManifest, WorkerManifestCache, load_cached_agent_model_assignments,
+    load_cached_capability_defaults, load_cached_model_runtime,
+};
 use nenjo_worker::handlers::manifest::{
     ManifestChangedCommand, ManifestCommandContext, ManifestStore, McpRuntime,
     WorkerManifestHarnessExt,
@@ -26,6 +35,7 @@ struct RecordingManifestStore {
     metadata_syncs: Mutex<Vec<String>>,
     content_syncs: Mutex<Vec<String>>,
     removals: Mutex<Vec<String>>,
+    bootstrap_refreshes: Mutex<usize>,
 }
 
 #[async_trait]
@@ -53,6 +63,7 @@ impl ManifestStore for RecordingManifestStore {
         &self,
         _client: &nenjo_platform::api_client::ApiClient,
     ) -> Result<Manifest> {
+        *self.bootstrap_refreshes.lock().unwrap() += 1;
         Ok(Manifest::default())
     }
 
@@ -94,6 +105,171 @@ impl ManifestStore for RecordingManifestStore {
     ) -> Result<()> {
         Ok(())
     }
+}
+
+struct DelayedManifestStore;
+
+#[async_trait]
+impl ManifestStore for DelayedManifestStore {
+    async fn persist_resource(
+        &self,
+        _manifest: &Manifest,
+        _resource_type: ResourceType,
+    ) -> Result<()> {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        Ok(())
+    }
+
+    async fn full_refresh(
+        &self,
+        _client: &nenjo_platform::api_client::ApiClient,
+    ) -> Result<Manifest> {
+        Ok(Manifest::default())
+    }
+}
+
+#[tokio::test]
+async fn model_assignment_change_applies_its_inline_snapshot_without_bootstrap() {
+    let env = test_harness(Manifest::default()).await;
+    let agent_id = Uuid::from_u128(1);
+    let temp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(WorkerManifestCache {
+        manifests_dir: temp.path().join("manifests"),
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        config_dir: temp.path().join("config"),
+    });
+    std::fs::create_dir_all(&cache.manifests_dir).unwrap();
+    std::fs::write(
+        cache.manifests_dir.join("agents.json"),
+        serde_json::to_vec(&vec![CachedAgentManifest {
+            id: agent_id,
+            manifest: agent(agent_id, "voice-agent", "prompt"),
+            model_assignments: Vec::new(),
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+    let mut context = env.manifest_context();
+    context.bootstrap_cache = Some(cache.clone());
+
+    env.harness
+        .handle_manifest_changed(
+            &context,
+            ManifestChangedCommand {
+                resource_id: agent_id,
+                resource_type: ResourceType::ModelAssignment,
+                resource: Slug::derive("model-assignments"),
+                action: ResourceAction::Updated,
+                project: None,
+                payload: Some(
+                    ManifestResourcePayload::new(ModelAssignmentsManifestUpdate {
+                        agent_id,
+                        assignments: vec![ModelAssignmentBinding {
+                            capability: "transcribe_audio".into(),
+                            model_id: Uuid::from_u128(2),
+                            assignment_source: "local".into(),
+                        }],
+                    })
+                    .into_value(),
+                ),
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*env.store.bootstrap_refreshes.lock().unwrap(), 0);
+    assert!(env.store.persisted.lock().unwrap().is_empty());
+    let assignments = load_cached_agent_model_assignments(&cache.manifests_dir);
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].agent_id, agent_id);
+    assert_eq!(assignments[0].assignments[0].model_id, Uuid::from_u128(2));
+}
+
+#[tokio::test]
+async fn model_change_applies_its_inline_snapshot_to_the_bootstrap_cache() {
+    let env = test_harness(Manifest::default()).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(WorkerManifestCache {
+        manifests_dir: temp.path().join("manifests"),
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        config_dir: temp.path().join("config"),
+    });
+    let mut context = env.manifest_context();
+    context.bootstrap_cache = Some(cache.clone());
+    let model_id = Uuid::from_u128(3);
+
+    env.harness
+        .handle_manifest_changed(
+            &context,
+            ManifestChangedCommand {
+                resource_id: model_id,
+                resource_type: ResourceType::Model,
+                resource: Slug::derive("speech-model"),
+                action: ResourceAction::Updated,
+                project: None,
+                payload: Some(model_inline_payload(model_id, "speech-model")),
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*env.store.bootstrap_refreshes.lock().unwrap(), 0);
+    assert_eq!(
+        env.store.persisted.lock().unwrap().as_slice(),
+        &[ResourceType::Model]
+    );
+    let models = load_cached_model_runtime(&cache.manifests_dir);
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, model_id);
+    assert_eq!(models[0].capabilities, ["chat", "transcribe_audio"]);
+}
+
+#[tokio::test]
+async fn capability_default_change_applies_its_inline_snapshot_without_bootstrap() {
+    let env = test_harness(Manifest::default()).await;
+    let temp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(WorkerManifestCache {
+        manifests_dir: temp.path().join("manifests"),
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        config_dir: temp.path().join("config"),
+    });
+    let mut context = env.manifest_context();
+    context.bootstrap_cache = Some(cache.clone());
+
+    env.harness
+        .handle_manifest_changed(
+            &context,
+            ManifestChangedCommand {
+                resource_id: Uuid::from_u128(1),
+                resource_type: ResourceType::ModelCapabilityDefault,
+                resource: Slug::derive("model-capability-defaults"),
+                action: ResourceAction::Updated,
+                project: None,
+                payload: Some(
+                    ManifestResourcePayload::new(ModelCapabilityDefaultsManifestUpdate {
+                        defaults: vec![ModelCapabilityDefaultBinding {
+                            capability: "generate_speech".into(),
+                            model_id: Uuid::from_u128(2),
+                        }],
+                    })
+                    .into_value(),
+                ),
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*env.store.bootstrap_refreshes.lock().unwrap(), 0);
+    assert!(env.store.persisted.lock().unwrap().is_empty());
+    let defaults = load_cached_capability_defaults(&cache.manifests_dir);
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].model_id, Uuid::from_u128(2));
 }
 
 #[derive(Default)]
@@ -151,6 +327,7 @@ struct TestHarness {
     harness: Harness<TestProvider, nenjo_sessions::NoopSessionRuntime>,
     store: Arc<RecordingManifestStore>,
     mcp: Arc<RecordingMcpRuntime>,
+    manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 async fn test_harness(manifest: Manifest) -> TestHarness {
@@ -162,6 +339,7 @@ async fn test_harness(manifest: Manifest) -> TestHarness {
         harness,
         store,
         mcp,
+        manifest_change_lock: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
 
@@ -175,7 +353,9 @@ impl TestHarness {
                 "test",
             )),
             store: self.store.clone(),
+            bootstrap_cache: None,
             mcp: Some(self.mcp.clone()),
+            change_lock: self.manifest_change_lock.clone(),
         }
     }
 }
@@ -212,6 +392,7 @@ fn model(_id: Uuid, name: &str) -> ModelManifest {
         model: "gpt-test".into(),
         model_provider: "test".into(),
         temperature: Some(0.1),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     }
@@ -407,7 +588,9 @@ fn model_inline_payload(id: Uuid, slug: &str) -> serde_json::Value {
         "model": "gpt-test",
         "model_provider": "test",
         "temperature": 0.1,
+        "context_window": 1_000_000,
         "base_url": null,
+        "capabilities": ["chat", "transcribe_audio"],
         "created_by": inline_created_by(),
         "created_at": INLINE_TS,
         "updated_at": INLINE_TS,
@@ -624,7 +807,10 @@ async fn manifest_inline_upserts_each_provider_resource() {
             ResourceType::ContextBlock => "context",
             ResourceType::McpServer => "mcp",
             ResourceType::Domain => "domain",
-            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+            ResourceType::ModelAssignment
+            | ResourceType::ModelCapabilityDefault
+            | ResourceType::Document
+            | ResourceType::KnowledgePack => unreachable!(),
         });
         let env = test_harness(Manifest::default()).await;
         env.harness
@@ -656,7 +842,12 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 assert_eq!(item.prompt_config.developer_prompt, "agent prompt");
             }
             ResourceType::Model => {
-                assert!(manifest.models.iter().any(|item| item.slug == resource))
+                let item = manifest
+                    .models
+                    .iter()
+                    .find(|item| item.slug == resource)
+                    .unwrap();
+                assert_eq!(item.context_window, Some(1_000_000));
             }
             ResourceType::Routine => {
                 assert!(manifest.routines.iter().any(|item| item.slug == resource))
@@ -711,7 +902,10 @@ async fn manifest_inline_upserts_each_provider_resource() {
                     Some("domain prompt")
                 );
             }
-            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+            ResourceType::ModelAssignment
+            | ResourceType::ModelCapabilityDefault
+            | ResourceType::Document
+            | ResourceType::KnowledgePack => unreachable!(),
         }
 
         assert_eq!(
@@ -799,7 +993,10 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             ResourceType::ContextBlock => Slug::derive("context"),
             ResourceType::McpServer => Slug::derive("mcp"),
             ResourceType::Domain => Slug::derive("domain"),
-            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+            ResourceType::ModelAssignment
+            | ResourceType::ModelCapabilityDefault
+            | ResourceType::Document
+            | ResourceType::KnowledgePack => unreachable!(),
         };
         let env = test_harness(manifest.clone()).await;
         env.harness
@@ -876,7 +1073,10 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                         .any(|item| Slug::derive(&item.name) == resource)
                 )
             }
-            ResourceType::Document | ResourceType::KnowledgePack => unreachable!(),
+            ResourceType::ModelAssignment
+            | ResourceType::ModelCapabilityDefault
+            | ResourceType::Document
+            | ResourceType::KnowledgePack => unreachable!(),
         }
 
         assert!(env.store.persisted.lock().unwrap().is_empty());
@@ -885,6 +1085,93 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
             &[resource_type]
         );
     }
+}
+
+#[tokio::test]
+async fn model_delete_removes_runtime_metadata_by_platform_model_id() {
+    let model_id = Uuid::new_v4();
+    let env = test_harness(Manifest {
+        models: vec![model(model_id, "model")],
+        ..Default::default()
+    })
+    .await;
+
+    env.harness
+        .handle_manifest_changed(
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_id: model_id,
+                resource_type: ResourceType::Model,
+                resource: Slug::derive("model"),
+                action: ResourceAction::Deleted,
+                project: None,
+                payload: None,
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        env.store.removed.lock().unwrap().as_slice(),
+        &[ResourceType::Model]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_manifest_changes_preserve_both_provider_updates() {
+    let harness = Harness::builder(provider_with_manifest(Manifest::default()).await).build();
+    let ctx = ManifestCommandContext {
+        client: Arc::new(nenjo_platform::api_client::ApiClient::new(
+            "http://127.0.0.1:9",
+            "test",
+        )),
+        store: Arc::new(DelayedManifestStore),
+        bootstrap_cache: None,
+        mcp: Some(Arc::new(RecordingMcpRuntime::default())),
+        change_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    let first = ManifestChangedCommand {
+        resource_id: first_id,
+        resource_type: ResourceType::Model,
+        resource: Slug::derive("first-model"),
+        action: ResourceAction::Created,
+        project: None,
+        payload: Some(model_inline_payload(first_id, "first-model")),
+        encrypted_payload: None,
+    };
+    let second = ManifestChangedCommand {
+        resource_id: second_id,
+        resource_type: ResourceType::Model,
+        resource: Slug::derive("second-model"),
+        action: ResourceAction::Created,
+        project: None,
+        payload: Some(model_inline_payload(second_id, "second-model")),
+        encrypted_payload: None,
+    };
+
+    let (first_result, second_result) = tokio::join!(
+        harness.handle_manifest_changed(&ctx, first),
+        harness.handle_manifest_changed(&ctx, second),
+    );
+    first_result.unwrap();
+    second_result.unwrap();
+
+    let manifest = harness.provider().manifest_snapshot();
+    assert!(
+        manifest
+            .models
+            .iter()
+            .any(|model| model.slug == Slug::derive("first-model"))
+    );
+    assert!(
+        manifest
+            .models
+            .iter()
+            .any(|model| model.slug == Slug::derive("second-model"))
+    );
 }
 
 #[tokio::test]

@@ -209,19 +209,32 @@ async fn sync_library_knowledge_pack_manifests(
 ) -> Result<()> {
     let remote_slugs = remote_library_pack_slugs(remote_packs);
     let store = nenjo::LocalManifestStore::new(manifests_dir);
-    let mut manifest = nenjo::ManifestReader::load_manifest(&store).await?;
-    manifest.knowledge_packs.retain(|pack| {
-        pack.source_type != KnowledgePackSource::Library
-            || remote_slugs.contains(pack.slug.as_str())
-    });
+    let manifest = nenjo::ManifestReader::load_manifest(&store).await?;
+    for pack in manifest.knowledge_packs.into_iter().filter(|pack| {
+        pack.source_type == KnowledgePackSource::Library
+            && !remote_slugs.contains(pack.slug.as_str())
+    }) {
+        nenjo::ManifestWriter::delete_resource(
+            &store,
+            nenjo::manifest::ManifestResourceKind::KnowledgePack,
+            &pack.slug,
+        )
+        .await?;
+    }
     for pack in remote_packs
         .iter()
         .filter(|pack| is_uploaded_library_pack(pack))
     {
-        let entry = library_knowledge_pack_manifest(pack, library_dir);
-        manifest.upsert_resource(nenjo::ManifestResource::KnowledgePack(entry));
+        nenjo::ManifestWriter::upsert_resource(
+            &store,
+            &nenjo::ManifestResource::KnowledgePack(library_knowledge_pack_manifest(
+                pack,
+                library_dir,
+            )),
+        )
+        .await?;
     }
-    nenjo::ManifestWriter::replace_manifest(&store, &manifest).await
+    Ok(())
 }
 
 async fn upsert_library_knowledge_pack_manifest(

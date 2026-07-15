@@ -3,7 +3,7 @@
 
 use crate::ModelProvider;
 use crate::native::{
-    NativeMediaJob, NativeMediaRequest, NativeMediaResponse, ProviderNativeCapabilities,
+    NativeMediaJob, NativeMediaRequest, NativeMediaResponse, ProviderMediaCapabilities,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -348,10 +348,10 @@ impl ModelProvider for ReliableProvider {
             .unwrap_or(false)
     }
 
-    fn native_capabilities(&self) -> Option<ProviderNativeCapabilities> {
+    fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
         self.providers
             .first()
-            .and_then(|(_, p)| p.native_capabilities())
+            .and_then(|(_, p)| p.media_capabilities())
     }
 
     async fn submit_media(
@@ -359,13 +359,13 @@ impl ModelProvider for ReliableProvider {
         request: NativeMediaRequest,
     ) -> anyhow::Result<NativeMediaResponse> {
         let Some((provider_name, provider)) = self.providers.first() else {
-            anyhow::bail!("no provider configured for native media operation");
+            anyhow::bail!("no provider configured for media operation");
         };
 
         provider
             .submit_media(request)
             .await
-            .map_err(|err| anyhow::anyhow!("{provider_name} native media operation failed: {err}"))
+            .map_err(|err| anyhow::anyhow!("{provider_name} media operation failed: {err}"))
     }
 
     async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
@@ -378,13 +378,13 @@ impl ModelProvider for ReliableProvider {
         }
 
         let Some((provider_name, provider)) = self.providers.first() else {
-            anyhow::bail!("no provider configured for native media job polling");
+            anyhow::bail!("no provider configured for media job polling");
         };
 
         provider
             .poll_media_job(job)
             .await
-            .map_err(|err| anyhow::anyhow!("{provider_name} native media job poll failed: {err}"))
+            .map_err(|err| anyhow::anyhow!("{provider_name} media job poll failed: {err}"))
     }
 }
 

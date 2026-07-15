@@ -2285,6 +2285,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "nenjo",
+ "nenjo-models",
  "nenjo-xml",
  "reqwest",
  "serde",

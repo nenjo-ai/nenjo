@@ -1,4 +1,4 @@
-//! Provider-native media tools.
+//! Direct provider media tools.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +10,9 @@ use nenjo::tools::AsyncOperationKind;
 use nenjo::{AsyncOperationHandle, StartAsyncOperation, current_async_operation_runtime};
 use nenjo_models::{
     EditImageRequest, EditVideoRequest, ExtendVideoRequest, GenerateImageRequest,
-    GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaOutputAsset,
-    NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest, NativeMediaResponse, NativeOperation,
-    NativeToolSpec, ReferenceToVideoRequest, TranscribeAudioRequest,
+    GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaOperation,
+    MediaOutputAsset, MediaToolSpec, NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest,
+    NativeMediaResponse, ReferenceToVideoRequest, TranscribeAudioRequest,
 };
 use serde_json::json;
 
@@ -25,7 +25,7 @@ const MEDIA_JOB_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct NativeMediaTool {
     resolved: ResolvedMediaProvider,
-    spec: NativeToolSpec,
+    spec: MediaToolSpec,
     provider_registry: Arc<ModelProviderRegistry>,
 }
 
@@ -45,43 +45,43 @@ impl NativeMediaTool {
     fn request(&self, mut args: serde_json::Value) -> Result<NativeMediaRequest> {
         inject_model(&mut args, &self.resolved.model);
         match self.resolved.capability {
-            NativeOperation::GenerateImage => Ok(NativeMediaRequest::GenerateImage(
+            MediaOperation::GenerateImage => Ok(NativeMediaRequest::GenerateImage(
                 serde_json::from_value::<GenerateImageRequest>(args)
                     .context("invalid generate_image request")?,
             )),
-            NativeOperation::EditImage => Ok(NativeMediaRequest::EditImage(
+            MediaOperation::EditImage => Ok(NativeMediaRequest::EditImage(
                 serde_json::from_value::<EditImageRequest>(args)
                     .context("invalid edit_image request")?,
             )),
-            NativeOperation::GenerateVideo => Ok(NativeMediaRequest::GenerateVideo(
+            MediaOperation::GenerateVideo => Ok(NativeMediaRequest::GenerateVideo(
                 serde_json::from_value::<GenerateVideoRequest>(args)
                     .context("invalid generate_video request")?,
             )),
-            NativeOperation::EditVideo => Ok(NativeMediaRequest::EditVideo(
+            MediaOperation::EditVideo => Ok(NativeMediaRequest::EditVideo(
                 serde_json::from_value::<EditVideoRequest>(args)
                     .context("invalid edit_video request")?,
             )),
-            NativeOperation::ImageToVideo => Ok(NativeMediaRequest::ImageToVideo(
+            MediaOperation::ImageToVideo => Ok(NativeMediaRequest::ImageToVideo(
                 serde_json::from_value::<ImageToVideoRequest>(args)
                     .context("invalid image_to_video request")?,
             )),
-            NativeOperation::ReferenceToVideo => Ok(NativeMediaRequest::ReferenceToVideo(
+            MediaOperation::ReferenceToVideo => Ok(NativeMediaRequest::ReferenceToVideo(
                 serde_json::from_value::<ReferenceToVideoRequest>(args)
                     .context("invalid reference_to_video request")?,
             )),
-            NativeOperation::ExtendVideo => Ok(NativeMediaRequest::ExtendVideo(
+            MediaOperation::ExtendVideo => Ok(NativeMediaRequest::ExtendVideo(
                 serde_json::from_value::<ExtendVideoRequest>(args)
                     .context("invalid extend_video request")?,
             )),
-            NativeOperation::GenerateSpeech => Ok(NativeMediaRequest::GenerateSpeech(
+            MediaOperation::GenerateSpeech => Ok(NativeMediaRequest::GenerateSpeech(
                 serde_json::from_value::<GenerateSpeechRequest>(args)
                     .context("invalid generate_speech request")?,
             )),
-            NativeOperation::TranscribeAudio => Ok(NativeMediaRequest::TranscribeAudio(
+            MediaOperation::TranscribeAudio => Ok(NativeMediaRequest::TranscribeAudio(
                 serde_json::from_value::<TranscribeAudioRequest>(args)
                     .context("invalid transcribe_audio request")?,
             )),
-            NativeOperation::RealtimeVoiceAgent => {
+            MediaOperation::RealtimeVoiceAgent => {
                 anyhow::bail!("realtime_voice_agent does not have a worker media tool yet")
             }
         }
@@ -111,7 +111,7 @@ impl Tool for NativeMediaTool {
         let operation = request.operation();
         let provider = self
             .provider_registry
-            .provider(&self.resolved.provider)
+            .provider_with_base_url(&self.resolved.provider, self.resolved.base_url.as_deref())
             .with_context(|| {
                 format!(
                     "failed to initialize media provider '{}'",
@@ -120,7 +120,7 @@ impl Tool for NativeMediaTool {
             })?;
         let response = provider.submit_media(request).await.with_context(|| {
             format!(
-                "{} native media operation failed for model {}",
+                "{} media operation failed for model {}",
                 self.resolved.provider, self.resolved.model
             )
         })?;
@@ -189,8 +189,8 @@ impl Tool for NativeMediaTool {
 fn resolved_tool_spec(
     resolved: &ResolvedMediaProvider,
     provider_registry: &ModelProviderRegistry,
-) -> Option<NativeToolSpec> {
-    let capabilities = provider_registry.native_capabilities(&resolved.provider)?;
+) -> Option<MediaToolSpec> {
+    let capabilities = provider_registry.media_capabilities(&resolved.provider)?;
     capabilities
         .models
         .into_iter()
@@ -253,6 +253,15 @@ async fn poll_media_job(
                     .await;
                 return;
             }
+            Ok(response @ NativeMediaResponse::Transcript { .. }) => {
+                operation
+                    .complete(
+                        format!("Media job {} completed with transcript", job.job_id),
+                        response_value(&response),
+                    )
+                    .await;
+                return;
+            }
             Ok(NativeMediaResponse::Job { job: next }) => {
                 job = next;
             }
@@ -302,7 +311,7 @@ fn inject_model(args: &mut serde_json::Value, model: &str) {
     );
 }
 
-pub fn tool_name(operation: NativeOperation) -> Option<&'static str> {
+pub fn tool_name(operation: MediaOperation) -> Option<&'static str> {
     operation.tool_name()
 }
 
@@ -326,7 +335,8 @@ mod tests {
                 slug: Slug::derive("image"),
                 provider: "openai".to_string(),
                 model: "gpt-image-1".to_string(),
-                capability: NativeOperation::GenerateImage,
+                capability: MediaOperation::GenerateImage,
+                base_url: None,
             },
             Arc::new(ModelProviderRegistry::new(
                 &Default::default(),
@@ -355,7 +365,8 @@ mod tests {
                 slug: Slug::derive("image"),
                 provider: "openai".to_string(),
                 model: "gpt-image-1".to_string(),
-                capability: NativeOperation::GenerateImage,
+                capability: MediaOperation::GenerateImage,
+                base_url: None,
             },
             Arc::new(ModelProviderRegistry::new(
                 &Default::default(),
@@ -379,7 +390,8 @@ mod tests {
                 slug: Slug::derive("video"),
                 provider: "xai".to_string(),
                 model: "grok-imagine-video".to_string(),
-                capability: NativeOperation::ExtendVideo,
+                capability: MediaOperation::ExtendVideo,
+                base_url: None,
             },
             Arc::new(ModelProviderRegistry::new(
                 &Default::default(),
@@ -402,7 +414,8 @@ mod tests {
                 slug: Slug::derive("video"),
                 provider: "xai".to_string(),
                 model: "grok-imagine-video".to_string(),
-                capability: NativeOperation::GenerateVideo,
+                capability: MediaOperation::GenerateVideo,
+                base_url: None,
             },
             Arc::new(ModelProviderRegistry::new(
                 &Default::default(),
@@ -421,7 +434,7 @@ mod tests {
     fn completed_asset_summary_includes_url() {
         let job = NativeMediaJob {
             provider: "xai".into(),
-            operation: NativeOperation::GenerateVideo,
+            operation: MediaOperation::GenerateVideo,
             job_id: "request-123".into(),
             status: NativeMediaJobStatus::Running,
             model: Some("grok-imagine-video".into()),

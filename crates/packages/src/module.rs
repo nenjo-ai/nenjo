@@ -260,7 +260,35 @@ pub struct ResourceManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Soft preferred engine hint for install-time candidate sorting.
+///
+/// Preferred models never auto-bind when multiple org models still match.
+pub struct PackagePreferredModel {
+    /// Provider id, such as `xai` or `openai`.
+    pub provider: String,
+    /// Provider model id, such as `grok-2-image`.
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Model capability requirement declared by a package resource.
+///
+/// Requirements are keyed by assignable operation capability (never `chat` or
+/// feature capabilities). Optional preferred models reorder install UI/error
+/// suggestions only.
+pub struct PackageModelRequirement {
+    /// Assignable operation capability, such as `generate_image`.
+    pub capability: String,
+    /// Soft preferred engines for install-time candidate sorting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_models: Vec<PackagePreferredModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Provider-native media capability requirement declared by a package resource.
+///
+/// Prefer [`PackageModelRequirement`] / `model_requirements` for new packages.
+/// This shape remains for dual-read of legacy `media:` manifests.
 pub struct PackageMediaRequirement {
     /// Native media capability name, such as `generate_image` or `reference_to_video`.
     pub capability: String,
@@ -270,6 +298,41 @@ pub struct PackageMediaRequirement {
     /// Optional provider model pin. A model pin requires a provider pin.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+impl From<PackageMediaRequirement> for PackageModelRequirement {
+    fn from(value: PackageMediaRequirement) -> Self {
+        let preferred_models = match (value.provider, value.model) {
+            (Some(provider), Some(model)) => {
+                vec![PackagePreferredModel { provider, model }]
+            }
+            _ => Vec::new(),
+        };
+        Self {
+            capability: value.capability,
+            preferred_models,
+        }
+    }
+}
+
+impl From<&PackageModelRequirement> for PackageMediaRequirement {
+    fn from(value: &PackageModelRequirement) -> Self {
+        let (provider, model) = value
+            .preferred_models
+            .first()
+            .map(|preferred| {
+                (
+                    Some(preferred.provider.clone()),
+                    Some(preferred.model.clone()),
+                )
+            })
+            .unwrap_or((None, None));
+        Self {
+            capability: value.capability.clone(),
+            provider,
+            model,
+        }
+    }
 }
 
 impl ResourceManifest {
@@ -332,6 +395,43 @@ impl ResourceManifest {
         extract_module_imports(&self.imports)
     }
 
+    /// Return model capability requirements declared by this resource manifest.
+    ///
+    /// Prefers `model_requirements` when present; otherwise dual-reads legacy
+    /// `media` entries. Capability IDs must be package-requirement capable
+    /// (assignable non-`chat` operations only).
+    ///
+    /// ```yaml
+    /// model_requirements:
+    ///   - capability: generate_image
+    ///     preferred_models:
+    ///       - provider: xai
+    ///         model: grok-2-image
+    ///   - capability: transcribe_audio
+    /// ```
+    pub fn model_requirements(&self) -> Result<Vec<PackageModelRequirement>> {
+        if let Some(value) = self.manifest.get("model_requirements") {
+            return parse_model_requirements(value);
+        }
+        let Some(value) = self.manifest.get("media") else {
+            return Ok(Vec::new());
+        };
+        let media = parse_media_requirements(value)?;
+        let mut requirements = Vec::with_capacity(media.len());
+        let mut seen = BTreeSet::new();
+        for item in media {
+            validate_package_requirement_capability(&item.capability)?;
+            if !seen.insert(item.capability.clone()) {
+                return Err(PackageError::invalid_resource_manifest(format!(
+                    "duplicate model requirement '{}'",
+                    item.capability
+                )));
+            }
+            requirements.push(PackageModelRequirement::from(item));
+        }
+        Ok(requirements)
+    }
+
     /// Return provider-native media requirements declared by this resource manifest.
     ///
     /// Accepts both shorthand capability strings and object entries:
@@ -343,7 +443,18 @@ impl ResourceManifest {
     ///     provider: xai
     ///     model: grok-imagine-video
     /// ```
+    ///
+    /// Prefer [`Self::model_requirements`] for new package authoring. When only
+    /// `model_requirements` is present, this dual-reads those entries into the
+    /// legacy provider/model pin shape (first preferred model when set).
     pub fn media_requirements(&self) -> Result<Vec<PackageMediaRequirement>> {
+        if self.manifest.get("model_requirements").is_some() {
+            return Ok(self
+                .model_requirements()?
+                .iter()
+                .map(PackageMediaRequirement::from)
+                .collect());
+        }
         let Some(value) = self.manifest.get("media") else {
             return Ok(Vec::new());
         };
@@ -369,7 +480,7 @@ impl ResourceManifest {
         for import in self.imports() {
             import.validate()?;
         }
-        self.media_requirements()?;
+        self.model_requirements()?;
         self.validate_package_authored_manifest_fields(kind)?;
         Ok(())
     }
@@ -389,6 +500,117 @@ impl ResourceManifest {
     }
 }
 
+fn parse_model_requirements(value: &serde_json::Value) -> Result<Vec<PackageModelRequirement>> {
+    let items = value.as_array().ok_or_else(|| {
+        PackageError::invalid_resource_manifest("manifest.model_requirements must be an array")
+    })?;
+    let mut seen = BTreeSet::new();
+    let mut requirements = Vec::with_capacity(items.len());
+
+    for (index, item) in items.iter().enumerate() {
+        let requirement = if let Some(capability) = item.as_str() {
+            PackageModelRequirement {
+                capability: non_empty_requirement_string(
+                    capability,
+                    &format!("manifest.model_requirements[{index}]"),
+                )?
+                .to_string(),
+                preferred_models: Vec::new(),
+            }
+        } else if let Some(object) = item.as_object() {
+            let capability = object
+                .get("capability")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    PackageError::invalid_resource_manifest(format!(
+                        "manifest.model_requirements[{index}].capability is required"
+                    ))
+                })?;
+            let preferred_models = parse_preferred_models(
+                object.get("preferred_models"),
+                &format!("manifest.model_requirements[{index}].preferred_models"),
+            )?;
+            PackageModelRequirement {
+                capability: non_empty_requirement_string(
+                    capability,
+                    &format!("manifest.model_requirements[{index}].capability"),
+                )?
+                .to_string(),
+                preferred_models,
+            }
+        } else {
+            return Err(PackageError::invalid_resource_manifest(format!(
+                "manifest.model_requirements[{index}] must be a capability string or object"
+            )));
+        };
+
+        validate_package_requirement_capability(&requirement.capability)?;
+
+        if !seen.insert(requirement.capability.clone()) {
+            return Err(PackageError::invalid_resource_manifest(format!(
+                "duplicate model requirement '{}'",
+                requirement.capability
+            )));
+        }
+
+        requirements.push(requirement);
+    }
+
+    Ok(requirements)
+}
+
+fn parse_preferred_models(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Vec<PackagePreferredModel>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value.as_array().ok_or_else(|| {
+        PackageError::invalid_resource_manifest(format!("{field} must be an array"))
+    })?;
+    let mut preferred = Vec::with_capacity(items.len());
+    let mut seen = BTreeSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().ok_or_else(|| {
+            PackageError::invalid_resource_manifest(format!(
+                "{field}[{index}] must be an object with provider and model"
+            ))
+        })?;
+        let provider = object
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PackageError::invalid_resource_manifest(format!(
+                    "{field}[{index}].provider is required"
+                ))
+            })?;
+        let model = object
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PackageError::invalid_resource_manifest(format!(
+                    "{field}[{index}].model is required"
+                ))
+            })?;
+        let provider =
+            non_empty_requirement_string(provider, &format!("{field}[{index}].provider"))?
+                .to_string();
+        let model =
+            non_empty_requirement_string(model, &format!("{field}[{index}].model"))?.to_string();
+        let key = (provider.clone(), model.clone());
+        if !seen.insert(key) {
+            return Err(PackageError::invalid_resource_manifest(format!(
+                "duplicate preferred model '{provider}/{model}' in {field}"
+            )));
+        }
+        preferred.push(PackagePreferredModel { provider, model });
+    }
+
+    Ok(preferred)
+}
+
 fn parse_media_requirements(value: &serde_json::Value) -> Result<Vec<PackageMediaRequirement>> {
     let items = value.as_array().ok_or_else(|| {
         PackageError::invalid_resource_manifest("manifest.media must be an array")
@@ -399,7 +621,7 @@ fn parse_media_requirements(value: &serde_json::Value) -> Result<Vec<PackageMedi
     for (index, item) in items.iter().enumerate() {
         let requirement = if let Some(capability) = item.as_str() {
             PackageMediaRequirement {
-                capability: non_empty_media_string(
+                capability: non_empty_requirement_string(
                     capability,
                     &format!("manifest.media[{index}]"),
                 )?
@@ -417,16 +639,16 @@ fn parse_media_requirements(value: &serde_json::Value) -> Result<Vec<PackageMedi
                     ))
                 })?;
             PackageMediaRequirement {
-                capability: non_empty_media_string(
+                capability: non_empty_requirement_string(
                     capability,
                     &format!("manifest.media[{index}].capability"),
                 )?
                 .to_string(),
-                provider: optional_media_string(
+                provider: optional_requirement_string(
                     object.get("provider"),
                     &format!("manifest.media[{index}].provider"),
                 )?,
-                model: optional_media_string(
+                model: optional_requirement_string(
                     object.get("model"),
                     &format!("manifest.media[{index}].model"),
                 )?,
@@ -461,7 +683,19 @@ fn parse_media_requirements(value: &serde_json::Value) -> Result<Vec<PackageMedi
     Ok(requirements)
 }
 
-fn non_empty_media_string<'a>(value: &'a str, field: &str) -> Result<&'a str> {
+fn validate_package_requirement_capability(capability: &str) -> Result<()> {
+    match capability.parse::<nenjo_models::ModelCapabilityId>() {
+        Ok(nenjo_models::ModelCapabilityId::Chat) => Err(PackageError::invalid_resource_manifest(
+            "chat is not allowed in model_requirements; agents imply a primary chat model",
+        )),
+        Ok(_) => Ok(()),
+        Err(_) => Err(PackageError::invalid_resource_manifest(format!(
+            "unknown model requirement capability '{capability}'"
+        ))),
+    }
+}
+
+fn non_empty_requirement_string<'a>(value: &'a str, field: &str) -> Result<&'a str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(PackageError::invalid_resource_manifest(format!(
@@ -471,7 +705,10 @@ fn non_empty_media_string<'a>(value: &'a str, field: &str) -> Result<&'a str> {
     Ok(trimmed)
 }
 
-fn optional_media_string(value: Option<&serde_json::Value>, field: &str) -> Result<Option<String>> {
+fn optional_requirement_string(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>> {
     let Some(value) = value else {
         return Ok(None);
     };

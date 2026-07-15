@@ -478,6 +478,7 @@ mod tests {
             model: "gpt-4o".into(),
             model_provider: "openai".into(),
             temperature: Some(0.3),
+            context_window: None,
             base_url: None,
             native_tools: vec![],
         };

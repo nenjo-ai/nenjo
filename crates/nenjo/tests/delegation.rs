@@ -25,6 +25,7 @@ fn model(_id: Uuid) -> ModelManifest {
         model: "mock-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     }

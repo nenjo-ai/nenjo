@@ -66,6 +66,7 @@ async fn chat_test_provider()
         model: "mock".into(),
         model_provider: "mock".into(),
         temperature: Some(0.0),
+        context_window: None,
         base_url: None,
         native_tools: Vec::new(),
     };

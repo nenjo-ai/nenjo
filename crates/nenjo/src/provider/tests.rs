@@ -57,6 +57,7 @@ fn test_manifest() -> Manifest {
         model: "mock".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };
@@ -939,6 +940,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         model: "mock".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };

@@ -91,6 +91,16 @@ pub trait ManifestWriter: Send + Sync {
     /// Insert or update a single manifest resource and return the canonical stored value.
     async fn upsert_resource(&self, resource: &ManifestResource) -> Result<ManifestResource>;
 
+    /// Cache a resource obtained while serving a read, without treating it as
+    /// a platform mutation.
+    ///
+    /// Most stores persist read-through entries exactly like ordinary upserts.
+    /// Hosts with an authoritative remote bootstrap cache can override this to
+    /// preserve cache envelopes or to avoid reloading their live provider.
+    async fn cache_resource(&self, resource: &ManifestResource) -> Result<ManifestResource> {
+        self.upsert_resource(resource).await
+    }
+
     /// Delete one manifest resource by kind and slug.
     async fn delete_resource(&self, kind: ManifestResourceKind, slug: &Slug) -> Result<()>;
 }

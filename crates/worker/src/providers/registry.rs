@@ -23,7 +23,7 @@ use tracing::debug;
 
 use nenjo::ModelProviderFactory;
 use nenjo_models::ReliableProvider;
-use nenjo_models::{ModelProvider, ProviderNativeCapabilities};
+use nenjo_models::{ModelProvider, ProviderMediaCapabilities};
 
 use super::ModelProviders;
 use crate::config::ReliabilityConfig;
@@ -82,14 +82,23 @@ impl ModelProviderRegistry {
         <Self as nenjo::ModelProviderFactory>::create(self, provider_name)
     }
 
-    /// Return provider-native capability metadata without requiring runtime
+    /// Return a configured provider instance with a model-specific base URL.
+    pub fn provider_with_base_url(
+        &self,
+        provider_name: &str,
+        base_url: Option<&str>,
+    ) -> Result<Arc<dyn ModelProvider>> {
+        <Self as nenjo::ModelProviderFactory>::create_with_base_url(self, provider_name, base_url)
+    }
+
+    /// Return provider media capability metadata without requiring runtime
     /// credentials. Capability discovery is static provider metadata; actual
     /// calls still go through authenticated provider instances.
-    pub fn native_capabilities(&self, provider_name: &str) -> Option<ProviderNativeCapabilities> {
+    pub fn media_capabilities(&self, provider_name: &str) -> Option<ProviderMediaCapabilities> {
         let bare_name = provider_name
             .strip_prefix("openai-compatible:")
             .map_or(provider_name, |_| "openai-compatible");
-        Self::create_bare(bare_name, "", None).native_capabilities()
+        Self::create_bare(bare_name, "", None).media_capabilities()
     }
 
     /// Candidate env var names for a provider, used as a runtime fallback when
@@ -228,8 +237,8 @@ impl ModelProviderRegistry {
 }
 
 impl MediaCapabilitySource for ModelProviderRegistry {
-    fn native_capabilities(&self, provider_name: &str) -> Option<ProviderNativeCapabilities> {
-        ModelProviderRegistry::native_capabilities(self, provider_name)
+    fn media_capabilities(&self, provider_name: &str) -> Option<ProviderMediaCapabilities> {
+        ModelProviderRegistry::media_capabilities(self, provider_name)
     }
 }
 
@@ -339,15 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn xai_provider_exposes_native_capabilities_through_registry() {
+    fn xai_provider_exposes_media_capabilities_through_registry() {
         let mut keys = HashMap::new();
         keys.insert(ModelProviders::XAI, "test-key".to_string());
         let registry = ModelProviderRegistry::new(&keys, &ReliabilityConfig::default());
 
         let provider = registry.create("xai").unwrap();
         let capabilities = provider
-            .native_capabilities()
-            .expect("xai native capabilities");
+            .media_capabilities()
+            .expect("xai media capabilities");
 
         assert_eq!(capabilities.provider, "xai");
     }

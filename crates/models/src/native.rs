@@ -1,4 +1,4 @@
-//! Provider-native media and model capability contracts.
+//! Provider media and provider-native model tool contracts.
 //!
 //! These APIs are separate from chat/tool calling. They represent direct
 //! provider endpoints such as image generation, video jobs, TTS, and STT.
@@ -84,10 +84,14 @@ pub struct ProviderNativeModelToolSpec {
     pub config_schema: Option<serde_json::Value>,
 }
 
-/// A provider-native operation exposed outside the chat turn loop.
+/// A media operation exposed outside the chat turn loop.
+///
+/// Most variants are configurable through non-`chat` model assignments. Some
+/// variants may remain reserved for provider integrations that are not yet
+/// assignable by the platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NativeOperation {
+pub enum MediaOperation {
     GenerateImage,
     EditImage,
     GenerateVideo,
@@ -100,7 +104,21 @@ pub enum NativeOperation {
     RealtimeVoiceAgent,
 }
 
-impl NativeOperation {
+impl MediaOperation {
+    /// Every media operation variant, in stable declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::GenerateImage,
+        Self::EditImage,
+        Self::GenerateVideo,
+        Self::EditVideo,
+        Self::ImageToVideo,
+        Self::ReferenceToVideo,
+        Self::ExtendVideo,
+        Self::GenerateSpeech,
+        Self::TranscribeAudio,
+        Self::RealtimeVoiceAgent,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GenerateImage => "generate_image",
@@ -124,6 +142,32 @@ impl NativeOperation {
     }
 }
 
+impl std::fmt::Display for MediaOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MediaOperation {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "generate_image" => Ok(Self::GenerateImage),
+            "edit_image" => Ok(Self::EditImage),
+            "generate_video" => Ok(Self::GenerateVideo),
+            "edit_video" => Ok(Self::EditVideo),
+            "image_to_video" => Ok(Self::ImageToVideo),
+            "reference_to_video" => Ok(Self::ReferenceToVideo),
+            "extend_video" => Ok(Self::ExtendVideo),
+            "generate_speech" => Ok(Self::GenerateSpeech),
+            "transcribe_audio" => Ok(Self::TranscribeAudio),
+            "realtime_voice_agent" => Ok(Self::RealtimeVoiceAgent),
+            other => Err(format!("unknown media operation '{other}'")),
+        }
+    }
+}
+
 /// Supported output representation for provider-generated media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,7 +178,7 @@ pub enum MediaOutputFormat {
     Base64,
 }
 
-/// A media input asset passed to a provider-native operation.
+/// A media input asset passed to a provider media operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MediaInputAsset {
@@ -143,7 +187,7 @@ pub enum MediaInputAsset {
     ProviderFileId { file_id: String },
 }
 
-/// A media asset returned by a provider-native operation.
+/// A media asset returned by a provider media operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MediaOutputAsset {
@@ -286,11 +330,17 @@ pub struct TranscribeAudioRequest {
     pub audio: MediaInputAsset,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Optional provider-compatible guidance for the transcription.
+    ///
+    /// OpenAI-style transcription endpoints use this as decoding context,
+    /// while conversational audio models may treat it as an instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub provider_options: serde_json::Value,
 }
 
-/// A provider-native media request.
+/// A direct provider media request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub enum NativeMediaRequest {
@@ -306,22 +356,22 @@ pub enum NativeMediaRequest {
 }
 
 impl NativeMediaRequest {
-    pub fn operation(&self) -> NativeOperation {
+    pub fn operation(&self) -> MediaOperation {
         match self {
-            Self::GenerateImage(_) => NativeOperation::GenerateImage,
-            Self::EditImage(_) => NativeOperation::EditImage,
-            Self::GenerateVideo(_) => NativeOperation::GenerateVideo,
-            Self::EditVideo(_) => NativeOperation::EditVideo,
-            Self::ImageToVideo(_) => NativeOperation::ImageToVideo,
-            Self::ReferenceToVideo(_) => NativeOperation::ReferenceToVideo,
-            Self::ExtendVideo(_) => NativeOperation::ExtendVideo,
-            Self::GenerateSpeech(_) => NativeOperation::GenerateSpeech,
-            Self::TranscribeAudio(_) => NativeOperation::TranscribeAudio,
+            Self::GenerateImage(_) => MediaOperation::GenerateImage,
+            Self::EditImage(_) => MediaOperation::EditImage,
+            Self::GenerateVideo(_) => MediaOperation::GenerateVideo,
+            Self::EditVideo(_) => MediaOperation::EditVideo,
+            Self::ImageToVideo(_) => MediaOperation::ImageToVideo,
+            Self::ReferenceToVideo(_) => MediaOperation::ReferenceToVideo,
+            Self::ExtendVideo(_) => MediaOperation::ExtendVideo,
+            Self::GenerateSpeech(_) => MediaOperation::GenerateSpeech,
+            Self::TranscribeAudio(_) => MediaOperation::TranscribeAudio,
         }
     }
 }
 
-/// Provider async job state for native media operations.
+/// Provider async job state for media operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeMediaJobStatus {
@@ -333,11 +383,11 @@ pub enum NativeMediaJobStatus {
     Cancelled,
 }
 
-/// A submitted provider-native media job.
+/// A submitted provider media job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeMediaJob {
     pub provider: String,
-    pub operation: NativeOperation,
+    pub operation: MediaOperation,
     pub job_id: String,
     pub status: NativeMediaJobStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,7 +396,7 @@ pub struct NativeMediaJob {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Result from a provider-native media operation.
+/// Result from a provider media operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NativeMediaResponse {
@@ -355,55 +405,78 @@ pub enum NativeMediaResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
+    Transcript {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_seconds: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        segments: Vec<TranscriptSegment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
     Job {
         job: NativeMediaJob,
     },
 }
 
-/// Capability metadata for a model or model family.
+/// Timestamped transcript segment returned by a speech-to-text provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelNativeCapabilities {
-    pub model_pattern: String,
-    pub tools: Vec<NativeToolSpec>,
+pub struct TranscriptSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_seconds: Option<f64>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
-impl ModelNativeCapabilities {
-    pub fn operations(&self) -> impl Iterator<Item = NativeOperation> + '_ {
+/// Media capability metadata for a model or model family.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelMediaCapabilities {
+    pub model_pattern: String,
+    pub tools: Vec<MediaToolSpec>,
+}
+
+impl ModelMediaCapabilities {
+    pub fn operations(&self) -> impl Iterator<Item = MediaOperation> + '_ {
         self.tools.iter().map(|tool| tool.capability)
     }
 }
 
-/// How a provider-native tool completes.
+/// How a provider media operation completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub enum NativeExecutionMode {
+pub enum MediaExecutionMode {
     Immediate,
     AsyncJob { poll_supported: bool },
 }
 
-/// Complete model-visible tool contract for a provider-native capability.
+/// Complete model-visible contract for a provider media operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NativeToolSpec {
-    pub capability: NativeOperation,
+pub struct MediaToolSpec {
+    pub capability: MediaOperation,
     pub tool_name: String,
     pub description: String,
     pub parameters_schema: serde_json::Value,
-    pub execution: NativeExecutionMode,
+    pub execution: MediaExecutionMode,
 }
 
-/// Provider-native capability metadata.
+/// Provider media capability metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderNativeCapabilities {
+pub struct ProviderMediaCapabilities {
     pub provider: String,
     #[serde(default)]
     pub model_tools: Vec<ProviderNativeModelToolSpec>,
-    pub models: Vec<ModelNativeCapabilities>,
+    pub models: Vec<ModelMediaCapabilities>,
 }
 
 /// Provider support for direct media/model-specific endpoints.
 #[async_trait]
-pub trait NativeCapabilitiesProvider: Send + Sync {
-    fn native_capabilities(&self) -> ProviderNativeCapabilities;
+pub trait MediaCapabilitiesProvider: Send + Sync {
+    fn media_capabilities(&self) -> ProviderMediaCapabilities;
 
     async fn submit_media(
         &self,
@@ -412,7 +485,7 @@ pub trait NativeCapabilitiesProvider: Send + Sync {
 
     async fn poll_media_job(&self, job: &NativeMediaJob) -> anyhow::Result<NativeMediaResponse> {
         let _ = job;
-        anyhow::bail!("provider does not support polling native media jobs")
+        anyhow::bail!("provider does not support polling media jobs")
     }
 }
 
@@ -464,7 +537,26 @@ mod tests {
             provider_options: serde_json::Value::Null,
         });
 
-        assert_eq!(request.operation(), NativeOperation::GenerateImage);
+        assert_eq!(request.operation(), MediaOperation::GenerateImage);
+    }
+
+    #[test]
+    fn transcription_prompt_is_an_explicit_request_field() {
+        let request = TranscribeAudioRequest {
+            model: "transcription-model".to_string(),
+            audio: MediaInputAsset::Url {
+                url: "https://example.test/audio.webm".to_string(),
+            },
+            language: Some("en".to_string()),
+            prompt: Some("Use the product name Nenjo when it is spoken.".to_string()),
+            provider_options: serde_json::Value::Null,
+        };
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["prompt"],
+            "Use the product name Nenjo when it is spoken."
+        );
     }
 
     #[test]
@@ -478,5 +570,22 @@ mod tests {
             serde_json::json!("provider_search")
         );
         assert!(serde_json::from_value::<NativeModelToolId>(serde_json::json!("")).is_err());
+    }
+
+    #[test]
+    fn media_operation_wire_values_are_stable() {
+        for operation in MediaOperation::ALL {
+            let parsed: MediaOperation = operation.as_str().parse().expect("parse");
+            assert_eq!(parsed, *operation);
+            assert_eq!(parsed.to_string(), operation.as_str());
+            assert_eq!(serde_json::to_value(operation).unwrap(), operation.as_str());
+            assert_eq!(
+                serde_json::from_value::<MediaOperation>(serde_json::json!(operation.as_str()))
+                    .unwrap(),
+                *operation
+            );
+        }
+        assert!("chat".parse::<MediaOperation>().is_err());
+        assert!("make_poster".parse::<MediaOperation>().is_err());
     }
 }

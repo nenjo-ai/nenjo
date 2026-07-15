@@ -2651,6 +2651,7 @@ Original user message: {{ chat.message }}
             model: "mock".to_string(),
             model_provider: "test".to_string(),
             temperature: Some(0.0),
+            context_window: None,
             base_url: None,
             native_tools: vec![],
         };
@@ -2732,6 +2733,7 @@ Original user message: {{ chat.message }}
             model: "mock".to_string(),
             model_provider: "test".to_string(),
             temperature: Some(0.0),
+            context_window: None,
             base_url: None,
             native_tools: vec![],
         };

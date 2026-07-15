@@ -12,6 +12,7 @@ readme = "README.md"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 nenjo = { workspace = true }
+nenjo-models = { workspace = true }
 nenjo-xml = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }

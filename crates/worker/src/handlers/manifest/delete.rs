@@ -34,7 +34,11 @@ pub(super) fn apply_delete(
         ResourceType::Domain => manifest
             .domains
             .retain(|r| domain_slug(&r.path, &r.name) != *resource),
-        ResourceType::Document => return,
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document => {
+            return;
+        }
         ResourceType::KnowledgePack => manifest.knowledge_packs.retain(|r| r.slug != *resource),
     }
 

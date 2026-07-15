@@ -1617,6 +1617,7 @@ mod tests {
                 model: "mock".into(),
                 model_provider: "mock".into(),
                 temperature: Some(0.2),
+                context_window: None,
                 base_url: None,
                 native_tools: vec![],
             },

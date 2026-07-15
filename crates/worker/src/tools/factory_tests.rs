@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::bootstrap::{ManifestRefreshHandle, WorkerManifestCache, WorkerManifestStore};
 use crate::crypto::WorkerAuthProvider;
 use crate::tools::NativeRuntime;
 use crate::tools::platform_payload::PlatformPayloadEncoder;
 use crate::tools::platform_services::PlatformToolServices;
 use nenjo::agents::prompts::PromptConfig;
+use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
     AbilityManifest, CommandManifest, ContextBlockManifest, CouncilDelegationStrategy,
     CouncilManifest, DomainManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest,
     RoutineManifest, RoutineMetadata, RoutineTrigger, SkillManifest,
 };
-use nenjo::manifest::{AgentManifest, MediaRequirement};
 use nenjo::{ManifestWriter, Slug, ToolFactory};
-use nenjo_events::EncryptedPayload;
-use nenjo_models::NativeOperation;
+use nenjo_events::{EncryptedPayload, ModelAssignmentBinding};
+use nenjo_models::MediaOperation;
 use nenjo_platform::manifest_mcp::CommandsGetParams;
 use nenjo_platform::{
     AbilitiesGetParams, AbilityManifestBackend, AgentManifestBackend, AgentsGetParams,
@@ -26,6 +27,61 @@ use nenjo_platform::{
     tools::PlatformNotificationEmitter,
 };
 use tempfile::tempdir;
+
+fn cached_model(
+    id: uuid::Uuid,
+    slug: &str,
+    model: &str,
+    provider: &str,
+    base_url: Option<&str>,
+    capabilities: Vec<String>,
+) -> crate::bootstrap::CachedModelManifest {
+    crate::bootstrap::CachedModelManifest {
+        id,
+        manifest: ModelManifest {
+            name: slug.into(),
+            slug: Slug::derive(slug),
+            description: None,
+            model: model.into(),
+            model_provider: provider.into(),
+            temperature: None,
+            context_window: None,
+            base_url: base_url.map(str::to_owned),
+            native_tools: Vec::new(),
+        },
+        capabilities,
+    }
+}
+
+fn cached_agent(
+    id: uuid::Uuid,
+    name: &str,
+    slug: Slug,
+    model_assignments: Vec<ModelAssignmentBinding>,
+) -> crate::bootstrap::CachedAgentManifest {
+    crate::bootstrap::CachedAgentManifest {
+        id,
+        manifest: AgentManifest {
+            name: name.into(),
+            slug,
+            description: None,
+            prompt_config: PromptConfig::default(),
+            color: None,
+            model: None,
+            domains: Vec::new(),
+            platform_scopes: Vec::new(),
+            mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
+            media: Vec::new(),
+            abilities: Vec::new(),
+            prompt_locked: false,
+            heartbeat: None,
+            source_type: None,
+            metadata: serde_json::json!({}),
+        },
+        model_assignments,
+    }
+}
 
 struct TestNotificationSink;
 
@@ -45,7 +101,16 @@ fn test_platform_services(
     config: &crate::config::Config,
     auth_provider: Arc<WorkerAuthProvider>,
 ) -> PlatformToolServices {
-    let manifest_store = Arc::new(LocalManifestStore::new(config.manifests_dir.clone()));
+    let manifest_cache = Arc::new(WorkerManifestCache {
+        manifests_dir: config.manifests_dir.clone(),
+        workspace_dir: config.workspace_dir.clone(),
+        state_dir: config.state_dir.clone(),
+        config_dir: config.config_dir.clone(),
+    });
+    let manifest_store = Arc::new(WorkerManifestStore::new(
+        manifest_cache,
+        ManifestRefreshHandle::default(),
+    ));
     let platform_client = PlatformManifestClient::new(config.backend_api_url(), &config.api_key)
         .map(Arc::new)
         .ok();
@@ -192,19 +257,60 @@ async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
 
 #[tokio::test]
 async fn worker_factory_exposes_agent_native_media_tools() {
+    use nenjo_platform::{
+        PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind,
+    };
+    use uuid::Uuid;
+
     let temp = tempdir().unwrap();
     let root = temp.path();
+    let manifests_dir = root.join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let agent_id = Uuid::new_v4();
+    let model_id = Uuid::new_v4();
+    let agent_slug = Slug::derive("image-tester");
+
+    let mut resource_ids = PlatformResourceIdSnapshot::default();
+    resource_ids.insert(PlatformResourceKind::Agent, &agent_slug, agent_id);
+    PlatformResourceIdStore::new(&manifests_dir)
+        .replace(&resource_ids)
+        .unwrap();
+
+    std::fs::write(
+        manifests_dir.join("models.json"),
+        serde_json::to_string(&[cached_model(
+            model_id,
+            "openai-image",
+            "gpt-image-1",
+            "openai",
+            None,
+            vec![MediaOperation::GenerateImage.as_str().to_string()],
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        manifests_dir.join("agents.json"),
+        serde_json::to_string(&[cached_agent(
+            agent_id,
+            "image tester",
+            agent_slug.clone(),
+            vec![ModelAssignmentBinding {
+                capability: MediaOperation::GenerateImage.as_str().to_string(),
+                model_id,
+                assignment_source: "local".to_string(),
+            }],
+        )])
+        .unwrap(),
+    )
+    .unwrap();
 
     let config = crate::config::Config {
         workspace_dir: root.join("workspace"),
         state_dir: root.join("state"),
-        manifests_dir: root.join("manifests"),
-        media_providers: vec![crate::config::MediaProviderConfig {
-            slug: Slug::derive("openai_image"),
-            provider: "openai".to_string(),
-            model: "gpt-image-1".to_string(),
-            capabilities: vec![NativeOperation::GenerateImage],
-        }],
+        manifests_dir,
+        media_providers: Vec::new(),
         ..Default::default()
     };
 
@@ -216,7 +322,7 @@ async fn worker_factory_exposes_agent_native_media_tools() {
 
     let agent = AgentManifest {
         name: "image tester".into(),
-        slug: Slug::derive("image-tester"),
+        slug: agent_slug,
         description: None,
         prompt_config: PromptConfig::default(),
         color: None,
@@ -225,7 +331,7 @@ async fn worker_factory_exposes_agent_native_media_tools() {
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: Vec::new(),
-        media: vec![MediaRequirement::Capability(NativeOperation::GenerateImage)],
+        media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
         heartbeat: None,
@@ -237,7 +343,100 @@ async fn worker_factory_exposes_agent_native_media_tools() {
 
     assert!(
         tools.iter().any(|tool| tool.name() == "generate_image"),
-        "agent media requirements should add native media tools"
+        "agent model_assignments should add native media tools"
+    );
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_assignment_only_transcribe_tool_with_custom_base_url() {
+    use nenjo_platform::{
+        PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind,
+    };
+    use uuid::Uuid;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let manifests_dir = root.join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let agent_id = Uuid::new_v4();
+    let model_id = Uuid::new_v4();
+    let agent_slug = Slug::derive("voice-agent");
+
+    let mut resource_ids = PlatformResourceIdSnapshot::default();
+    resource_ids.insert(PlatformResourceKind::Agent, &agent_slug, agent_id);
+    PlatformResourceIdStore::new(&manifests_dir)
+        .replace(&resource_ids)
+        .unwrap();
+
+    std::fs::write(
+        manifests_dir.join("models.json"),
+        serde_json::to_string(&[cached_model(
+            model_id,
+            "custom-stt",
+            "whisper-1",
+            "openai",
+            Some("https://stt.example.internal/v1"),
+            vec![MediaOperation::TranscribeAudio.as_str().to_string()],
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        manifests_dir.join("agents.json"),
+        serde_json::to_string(&[cached_agent(
+            agent_id,
+            "voice agent",
+            agent_slug.clone(),
+            vec![ModelAssignmentBinding {
+                capability: MediaOperation::TranscribeAudio.as_str().to_string(),
+                model_id,
+                assignment_source: "local".to_string(),
+            }],
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+    // No media_providers.json — assignment-only path.
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir,
+        media_providers: Vec::new(),
+        ..Default::default()
+    };
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+
+    let agent = AgentManifest {
+        name: "voice agent".into(),
+        slug: agent_slug,
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(), // no legacy media row
+        abilities: vec![],
+        prompt_locked: false,
+        heartbeat: None,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+
+    let tools = factory.create_tools(&agent).await;
+
+    assert!(
+        tools.iter().any(|tool| tool.name() == "transcribe_audio"),
+        "assignment-only STT path should expose transcribe_audio without media_providers"
     );
 }
 
@@ -1068,6 +1267,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         model: "gpt-4.1".into(),
         model_provider: "openai".into(),
         temperature: None,
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };

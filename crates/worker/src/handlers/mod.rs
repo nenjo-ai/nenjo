@@ -10,6 +10,7 @@ mod notification;
 pub mod packages;
 pub mod repo;
 pub mod task;
+mod voice_input;
 
 use std::sync::Arc;
 
@@ -39,6 +40,7 @@ use crate::handlers::repo::{RepoCommandContext, WorkerRepoHarnessExt};
 use crate::handlers::task::{
     TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager, WorkerTaskHarnessExt,
 };
+use crate::handlers::voice_input::{VoiceInputTranscribeRequest, handle_voice_input_transcribe};
 pub use crate::runtime::CommandContext;
 use crate::runtime::WorkerAccountKeyStore;
 
@@ -299,6 +301,31 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             ctx.harness
                 .handle_session_delete(&ctx.chat_context(), &project, &agent, session_id)
                 .await
+        }
+
+        Command::VoiceInputTranscribe {
+            job_id,
+            session_id,
+            audio,
+            provider,
+            model,
+            base_url,
+            language,
+            ..
+        } => {
+            handle_voice_input_transcribe(
+                &ctx,
+                VoiceInputTranscribeRequest {
+                    job_id,
+                    session_id,
+                    audio,
+                    provider: &provider,
+                    model: &model,
+                    base_url: base_url.as_deref(),
+                    language: language.as_deref(),
+                },
+            )
+            .await
         }
 
         Command::ChatDomainExit {
@@ -681,18 +708,15 @@ impl CommandContext {
     pub(crate) fn manifest_context(
         &self,
     ) -> ManifestCommandContext<
-        crate::bootstrap::WorkerManifestCache,
+        Arc<crate::bootstrap::WorkerManifestCache>,
         std::sync::Arc<crate::external_mcp::ExternalMcpPool>,
     > {
         ManifestCommandContext {
             client: self.api.clone(),
-            store: crate::bootstrap::WorkerManifestCache {
-                manifests_dir: self.config.manifests_dir.clone(),
-                workspace_dir: self.config.workspace_dir.clone(),
-                state_dir: self.config.state_dir.clone(),
-                config_dir: self.config.config_dir.clone(),
-            },
+            store: self.manifest_cache.clone(),
+            bootstrap_cache: Some(self.manifest_cache.clone()),
             mcp: Some(self.external_mcp.clone()),
+            change_lock: self.manifest_change_lock.clone(),
         }
     }
 }

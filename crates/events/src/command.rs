@@ -38,6 +38,15 @@ pub struct DomainActivation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceInputAudio {
+    pub data_uri: String,
+    pub content_type: String,
+    pub byte_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageGraphUpdate {
     pub schema: String,
     pub nenpm_yml: String,
@@ -164,6 +173,31 @@ pub enum Command {
         project: String,
         agent: String,
         session_id: Uuid,
+    },
+
+    /// Transcribe a push-to-talk audio clip before the dashboard sends the
+    /// transcript through the regular encrypted chat path.
+    #[serde(rename = "voice_input.transcribe")]
+    VoiceInputTranscribe {
+        #[serde(default)]
+        id: Option<String>,
+        job_id: Uuid,
+        session_id: Uuid,
+        audio: VoiceInputAudio,
+        provider: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
 
     // -----------------------------------------------------------------
@@ -350,6 +384,14 @@ impl std::fmt::Display for Command {
             Self::ChatSessionDelete { session_id, .. } => {
                 write!(f, "chat.session_delete(session={session_id})")
             }
+            Self::VoiceInputTranscribe {
+                job_id, session_id, ..
+            } => {
+                write!(
+                    f,
+                    "voice_input.transcribe(job={job_id}, session={session_id})"
+                )
+            }
             Self::TaskExecute {
                 execution_run_id, ..
             } => {
@@ -405,7 +447,8 @@ impl Command {
             | Command::ChatCommand { .. }
             | Command::ChatDomainExit { .. }
             | Command::ChatCancel { .. }
-            | Command::ChatSessionDelete { .. } => Capability::Chat,
+            | Command::ChatSessionDelete { .. }
+            | Command::VoiceInputTranscribe { .. } => Capability::Chat,
 
             Command::TaskExecute { .. }
             | Command::ExecutionCancel { .. }
@@ -457,6 +500,8 @@ pub enum ResourceType {
     ContextBlock,
     McpServer,
     Domain,
+    ModelAssignment,
+    ModelCapabilityDefault,
     Document,
     KnowledgePack,
 }
@@ -474,6 +519,8 @@ impl std::fmt::Display for ResourceType {
             Self::ContextBlock => write!(f, "context_block"),
             Self::McpServer => write!(f, "mcp_server"),
             Self::Domain => write!(f, "domain"),
+            Self::ModelAssignment => write!(f, "model_assignment"),
+            Self::ModelCapabilityDefault => write!(f, "model_capability_default"),
             Self::Document => write!(f, "document"),
             Self::KnowledgePack => write!(f, "knowledge_pack"),
         }

@@ -71,6 +71,17 @@ pub struct ExecutionTaskCompletedEvent {
     pub total_output_tokens: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceTranscriptSegment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_seconds: Option<f64>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// Stable discriminator for canonical execution-scoped event payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExecutionEventKind {
@@ -252,6 +263,34 @@ pub enum Response {
         encrypted_payload: EncryptedPayload,
     },
 
+    /// Completed push-to-talk transcription. The transcript text is encrypted
+    /// for the initiating user; the platform stores and routes ciphertext.
+    #[serde(rename = "voice_input.transcribed")]
+    VoiceInputTranscribed {
+        job_id: Uuid,
+        session_id: Uuid,
+        encrypted_transcript: EncryptedPayload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_seconds: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        segments: Vec<VoiceTranscriptSegment>,
+        provider: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+
+    /// Failed push-to-talk transcription.
+    #[serde(rename = "voice_input.failed")]
+    VoiceInputFailed {
+        job_id: Uuid,
+        session_id: Uuid,
+        error_code: String,
+        error_message: String,
+    },
+
     /// Confirms receipt of a command (sent after processing begins).
     #[serde(rename = "delivery_receipt")]
     DeliveryReceipt { message_id: String },
@@ -392,6 +431,25 @@ impl std::fmt::Display for Response {
                 agent, session_id, ..
             } => {
                 write!(f, "push.notification(agent={agent}, session={session_id})")
+            }
+            Self::VoiceInputTranscribed {
+                job_id, session_id, ..
+            } => {
+                write!(
+                    f,
+                    "voice_input.transcribed(job={job_id}, session={session_id})"
+                )
+            }
+            Self::VoiceInputFailed {
+                job_id,
+                session_id,
+                error_code,
+                ..
+            } => {
+                write!(
+                    f,
+                    "voice_input.failed(job={job_id}, session={session_id}, code={error_code})"
+                )
             }
             Self::DeliveryReceipt { message_id } => write!(f, "delivery_receipt({message_id})"),
             Self::WorkerPong => write!(f, "worker.pong"),

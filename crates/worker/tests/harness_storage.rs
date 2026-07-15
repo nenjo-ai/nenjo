@@ -115,11 +115,10 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     };
     let config_dir = cache.config_dir.clone();
 
+    let manifest = harness.provider().manifest_snapshot();
     cache
-        .persist_resource(
-            harness.provider().manifest(),
-            nenjo_events::ResourceType::Project,
-        )
+        .persist_resource(&manifest, nenjo_events::ResourceType::Project)
+        .await
         .expect("persist project manifest cache");
     assert!(manifests_dir.join("projects.json").exists());
     assert!(!workspace_dir.join("projects.json").exists());

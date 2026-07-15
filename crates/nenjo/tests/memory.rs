@@ -75,6 +75,7 @@ fn test_manifest() -> Manifest {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };
@@ -615,6 +616,7 @@ async fn ability_inherits_memory_vars() {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };
@@ -743,6 +745,7 @@ async fn domain_expansion_preserves_memory() {
         model: "mock-llm-v1".into(),
         model_provider: "mock".into(),
         temperature: Some(0.5),
+        context_window: None,
         base_url: None,
         native_tools: vec![],
     };

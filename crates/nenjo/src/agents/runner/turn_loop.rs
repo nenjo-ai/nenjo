@@ -360,8 +360,27 @@ pub(crate) fn record_nested_token_usage(input_tokens: u64, output_tokens: u64) {
     }
 }
 
-/// Conservative fallback context window when the provider doesn't report one.
+/// Conservative fallback context window when no configured or provider value exists.
 const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
+const CONTEXT_WINDOW_SAFETY_NUMERATOR: usize = 4;
+const CONTEXT_WINDOW_SAFETY_DENOMINATOR: usize = 5;
+
+fn compaction_context_budget(
+    configured_context_window: Option<u64>,
+    provider_context_window: Option<usize>,
+) -> usize {
+    let raw_window = configured_context_window
+        .and_then(|window| usize::try_from(window).ok())
+        .filter(|window| *window > 0)
+        .or(provider_context_window)
+        .filter(|window| *window > 0)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+
+    raw_window
+        .saturating_mul(CONTEXT_WINDOW_SAFETY_NUMERATOR)
+        .saturating_div(CONTEXT_WINDOW_SAFETY_DENOMINATOR)
+        .max(1)
+}
 
 fn sanitize_tool_text_preview(text: &str) -> Option<String> {
     static XML_TAG_RE: OnceLock<Regex> = OnceLock::new();
@@ -493,13 +512,13 @@ where
                     "Turn loop iteration"
                 );
 
-                // Resolve the context budget: provider-reported context window with
-                // an 80% safety margin. Falls back to 100K if the provider doesn't
-                // know the model. Agent config can override.
-                let raw_window = model_provider
-                    .context_window(model)
-                    .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-                let context_budget = raw_window * 4 / 5;
+                // Prefer the catalog-derived model context window. It reflects the
+                // exact configured provider model; provider heuristics remain a
+                // fallback for legacy/manual model configurations.
+                let context_budget = compaction_context_budget(
+                    agent.model_manifest.context_window,
+                    model_provider.context_window(model),
+                );
 
                 // Truncate tool arguments in older messages only when we're
                 // approaching the configured compaction threshold. This keeps full
@@ -1555,6 +1574,16 @@ mod tests {
     use super::*;
     use crate::agents::async_ops::AsyncOpManager;
     use crate::agents::respond::RespondToUserTool;
+
+    #[test]
+    fn compaction_budget_prefers_configured_context_window() {
+        assert_eq!(
+            compaction_context_budget(Some(200_000), Some(1_000_000)),
+            160_000
+        );
+        assert_eq!(compaction_context_budget(None, Some(128_000)), 102_400);
+        assert_eq!(compaction_context_budget(None, None), 80_000);
+    }
 
     #[test]
     fn post_batch_guard_rejects_terminal_respond_to_user_result() {

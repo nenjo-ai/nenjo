@@ -133,8 +133,8 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "configure_routine")
             .expect("missing configure_routine");
-        let config_schema = &tool.parameters["properties"]["graph"]["allOf"][0]["properties"]["steps"]
-            ["items"]["properties"]["config"];
+        let config_schema = &tool.parameters["properties"]["graph"]["properties"]["steps"]["items"]
+            ["properties"]["config"];
 
         assert!(
             tool.parameters["properties"].get("id").is_none(),
@@ -163,6 +163,48 @@ mod tests {
                 .unwrap_or_default()
                 .contains("edge metadata.max_attempts"),
             "routine step config should tell agents where retry budgets belong"
+        );
+    }
+
+    #[test]
+    fn configure_routine_schema_exposes_edge_handoff_schema_contract() {
+        let tools = all_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "configure_routine")
+            .expect("missing configure_routine");
+        let graph_schema = &tool.parameters["properties"]["graph"];
+        let metadata_schema =
+            &graph_schema["properties"]["edges"]["items"]["properties"]["metadata"];
+        let handoff_schema = &metadata_schema["properties"]["handoff_schema"];
+
+        assert_eq!(graph_schema["type"], "object");
+        assert!(
+            graph_schema["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not serialize that object into a string"),
+            "configure_routine must make graph's object shape explicit"
+        );
+        assert_eq!(handoff_schema["type"], "object");
+        assert_eq!(handoff_schema["required"], serde_json::json!(["type"]));
+        assert_eq!(
+            handoff_schema["properties"]["type"]["enum"],
+            serde_json::json!(["object"])
+        );
+        assert!(
+            handoff_schema["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Required for every edge whose source step is agent or gate"),
+            "configure_routine must tell agents when handoff_schema is required"
+        );
+        assert!(
+            metadata_schema["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must define handoff_schema"),
+            "edge metadata guidance must identify handoff_schema as the route contract"
         );
     }
 
