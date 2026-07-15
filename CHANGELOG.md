@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0](https://github.com/nenjo-ai/nenjo/compare/v0.27.2...v0.28.0) - 2026-07-15
+
+### Added
+
+- add support for voice transcription ([#95](https://github.com/nenjo-ai/nenjo/pull/95))
+
 ## [0.27.2](https://github.com/nenjo-ai/nenjo/compare/v0.27.1...v0.27.2) - 2026-07-12
 
 ### Fixed
