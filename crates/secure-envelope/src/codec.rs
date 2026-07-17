@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, CronTaskContent, EncryptedPayload, ExecutionEventPayload,
-    HeartbeatInstructionsContent, Response, StreamEvent, TaskEncryptedContent, TaskExecuteContent,
+    Command, EncryptedPayload, ExecutionEventPayload, Response, StreamEvent, TaskEncryptedContent,
+    TaskExecuteContent,
 };
 use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
@@ -284,8 +284,7 @@ impl SecureEnvelopeCodec {
                 let encrypted = self
                     .decode_json_payload::<TaskEncryptedContent>(actor_user_id, encrypted_payload)
                     .await?;
-                payload.description = encrypted.description;
-                payload.acceptance_criteria = encrypted.acceptance_criteria;
+                payload.instructions = encrypted.instructions;
                 Ok(payload)
             }
             None => {
@@ -527,6 +526,8 @@ impl SecureEnvelopeCodec {
                     .await?,
             })),
             StreamEvent::Done {
+                run_id,
+                input_message_id,
                 payload,
                 encrypted_payload: _,
                 total_input_tokens,
@@ -535,6 +536,8 @@ impl SecureEnvelopeCodec {
                 agent,
                 session_id,
             } => Ok(Some(StreamEvent::Done {
+                run_id,
+                input_message_id,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_stream_payload(scope, "agent_response", payload)
@@ -665,8 +668,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 task_id,
                 project,
                 execution_run_id,
-                routine,
-                agent,
+                trigger,
+                target,
                 payload,
                 encrypted_payload: Some(encrypted_payload),
             } => {
@@ -688,8 +691,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         task_id,
                         project,
                         execution_run_id,
-                        routine,
-                        agent,
+                        trigger,
+                        target,
                         payload: Some(payload),
                         encrypted_payload: None,
                     },
@@ -699,196 +702,6 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 encrypted_payload: None,
                 ..
             } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_payload")),
-            Command::CronEnable {
-                routine,
-                project,
-                schedule,
-                timezone,
-                task: _,
-                encrypted_task: Some(encrypted_task),
-            } => {
-                if let Err(error) = Self::validate_sensitive_payload_kind(
-                    &encrypted_task,
-                    SensitiveContentKind::RoutineCronTask,
-                ) {
-                    return Ok(Self::drop_command_decode_failure(
-                        &command_label,
-                        "encrypted_cron_task_decode_failed",
-                        error,
-                    ));
-                }
-                let task = match self
-                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
-                    .await
-                {
-                    Ok(task) => task,
-                    Err(error) => {
-                        return Ok(Self::drop_command_decode_failure(
-                            &command_label,
-                            "encrypted_cron_task_decode_failed",
-                            error,
-                        ));
-                    }
-                };
-                Ok(DecodeCommandResult::Command(Box::new(
-                    Command::CronEnable {
-                        routine,
-                        project,
-                        schedule,
-                        timezone,
-                        task: Some(task),
-                        encrypted_task: None,
-                    },
-                )))
-            }
-            command @ Command::CronEnable {
-                task: Some(_),
-                encrypted_task: None,
-                ..
-            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_task")),
-            Command::CronTrigger {
-                routine,
-                project,
-                task: _,
-                encrypted_task: Some(encrypted_task),
-            } => {
-                if let Err(error) = Self::validate_sensitive_payload_kind(
-                    &encrypted_task,
-                    SensitiveContentKind::RoutineCronTask,
-                ) {
-                    return Ok(Self::drop_command_decode_failure(
-                        &command_label,
-                        "encrypted_cron_task_decode_failed",
-                        error,
-                    ));
-                }
-                let task = match self
-                    .decode_json_payload::<CronTaskContent>(actor_user_id, &encrypted_task)
-                    .await
-                {
-                    Ok(task) => task,
-                    Err(error) => {
-                        return Ok(Self::drop_command_decode_failure(
-                            &command_label,
-                            "encrypted_cron_task_decode_failed",
-                            error,
-                        ));
-                    }
-                };
-                Ok(DecodeCommandResult::Command(Box::new(
-                    Command::CronTrigger {
-                        routine,
-                        project,
-                        task: Some(task),
-                        encrypted_task: None,
-                    },
-                )))
-            }
-            command @ Command::CronTrigger {
-                task: Some(_),
-                encrypted_task: None,
-                ..
-            } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_task")),
-            Command::AgentHeartbeatEnable {
-                agent,
-                interval,
-                timezone,
-                instructions: _,
-                encrypted_instructions: Some(encrypted_instructions),
-            } => {
-                if let Err(error) = Self::validate_sensitive_payload_kind(
-                    &encrypted_instructions,
-                    SensitiveContentKind::HeartbeatInstructions,
-                ) {
-                    return Ok(Self::drop_command_decode_failure(
-                        &command_label,
-                        "encrypted_heartbeat_instructions_decode_failed",
-                        error,
-                    ));
-                }
-                let instructions = match self
-                    .decode_json_payload::<HeartbeatInstructionsContent>(
-                        actor_user_id,
-                        &encrypted_instructions,
-                    )
-                    .await
-                {
-                    Ok(instructions) => instructions,
-                    Err(error) => {
-                        return Ok(Self::drop_command_decode_failure(
-                            &command_label,
-                            "encrypted_heartbeat_instructions_decode_failed",
-                            error,
-                        ));
-                    }
-                };
-                Ok(DecodeCommandResult::Command(Box::new(
-                    Command::AgentHeartbeatEnable {
-                        agent,
-                        interval,
-                        timezone,
-                        instructions: Some(instructions),
-                        encrypted_instructions: None,
-                    },
-                )))
-            }
-            command @ Command::AgentHeartbeatEnable {
-                instructions: Some(_),
-                encrypted_instructions: None,
-                ..
-            } => Ok(self.unsecured_command_result(
-                command,
-                &command_label,
-                "encrypted_instructions",
-            )),
-            Command::AgentHeartbeatTrigger {
-                agent,
-                instructions: _,
-                encrypted_instructions: Some(encrypted_instructions),
-            } => {
-                if let Err(error) = Self::validate_sensitive_payload_kind(
-                    &encrypted_instructions,
-                    SensitiveContentKind::HeartbeatInstructions,
-                ) {
-                    return Ok(Self::drop_command_decode_failure(
-                        &command_label,
-                        "encrypted_heartbeat_instructions_decode_failed",
-                        error,
-                    ));
-                }
-                let instructions = match self
-                    .decode_json_payload::<HeartbeatInstructionsContent>(
-                        actor_user_id,
-                        &encrypted_instructions,
-                    )
-                    .await
-                {
-                    Ok(instructions) => instructions,
-                    Err(error) => {
-                        return Ok(Self::drop_command_decode_failure(
-                            &command_label,
-                            "encrypted_heartbeat_instructions_decode_failed",
-                            error,
-                        ));
-                    }
-                };
-                Ok(DecodeCommandResult::Command(Box::new(
-                    Command::AgentHeartbeatTrigger {
-                        agent,
-                        instructions: Some(instructions),
-                        encrypted_instructions: None,
-                    },
-                )))
-            }
-            command @ Command::AgentHeartbeatTrigger {
-                instructions: Some(_),
-                encrypted_instructions: None,
-                ..
-            } => Ok(self.unsecured_command_result(
-                command,
-                &command_label,
-                "encrypted_instructions",
-            )),
             Command::ManifestChanged {
                 schema,
                 resource_id,
@@ -1098,11 +911,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                             payload,
                         }
                     }
-                    ExecutionEventPayload::TaskCompleted(mut outcome) => {
-                        outcome.error = Self::redact_error_text(outcome.error, "Execution failed");
-                        outcome.merge_error =
-                            Self::redact_error_text(outcome.merge_error, "Merge failed");
-                        ExecutionEventPayload::TaskCompleted(outcome)
+                    ExecutionEventPayload::TaskArtifacts(artifacts) => {
+                        ExecutionEventPayload::TaskArtifacts(artifacts)
                     }
                 };
 
@@ -1112,27 +922,38 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     event,
                 }))
             }
-            Response::ExecutionCompleted {
-                id,
-                success,
-                error,
-                total_input_tokens,
-                total_output_tokens,
-                execution_type,
-                routine,
-                routine_name,
-                agent,
-            } => Ok(Some(Response::ExecutionCompleted {
-                id,
-                success,
-                error: Self::redact_error_text(error, "Execution failed"),
-                total_input_tokens,
-                total_output_tokens,
-                execution_type,
-                routine,
-                routine_name,
-                agent,
-            })),
+            Response::TaskExecutionState {
+                execution_run_id,
+                task_id,
+                state,
+                origin,
+                revision,
+                recovered,
+            } => {
+                let state = match state {
+                    nenjo_events::TaskExecutionState::Failed { error } => {
+                        nenjo_events::TaskExecutionState::Failed {
+                            error: Self::redact_error_text(Some(error), "Execution failed")
+                                .expect("present error remains present"),
+                        }
+                    }
+                    nenjo_events::TaskExecutionState::Rejected { reason } => {
+                        nenjo_events::TaskExecutionState::Rejected {
+                            reason: Self::redact_error_text(Some(reason), "Execution rejected")
+                                .expect("present reason remains present"),
+                        }
+                    }
+                    other => other,
+                };
+                Ok(Some(Response::TaskExecutionState {
+                    execution_run_id,
+                    task_id,
+                    state,
+                    origin,
+                    revision,
+                    recovered,
+                }))
+            }
             other => Ok(Some(other)),
         }
     }
@@ -1392,20 +1213,17 @@ mod tests {
                 &CodecContext::for_actor(actor_user_id),
                 Command::TaskExecute {
                     task_id: Uuid::new_v4(),
-                    project: "demo".into(),
+                    project: Some("demo".into()),
                     execution_run_id: Uuid::new_v4(),
-                    routine: None,
-                    agent: None,
+                    trigger: nenjo_events::TaskExecutionTrigger::Manual,
+                    target: nenjo_events::TaskExecutionTarget::Agent("coder".into()),
                     payload: Some(TaskExecuteContent {
                         title: "plaintext task".into(),
-                        description: Some("sensitive description".into()),
+                        instructions: Some("sensitive description".into()),
                         slug: None,
-                        acceptance_criteria: Some("sensitive criteria".into()),
-                        tags: Vec::new(),
+                        labels: Vec::new(),
                         status: None,
                         priority: None,
-                        task_type: None,
-                        complexity: None,
                     }),
                     encrypted_payload: None,
                 },
@@ -1511,6 +1329,7 @@ mod tests {
             payload: StreamEvent::RunStarted {
                 run_id: "run".into(),
                 session_id: session_id.to_string(),
+                input_message_id: None,
                 parent_run_id: None,
                 agent_id: None,
                 agent_name: None,

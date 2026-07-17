@@ -300,20 +300,12 @@ fn task_input_for_instruction(state: &RoutineState, description: String) -> Task
     TaskInput {
         task_id: state.input.task_id.unwrap_or_else(Uuid::nil),
         title: state.input.title.clone(),
-        description,
-        acceptance_criteria: state.input.acceptance_criteria.clone(),
-        tags: state.input.tags.clone(),
-        source: state
-            .input
-            .source
-            .clone()
-            .or_else(|| Some("routine".to_string())),
+        instructions: description,
+        labels: state.input.labels.clone(),
         project: state.input.project.clone(),
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
-        task_type: state.input.task_type.clone(),
         slug: state.input.slug.clone(),
-        complexity: state.input.complexity.clone(),
     }
 }
 
@@ -923,14 +915,10 @@ mod tests {
         RoutineState::new(
             RoutineInput::new("Parent task", "Parent description")
                 .with_task_id(Uuid::nil())
-                .with_acceptance_criteria(Some("Meets criteria".to_string()))
-                .with_tags(vec!["tag".to_string()])
+                .with_labels(vec!["tag".to_string()])
                 .with_slug("parent-task")
                 .with_status("todo")
-                .with_priority("high")
-                .with_task_type("feature")
-                .with_complexity("medium")
-                .with_source("test"),
+                .with_priority("high"),
         )
     }
 
@@ -961,9 +949,9 @@ mod tests {
 
         match run.kind {
             AgentRunKind::Task(task) => {
-                assert_eq!(task.description, "Complete assignment");
+                assert_eq!(task.instructions, "Complete assignment");
                 assert_eq!(task.title, "Parent task");
-                assert_eq!(task.acceptance_criteria.as_deref(), Some("Meets criteria"));
+                assert_eq!(task.labels, ["tag"]);
             }
             other => panic!("expected task run, got {other:?}"),
         }

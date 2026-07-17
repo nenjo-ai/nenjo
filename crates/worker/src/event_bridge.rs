@@ -2,7 +2,7 @@
 
 use nenjo::manifest::Manifest;
 use nenjo_events::{
-    AsyncOperationTranscriptEvent, ExecutionEventPayload, ExecutionTaskCompletedEvent,
+    AsyncOperationTranscriptEvent, ExecutionEventPayload, ExecutionTaskArtifactsEvent,
     ExecutionTraceRoutineStep, ExecutionWorkflowStepEvent, Response, StepAgent, StreamEvent,
 };
 use serde::Serialize;
@@ -84,17 +84,6 @@ pub struct StepFailedData {
     pub step_slug: String,
     pub step_run_id: Uuid,
     pub error: &'static str,
-}
-
-#[derive(Serialize)]
-pub struct CronCycleStartedData {
-    pub cycle: u32,
-}
-
-#[derive(Serialize)]
-pub struct CronCycleCompletedData {
-    pub cycle: u32,
-    pub passed: bool,
 }
 
 /// Convert a TurnEvent to StreamEvents for the frontend.
@@ -360,6 +349,8 @@ pub fn turn_event_to_stream_events(
                 session_id: session_id.to_string(),
             },
             StreamEvent::Done {
+                run_id: Some(run_id.to_string()),
+                input_message_id: None,
                 payload: Some(serde_json::Value::String(event_text_preview(&output.text))),
                 encrypted_payload: None,
                 total_input_tokens: output.input_tokens,
@@ -682,6 +673,8 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             )
         }
         StreamEvent::Done {
+            run_id,
+            input_message_id,
             payload,
             encrypted_payload,
             total_input_tokens,
@@ -690,7 +683,12 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             agent,
             session_id,
         } => format!(
-            "done(payload={}, encrypted={}, input_tokens={}, output_tokens={}, project={}, agent={}, session_id={})",
+            "done(run_id={}, input_message_id={}, payload={}, encrypted={}, input_tokens={}, output_tokens={}, project={}, agent={}, session_id={})",
+            run_id.as_deref().unwrap_or("-"),
+            input_message_id
+                .map(|id| id.to_string())
+                .as_deref()
+                .unwrap_or("-"),
             if payload.is_some() { "yes" } else { "no" },
             encrypted_payload.is_some(),
             total_input_tokens,
@@ -804,24 +802,22 @@ pub fn execution_workflow_step_response(
     }
 }
 
-pub fn execution_task_completed_response(
-    execution_run_id: Uuid,
-    task_id: Option<Uuid>,
-    success: bool,
-    error: Option<String>,
-    merge_error: Option<String>,
-    total_input_tokens: u64,
-    total_output_tokens: u64,
-) -> Response {
+pub struct ExecutionTaskArtifactsResponse {
+    pub execution_run_id: Uuid,
+    pub task_id: Option<Uuid>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub attachments: Vec<nenjo_events::TaskAttachmentManifest>,
+}
+
+pub fn execution_task_artifacts_response(artifacts: ExecutionTaskArtifactsResponse) -> Response {
     Response::ExecutionEvent {
-        execution_run_id: execution_run_id.to_string(),
-        task_id: task_id.map(|id| id.to_string()),
-        event: ExecutionEventPayload::TaskCompleted(ExecutionTaskCompletedEvent {
-            success,
-            error,
-            merge_error,
-            total_input_tokens,
-            total_output_tokens,
+        execution_run_id: artifacts.execution_run_id.to_string(),
+        task_id: artifacts.task_id.map(|id| id.to_string()),
+        event: ExecutionEventPayload::TaskArtifacts(ExecutionTaskArtifactsEvent {
+            total_input_tokens: artifacts.total_input_tokens,
+            total_output_tokens: artifacts.total_output_tokens,
+            attachments: artifacts.attachments,
         }),
     }
 }
@@ -1287,30 +1283,6 @@ pub fn routine_event_to_responses(
             manifest,
         ),
         nenjo::RoutineEvent::Done { .. } => Vec::new(),
-        nenjo::RoutineEvent::CronCycleStarted { cycle } => vec![execution_workflow_step_response(
-            &workflow_context,
-            "cron_cycle_started",
-            format!("cycle-{cycle}"),
-            "cron",
-            None,
-            serde_json::to_value(CronCycleStartedData { cycle: *cycle }).unwrap_or_default(),
-            None,
-        )],
-        nenjo::RoutineEvent::CronCycleCompleted { cycle, result, .. } => {
-            vec![execution_workflow_step_response(
-                &workflow_context,
-                "cron_cycle_completed",
-                format!("cycle-{cycle}"),
-                "cron",
-                None,
-                serde_json::to_value(CronCycleCompletedData {
-                    cycle: *cycle,
-                    passed: result.passed,
-                })
-                .unwrap_or_default(),
-                None,
-            )]
-        }
     }
 }
 
@@ -1416,7 +1388,7 @@ mod tests {
     use nenjo::Slug;
     use nenjo::manifest::{
         AgentManifest, Manifest, PromptConfig, PromptTemplates, RoutineManifest, RoutineMetadata,
-        RoutineStepManifest, RoutineStepType, RoutineTrigger,
+        RoutineStepManifest, RoutineStepType,
     };
 
     fn expect_workflow_step(
@@ -1756,7 +1728,6 @@ mod tests {
                 name: "Code Generation".to_string(),
                 slug: routine_slug.clone(),
                 description: None,
-                trigger: RoutineTrigger::Task,
                 metadata: RoutineMetadata::default(),
                 steps: vec![RoutineStepManifest {
                     slug: step_slug.clone(),
@@ -1780,7 +1751,6 @@ mod tests {
                         task_execution: String::new(),
                         chat_task: String::new(),
                         gate_eval: String::new(),
-                        heartbeat_task: String::new(),
                     },
                     ..Default::default()
                 },
@@ -1793,7 +1763,6 @@ mod tests {
                 media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
-                heartbeat: None,
                 source_type: None,
                 metadata: serde_json::json!({}),
             }],

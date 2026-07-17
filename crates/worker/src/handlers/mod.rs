@@ -1,10 +1,8 @@
 //! Command handlers — one module per command category.
 
 pub mod chat;
-pub mod cron;
 pub mod crypto;
 pub mod domain;
-pub mod heartbeat;
 pub mod manifest;
 mod notification;
 pub mod packages;
@@ -23,22 +21,21 @@ use tracing::{debug, warn};
 use nenjo_events::{Command, EncryptedPayload, ResourceType, Response};
 use serde_json::Value;
 
-use crate::crypto::decrypt_text_with_provider;
+use crate::crypto::{ContentScope, decrypt_text_with_provider, encrypt_text_with_provider};
 use crate::event_loop::ResponseSender as EventLoopResponseSender;
 use crate::handlers::chat::{
     ChatCommandContext, ChatCommandRequest, ChatSlashCommandRequest, WorkerChatHarnessExt,
 };
-use crate::handlers::cron::{CronCommandContext, WorkerCronHarnessExt};
 use crate::handlers::crypto::{CryptoCommandContext, WorkerCryptoHarnessExt};
 use crate::handlers::domain::{DomainCommandContext, WorkerDomainHarnessExt};
-use crate::handlers::heartbeat::{HeartbeatCommandContext, WorkerHeartbeatHarnessExt};
 use crate::handlers::manifest::{
     ManifestChangedCommand, ManifestCommandContext, WorkerManifestHarnessExt,
 };
 use crate::handlers::packages::handle_package_graph_changed;
 use crate::handlers::repo::{RepoCommandContext, WorkerRepoHarnessExt};
 use crate::handlers::task::{
-    TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager, WorkerTaskHarnessExt,
+    TaskAttachmentEncoder, TaskCommandContext, TaskExecuteRequest, TaskWorktreeManager,
+    WorkerTaskHarnessExt,
 };
 use crate::handlers::voice_input::{VoiceInputTranscribeRequest, handle_voice_input_transcribe};
 pub use crate::runtime::CommandContext;
@@ -65,6 +62,36 @@ where
 
 pub(crate) struct WorkerTaskWorktrees {
     workspace_dir: PathBuf,
+}
+
+#[derive(Clone)]
+struct WorkerTaskAttachmentEncoder {
+    auth_provider: Arc<crate::crypto::WorkerAuthProvider>,
+}
+
+#[async_trait]
+impl TaskAttachmentEncoder for WorkerTaskAttachmentEncoder {
+    async fn encrypt_attachment(
+        &self,
+        attachment_id: uuid::Uuid,
+        plaintext: &str,
+    ) -> Result<EncryptedPayload> {
+        let enrollment = self.auth_provider.enrollment().await;
+        let org_id = enrollment
+            .certificate
+            .as_ref()
+            .map(|certificate| certificate.account_id)
+            .ok_or_else(|| anyhow::anyhow!("worker enrollment missing org certificate"))?;
+        encrypt_text_with_provider(
+            &self.auth_provider,
+            ContentScope::Org,
+            org_id,
+            attachment_id,
+            nenjo_platform::SensitiveContentKind::TaskAttachment.encrypted_object_type(),
+            plaintext,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -347,37 +374,39 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::TaskExecute {
             task_id,
             project,
-            routine,
-            agent,
+            target,
             execution_run_id,
+            trigger: _,
             payload,
             encrypted_payload: _,
         } => {
             let payload = payload.ok_or_else(|| {
                 anyhow::anyhow!("task.execute missing payload after command decode")
             })?;
-            ctx.harness
+            let result = ctx
+                .harness
                 .handle_task_execute(
                     &ctx.task_context(),
                     TaskExecuteRequest {
                         task_id,
-                        project: &project,
-                        routine: routine.as_deref(),
-                        agent: agent.as_deref(),
+                        project: project.as_deref(),
+                        target: &target,
                         execution_run_id,
                         title: &payload.title,
-                        description: payload.description.as_deref().unwrap_or(""),
+                        instructions: payload.instructions.as_deref().unwrap_or(""),
                         slug: payload.slug.as_deref(),
-                        acceptance_criteria: payload.acceptance_criteria.as_deref(),
-                        tags: &payload.tags,
+                        labels: &payload.labels,
                         status: payload.status.as_deref(),
                         priority: payload.priority.as_deref(),
-                        task_type: payload.task_type.as_deref(),
-                        complexity: payload.complexity.as_deref(),
+                        cancellation: tokio_util::sync::CancellationToken::new(),
                     },
                 )
-                .await
+                .await?;
+            ctx.response_tx.send(result.artifacts)?;
+            Ok(())
         }
+
+        Command::TaskSchedulesSync { .. } => Ok(()),
 
         Command::ExecutionCancel { execution_run_id } => {
             ctx.harness
@@ -394,85 +423,6 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::ExecutionResume { execution_run_id } => {
             ctx.harness
                 .handle_execution_resume(&ctx.task_context(), execution_run_id)
-                .await
-        }
-
-        Command::CronEnable {
-            routine,
-            project,
-            schedule,
-            timezone,
-            task,
-            encrypted_task: _,
-        } => {
-            ctx.harness
-                .handle_cron_enable(
-                    &ctx.cron_context(),
-                    crate::handlers::cron::CronEnableRequest {
-                        routine: &routine,
-                        project: project.as_deref(),
-                        schedule: &schedule,
-                        timezone: timezone.as_deref(),
-                        task_content: task,
-                        start_at: None,
-                    },
-                )
-                .await
-        }
-
-        Command::CronDisable { routine } => {
-            ctx.harness
-                .handle_cron_disable(&ctx.cron_context(), &routine)
-                .await
-        }
-
-        Command::CronTrigger {
-            routine,
-            project,
-            task,
-            encrypted_task: _,
-        } => {
-            ctx.harness
-                .handle_cron_trigger(&ctx.cron_context(), &routine, project.as_deref(), task)
-                .await
-        }
-
-        Command::AgentHeartbeatEnable {
-            agent,
-            interval,
-            timezone,
-            instructions,
-            encrypted_instructions: _,
-        } => {
-            ctx.harness
-                .handle_agent_heartbeat_enable(
-                    &ctx.heartbeat_context(),
-                    &agent,
-                    &interval,
-                    timezone.as_deref(),
-                    instructions.map(|content| content.instructions),
-                    None,
-                )
-                .await
-        }
-
-        Command::AgentHeartbeatDisable { agent } => {
-            ctx.harness
-                .handle_agent_heartbeat_disable(&ctx.heartbeat_context(), &agent)
-                .await
-        }
-
-        Command::AgentHeartbeatTrigger {
-            agent,
-            instructions,
-            encrypted_instructions: _,
-        } => {
-            ctx.harness
-                .handle_agent_heartbeat_trigger(
-                    &ctx.heartbeat_context(),
-                    &agent,
-                    instructions.map(|content| content.instructions),
-                )
                 .await
         }
 
@@ -679,20 +629,10 @@ impl CommandContext {
                 workspace_dir: self.config.workspace_dir.clone(),
             },
             git_locks: self.git_locks.clone(),
-        }
-    }
-
-    pub(crate) fn cron_context(&self) -> CronCommandContext<EventLoopResponseSender> {
-        CronCommandContext {
-            response_sink: self.response_tx.clone(),
-            worker_id: self.worker_name.clone(),
-        }
-    }
-
-    pub(crate) fn heartbeat_context(&self) -> HeartbeatCommandContext<EventLoopResponseSender> {
-        HeartbeatCommandContext {
-            response_sink: self.response_tx.clone(),
-            worker_id: self.worker_name.clone(),
+            attachment_encoder: Arc::new(WorkerTaskAttachmentEncoder {
+                auth_provider: self.auth_provider.clone(),
+            }),
+            local_execution_watcher: self.local_execution_watcher.clone(),
         }
     }
 

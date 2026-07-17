@@ -162,14 +162,6 @@ fn routine_metadata_schema(description: &str) -> Value {
     json!({
         "type": "object",
         "properties": {
-            "schedule": {
-                "type": ["string", "null"],
-                "description": "Optional persisted cron schedule expression or interval string."
-            },
-            "timezone": {
-                "type": ["string", "null"],
-                "description": "IANA timezone used when evaluating cron schedules."
-            },
             "entry_steps": {
                 "type": "array",
                 "items": { "type": "string" },
@@ -181,43 +173,12 @@ fn routine_metadata_schema(description: &str) -> Value {
     })
 }
 
-fn routine_trigger_schema(description: &str) -> Value {
-    json!({
-        "type": "string",
-        "enum": ["task", "cron"],
-        "description": description
-    })
-}
-
 fn routine_graph_field_schema(description: &str) -> Value {
     let mut schema = routine_graph_schema();
     schema["description"] = Value::String(format!(
         "{description} Pass graph as a JSON object with entry_steps, steps, and edges; do not serialize that object into a string."
     ));
     schema
-}
-
-fn cron_task_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["title"],
-        "description": "Cron task input for cron routines. Populates the {{task}} template var for routines.",
-        "properties": {
-            "title": {
-                "type": "string",
-                "description": "Task title for scheduled routine runs."
-            },
-            "description": {
-                "type": "string",
-                "description": "Optional task description for scheduled routine runs."
-            },
-            "acceptance_criteria": {
-                "type": "string",
-                "description": "Optional acceptance criteria for scheduled routine runs."
-            }
-        },
-        "additionalProperties": false
-    })
 }
 
 fn configure_metadata_schema() -> Value {
@@ -238,10 +199,9 @@ fn configure_metadata_schema() -> Value {
                 "format": "uuid",
                 "description": "Project UUID to associate with the routine. Omit to leave unchanged; set null to clear."
             },
-            "trigger": routine_trigger_schema("Routine trigger type. Use task for task-driven routines or cron for scheduled routines."),
             "is_active": {
                 "type": "boolean",
-                "description": "Whether the routine is active. For cron routines this controls schedule enablement."
+                "description": "Whether the routine is active."
             },
             "max_retries": {
                 "type": "integer",
@@ -265,13 +225,12 @@ fn routine_configure_parameters() -> Value {
     properties.insert("metadata".into(), configure_metadata_schema());
     properties.insert(
         "runtime_metadata".into(),
-        routine_metadata_schema("Full replacement runtime metadata, such as cron schedule and timezone. Omit to leave unchanged."),
+        routine_metadata_schema("Full replacement runtime metadata. Omit to leave unchanged."),
     );
     properties.insert(
         "graph".into(),
         routine_graph_field_schema("Full replacement workflow graph. Omit to leave unchanged."),
     );
-    properties.insert("cron_task".into(), cron_task_schema());
     json!({
         "type": "object",
         "properties": properties,
@@ -291,7 +250,7 @@ pub fn routine_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_routine".to_string(),
-            description: "Get one routine's name, description, trigger, metadata, steps, and edges by slug."
+            description: "Get one routine's name, description, metadata, steps, and edges by slug."
                 .to_string(),
             parameters: json!({
                 "type": "object",

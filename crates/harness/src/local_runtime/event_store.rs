@@ -359,7 +359,6 @@ mod tests {
                 memory_namespace: None,
             },
             lease: Default::default(),
-            scheduler: None,
             domain: None,
             summary: SessionSummary::default(),
             metadata: serde_json::Value::Null,

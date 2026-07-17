@@ -472,7 +472,6 @@ manifest:
         r#"schema: nenjo.routine.v1
 manifest:
   name: review_flow
-  trigger: task
   entry_steps:
     - implement
   steps:
@@ -579,7 +578,6 @@ manifest:
         r#"schema: nenjo.routine.v1
 manifest:
   name: review_flow
-  trigger: task
   entry_steps:
     - implement
   steps:
@@ -666,7 +664,6 @@ manifest:
         r#"schema: nenjo.routine.v1
 manifest:
   name: review_flow
-  trigger: task
   entry_steps:
     - implement
   steps:

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use nenjo::LocalRoutineExecutionWatcher;
 use nenjo::Manifest;
 use nenjo::arguments::{ArgumentValueType, ResolvedArgumentBinding};
 use nenjo::manifest::HasManifestSlug;
@@ -44,13 +45,14 @@ pub type WorkerHarness = Harness<WorkerProvider, WorkerSessionRuntime>;
 /// Dependencies that are consumed together while constructing a provider.
 pub(crate) struct ProviderBuildContext<'a> {
     pub(crate) config: &'a Config,
-    pub(crate) loader: LocalManifestStore,
+    pub(crate) local_manifest_loader: LocalManifestStore,
     pub(crate) auth_provider: Arc<WorkerAuthProvider>,
     pub(crate) external_mcp: Arc<ExternalMcpPool>,
     pub(crate) skill_registry: Arc<SkillRegistry>,
     pub(crate) provider_registry: Arc<ModelProviderRegistry>,
     pub(crate) manifest_cache: Arc<WorkerManifestCache>,
     pub(crate) manifest_refresh: ManifestRefreshHandle,
+    pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
 /// Applies a platform mutation to the worker's canonical cache and live
@@ -112,6 +114,7 @@ pub struct WorkerAssembly {
     pub skill_registry: Arc<SkillRegistry>,
     pub manifest_cache: Arc<WorkerManifestCache>,
     pub manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
 #[derive(Clone)]
@@ -176,21 +179,23 @@ impl WorkerAssembly {
         });
         let manifest_change_lock = Arc::new(tokio::sync::Mutex::new(()));
         let manifest_refresh = ManifestRefreshHandle::default();
+        let local_execution_watcher = LocalRoutineExecutionWatcher::default();
 
-        let loader = LocalManifestStore::new(&config.manifests_dir);
+        let local_manifest_loader = LocalManifestStore::new(&config.manifests_dir);
         let provider_registry = Arc::new(ModelProviderRegistry::new(
             &config.model_provider_api_keys,
             &config.reliability,
         ));
         let provider = build_provider(ProviderBuildContext {
             config,
-            loader,
+            local_manifest_loader,
             auth_provider: auth_provider.clone(),
             external_mcp: external_mcp.clone(),
             skill_registry: skill_registry.clone(),
             provider_registry: provider_registry.clone(),
             manifest_cache: manifest_cache.clone(),
             manifest_refresh: manifest_refresh.clone(),
+            local_execution_watcher: local_execution_watcher.clone(),
         })
         .await?;
         let manifest = provider.manifest_snapshot();
@@ -230,6 +235,7 @@ impl WorkerAssembly {
             skill_registry,
             manifest_cache,
             manifest_change_lock,
+            local_execution_watcher,
         })
     }
 }
@@ -237,13 +243,14 @@ impl WorkerAssembly {
 pub(crate) async fn build_provider(
     ProviderBuildContext {
         config,
-        loader,
+        local_manifest_loader,
         auth_provider,
         external_mcp,
         skill_registry,
         provider_registry,
         manifest_cache,
         manifest_refresh,
+        local_execution_watcher,
     }: ProviderBuildContext<'_>,
 ) -> Result<WorkerProvider> {
     let mut security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
@@ -262,17 +269,18 @@ pub(crate) async fn build_provider(
         platform_tools,
         external_mcp.clone(),
         skill_registry,
-    );
+    )
+    .with_local_execution_watcher(local_execution_watcher);
 
     let memory_dir = config.state_dir.join("memory");
     let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
-    let live_manifest_reader = loader.clone();
+    let live_manifest_reader = local_manifest_loader.clone();
     let argument_bindings = load_platform_package_argument_bindings(config)?;
 
     let provider = Provider::builder()
         .with_loader(global_package_manifest_loader(config))
         .with_loader(platform_package_manifest_loader(config))
-        .with_loader(loader)
+        .with_loader(local_manifest_loader)
         .with_loader(workspace_package_manifest_loader(config))
         .with_model_factory(provider_registry.clone())
         .with_tool_factory(tool_factory)
@@ -542,13 +550,14 @@ mod tests {
         });
         let provider = build_provider(ProviderBuildContext {
             config: &config,
-            loader: LocalManifestStore::new(&config.manifests_dir),
+            local_manifest_loader: LocalManifestStore::new(&config.manifests_dir),
             auth_provider,
             external_mcp: external_mcp.clone(),
             skill_registry: skill_registry.clone(),
             provider_registry,
             manifest_cache: cache.clone(),
             manifest_refresh: ManifestRefreshHandle::default(),
+            local_execution_watcher: LocalRoutineExecutionWatcher::default(),
         })
         .await
         .unwrap();
@@ -682,7 +691,6 @@ mod tests {
                 media: vec![MediaRequirement::Capability(MediaOperation::GenerateImage)],
                 abilities: vec![],
                 prompt_locked: false,
-                heartbeat: None,
                 source_type: None,
                 metadata: serde_json::json!({}),
             }],
@@ -863,7 +871,6 @@ modules:
                     media: Vec::new(),
                     abilities: vec![],
                     prompt_locked: false,
-                    heartbeat: None,
                     source_type: None,
                     metadata: serde_json::json!({}),
                 }],

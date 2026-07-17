@@ -48,8 +48,8 @@ pub use arguments::{
 pub use commands::{CommandProvider, LoadedCommand};
 pub use config::AgentConfig;
 pub use input::{
-    AgentRun, AgentRunKind, ChatInput, CronInput, ExecutionOptions, GateInput, HeartbeatInput,
-    ProjectLocation, RoutineRun, RoutineRunKind, TaskInput,
+    AgentRun, AgentRunKind, ChatInput, ExecutionOptions, GateInput, ProjectLocation, RoutineRun,
+    RoutineRunKind, TaskInput,
 };
 pub use manifest::{
     KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader, ManifestResource,
@@ -65,6 +65,11 @@ pub use package_resolve::{
 pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,
     ProviderRuntime, RoutineRunner, ToolContext, ToolFactory, TypedModelProviderFactory,
+};
+pub use routines::{
+    LocalRoutineExecutionRegistration, LocalRoutineExecutionWatcher, RuntimeExecutionEvent,
+    RuntimeExecutionProgress, RuntimeExecutionStatus, RuntimeExecutionSubscription,
+    RuntimeExecutionWatcher, WatchExecutionRunTool, start_runtime_execution_watch,
 };
 pub use skills::{
     ActiveSkill, ListInstalledSkillsTool, LoadedSkill, SkillProvider, SkillRuntimeState,

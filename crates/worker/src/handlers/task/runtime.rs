@@ -6,9 +6,11 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::types::GitContext;
+use nenjo_events::EncryptedPayload;
 use uuid::Uuid;
 
 use crate::runtime::GitLocks;
+use nenjo::LocalRoutineExecutionWatcher;
 
 #[derive(Clone)]
 pub struct TaskCommandContext<S, W> {
@@ -16,6 +18,18 @@ pub struct TaskCommandContext<S, W> {
     pub worker_id: String,
     pub worktrees: W,
     pub git_locks: GitLocks,
+    pub attachment_encoder: Arc<dyn TaskAttachmentEncoder>,
+    pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
+}
+
+#[async_trait]
+/// Encrypts one task attachment using its UUID as AEAD object identity.
+pub trait TaskAttachmentEncoder: Send + Sync {
+    async fn encrypt_attachment(
+        &self,
+        attachment_id: Uuid,
+        plaintext: &str,
+    ) -> Result<EncryptedPayload>;
 }
 
 #[async_trait]

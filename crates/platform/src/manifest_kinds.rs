@@ -88,14 +88,12 @@ pub enum SensitiveContentKind {
     CommandContent,
     /// Library knowledge document body.
     DocumentContent,
-    /// Project task description and acceptance criteria.
+    /// Task instructions.
     TaskContent,
+    /// Encrypted routine handoff attached to a task execution.
+    TaskAttachment,
     /// Project settings sensitive envelope.
     ProjectSettings,
-    /// Agent heartbeat instruction envelope.
-    HeartbeatInstructions,
-    /// Cron routine task envelope.
-    RoutineCronTask,
     /// Routine step instruction envelope.
     RoutineStepInstructions,
 }
@@ -111,10 +109,8 @@ impl SensitiveContentKind {
             Self::CommandContent => Some(ResourceType::Command),
             Self::DocumentContent => Some(ResourceType::Document),
             Self::ProjectSettings => Some(ResourceType::Project),
-            Self::HeartbeatInstructions => Some(ResourceType::Agent),
-            Self::RoutineCronTask => Some(ResourceType::Routine),
             Self::RoutineStepInstructions => Some(ResourceType::Routine),
-            Self::TaskContent => None,
+            Self::TaskContent | Self::TaskAttachment => None,
         }
     }
 
@@ -128,9 +124,8 @@ impl SensitiveContentKind {
             Self::CommandContent => "manifest.command.content",
             Self::DocumentContent => "manifest.document.content",
             Self::TaskContent => "task_content",
+            Self::TaskAttachment => "task.attachment",
             Self::ProjectSettings => "project.settings",
-            Self::HeartbeatInstructions => "agent.heartbeat.instructions",
-            Self::RoutineCronTask => "routine.cron_task",
             Self::RoutineStepInstructions => "routine.step.instructions",
         }
     }
@@ -145,9 +140,8 @@ impl SensitiveContentKind {
             | Self::CommandContent
             | Self::DocumentContent
             | Self::TaskContent
+            | Self::TaskAttachment
             | Self::ProjectSettings
-            | Self::HeartbeatInstructions
-            | Self::RoutineCronTask
             | Self::RoutineStepInstructions => ContentScope::Org,
         }
     }
@@ -162,9 +156,8 @@ impl SensitiveContentKind {
             "manifest.command.content" => Some(Self::CommandContent),
             "manifest.document.content" => Some(Self::DocumentContent),
             "task_content" => Some(Self::TaskContent),
+            "task.attachment" => Some(Self::TaskAttachment),
             "project.settings" => Some(Self::ProjectSettings),
-            "agent.heartbeat.instructions" => Some(Self::HeartbeatInstructions),
-            "routine.cron_task" => Some(Self::RoutineCronTask),
             "routine.step.instructions" => Some(Self::RoutineStepInstructions),
             _ => None,
         }
@@ -215,11 +208,6 @@ mod tests {
             ),
             (SensitiveContentKind::CommandContent, ResourceType::Command),
             (SensitiveContentKind::ProjectSettings, ResourceType::Project),
-            (
-                SensitiveContentKind::HeartbeatInstructions,
-                ResourceType::Agent,
-            ),
-            (SensitiveContentKind::RoutineCronTask, ResourceType::Routine),
         ] {
             let object_type = kind.encrypted_object_type();
             assert_eq!(kind.encrypted_scope(), ContentScope::Org);

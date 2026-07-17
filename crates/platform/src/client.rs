@@ -22,7 +22,6 @@ use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformMani
 use nenjo::Slug;
 use nenjo::manifest::{
     CommandManifest, CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata,
-    RoutineTrigger,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -30,15 +29,6 @@ struct CommandConfigureResponse {
     id: Uuid,
     #[serde(flatten)]
     manifest: CommandManifest,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct AgentHeartbeatConfigureApiBody<'a> {
-    pub interval: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<&'a serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<&'a serde_json::Value>,
 }
 
 /// Thin HTTP client for Nenjo platform manifest endpoints.
@@ -106,8 +96,6 @@ struct SaveRoutineGraphBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<Option<&'a str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    trigger: Option<RoutineTrigger>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<&'a RoutineMetadata>,
     entry_steps: Vec<Slug>,
     steps: Vec<SaveRoutineGraphStepBody>,
@@ -163,14 +151,12 @@ fn retry_after_delay(headers: &header::HeaderMap) -> Duration {
 fn routine_graph_body<'a>(
     name: Option<&'a str>,
     description: Option<Option<&'a str>>,
-    trigger: Option<RoutineTrigger>,
     metadata: Option<&'a RoutineMetadata>,
     graph: &'a RoutineGraphInput,
 ) -> SaveRoutineGraphBody<'a> {
     SaveRoutineGraphBody {
         name,
         description,
-        trigger,
         metadata,
         entry_steps: graph.entry_steps.clone(),
         steps: graph
@@ -211,7 +197,7 @@ fn routine_graph_body<'a>(
 }
 
 fn routine_configure_graph_body(graph: &RoutineGraphInput) -> ConfigureRoutineGraphApiBody {
-    let body = routine_graph_body(None, None, None, None, graph);
+    let body = routine_graph_body(None, None, None, graph);
     ConfigureRoutineGraphApiBody {
         entry_steps: body.entry_steps,
         steps: body.steps,
@@ -223,6 +209,14 @@ fn response_error_preview(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return "<empty response body>".to_string();
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(message) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+    {
+        return message.to_string();
     }
     trimmed.chars().take(1000).collect()
 }
@@ -379,57 +373,70 @@ pub struct KnowledgeDocEdgeReplaceItem<'a> {
     pub note: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-/// Query parameters for listing project tasks.
-pub struct ProjectTaskListQuery {
-    /// Project whose tasks should be listed.
-    pub project: Slug,
-    /// Optional task status filter.
+/// Cursor-based filters for the organization task catalog.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct TaskListQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<Slug>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// Optional task priority filter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<String>,
-    /// Optional task type filter.
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub task_type: Option<String>,
-    /// Optional comma-separated tag filter.
+    pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<String>,
-    /// Optional routine slug filter.
+    pub agent: Option<Slug>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routine: Option<Slug>,
-    /// Optional agent assignment filter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assigned_agent: Option<Slug>,
-    /// Optional maximum number of tasks to return.
+    pub cursor_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
-    /// Optional result offset for pagination.
+}
+
+/// Lifecycle subset supported by the execution history API.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionActivityQuery {
+    Active,
+}
+
+/// Resource ownership subset supported by the execution history API.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionKindQuery {
+    Task,
+}
+
+/// Filters for task execution history.
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct ExecutionListQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_slug: Option<Slug>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<Slug>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<Slug>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine: Option<Slug>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ExecutionActivityQuery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ExecutionKindQuery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
 }
 
+/// Incremental trace filters used by execution watchers.
 #[derive(Debug, Clone, serde::Serialize)]
-/// Query parameters for listing project execution runs.
-pub struct ProjectExecutionListQuery {
-    /// Project whose execution runs should be listed.
-    pub project: Slug,
-    /// Optional agent slug filter.
+pub struct ExecutionTraceQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<Slug>,
-    /// Optional routine slug filter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub routine: Option<Slug>,
-    /// Optional execution status filter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// Optional maximum number of runs to return.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<i64>,
-    /// Optional result offset for pagination.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset: Option<i64>,
+    pub after: Option<i64>,
+    pub limit: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, Default)]
@@ -488,30 +495,6 @@ pub struct NotificationRecipientSearchQuery {
     /// Optional maximum number of recipients to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-/// Request body for creating a project execution run.
-pub struct CreateExecutionRequest {
-    /// Project that should own the execution run.
-    pub project: Slug,
-    /// Execution-specific configuration payload.
-    #[serde(default)]
-    pub config: serde_json::Value,
-    /// Optional number of models to use.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_count: Option<i32>,
-    /// Optional parallelism setting for the run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parallel_count: Option<i32>,
-    /// Optional initial status to assign to the run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_status: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ExecutionCommandRequest<'a> {
-    command: &'a str,
 }
 
 impl PlatformManifestClient {
@@ -611,9 +594,6 @@ impl PlatformManifestClient {
         {
             object.remove("prompt_config");
         }
-        if let Some(object) = body.as_object_mut() {
-            object.remove("heartbeat");
-        }
         let response = self
             .http
             .post(format!("{}/api/v1/agents/configure", self.base_url))
@@ -632,36 +612,6 @@ impl PlatformManifestClient {
                 let body = response.text().await.unwrap_or_default();
                 bail!(
                     "agent configure failed with status {status}: {}",
-                    response_error_preview(&body)
-                )
-            }
-        }
-    }
-
-    /// Upsert an agent heartbeat and return the canonical agent record.
-    pub(crate) async fn upsert_agent_heartbeat_record(
-        &self,
-        agent: &Slug,
-        body: &AgentHeartbeatConfigureApiBody<'_>,
-    ) -> Result<AgentRecord> {
-        let response = self
-            .http
-            .put(format!("{}/api/v1/agents/{agent}/heartbeat", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send_with_platform_retry()
-            .await
-            .with_context(|| format!("failed to configure heartbeat for agent {agent}"))?;
-
-        match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json::<AgentRecord>()
-                .await
-                .context("failed to decode heartbeat agent"),
-            status => {
-                let body = response.text().await.unwrap_or_default();
-                bail!(
-                    "agent heartbeat configure failed with status {status}: {}",
                     response_error_preview(&body)
                 )
             }
@@ -1266,58 +1216,6 @@ impl PlatformManifestClient {
         }
     }
 
-    /// List project tasks using the platform task API.
-    pub async fn list_project_tasks(
-        &self,
-        query: &ProjectTaskListQuery,
-    ) -> Result<serde_json::Value> {
-        let mut url = Url::parse(&format!("{}/api/v1/tasks", self.base_url))
-            .context("failed to build task list URL")?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("project", query.project.as_str());
-            if let Some(status) = query.status.as_ref() {
-                pairs.append_pair("status", status);
-            }
-            if let Some(priority) = query.priority.as_ref() {
-                pairs.append_pair("priority", priority);
-            }
-            if let Some(task_type) = query.task_type.as_ref() {
-                pairs.append_pair("type", task_type);
-            }
-            if let Some(tags) = query.tags.as_ref() {
-                pairs.append_pair("tags", tags);
-            }
-            if let Some(routine) = query.routine.as_ref() {
-                pairs.append_pair("routine", routine.as_str());
-            }
-            if let Some(assigned_agent) = query.assigned_agent.as_ref() {
-                pairs.append_pair("assigned_agent", assigned_agent.as_str());
-            }
-            if let Some(limit) = query.limit {
-                pairs.append_pair("limit", &limit.to_string());
-            }
-            if let Some(offset) = query.offset {
-                pairs.append_pair("offset", &offset.to_string());
-            }
-        }
-        let response = self
-            .http
-            .get(url)
-            .header("X-API-Key", &self.api_key)
-            .send_with_platform_retry()
-            .await
-            .with_context(|| format!("failed to list tasks for project {}", query.project))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json::<serde_json::Value>()
-                .await
-                .context("failed to decode task list"),
-            status => bail!("project task list failed with status {status}"),
-        }
-    }
-
     /// Fetch the current organization ID associated with the API key.
     pub async fn current_org_id(&self) -> Result<Uuid> {
         let response = self
@@ -1449,134 +1347,35 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Fetch one project task by ID.
-    pub async fn get_project_task(&self, task_id: Uuid) -> Result<Option<serde_json::Value>> {
-        let response = self
-            .http
-            .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send_with_platform_retry()
-            .await
-            .with_context(|| format!("failed to fetch task {task_id}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .map(Some)
-                .context("failed to decode task"),
-            StatusCode::NOT_FOUND => Ok(None),
-            status => bail!("project task fetch failed with status {status}"),
-        }
-    }
-
-    /// Create a project task using a raw platform task payload.
-    pub async fn create_project_task(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .post(format!("{}/api/v1/tasks", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send_with_platform_retry()
-            .await
-            .context("failed to create project task")?;
-
-        match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json()
-                .await
-                .context("failed to decode created project task"),
-            status => bail!("project task create failed with status {status}"),
-        }
-    }
-
-    /// Create multiple project tasks using a raw platform bulk payload.
-    pub async fn bulk_create_project_tasks(
-        &self,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .post(format!("{}/api/v1/tasks/bulk", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send_with_platform_retry()
-            .await
-            .context("failed to bulk create project tasks")?;
-
-        match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json()
-                .await
-                .context("failed to decode bulk-created project tasks"),
-            status => bail!("project task bulk create failed with status {status}"),
-        }
-    }
-
-    /// Update a project task using a raw platform task payload.
-    pub async fn update_project_task(
-        &self,
-        task_id: Uuid,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .patch(format!("{}/api/v1/tasks/{task_id}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send_with_platform_retry()
-            .await
-            .with_context(|| format!("failed to update task {task_id}"))?;
-
-        match response.status() {
-            StatusCode::OK => response
-                .json()
-                .await
-                .context("failed to decode updated project task"),
-            status => bail!("project task update failed with status {status}"),
-        }
-    }
-
-    /// Delete a project task by ID.
-    pub async fn delete_project_task(&self, task_id: Uuid) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/api/v1/tasks/{task_id}", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .send_with_platform_retry()
-            .await
-            .with_context(|| format!("failed to delete task {task_id}"))?;
-
-        match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            status => bail!("project task delete failed with status {status}"),
-        }
-    }
-
-    /// List project execution runs using the platform execution API.
-    pub async fn list_project_execution_runs(
-        &self,
-        query: &ProjectExecutionListQuery,
-    ) -> Result<serde_json::Value> {
-        let mut url = Url::parse(&format!("{}/api/v1/executions", self.base_url))
-            .context("failed to build execution list URL")?;
+    /// List tasks using the canonical organization task API.
+    pub async fn list_tasks(&self, query: &TaskListQuery) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!("{}/api/v1/tasks", self.base_url))
+            .context("failed to build task list URL")?;
         {
             let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("project", query.project.as_str());
-            if let Some(agent) = query.agent.as_ref() {
-                pairs.append_pair("agent", agent.as_str());
+            if let Some(value) = query.project.as_ref() {
+                pairs.append_pair("project", value.as_str());
             }
-            if let Some(routine) = query.routine.as_ref() {
-                pairs.append_pair("routine", routine.as_str());
+            if let Some(value) = query.status.as_ref() {
+                pairs.append_pair("status", value);
             }
-            if let Some(status) = query.status.as_ref() {
-                pairs.append_pair("status", status);
+            if let Some(value) = query.label.as_ref() {
+                pairs.append_pair("label", value);
             }
-            if let Some(limit) = query.limit {
-                pairs.append_pair("limit", &limit.to_string());
+            if let Some(value) = query.agent.as_ref() {
+                pairs.append_pair("agent", value.as_str());
             }
-            if let Some(offset) = query.offset {
-                pairs.append_pair("offset", &offset.to_string());
+            if let Some(value) = query.routine.as_ref() {
+                pairs.append_pair("routine", value.as_str());
+            }
+            if let Some(value) = query.cursor_updated_at.as_ref() {
+                pairs.append_pair("cursor_updated_at", value);
+            }
+            if let Some(value) = query.cursor_id {
+                pairs.append_pair("cursor_id", &value.to_string());
+            }
+            if let Some(value) = query.limit {
+                pairs.append_pair("limit", &value.to_string());
             }
         }
         let response = self
@@ -1585,24 +1384,175 @@ impl PlatformManifestClient {
             .header("X-API-Key", &self.api_key)
             .send_with_platform_retry()
             .await
-            .with_context(|| {
-                format!(
-                    "failed to list execution runs for project {}",
-                    query.project
-                )
-            })?;
-
+            .context("failed to list tasks")?;
         match response.status() {
-            StatusCode::OK => response
-                .json::<serde_json::Value>()
-                .await
-                .context("failed to decode execution run list"),
-            status => bail!("project execution run list failed with status {status}"),
+            StatusCode::OK => response.json().await.context("failed to decode task list"),
+            status => bail!("task list failed with status {status}"),
         }
     }
 
-    /// Fetch one project execution run by ID.
-    pub async fn get_project_execution_run(
+    /// List the organization task-label catalog.
+    pub async fn list_task_labels(&self) -> Result<serde_json::Value> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/labels", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to list task labels")?;
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode task labels"),
+            status => bail!("task label list failed with status {status}"),
+        }
+    }
+
+    /// Fetch one organization task by UUID or slug.
+    pub async fn get_task(&self, task_ref: &str) -> Result<Option<serde_json::Value>> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/tasks/{task_ref}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to fetch task {task_ref}"))?;
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .map(Some)
+                .context("failed to decode task"),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "task fetch failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
+        }
+    }
+
+    /// Create or update one task through the backend-owned slug resolution flow.
+    pub async fn configure_task(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/tasks/configure", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(body)
+            .send_with_platform_retry()
+            .await
+            .context("failed to configure task")?;
+        match response.status() {
+            StatusCode::OK | StatusCode::CREATED => response
+                .json()
+                .await
+                .context("failed to decode configured task"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "task configure failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
+        }
+    }
+
+    /// Delete one organization task by its stable ID.
+    pub async fn delete_task(&self, task_id: Uuid) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!("{}/api/v1/tasks/{task_id}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to delete task {task_id}"))?;
+        match response.status() {
+            StatusCode::NO_CONTENT => Ok(()),
+            status => bail!("task delete failed with status {status}"),
+        }
+    }
+
+    /// Dispatch one manual task execution and return its run immediately.
+    pub async fn dispatch_task(
+        &self,
+        task_id: Uuid,
+        idempotency_key: Uuid,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/tasks/{task_id}/execute", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(&serde_json::json!({ "idempotency_key": idempotency_key }))
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to dispatch task {task_id}"))?;
+        match response.status() {
+            StatusCode::ACCEPTED => response
+                .json()
+                .await
+                .context("failed to decode dispatched task execution"),
+            status => bail!("task dispatch failed with status {status}"),
+        }
+    }
+
+    /// List task execution runs across the organization.
+    pub async fn list_execution_runs(
+        &self,
+        query: &ExecutionListQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!("{}/api/v1/executions", self.base_url))
+            .context("failed to build execution list URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(value) = query.task_slug.as_ref() {
+                pairs.append_pair("task_slug", value.as_str());
+            }
+            if let Some(value) = query.project.as_ref() {
+                pairs.append_pair("project", value.as_str());
+            }
+            if let Some(value) = query.agent.as_ref() {
+                pairs.append_pair("agent", value.as_str());
+            }
+            if let Some(value) = query.routine.as_ref() {
+                pairs.append_pair("routine", value.as_str());
+            }
+            if let Some(value) = query.status.as_ref() {
+                pairs.append_pair("status", value);
+            }
+            if let Some(ExecutionActivityQuery::Active) = query.activity {
+                pairs.append_pair("activity", "active");
+            }
+            if let Some(ExecutionKindQuery::Task) = query.kind {
+                pairs.append_pair("kind", "task");
+            }
+            if let Some(value) = query.limit {
+                pairs.append_pair("limit", &value.to_string());
+            }
+            if let Some(value) = query.offset {
+                pairs.append_pair("offset", &value.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to list task execution runs")?;
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode task execution runs"),
+            status => bail!("task execution list failed with status {status}"),
+        }
+    }
+
+    /// Fetch one task-backed execution run.
+    pub async fn get_execution_run(
         &self,
         execution_run_id: Uuid,
     ) -> Result<Option<serde_json::Value>> {
@@ -1616,7 +1566,6 @@ impl PlatformManifestClient {
             .send_with_platform_retry()
             .await
             .with_context(|| format!("failed to fetch execution run {execution_run_id}"))?;
-
         match response.status() {
             StatusCode::OK => response
                 .json()
@@ -1624,59 +1573,129 @@ impl PlatformManifestClient {
                 .map(Some)
                 .context("failed to decode execution run"),
             StatusCode::NOT_FOUND => Ok(None),
-            status => bail!("project execution run fetch failed with status {status}"),
+            status => bail!("execution run fetch failed with status {status}"),
         }
     }
 
-    /// Create a project execution run.
-    pub async fn create_execution_run(
-        &self,
-        request: &CreateExecutionRequest,
-    ) -> Result<serde_json::Value> {
+    /// Fetch the routine task/step projection for an execution run.
+    pub async fn get_execution_tasks(&self, execution_run_id: Uuid) -> Result<serde_json::Value> {
         let response = self
             .http
-            .post(format!("{}/api/v1/executions", self.base_url))
-            .header("X-API-Key", &self.api_key)
-            .json(request)
-            .send_with_platform_retry()
-            .await
-            .context("failed to create execution run")?;
-
-        match response.status() {
-            StatusCode::OK | StatusCode::CREATED => response
-                .json()
-                .await
-                .context("failed to decode created execution run"),
-            status => bail!("project execution start failed with status {status}"),
-        }
-    }
-
-    /// Send a command to an existing project execution run.
-    pub async fn command_project_execution_run(
-        &self,
-        execution_run_id: Uuid,
-        command: &str,
-    ) -> Result<serde_json::Value> {
-        let response = self
-            .http
-            .post(format!(
-                "{}/api/v1/executions/{execution_run_id}/command",
+            .get(format!(
+                "{}/api/v1/executions/{execution_run_id}/tasks",
                 self.base_url
             ))
             .header("X-API-Key", &self.api_key)
-            .json(&ExecutionCommandRequest { command })
             .send_with_platform_retry()
             .await
-            .with_context(|| {
-                format!("failed to send '{command}' command to execution run {execution_run_id}")
-            })?;
-
+            .with_context(|| format!("failed to fetch execution tasks for {execution_run_id}"))?;
         match response.status() {
             StatusCode::OK => response
                 .json()
                 .await
-                .context("failed to decode commanded execution run"),
-            status => bail!("project execution command failed with status {status}"),
+                .context("failed to decode execution tasks"),
+            status => bail!("execution task activity failed with status {status}"),
+        }
+    }
+
+    /// Fetch a bounded incremental page of persisted execution traces.
+    pub async fn get_execution_trace_events(
+        &self,
+        execution_run_id: Uuid,
+        query: &ExecutionTraceQuery,
+    ) -> Result<serde_json::Value> {
+        let mut url = Url::parse(&format!(
+            "{}/api/v1/executions/{execution_run_id}/trace-events",
+            self.base_url
+        ))
+        .context("failed to build execution trace URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(after) = query.after {
+                pairs.append_pair("after", &after.to_string());
+            }
+            pairs.append_pair("limit", &query.limit.to_string());
+        }
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to fetch execution trace for {execution_run_id}"))?;
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode execution trace"),
+            status => bail!("execution trace failed with status {status}"),
+        }
+    }
+
+    /// List attachment metadata produced by a task's executions.
+    pub async fn list_task_attachments(&self, task_id: Uuid) -> Result<serde_json::Value> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/api/v1/tasks/{task_id}/attachments",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to list attachments for task {task_id}"))?;
+        match response.status() {
+            StatusCode::OK => response
+                .json()
+                .await
+                .context("failed to decode task attachments"),
+            status => bail!("task attachment list failed with status {status}"),
+        }
+    }
+
+    /// Request cancellation of one queued or running task execution.
+    pub async fn cancel_execution_run(&self, execution_run_id: Uuid) -> Result<serde_json::Value> {
+        self.task_execution_command(execution_run_id, "cancel", None)
+            .await
+    }
+
+    /// Retry one terminal task execution and return the new run.
+    pub async fn retry_execution_run(
+        &self,
+        execution_run_id: Uuid,
+        idempotency_key: Uuid,
+    ) -> Result<serde_json::Value> {
+        self.task_execution_command(execution_run_id, "retry", Some(idempotency_key))
+            .await
+    }
+
+    async fn task_execution_command(
+        &self,
+        execution_run_id: Uuid,
+        command: &str,
+        idempotency_key: Option<Uuid>,
+    ) -> Result<serde_json::Value> {
+        let request = self
+            .http
+            .post(format!(
+                "{}/api/v1/executions/{execution_run_id}/{command}",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key);
+        let request = match idempotency_key {
+            Some(key) => request.json(&serde_json::json!({ "idempotency_key": key })),
+            None => request,
+        };
+        let response = request
+            .send_with_platform_retry()
+            .await
+            .with_context(|| format!("failed to {command} task execution {execution_run_id}"))?;
+        match response.status() {
+            StatusCode::ACCEPTED => response
+                .json()
+                .await
+                .with_context(|| format!("failed to decode {command} execution response")),
+            status => bail!("task execution {command} failed with status {status}"),
         }
     }
 
@@ -2330,6 +2349,16 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn response_error_preview_extracts_the_platform_message() {
+        assert_eq!(
+            response_error_preview(
+                r#"{"error":{"code":"validation_error","message":"routine not found: missing-pipeline"}}"#,
+            ),
+            "routine not found: missing-pipeline"
+        );
+    }
+
+    #[test]
     fn routine_graph_body_uses_step_slugs_for_platform_refs() {
         let graph = RoutineGraphInput {
             entry_steps: vec![Slug::derive("implement_pr_changes")],
@@ -2369,7 +2398,7 @@ mod tests {
             }],
         };
 
-        let body = routine_graph_body(None, None, None, None, &graph);
+        let body = routine_graph_body(None, None, None, &graph);
 
         assert_eq!(body.entry_steps, vec![Slug::derive("implement_pr_changes")]);
         assert_eq!(
@@ -2401,7 +2430,7 @@ mod tests {
             edges: Vec::new(),
         };
 
-        let body = routine_graph_body(None, None, None, None, &graph);
+        let body = routine_graph_body(None, None, None, &graph);
 
         assert_eq!(body.steps[0].position_x, Some(42.0));
         assert_eq!(body.steps[0].position_y, Some(99.0));

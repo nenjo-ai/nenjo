@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use nenjo::LocalRoutineExecutionWatcher;
 use nenjo_crypto_auth::WrappedAccountContentKey as AuthWrappedAccountContentKey;
+use nenjo_events::TaskScheduleAssignment;
 use nenjo_events::WrappedAccountContentKey as EventWrappedAccountContentKey;
 use nenjo_secure_envelope::SecureEnvelopeBus;
 use tokio_util::sync::CancellationToken;
@@ -23,13 +25,10 @@ use crate::config::{Config, SessionConfig};
 use crate::crypto::WorkerAuthProvider;
 use crate::event_loop::{self, ResponseSender, SeenMessageIds, WorkerEventLoopContext};
 use crate::external_mcp::ExternalMcpPool;
-use crate::handlers::cron::WorkerCronHarnessExt;
 use crate::handlers::crypto::AccountKeyStore;
-use crate::handlers::heartbeat::{HeartbeatRestoreRequest, WorkerHeartbeatHarnessExt};
 use crate::providers::ModelProviderRegistry;
 use crate::sessions::{
-    CronSessionRecovery, DomainSessionRecovery, HeartbeatSessionRecovery,
-    WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
+    DomainSessionRecovery, WorkerSessionRecoveryHandler, WorkerSessionRuntime, WorkerSessionStores,
 };
 use crate::skills::SkillRegistry;
 
@@ -75,6 +74,7 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 ///
 /// Handlers use `harness` for provider-backed command execution.
 /// Responses are sent via `response_tx` (never touch the bus directly).
+#[derive(Clone)]
 pub struct CommandContext {
     pub harness: WorkerHarness,
     pub api: Arc<ApiClient>,
@@ -91,6 +91,7 @@ pub struct CommandContext {
     pub git_locks: GitLocks,
     pub manifest_cache: Arc<WorkerManifestCache>,
     pub manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,7 @@ pub struct WorkerRuntime {
     git_locks: GitLocks,
     manifest_cache: Arc<WorkerManifestCache>,
     manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
+    local_execution_watcher: LocalRoutineExecutionWatcher,
     seen_message_ids: SeenMessageIds,
     shutdown: CancellationToken,
 }
@@ -134,64 +136,6 @@ impl WorkerSessionRecoveryHandler for RuntimeSessionRecoveryHandler {
             .rebuild_domain_session(request.session_id, agent, project, &request.domain_command)
             .await?;
         self.ctx.domains.insert(request.session_id, session);
-        Ok(())
-    }
-
-    async fn restore_cron_session(&self, request: CronSessionRecovery) -> Result<()> {
-        let Some(routine) = request.routine.as_deref() else {
-            return Ok(());
-        };
-        let routine = nenjo::Slug::parse(routine)?;
-        let project = request
-            .project
-            .as_deref()
-            .map(nenjo::Slug::parse)
-            .transpose()?;
-        let project = project.as_ref().map(|slug| slug.as_str());
-        let task: Option<nenjo_events::CronTaskContent> =
-            request.task.map(serde_json::from_value).transpose()?;
-        self.ctx
-            .harness
-            .handle_cron_enable(
-                &self.ctx.cron_context(),
-                crate::handlers::cron::CronEnableRequest {
-                    routine: routine.as_str(),
-                    project,
-                    schedule: &request.schedule_expr,
-                    timezone: request.timezone.as_deref(),
-                    task_content: task,
-                    start_at: request.next_run_at,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn restore_heartbeat_session(&self, request: HeartbeatSessionRecovery) -> Result<()> {
-        let agent = nenjo::Slug::parse(&request.agent)?;
-        let manifest = self.ctx.harness.provider().manifest_snapshot();
-        let agent_id = manifest
-            .agents
-            .iter()
-            .any(|item| item.slug == agent)
-            .then(|| crate::resource_resolver::stable_resource_id("agent", &agent))
-            .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
-        self.ctx
-            .harness
-            .restore_agent_heartbeat(
-                &self.ctx.heartbeat_context(),
-                HeartbeatRestoreRequest {
-                    agent_id,
-                    interval: request.interval,
-                    timezone: request.timezone,
-                    start_at: request.next_run_at,
-                    instructions: request.instructions,
-                    previous_output_ref: request.previous_output_ref,
-                    last_run_at: request.last_run_at,
-                    start_paused: request.start_paused,
-                },
-            )
-            .await?;
         Ok(())
     }
 }
@@ -221,6 +165,7 @@ impl WorkerRuntime {
             git_locks: Arc::new(DashMap::new()),
             manifest_cache: assembly.manifest_cache,
             manifest_change_lock: assembly.manifest_change_lock,
+            local_execution_watcher: assembly.local_execution_watcher,
             seen_message_ids,
             shutdown,
         })
@@ -248,6 +193,7 @@ impl WorkerRuntime {
             git_locks: self.git_locks.clone(),
             manifest_cache: self.manifest_cache.clone(),
             manifest_change_lock: self.manifest_change_lock.clone(),
+            local_execution_watcher: self.local_execution_watcher.clone(),
         }
     }
 
@@ -291,6 +237,30 @@ impl WorkerRuntime {
 
     pub(crate) fn seen_message_ids(&self) -> SeenMessageIds {
         self.seen_message_ids.clone()
+    }
+
+    pub(crate) fn task_inbox_settings(&self) -> (std::path::PathBuf, usize, usize) {
+        (
+            self.config.state_dir.clone(),
+            self.config.task_inbox.max_concurrency.max(1),
+            self.config.task_inbox.terminal_receipts.max(1),
+        )
+    }
+
+    pub(crate) fn cached_task_schedules(&self) -> Vec<TaskScheduleAssignment> {
+        crate::bootstrap::load_cached_task_schedules(&self.config.manifests_dir)
+    }
+
+    pub(crate) fn task_schedule_cache_path(&self) -> std::path::PathBuf {
+        self.config.manifests_dir.join("task_schedules.json")
+    }
+
+    /// Decrypt the instructions of a cached schedule without requiring the platform.
+    pub(crate) async fn hydrate_task_schedule(
+        &self,
+        schedule: TaskScheduleAssignment,
+    ) -> Result<TaskScheduleAssignment> {
+        crate::task_runtime_adapter::hydrate_task_schedule(&self.auth_provider, schedule).await
     }
 
     pub(crate) fn cancel_active_executions(&self) {
@@ -367,6 +337,7 @@ mod tests {
     use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
     use crate::skills::SkillRegistry;
     use nenjo::LocalManifestStore;
+    use nenjo::LocalRoutineExecutionWatcher;
     use nenjo_platform::api_client::ApiClient;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -405,13 +376,14 @@ mod tests {
         let expected_manifest_change_lock = manifest_change_lock.clone();
         let provider = build_provider(ProviderBuildContext {
             config: &config,
-            loader: LocalManifestStore::new(&config.manifests_dir),
+            local_manifest_loader: LocalManifestStore::new(&config.manifests_dir),
             auth_provider: auth_provider.clone(),
             external_mcp: external_mcp.clone(),
             skill_registry: skill_registry.clone(),
             provider_registry: provider_registry.clone(),
             manifest_cache: manifest_cache.clone(),
             manifest_refresh: ManifestRefreshHandle::default(),
+            local_execution_watcher: LocalRoutineExecutionWatcher::default(),
         })
         .await
         .unwrap();
@@ -434,6 +406,7 @@ mod tests {
                 skill_registry,
                 manifest_cache,
                 manifest_change_lock,
+                local_execution_watcher: LocalRoutineExecutionWatcher::default(),
             },
             config,
         )

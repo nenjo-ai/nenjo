@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod security;
 pub mod sessions;
 pub mod skills;
+mod task_runtime_adapter;
 pub mod tools;
 
 pub use nenjo_platform::api_client;

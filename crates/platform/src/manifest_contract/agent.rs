@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
+use nenjo::manifest::AgentManifest;
 use nenjo::manifest::PromptConfig;
-use nenjo::manifest::{AgentHeartbeatManifest, AgentManifest};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -47,8 +47,6 @@ pub struct AgentRecord {
     pub abilities: Vec<String>,
     #[serde(default)]
     pub prompt_locked: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat: Option<AgentHeartbeatManifest>,
     #[serde(default = "default_agent_source_type")]
     pub source_type: String,
     #[serde(default)]
@@ -104,7 +102,6 @@ impl AgentRecord {
             media: Vec::new(),
             abilities: self.abilities.clone(),
             prompt_locked: self.prompt_locked,
-            heartbeat: self.heartbeat.clone(),
             source_type: Some(self.source_type.clone()),
             metadata: self.metadata.clone(),
         }

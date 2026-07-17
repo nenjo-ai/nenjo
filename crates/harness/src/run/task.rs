@@ -78,7 +78,7 @@ where
         crate::HarnessError::InvalidCommand("TaskRequest missing routine".to_string())
     })?;
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let pslug = project_slug(Some(&request.project));
+    let pslug = project_slug(request.project.as_ref());
     let task_slug = request.slug.clone().unwrap_or_else(|| "task".to_string());
     let execution_run_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
     let task = task_input_from_request(&request, task_slug.clone());
@@ -99,7 +99,7 @@ where
                 task_session_upsert_event(TaskSessionUpsert {
                     task_id: request.task_id,
                     status: SessionStatus::Active,
-                    project: request.project.to_string(),
+                    project: request.project.as_ref().map(ToString::to_string),
                     agent: None,
                     routine: Some(routine.to_string()),
                     execution_run_id,
@@ -284,7 +284,7 @@ fn replace_active_execution_for_task_start(
 
 struct PreparedTaskExecution {
     task_id: Uuid,
-    project: nenjo::Slug,
+    project: Option<nenjo::Slug>,
     execution_run_id: Uuid,
     agent_id: Option<Uuid>,
     agent: nenjo::Slug,
@@ -315,7 +315,7 @@ where
         .ok_or_else(|| anyhow!("agent not found: {}", agent))?;
     let agent_id = None;
     let aname = agent_manifest.name.clone();
-    let pslug = project_slug(Some(&request.project));
+    let pslug = project_slug(request.project.as_ref());
     let task_slug = request.slug.clone().unwrap_or_else(|| "task".to_string());
     let execution_run_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
     let task = task_input_from_request(&request, task_slug.clone());
@@ -336,7 +336,7 @@ where
                 task_session_upsert_event(TaskSessionUpsert {
                     task_id: request.task_id,
                     status: SessionStatus::Active,
-                    project: request.project.to_string(),
+                    project: request.project.as_ref().map(ToString::to_string),
                     agent: Some(agent.to_string()),
                     routine: None,
                     execution_run_id,
@@ -393,14 +393,16 @@ where
         .await
         .map_err(anyhow::Error::from)?;
 
-    if let Some(project) = provider.find_project(&prepared.project) {
-        builder = builder.with_project_context(project);
-    } else {
-        warn!(
-            project = %prepared.project,
-            agent = %prepared.agent,
-            "Project not found in manifest for harness task"
-        );
+    if let Some(project_slug) = prepared.project.as_ref() {
+        if let Some(project) = provider.find_project(project_slug) {
+            builder = builder.with_project_context(project);
+        } else {
+            warn!(
+                project = %project_slug,
+                agent = %prepared.agent,
+                "Project not found in manifest for harness task"
+            );
+        }
     }
     if let Some(ref location) = prepared.run.execution.project_location
         && let Some(ref work_dir) = location.working_dir
@@ -564,18 +566,14 @@ where
 
 fn task_input_from_request(request: &TaskRequest, task_slug: String) -> TaskInput {
     TaskInput {
-        project: Some(request.project.clone()),
+        project: request.project.clone(),
         task_id: request.task_id,
         title: request.title.clone(),
-        description: request.description.clone(),
-        acceptance_criteria: request.acceptance_criteria.clone(),
-        tags: request.tags.clone(),
-        source: Some("task".to_string()),
+        instructions: request.instructions.clone(),
+        labels: request.labels.clone(),
         status: request.status.clone(),
         priority: request.priority.clone(),
-        task_type: request.task_type.clone(),
         slug: Some(task_slug),
-        complexity: request.complexity.clone(),
     }
 }
 

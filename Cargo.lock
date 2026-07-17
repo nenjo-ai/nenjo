@@ -2093,8 +2093,7 @@ dependencies = [
  "async-trait",
  "bon",
  "chrono",
- "chrono-tz",
- "cron",
+ "dashmap",
  "derive_builder",
  "futures-util",
  "nenjo-events",
@@ -2102,6 +2101,7 @@ dependencies = [
  "nenjo-models",
  "nenjo-tool-api",
  "nenjo-xml",
+ "parking_lot",
  "quick-xml",
  "regex",
  "serde",
@@ -2178,8 +2178,11 @@ name = "nenjo-events"
 version = "0.28.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
+ "cron",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
@@ -2193,6 +2196,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "nenjo",
+ "nenjo-events",
  "nenjo-models",
  "nenjo-sessions",
  "parking_lot",
@@ -2303,6 +2307,7 @@ version = "0.28.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "derive_builder",
  "nenjo",
@@ -2393,9 +2398,9 @@ dependencies = [
  "axum-test",
  "base64",
  "chrono",
+ "chrono-tz",
  "clap",
  "config",
- "cron",
  "dashmap",
  "directories",
  "dotenvy",

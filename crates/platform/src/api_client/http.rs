@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use super::types::ActiveAgentHeartbeatState;
 use crate::SensitiveContentKind;
 use crate::manifest_contract::{ModelRecord, ProjectDetailRecord};
 use async_trait::async_trait;
@@ -182,26 +181,6 @@ impl ApiClient {
             .fetch_resource(&format!("/api/v1/routines/{resource}"))
             .await?;
         self.decode_routine_step_instructions(response).await
-    }
-
-    pub async fn list_active_cron_routines(&self) -> Result<Vec<ActiveCronRoutineState>> {
-        let url = format!("{}/api/v1/routines/cron-state", self.base_url);
-        let resp = self.get(&url).await?;
-
-        match resp.status() {
-            StatusCode::OK => resp.json().await.map_err(ApiClientError::Http),
-            status => Err(self.api_error(status, resp).await),
-        }
-    }
-
-    pub async fn list_active_agent_heartbeats(&self) -> Result<Vec<ActiveAgentHeartbeatState>> {
-        let url = format!("{}/api/v1/agents/heartbeat-state", self.base_url);
-        let resp = self.get(&url).await?;
-
-        match resp.status() {
-            StatusCode::OK => resp.json().await.map_err(ApiClientError::Http),
-            status => Err(self.api_error(status, resp).await),
-        }
     }
 
     pub async fn register_worker_enrollment(

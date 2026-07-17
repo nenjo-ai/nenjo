@@ -5,19 +5,6 @@ use uuid::Uuid;
 
 use crate::{Capability, EncryptedPayload};
 
-// ---------------------------------------------------------------------------
-// Execution type
-// ---------------------------------------------------------------------------
-
-/// Distinguishes how an execution was triggered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionType {
-    Cron,
-    Task,
-    Heartbeat,
-}
-
 /// Agent identity attached to step events so the frontend can render identicons.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepAgent {
@@ -41,7 +28,7 @@ pub struct ExecutionTraceRoutineStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionWorkflowStepEvent {
     /// One of: `step_started`, `step_completed`, `step_failed`,
-    /// `step_warning`, `progress`, or cron/worktree lifecycle event names.
+    /// `step_warning`, `progress`, or worktree lifecycle event names.
     pub event_type: String,
     pub step_name: String,
     pub step_type: String,
@@ -57,18 +44,66 @@ pub struct ExecutionWorkflowStepEvent {
     pub agent: Option<StepAgent>,
 }
 
-/// A task terminal event inside an execution run.
+/// Durable artifacts and usage produced by a task execution.
+///
+/// Lifecycle outcome is intentionally excluded. [`TaskExecutionState`] is the
+/// sole authority for completion, failure, rejection, and cancellation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionTaskCompletedEvent {
-    pub success: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge_error: Option<String>,
+pub struct ExecutionTaskArtifactsEvent {
     #[serde(default)]
     pub total_input_tokens: u64,
     #[serde(default)]
     pub total_output_tokens: u64,
+    /// Encrypted durable outputs finalized atomically with this terminal event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<TaskAttachmentManifest>,
+}
+
+/// Stable identifier for a durable task attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskAttachmentId(Uuid);
+
+impl TaskAttachmentId {
+    pub const fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    pub const fn into_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Closed set of task attachment kinds supported by the initial protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAttachmentKind {
+    FinalOutput,
+    RoutineHandoff,
+}
+
+/// Provenance for one activated edge reaching a terminal routine step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutineHandoffSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<Uuid>,
+    pub source_step_slug: String,
+    pub destination_step_slug: String,
+    pub edge_condition: String,
+}
+
+/// Opaque encrypted attachment delivered with a terminal task event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAttachmentManifest {
+    pub id: TaskAttachmentId,
+    pub kind: TaskAttachmentKind,
+    pub name: String,
+    pub content_type: String,
+    pub byte_size: u64,
+    pub encrypted_payload: EncryptedPayload,
+    pub content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RoutineHandoffSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +124,8 @@ pub enum ExecutionEventKind {
     WorkflowStep,
     #[serde(rename = "agent.trace")]
     AgentTrace,
-    #[serde(rename = "task.completed")]
-    TaskCompleted,
+    #[serde(rename = "task.artifacts")]
+    TaskArtifacts,
 }
 
 impl ExecutionEventKind {
@@ -98,7 +133,7 @@ impl ExecutionEventKind {
         match self {
             Self::WorkflowStep => "workflow.step",
             Self::AgentTrace => "agent.trace",
-            Self::TaskCompleted => "task.completed",
+            Self::TaskArtifacts => "task.artifacts",
         }
     }
 }
@@ -123,9 +158,9 @@ pub enum ExecutionEventPayload {
         routine_step: Option<ExecutionTraceRoutineStep>,
         payload: StreamEvent,
     },
-    /// Terminal task outcome.
-    #[serde(rename = "task.completed")]
-    TaskCompleted(ExecutionTaskCompletedEvent),
+    /// Outputs and usage produced by a terminal task execution.
+    #[serde(rename = "task.artifacts")]
+    TaskArtifacts(ExecutionTaskArtifactsEvent),
 }
 
 impl ExecutionEventPayload {
@@ -133,7 +168,7 @@ impl ExecutionEventPayload {
         match self {
             Self::WorkflowStep(_) => ExecutionEventKind::WorkflowStep,
             Self::AgentTrace { .. } => ExecutionEventKind::AgentTrace,
-            Self::TaskCompleted(_) => ExecutionEventKind::TaskCompleted,
+            Self::TaskArtifacts(_) => ExecutionEventKind::TaskArtifacts,
         }
     }
 }
@@ -141,6 +176,48 @@ impl ExecutionEventPayload {
 // ---------------------------------------------------------------------------
 // Top-level response wrapper
 // ---------------------------------------------------------------------------
+
+/// Lifecycle state maintained by the worker's durable task inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TaskExecutionState {
+    Queued,
+    Running,
+    Completed,
+    Failed { error: String },
+    Cancelled,
+    Rejected { reason: String },
+}
+
+/// Trigger accepted by an immediate platform-to-worker task command.
+///
+/// Scheduled work is materialized by the worker and therefore appears only in
+/// [`TaskExecutionOrigin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskExecutionTrigger {
+    Manual,
+    Retry,
+}
+
+/// Immutable origin of a durable worker-inbox execution receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskExecutionOrigin {
+    Manual,
+    Retry,
+    Schedule {
+        schedule_id: Uuid,
+        scheduled_for: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_run_at: Option<String>,
+        /// Revision of the exact cached assignment used for materialization.
+        assignment_revision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        target: crate::TaskExecutionTarget,
+    },
+}
 
 /// A response sent from the harness back to the backend.
 ///
@@ -165,81 +242,19 @@ pub enum Response {
         event: ExecutionEventPayload,
     },
 
-    /// Periodic heartbeat from the cron scheduler reporting active schedules.
-    #[serde(rename = "cron.heartbeat")]
-    CronHeartbeat {
-        active_schedules: Vec<CronScheduleStatus>,
-    },
-
-    /// Confirms that a cron schedule was enabled by the worker.
-    #[serde(rename = "cron.scheduled")]
-    CronScheduled {
-        routine: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next_run_at: Option<String>,
-    },
-
-    /// Confirms that a cron schedule was disabled by the worker.
-    #[serde(rename = "cron.stopped")]
-    CronStopped { routine: String },
-
-    /// Periodic heartbeat from the agent heartbeat scheduler.
-    #[serde(rename = "agent_heartbeat.heartbeat")]
-    AgentHeartbeatHeartbeat {
-        agent: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_run_at: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next_run_at: Option<String>,
-    },
-
-    /// Confirms that an agent heartbeat schedule was enabled by the worker.
-    #[serde(rename = "agent_heartbeat.scheduled")]
-    AgentHeartbeatScheduled {
-        agent: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next_run_at: Option<String>,
-    },
-
-    /// Confirms that an agent heartbeat schedule was disabled by the worker.
-    #[serde(rename = "agent_heartbeat.stopped")]
-    AgentHeartbeatStopped { agent: String },
-
-    /// Signals that a new execution run is starting (e.g. a cron cycle).
-    /// The worker pre-generates the UUID; the backend creates the row.
-    #[serde(rename = "execution.started")]
-    ExecutionStarted {
-        id: Uuid,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        project: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<String>,
-        config: serde_json::Value,
-    },
-
-    /// Signals that an execution run finished.
-    #[serde(rename = "execution.completed")]
-    ExecutionCompleted {
-        id: Uuid,
-        success: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+    /// Durable worker-inbox state for a task execution.
+    #[serde(rename = "task.execution_state")]
+    TaskExecutionState {
+        execution_run_id: Uuid,
+        task_id: Uuid,
+        state: TaskExecutionState,
+        origin: TaskExecutionOrigin,
+        /// Monotonic revision of the worker's durable inbox receipt.
         #[serde(default)]
-        total_input_tokens: u64,
+        revision: u64,
+        /// Distinguishes a genuine worker restart recovery from a stale queued replay.
         #[serde(default)]
-        total_output_tokens: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        execution_type: Option<ExecutionType>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        routine_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<String>,
+        recovered: bool,
     },
 
     /// Repo sync completed (or failed) for a project.
@@ -368,57 +383,22 @@ impl std::fmt::Display for Response {
                         )
                     }
                 }
-                ExecutionEventPayload::TaskCompleted(outcome) => write!(
+                ExecutionEventPayload::TaskArtifacts(artifacts) => write!(
                     f,
-                    "execution.event(run={execution_run_id}, {}, success={})",
+                    "execution.event(run={execution_run_id}, {}, attachments={})",
                     event.kind(),
-                    outcome.success
+                    artifacts.attachments.len()
                 ),
             },
-            Self::CronHeartbeat { active_schedules } => {
-                write!(f, "cron.heartbeat(schedules={})", active_schedules.len())
-            }
-            Self::CronScheduled {
-                routine,
-                next_run_at,
-            } => {
-                write!(
-                    f,
-                    "cron.scheduled(routine={routine}, next_run_at={})",
-                    next_run_at.as_deref().unwrap_or("none")
-                )
-            }
-            Self::CronStopped { routine } => write!(f, "cron.stopped(routine={routine})"),
-            Self::AgentHeartbeatHeartbeat {
-                agent, next_run_at, ..
+            Self::TaskExecutionState {
+                execution_run_id,
+                state,
+                origin,
+                ..
             } => write!(
                 f,
-                "agent_heartbeat.heartbeat(agent={agent}, next_run_at={})",
-                next_run_at.as_deref().unwrap_or("none")
+                "task.execution_state(run={execution_run_id}, state={state:?}, origin={origin:?})"
             ),
-            Self::AgentHeartbeatScheduled { agent, next_run_at } => write!(
-                f,
-                "agent_heartbeat.scheduled(agent={agent}, next_run_at={})",
-                next_run_at.as_deref().unwrap_or("none")
-            ),
-            Self::AgentHeartbeatStopped { agent } => {
-                write!(f, "agent_heartbeat.stopped(agent={agent})")
-            }
-            Self::ExecutionStarted {
-                id,
-                routine_name,
-                agent,
-                ..
-            } => match (routine_name, agent) {
-                (Some(routine_name), _) => {
-                    write!(f, "execution.started(id={id}, routine={routine_name})")
-                }
-                (None, Some(agent)) => write!(f, "execution.started(id={id}, agent={agent})"),
-                (None, None) => write!(f, "execution.started(id={id})"),
-            },
-            Self::ExecutionCompleted { id, success, .. } => {
-                write!(f, "execution.completed(id={id}, success={success})")
-            }
             Self::RepoSyncComplete {
                 project, success, ..
             } => {
@@ -475,6 +455,9 @@ pub enum StreamEvent {
     RunStarted {
         run_id: String,
         session_id: String,
+        /// Durable user-message identity that initiated this chat run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_message_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_run_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -648,6 +631,12 @@ pub enum StreamEvent {
 
     /// Execution completed successfully.
     Done {
+        /// Run producing this terminal response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// Durable user-message identity this response answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_message_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -862,19 +851,6 @@ pub struct AsyncOperationTranscriptEvent {
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// Status of a single cron schedule in a heartbeat.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CronScheduleStatus {
-    /// The routine this status refers to.
-    pub routine: String,
-    /// ISO 8601 timestamp of the last successful run, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at: Option<String>,
-    /// ISO 8601 timestamp of the next scheduled fire time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_fire_at: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Builder helpers
 // ---------------------------------------------------------------------------
@@ -906,25 +882,20 @@ impl Response {
         }
     }
 
-    /// Build a canonical task completion execution event.
-    pub fn task_completed(
+    /// Build a canonical task artifact execution event.
+    pub fn task_artifacts(
         execution_run_id: Uuid,
         task_id: Option<Uuid>,
-        success: bool,
-        error: Option<String>,
-        merge_error: Option<String>,
         total_input_tokens: u64,
         total_output_tokens: u64,
     ) -> Self {
         Self::ExecutionEvent {
             execution_run_id: execution_run_id.to_string(),
             task_id: task_id.map(|id| id.to_string()),
-            event: ExecutionEventPayload::TaskCompleted(ExecutionTaskCompletedEvent {
-                success,
-                error,
-                merge_error,
+            event: ExecutionEventPayload::TaskArtifacts(ExecutionTaskArtifactsEvent {
                 total_input_tokens,
                 total_output_tokens,
+                attachments: Vec::new(),
             }),
         }
     }
@@ -938,6 +909,39 @@ impl Response {
 mod tests {
     use super::*;
     use crate::{Command, EncryptedPayload, Envelope};
+
+    #[test]
+    fn final_output_attachment_roundtrips_with_size() {
+        let org_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let attachment = TaskAttachmentManifest {
+            id: TaskAttachmentId::new(attachment_id),
+            kind: TaskAttachmentKind::FinalOutput,
+            name: "Final output".to_string(),
+            content_type: "text/markdown".to_string(),
+            byte_size: 5,
+            encrypted_payload: EncryptedPayload {
+                account_id: org_id,
+                encryption_scope: Some("org".to_string()),
+                object_id: attachment_id,
+                object_type: "task.attachment".to_string(),
+                algorithm: "aes-256-gcm".to_string(),
+                key_version: 1,
+                nonce: "nonce".to_string(),
+                ciphertext: "ciphertext".to_string(),
+            },
+            content_digest: "sha256:test".to_string(),
+            source: None,
+        };
+        let json = serde_json::to_value(&attachment).expect("serialize attachment");
+        assert_eq!(json["kind"], "final_output");
+        assert_eq!(json["byte_size"], 5);
+        let decoded: TaskAttachmentManifest =
+            serde_json::from_value(json).expect("deserialize attachment");
+        assert_eq!(decoded.kind, TaskAttachmentKind::FinalOutput);
+        assert_eq!(decoded.byte_size, 5);
+        assert!(decoded.source.is_none());
+    }
 
     #[test]
     fn command_chat_message_roundtrip() {
@@ -1031,19 +1035,19 @@ mod tests {
     }
 
     #[test]
-    fn response_task_completed_builder() {
-        let resp = Response::task_completed(Uuid::nil(), None, true, None, None, 100, 50);
+    fn response_task_artifacts_builder() {
+        let resp = Response::task_artifacts(Uuid::nil(), None, 100, 50);
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"execution.event""#));
-        assert!(json.contains(r#""kind":"task.completed""#));
-        assert!(json.contains(r#""success":true"#));
+        assert!(json.contains(r#""kind":"task.artifacts""#));
+        assert!(!json.contains(r#""success""#));
     }
 
     #[test]
     fn execution_event_kind_uses_stable_wire_values() {
         assert_eq!(ExecutionEventKind::WorkflowStep.as_str(), "workflow.step");
         assert_eq!(ExecutionEventKind::AgentTrace.as_str(), "agent.trace");
-        assert_eq!(ExecutionEventKind::TaskCompleted.as_str(), "task.completed");
+        assert_eq!(ExecutionEventKind::TaskArtifacts.as_str(), "task.artifacts");
         assert_eq!(
             serde_json::to_string(&ExecutionEventKind::WorkflowStep).unwrap(),
             r#""workflow.step""#,
@@ -1052,15 +1056,13 @@ mod tests {
 
     #[test]
     fn execution_event_payload_exposes_typed_kind() {
-        let event = ExecutionEventPayload::TaskCompleted(ExecutionTaskCompletedEvent {
-            success: true,
-            error: None,
-            merge_error: None,
+        let event = ExecutionEventPayload::TaskArtifacts(ExecutionTaskArtifactsEvent {
             total_input_tokens: 1,
             total_output_tokens: 2,
+            attachments: Vec::new(),
         });
 
-        assert_eq!(event.kind(), ExecutionEventKind::TaskCompleted);
+        assert_eq!(event.kind(), ExecutionEventKind::TaskArtifacts);
     }
 
     #[test]
@@ -1094,7 +1096,7 @@ mod tests {
                 },
             },
         };
-        let completed = Response::task_completed(run_id, Some(task_id), true, None, None, 1, 2);
+        let artifacts = Response::task_artifacts(run_id, Some(task_id), 1, 2);
 
         let workflow_json = serde_json::to_value(&workflow).unwrap();
         assert_eq!(workflow_json["type"], "execution.event");
@@ -1113,10 +1115,10 @@ mod tests {
             "AssistantTextDelta"
         );
 
-        let completed_json = serde_json::to_value(&completed).unwrap();
-        assert_eq!(completed_json["type"], "execution.event");
-        assert_eq!(completed_json["event"]["kind"], "task.completed");
-        assert_eq!(completed_json["event"]["data"]["success"], true);
+        let artifacts_json = serde_json::to_value(&artifacts).unwrap();
+        assert_eq!(artifacts_json["type"], "execution.event");
+        assert_eq!(artifacts_json["event"]["kind"], "task.artifacts");
+        assert_eq!(artifacts_json["event"]["data"]["total_input_tokens"], 1);
     }
 
     #[test]
@@ -1124,6 +1126,8 @@ mod tests {
         let resp = Response::AgentResponse {
             session_id: Some(Uuid::nil()),
             payload: StreamEvent::Done {
+                run_id: Some("run-1".into()),
+                input_message_id: Some(Uuid::nil()),
                 payload: Some(serde_json::Value::String("result".into())),
                 encrypted_payload: None,
                 total_input_tokens: 0,
@@ -1142,11 +1146,15 @@ mod tests {
                 payload,
             } => match payload {
                 StreamEvent::Done {
+                    run_id,
+                    input_message_id,
                     payload,
                     encrypted_payload,
                     ..
                 } => {
                     assert_eq!(session_id, Some(Uuid::nil()));
+                    assert_eq!(run_id.as_deref(), Some("run-1"));
+                    assert_eq!(input_message_id, Some(Uuid::nil()));
                     assert_eq!(
                         payload.as_ref().and_then(|value| value.as_str()),
                         Some("result")
@@ -1164,6 +1172,8 @@ mod tests {
         let resp = Response::AgentResponse {
             session_id: Some(Uuid::nil()),
             payload: StreamEvent::Done {
+                run_id: Some("run-1".into()),
+                input_message_id: Some(Uuid::nil()),
                 payload: Some(serde_json::Value::String("compat".into())),
                 encrypted_payload: Some(EncryptedPayload {
                     account_id: Uuid::nil(),
@@ -1312,82 +1322,31 @@ mod tests {
     }
 
     #[test]
-    fn response_execution_started_roundtrip() {
-        let id = Uuid::new_v4();
-        let resp = Response::ExecutionStarted {
-            id,
-            project: None,
-            routine: Some("deploy".into()),
-            routine_name: Some("deploy".into()),
-            agent: None,
-            config: serde_json::json!({}),
+    fn task_execution_state_roundtrip_encodes_typed_failure_and_origin() {
+        let response = Response::TaskExecutionState {
+            execution_run_id: Uuid::nil(),
+            task_id: Uuid::nil(),
+            state: TaskExecutionState::Failed {
+                error: "provider unavailable".to_string(),
+            },
+            origin: TaskExecutionOrigin::Schedule {
+                schedule_id: Uuid::nil(),
+                scheduled_for: "2026-07-16T12:00:00Z".to_string(),
+                next_run_at: None,
+                assignment_revision: "2026-07-16T11:00:00Z".to_string(),
+                project: Some("demo".to_string()),
+                target: crate::TaskExecutionTarget::Routine("daily-review".to_string()),
+            },
+            revision: 2,
+            recovered: false,
         };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains(r#""type":"execution.started""#));
-        let parsed: Response = serde_json::from_str(&json).unwrap();
-        match parsed {
-            Response::ExecutionStarted {
-                id: parsed_id,
-                routine_name,
-                ..
-            } => {
-                assert_eq!(parsed_id, id);
-                assert_eq!(routine_name.as_deref(), Some("deploy"));
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
 
-    #[test]
-    fn response_execution_completed_roundtrip() {
-        let resp = Response::ExecutionCompleted {
-            id: Uuid::nil(),
-            success: true,
-            error: None,
-            total_input_tokens: 1000,
-            total_output_tokens: 500,
-            execution_type: Some(ExecutionType::Task),
-            routine: Some("test_routine".to_string()),
-            routine_name: Some("Test Routine".to_string()),
-            agent: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains(r#""type":"execution.completed""#));
-        let parsed: Response = serde_json::from_str(&json).unwrap();
-        match parsed {
-            Response::ExecutionCompleted {
-                success,
-                total_input_tokens,
-                total_output_tokens,
-                ..
-            } => {
-                assert!(success);
-                assert_eq!(total_input_tokens, 1000);
-                assert_eq!(total_output_tokens, 500);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn response_cron_heartbeat_roundtrip() {
-        let resp = Response::CronHeartbeat {
-            active_schedules: vec![CronScheduleStatus {
-                routine: "r1".into(),
-                last_run_at: Some("2026-01-01T00:00:00Z".into()),
-                next_fire_at: None,
-            }],
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains(r#""type":"cron.heartbeat""#));
-        let parsed: Response = serde_json::from_str(&json).unwrap();
-        match parsed {
-            Response::CronHeartbeat { active_schedules } => {
-                assert_eq!(active_schedules.len(), 1);
-                assert_eq!(active_schedules[0].routine, "r1");
-            }
-            _ => panic!("wrong variant"),
-        }
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["state"]["status"], "failed");
+        assert_eq!(json["state"]["error"], "provider unavailable");
+        assert_eq!(json["origin"]["kind"], "schedule");
+        assert_eq!(json["origin"]["target"]["kind"], "routine");
+        assert!(serde_json::from_value::<Response>(json).is_ok());
     }
 
     #[test]
@@ -1426,20 +1385,17 @@ mod tests {
     fn command_task_execute_roundtrip() {
         let cmd = Command::TaskExecute {
             task_id: Uuid::nil(),
-            project: "demo_project".into(),
+            project: Some("demo_project".into()),
             execution_run_id: Uuid::nil(),
-            routine: None,
-            agent: None,
+            trigger: TaskExecutionTrigger::Manual,
+            target: crate::TaskExecutionTarget::Agent("coder".into()),
             payload: Some(crate::TaskExecuteContent {
                 title: "Fix bug".into(),
-                description: Some("In auth module".into()),
+                instructions: Some("In auth module".into()),
                 slug: None,
-                acceptance_criteria: None,
-                tags: vec!["urgent".into()],
+                labels: vec!["urgent".into()],
                 status: None,
                 priority: None,
-                task_type: None,
-                complexity: None,
             }),
             encrypted_payload: None,
         };
@@ -1452,7 +1408,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(payload.title, "Fix bug");
-                assert_eq!(payload.tags, vec!["urgent"]);
+                assert_eq!(payload.labels, vec!["urgent"]);
             }
             _ => panic!("wrong variant"),
         }
@@ -1484,21 +1440,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-    }
-
-    #[test]
-    fn command_cron_enable_roundtrip() {
-        let cmd = Command::CronEnable {
-            routine: "demo_routine".into(),
-            project: None,
-            schedule: "0 * * * *".into(),
-            timezone: Some("America/Chicago".into()),
-            task: None,
-            encrypted_task: None,
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains(r#""type":"cron.enable""#));
-        let _: Command = serde_json::from_str(&json).unwrap();
     }
 
     #[test]

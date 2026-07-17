@@ -541,12 +541,6 @@ fn rendered_fields(module: &ResolvedModule) -> Vec<(String, &str)> {
                         "manifest.prompt_config.templates.gate",
                         &mut fields,
                     );
-                    push_string_field(
-                        templates,
-                        "heartbeat",
-                        "manifest.prompt_config.templates.heartbeat",
-                        &mut fields,
-                    );
                 }
             }
         }

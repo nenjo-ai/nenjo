@@ -1,10 +1,7 @@
 //! Routine execution types — inputs, state, step config.
 
-use std::collections::HashMap;
-use std::time::Duration;
-
-use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::Slug;
@@ -59,28 +56,23 @@ impl Default for StepResult {
 /// let input = RoutineInput::new("Implement auth", "Add JWT authentication")
 ///     .with_task_id(task_id)
 ///     .with_execution_run_id(run_id)
-///     .with_tags(vec!["auth".into(), "security".into()]);
+///     .with_labels(vec!["auth".into(), "security".into()]);
 /// ```
 #[derive(Clone)]
 pub struct RoutineInput {
     pub project: Option<Slug>,
     pub title: String,
-    pub description: String,
+    pub instructions: String,
     pub task_id: Option<Uuid>,
     pub execution_run_id: Option<Uuid>,
-    pub acceptance_criteria: Option<String>,
-    pub tags: Vec<String>,
+    pub labels: Vec<String>,
     pub slug: Option<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
-    pub task_type: Option<String>,
-    pub complexity: Option<String>,
-    pub source: Option<String>,
     pub git: Option<crate::types::GitContext>,
     pub project_name: Option<String>,
     pub project_description: Option<String>,
     pub project_metadata: Option<String>,
-    pub is_cron_trigger: bool,
     pub session_binding: Option<SessionBinding>,
 }
 
@@ -91,26 +83,21 @@ pub struct SessionBinding {
 }
 
 impl RoutineInput {
-    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(title: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self {
             project: None,
             title: title.into(),
-            description: description.into(),
+            instructions: instructions.into(),
             task_id: None,
             execution_run_id: None,
-            acceptance_criteria: None,
-            tags: Vec::new(),
+            labels: Vec::new(),
             slug: None,
             status: None,
             priority: None,
-            task_type: None,
-            complexity: None,
-            source: None,
             git: None,
             project_name: None,
             project_description: None,
             project_metadata: None,
-            is_cron_trigger: false,
             session_binding: None,
         }
     }
@@ -125,13 +112,8 @@ impl RoutineInput {
         self
     }
 
-    pub fn with_acceptance_criteria(mut self, criteria: Option<String>) -> Self {
-        self.acceptance_criteria = criteria;
-        self
-    }
-
-    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
-        self.tags = tags;
+    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
         self
     }
 
@@ -150,21 +132,6 @@ impl RoutineInput {
         self
     }
 
-    pub fn with_task_type(mut self, task_type: impl Into<String>) -> Self {
-        self.task_type = Some(task_type.into());
-        self
-    }
-
-    pub fn with_complexity(mut self, complexity: impl Into<String>) -> Self {
-        self.complexity = Some(complexity.into());
-        self
-    }
-
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.source = Some(source.into());
-        self
-    }
-
     pub fn with_git(mut self, git: Option<crate::types::GitContext>) -> Self {
         self.git = git;
         self
@@ -178,11 +145,6 @@ impl RoutineInput {
         if !metadata.is_empty() {
             self.project_metadata = Some(metadata);
         }
-        self
-    }
-
-    pub fn with_cron_trigger(mut self) -> Self {
-        self.is_cron_trigger = true;
         self
     }
 
@@ -203,32 +165,12 @@ impl RoutineInput {
                 }
                 input
             }
-            RoutineRunKind::Cron(cron) => {
-                let location = run.execution.project_location;
-                let mut input = match cron.task {
-                    Some(task) => RoutineInput::from_task_input(task),
-                    None => {
-                        let mut input = RoutineInput::new("Cron", "Cron-triggered routine");
-                        input.project = cron.project;
-                        input
-                    }
-                };
-                input = input
-                    .with_git(location.and_then(|location| location.git))
-                    .with_cron_trigger()
-                    .with_execution_run_id_opt(run.execution.execution_run_id);
-                if let Some(binding) = run.execution.session_binding {
-                    input = input.with_session_binding(binding);
-                }
-                input
-            }
         }
     }
 
     fn from_task_input(task: TaskInput) -> Self {
-        let mut input = RoutineInput::new(task.title, task.description)
-            .with_tags(task.tags)
-            .with_acceptance_criteria(task.acceptance_criteria)
+        let mut input = RoutineInput::new(task.title, task.instructions)
+            .with_labels(task.labels)
             .with_task_id(task.task_id);
         input.project = task.project;
         if let Some(slug) = task.slug {
@@ -239,15 +181,6 @@ impl RoutineInput {
         }
         if let Some(priority) = task.priority {
             input = input.with_priority(priority);
-        }
-        if let Some(task_type) = task.task_type {
-            input = input.with_task_type(task_type);
-        }
-        if let Some(complexity) = task.complexity {
-            input = input.with_complexity(complexity);
-        }
-        if let Some(source) = task.source {
-            input = input.with_source(source);
         }
         input
     }
@@ -274,7 +207,6 @@ pub(crate) struct RoutineState {
     pub routine_name: Option<String>,
     pub current_step_name: Option<String>,
     pub current_step_type: Option<String>,
-    pub gate_feedback: Option<String>,
     pub step_instructions: Option<String>,
     pub step_metadata: Option<String>,
     pub metrics: RoutineMetrics,
@@ -282,7 +214,7 @@ pub(crate) struct RoutineState {
 
 impl RoutineState {
     pub fn new(input: RoutineInput) -> Self {
-        let initial_input = input.description.clone();
+        let initial_input = input.instructions.clone();
         Self {
             step_results: HashMap::new(),
             handoffs: HashMap::new(),
@@ -293,7 +225,6 @@ impl RoutineState {
             routine_name: None,
             current_step_name: None,
             current_step_type: None,
-            gate_feedback: None,
             step_instructions: None,
             step_metadata: None,
             metrics: RoutineMetrics::new(),
@@ -334,13 +265,15 @@ impl RoutineState {
     }
 }
 
+/// One activated routine edge and the structured handoff it delivered.
 #[derive(Debug, Clone)]
-pub(crate) struct RoutineHandoff {
+pub struct RoutineHandoff {
     pub source_step: Slug,
     pub target_step: Slug,
     pub handoff: serde_json::Value,
     pub purpose: Option<String>,
     pub summary: Option<String>,
+    pub edge_condition: EdgeCondition,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,122 +306,6 @@ impl StepType {
             _ => Self::Agent,
         }
     }
-}
-
-/// A cron schedule — either a fixed interval or a cron expression.
-#[derive(Debug, Clone)]
-pub enum CronSchedule {
-    /// Fixed interval between cycles (e.g. "30s", "5m").
-    Interval(Duration),
-    /// Standard cron expression (e.g. "0 9 * * *").
-    Expression {
-        schedule: Box<cron::Schedule>,
-        timezone: chrono_tz::Tz,
-    },
-}
-
-impl CronSchedule {
-    /// Compute the next fire time in UTC.
-    pub fn next_fire_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.next_fire_after(chrono::Utc::now())
-    }
-
-    /// Compute the next fire time after a specific UTC instant.
-    pub fn next_fire_after(
-        &self,
-        after: chrono::DateTime<chrono::Utc>,
-    ) -> chrono::DateTime<chrono::Utc> {
-        match self {
-            CronSchedule::Interval(d) => {
-                after
-                    + chrono::Duration::from_std(*d)
-                        .unwrap_or_else(|_| chrono::Duration::seconds(60))
-            }
-            CronSchedule::Expression { schedule, timezone } => schedule
-                .after(&after.with_timezone(timezone))
-                .next()
-                .map(|value| value.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|| after + chrono::Duration::seconds(60)),
-        }
-    }
-
-    /// Compute the duration to sleep until the next fire time.
-    /// For fixed intervals this returns the interval directly.
-    /// For cron expressions it computes the delay until the next upcoming time.
-    pub fn next_delay(&self) -> Duration {
-        let now = chrono::Utc::now();
-        let delta = self.next_fire_after(now) - now;
-        delta.to_std().unwrap_or(Duration::from_secs(60))
-    }
-}
-
-/// Parse a schedule string — either a cron expression ("0 9 * * *") or a
-/// simple duration string ("30s", "5m", "1h", "2d").
-///
-/// Cron expressions are detected by the presence of spaces (at least 4
-/// space-separated fields). Everything else is parsed as a duration.
-pub fn parse_schedule(s: &str) -> Result<CronSchedule> {
-    parse_schedule_in_timezone(s, None)
-}
-
-pub fn parse_schedule_in_timezone(s: &str, timezone: Option<&str>) -> Result<CronSchedule> {
-    let s = s.trim();
-    if s.is_empty() {
-        bail!("Empty schedule string");
-    }
-
-    // Cron expressions have at least 4 space-separated fields.
-    if s.split_whitespace().count() >= 4 {
-        // The `cron` crate expects a 7-field format (sec min hour dom month dow year).
-        // Standard 5-field cron ("min hour dom month dow") needs sec + year padding.
-        let expr = match s.split_whitespace().count() {
-            5 => format!("0 {s} *"), // sec=0, append year=*
-            6 => format!("0 {s}"),   // prepend sec=0
-            _ => s.to_string(),      // already 7-field
-        };
-        let schedule: cron::Schedule = expr
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", s, e))?;
-        let timezone_name = timezone
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("UTC");
-        let timezone = timezone_name
-            .parse::<chrono_tz::Tz>()
-            .map_err(|_| anyhow::anyhow!("Invalid timezone '{}'", timezone_name))?;
-        Ok(CronSchedule::Expression {
-            schedule: Box::new(schedule),
-            timezone,
-        })
-    } else {
-        parse_duration(s).map(CronSchedule::Interval)
-    }
-}
-
-/// Parse a simple duration string: "30s", "5m", "1h", "2d".
-pub fn parse_duration(s: &str) -> Result<Duration> {
-    let s = s.trim();
-    if s.is_empty() {
-        bail!("Empty duration string");
-    }
-
-    let (num_str, suffix) = s.split_at(s.len() - 1);
-    let value: u64 = num_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Invalid duration number: '{}'", num_str))?;
-    if value == 0 {
-        bail!("Schedule duration must be greater than zero");
-    }
-
-    let secs = match suffix {
-        "s" => value,
-        "m" => value * 60,
-        "h" => value * 3600,
-        "d" => value * 86400,
-        _ => bail!("Invalid duration suffix '{}', expected s/m/h/d", suffix),
-    };
-
-    Ok(Duration::from_secs(secs))
 }
 
 // ---------------------------------------------------------------------------
@@ -549,8 +366,6 @@ impl RoutineMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
     #[test]
     fn edge_condition_parsing() {
         assert_eq!(
@@ -595,104 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_duration_all_units() {
-        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2d").unwrap(), Duration::from_secs(172800));
-    }
-
-    #[test]
-    fn parse_duration_invalid() {
-        assert!(parse_duration("10x").is_err());
-        assert!(parse_duration("abcs").is_err());
-        assert!(parse_duration("0s").is_err());
-        assert!(parse_duration("").is_err());
-    }
-
-    #[test]
-    fn parse_schedule_interval() {
-        let s = parse_schedule("30s").unwrap();
-        assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(30)));
-        let s = parse_schedule("5m").unwrap();
-        assert!(matches!(s, CronSchedule::Interval(d) if d == Duration::from_secs(300)));
-    }
-
-    #[test]
-    fn parse_schedule_rejects_zero_interval() {
-        let error = parse_schedule("0s").expect_err("zero interval should be rejected");
-        assert!(error.to_string().contains("greater than zero"));
-    }
-
-    #[test]
-    fn parse_schedule_cron_expression() {
-        // Standard 5-field cron
-        let s = parse_schedule("0 9 * * *").unwrap();
-        assert!(matches!(s, CronSchedule::Expression { .. }));
-        // Every 5 minutes
-        let s = parse_schedule("*/5 * * * *").unwrap();
-        assert!(matches!(s, CronSchedule::Expression { .. }));
-        // Next delay should be positive and finite
-        let delay = s.next_delay();
-        assert!(delay.as_secs() > 0);
-        assert!(delay.as_secs() <= 300);
-    }
-
-    #[test]
-    fn parse_schedule_cron_expression_timezone() {
-        let s = parse_schedule_in_timezone("0 9 * * *", Some("America/Chicago")).unwrap();
-        assert!(
-            matches!(s, CronSchedule::Expression { timezone, .. } if timezone == chrono_tz::America::Chicago)
-        );
-        assert!(parse_schedule_in_timezone("0 9 * * *", Some("Not/AZone")).is_err());
-    }
-
-    #[test]
-    fn cron_schedule_uses_timezone_for_hour_range_boundaries() {
-        let schedule = parse_schedule_in_timezone("0 8-19 * * *", Some("America/Chicago")).unwrap();
-        let chicago = chrono_tz::America::Chicago;
-
-        let before_window = chicago
-            .with_ymd_and_hms(2026, 7, 3, 7, 59, 59)
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        assert_eq!(
-            schedule
-                .next_fire_after(before_window)
-                .with_timezone(&chicago),
-            chicago.with_ymd_and_hms(2026, 7, 3, 8, 0, 0).unwrap()
-        );
-
-        let before_last_inclusive_hour = chicago
-            .with_ymd_and_hms(2026, 7, 3, 18, 59, 59)
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        assert_eq!(
-            schedule
-                .next_fire_after(before_last_inclusive_hour)
-                .with_timezone(&chicago),
-            chicago.with_ymd_and_hms(2026, 7, 3, 19, 0, 0).unwrap()
-        );
-
-        let at_last_inclusive_hour = chicago
-            .with_ymd_and_hms(2026, 7, 3, 19, 0, 0)
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        assert_eq!(
-            schedule
-                .next_fire_after(at_last_inclusive_hour)
-                .with_timezone(&chicago),
-            chicago.with_ymd_and_hms(2026, 7, 4, 8, 0, 0).unwrap()
-        );
-    }
-
-    #[test]
-    fn parse_schedule_invalid() {
-        assert!(parse_schedule("").is_err());
-        assert!(parse_schedule("not a schedule").is_err());
-    }
-
-    #[test]
     fn routine_input_builder() {
         let project = ProjectManifest {
             name: "Demo Project".to_string(),
@@ -702,15 +419,13 @@ mod tests {
         };
         let input = RoutineInput::new("Title", "Desc")
             .with_project_context(&project)
-            .with_tags(vec!["a".into()])
-            .with_cron_trigger();
+            .with_labels(vec!["a".into()]);
         assert_eq!(
             input.project.as_ref().map(Slug::as_str),
             Some("demo_project")
         );
         assert_eq!(input.title, "Title");
-        assert!(input.is_cron_trigger);
-        assert_eq!(input.tags, vec!["a"]);
+        assert_eq!(input.labels, vec!["a"]);
     }
 
     #[test]

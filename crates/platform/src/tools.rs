@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use nenjo::manifest::store::ManifestReader;
 use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -14,12 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     ContentScope, ManifestAccessPolicy, ManifestMcpBackend, ManifestMcpContract,
-    PlatformManifestClient, ScopeResource, SensitiveContentKind, SensitivePayloadEncoder,
-    client::{
-        CreateExecutionRequest, NotificationMessagePage, NotificationMessageRecord,
-        ProjectExecutionListQuery, ProjectTaskListQuery,
-    },
-    rest::{notifications::notification_tools, projects::project_rest_tools},
+    PlatformManifestClient, ScopeResource, SensitivePayloadEncoder,
+    client::{NotificationMessagePage, NotificationMessageRecord},
+    rest::notifications::notification_tools,
 };
 
 const AGENT_READ_TOOLS: &[&str] = &["list_agents", "get_agent"];
@@ -31,12 +27,6 @@ const COMMAND_WRITE_TOOLS: &[&str] = &["configure_command"];
 const DOMAIN_READ_TOOLS: &[&str] = &["list_domains", "get_domain"];
 const DOMAIN_WRITE_TOOLS: &[&str] = &["configure_domain"];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
-const PROJECT_REST_READ_TOOLS: &[&str] = &[
-    "list_project_tasks",
-    "get_project_task",
-    "list_project_execution_runs",
-    "get_project_execution_run",
-];
 const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
     &["create_project", "update_project", "delete_project"];
 const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
@@ -45,14 +35,6 @@ const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_knowledge_doc",
     "update_knowledge_doc",
     "delete_knowledge_doc",
-];
-const PROJECT_REST_WRITE_TOOLS: &[&str] = &[
-    "create_project_tasks",
-    "update_project_task",
-    "delete_project_task",
-    "start_project_execution",
-    "pause_project_execution",
-    "resume_project_execution",
 ];
 const ROUTINE_READ_TOOLS: &[&str] = &["list_routines", "get_routine"];
 const ROUTINE_WRITE_TOOLS: &[&str] = &["configure_routine"];
@@ -145,32 +127,12 @@ pub fn add_manifest_tools(
 ) {
     let specs = manifest_tool_specs();
     for (resource, read_tools, write_tools) in MANIFEST_TOOL_GROUPS {
-        if policy.can_read_resource(*resource) {
+        if policy.can_expose_manifest_read_tools(*resource) {
             add_named_manifest_tools(tools, backend.clone(), &specs, read_tools);
         }
         if policy.can_write_resource(*resource) {
             add_named_manifest_tools(tools, backend.clone(), &specs, write_tools);
         }
-    }
-}
-
-pub fn add_project_rest_tools<S, E>(
-    tools: &mut Vec<Arc<dyn Tool>>,
-    project_backend: Option<PlatformProjectToolsBackend<S, E>>,
-    policy: &ManifestAccessPolicy,
-) where
-    S: ManifestReader + 'static,
-    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
-{
-    if policy.can_read_resource(ScopeResource::Projects)
-        && let Some(backend) = project_backend.as_ref()
-    {
-        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_READ_TOOLS);
-    }
-    if policy.can_write_resource(ScopeResource::Projects)
-        && let Some(backend) = project_backend.as_ref()
-    {
-        add_named_project_rest_tools(tools, backend.clone(), PROJECT_REST_WRITE_TOOLS);
     }
 }
 
@@ -213,24 +175,6 @@ fn add_named_manifest_tools(
     }
 }
 
-fn add_named_project_rest_tools<S, E>(
-    tools: &mut Vec<Arc<dyn Tool>>,
-    backend: PlatformProjectToolsBackend<S, E>,
-    tool_names: &[&str],
-) where
-    S: ManifestReader + 'static,
-    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
-{
-    for tool_name in tool_names {
-        if tools.iter().any(|existing| existing.name() == *tool_name) {
-            continue;
-        }
-        if let Some(tool) = ProjectRestTool::from_name(tool_name, backend.clone()) {
-            tools.push(Arc::new(tool));
-        }
-    }
-}
-
 fn add_named_notification_tools<E>(
     tools: &mut Vec<Arc<dyn Tool>>,
     backend: PlatformNotificationToolsBackend<E>,
@@ -260,13 +204,6 @@ struct ManifestContractTool {
     backend: Arc<dyn ManifestMcpBackend>,
 }
 
-pub struct PlatformProjectToolsBackend<S, E> {
-    pub client: Arc<PlatformManifestClient>,
-    pub manifest_store: Arc<S>,
-    pub payload_encoder: E,
-    pub cached_org_id: Option<Uuid>,
-}
-
 pub struct PlatformNotificationToolsBackend<E> {
     pub client: Arc<PlatformManifestClient>,
     pub payload_encoder: E,
@@ -289,424 +226,6 @@ where
             current_session_id: self.current_session_id,
             notification_sink: self.notification_sink.clone(),
         }
-    }
-}
-
-impl<S, E> Clone for PlatformProjectToolsBackend<S, E>
-where
-    E: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            manifest_store: self.manifest_store.clone(),
-            payload_encoder: self.payload_encoder.clone(),
-            cached_org_id: self.cached_org_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskContentPayload {
-    description: Option<String>,
-    acceptance_criteria: Option<String>,
-    metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct CurrentTaskState {
-    description: Option<String>,
-    acceptance_criteria: Option<String>,
-    metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectTaskDocument {
-    slug: String,
-    title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    acceptance_criteria: Option<String>,
-    status: String,
-    priority: String,
-    #[serde(rename = "type")]
-    task_type: String,
-    tags: Vec<String>,
-    required_tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    complexity: Option<i64>,
-    order_index: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assigned_agent: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    routine: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resolved_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    closed_at: Option<String>,
-}
-
-fn string_array(values: &[serde_json::Value]) -> Vec<String> {
-    values
-        .iter()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect()
-}
-
-impl<S, E> PlatformProjectToolsBackend<S, E>
-where
-    S: ManifestReader + 'static,
-    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
-{
-    async fn org_id(&self) -> Result<Uuid> {
-        if let Some(org_id) = self.cached_org_id {
-            return Ok(org_id);
-        }
-
-        self.client
-            .current_org_id()
-            .await
-            .context("failed to derive org_id from authenticated API key")
-    }
-
-    async fn encode_task_payload(
-        &self,
-        task_id: Uuid,
-        payload: &TaskContentPayload,
-    ) -> Result<serde_json::Value> {
-        let org_id = self.org_id().await?;
-        self.payload_encoder
-            .encode_payload(
-                org_id,
-                task_id,
-                SensitiveContentKind::TaskContent.encrypted_object_type(),
-                &serde_json::to_value(payload).context("failed to encode task content payload")?,
-            )
-            .await?
-            .context("task payload encoder did not produce encrypted payload")
-    }
-
-    async fn maybe_encode_task_payload(
-        &self,
-        task_id: Uuid,
-        payload: &TaskContentPayload,
-    ) -> Result<Option<serde_json::Value>> {
-        if payload.description.is_none()
-            && payload.acceptance_criteria.is_none()
-            && payload.metadata.is_none()
-        {
-            return Ok(None);
-        }
-        self.encode_task_payload(task_id, payload).await.map(Some)
-    }
-
-    fn plaintext_task_metadata(task: &serde_json::Value) -> Option<serde_json::Value> {
-        task.get("metadata")
-            .filter(|value| !value.is_null())
-            .cloned()
-    }
-
-    fn plaintext_task_state(task: &serde_json::Value) -> TaskContentPayload {
-        TaskContentPayload {
-            description: task
-                .get("description")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            acceptance_criteria: task
-                .get("acceptance_criteria")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            metadata: Self::plaintext_task_metadata(task),
-        }
-    }
-
-    async fn resolve_project_task_id(&self, project: &Slug, task: &Slug) -> Result<Uuid> {
-        let tasks = self
-            .client
-            .list_project_tasks(&ProjectTaskListQuery {
-                project: project.clone(),
-                status: None,
-                priority: None,
-                task_type: None,
-                tags: None,
-                routine: None,
-                assigned_agent: None,
-                limit: Some(500),
-                offset: None,
-            })
-            .await?;
-        let task_rows = tasks
-            .as_array()
-            .context("project task list response was not an array")?;
-        let matches: Vec<_> = task_rows
-            .iter()
-            .filter(|row| row.get("slug").and_then(|value| value.as_str()) == Some(task.as_str()))
-            .collect();
-
-        match matches.as_slice() {
-            [row] => {
-                let task_id = row
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .with_context(|| format!("task {task} did not include an internal id"))?;
-                Uuid::parse_str(task_id).with_context(|| format!("task {task} id was invalid"))
-            }
-            [] => bail!("project task not found: {project}/{task}"),
-            _ => bail!("project task reference is ambiguous: {project}/{task}"),
-        }
-    }
-
-    async fn decode_task_content(&self, task: &serde_json::Value) -> Result<TaskContentPayload> {
-        if let Some(encrypted_payload) = task
-            .get("encrypted_payload")
-            .cloned()
-            .map(serde_json::from_value::<nenjo_events::EncryptedPayload>)
-            .transpose()
-            .context("failed to parse task encrypted payload")?
-        {
-            let decoded_payload = self
-                .payload_encoder
-                .decode_payload(&serde_json::to_value(encrypted_payload)?)
-                .await?
-                .context("task payload encoder did not decode encrypted payload")?;
-            return serde_json::from_value(decoded_payload)
-                .context("failed to decode task encrypted content");
-        }
-
-        Ok(Self::plaintext_task_state(task))
-    }
-
-    async fn task_document(&self, task: serde_json::Value) -> Result<ProjectTaskDocument> {
-        let content = self.decode_task_content(&task).await?;
-        let slug = task
-            .get("slug")
-            .and_then(|value| value.as_str())
-            .context("task response did not include slug")?
-            .to_string();
-        let title = task
-            .get("title")
-            .and_then(|value| value.as_str())
-            .context("task response did not include title")?
-            .to_string();
-        let status = task
-            .get("status")
-            .and_then(|value| value.as_str())
-            .context("task response did not include status")?
-            .to_string();
-        let priority = task
-            .get("priority")
-            .and_then(|value| value.as_str())
-            .unwrap_or("medium")
-            .to_string();
-        let task_type = task
-            .get("type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("task")
-            .to_string();
-        let tags = task
-            .get("tags")
-            .and_then(|value| value.as_array())
-            .map(|values| string_array(values))
-            .unwrap_or_default();
-        let required_tags = task
-            .get("required_tags")
-            .and_then(|value| value.as_array())
-            .map(|values| string_array(values))
-            .unwrap_or_default();
-
-        Ok(ProjectTaskDocument {
-            slug,
-            title,
-            description: content.description,
-            acceptance_criteria: content.acceptance_criteria,
-            status,
-            priority,
-            task_type,
-            tags,
-            required_tags,
-            complexity: task.get("complexity").and_then(|value| value.as_i64()),
-            order_index: task
-                .get("order_index")
-                .and_then(|value| value.as_i64())
-                .unwrap_or_default(),
-            metadata: content.metadata,
-            assigned_agent: task
-                .get("assigned_agent")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            routine: task
-                .get("routine")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            last_error: task
-                .get("last_error")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            resolved_at: task
-                .get("resolved_at")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            closed_at: task
-                .get("closed_at")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        })
-    }
-
-    async fn task_documents(&self, tasks: serde_json::Value) -> Result<Vec<ProjectTaskDocument>> {
-        let task_rows = tasks
-            .as_array()
-            .context("project task list response was not an array")?;
-        let mut documents = Vec::with_capacity(task_rows.len());
-        for task in task_rows {
-            documents.push(self.task_document(task.clone()).await?);
-        }
-        Ok(documents)
-    }
-
-    async fn create_task_body(
-        &self,
-        project: &Slug,
-        assigned_agent: Option<&Slug>,
-        routine: Option<&Slug>,
-        args: &CreateProjectTaskItemArgs,
-    ) -> Result<serde_json::Value> {
-        let task_id = Uuid::new_v4();
-        let payload = TaskContentPayload {
-            description: args.description.clone(),
-            acceptance_criteria: args.acceptance_criteria.clone(),
-            metadata: args.metadata.clone(),
-        };
-        let encrypted_payload = self.maybe_encode_task_payload(task_id, &payload).await?;
-
-        Ok(json!({
-            "id": task_id,
-            "project": project,
-            "title": args.title,
-            "status": args.status,
-            "priority": args.priority,
-            "type": args.task_type,
-            "tags": args.tags,
-            "required_tags": args.required_tags,
-            "complexity": args.complexity,
-            "order_index": args.order_index,
-            "assigned_agent": assigned_agent,
-            "routine": routine,
-            "encrypted_payload": encrypted_payload,
-        }))
-    }
-
-    async fn create_tasks_body(&self, args: &CreateProjectTasksArgs) -> Result<serde_json::Value> {
-        let mut tasks = Vec::with_capacity(args.tasks.len());
-        for task in &args.tasks {
-            let body = self
-                .create_task_body(
-                    &args.project,
-                    task.agent.as_ref(),
-                    task.routine.as_ref(),
-                    task,
-                )
-                .await?;
-            tasks.push(body);
-        }
-        Ok(json!({ "tasks": tasks }))
-    }
-
-    async fn update_task_body(
-        &self,
-        args: &UpdateProjectTaskArgs,
-        task_id: Uuid,
-    ) -> Result<serde_json::Value> {
-        let mut body = serde_json::Map::new();
-
-        if let Some(status) = args.status.as_ref() {
-            body.insert("status".into(), json!(status));
-        }
-        if let Some(priority) = args.priority.as_ref() {
-            body.insert("priority".into(), json!(priority));
-        }
-        if let Some(task_type) = args.task_type.as_ref() {
-            body.insert("type".into(), json!(task_type));
-        }
-        if let Some(tags) = args.tags.as_ref() {
-            body.insert("tags".into(), json!(tags));
-        }
-        if let Some(required_tags) = args.required_tags.as_ref() {
-            body.insert("required_tags".into(), json!(required_tags));
-        }
-        if let Some(complexity) = args.complexity {
-            body.insert("complexity".into(), json!(complexity));
-        }
-        if let Some(order_index) = args.order_index {
-            body.insert("order_index".into(), json!(order_index));
-        }
-        if let Some(assigned_agent) = args.agent.as_ref() {
-            body.insert("assigned_agent".into(), json!(assigned_agent));
-        }
-        if let Some(routine) = args.routine.as_ref() {
-            body.insert("routine".into(), json!(routine));
-        }
-
-        if let Some(title) = args.title.as_ref() {
-            body.insert("title".into(), json!(title));
-        }
-
-        let needs_encrypted_payload = args.description.is_some()
-            || args.acceptance_criteria.is_some()
-            || args.metadata.is_some();
-
-        if needs_encrypted_payload {
-            let current_state = if args.description.is_some() && args.acceptance_criteria.is_some()
-            {
-                CurrentTaskState::default()
-            } else {
-                let current = self
-                    .client
-                    .get_project_task(task_id)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("project task not found while preparing encrypted update")
-                    })?;
-                let mut current_state: CurrentTaskState =
-                    serde_json::from_value(current.clone())
-                        .context("failed to decode current task state")?;
-                if let Some(encrypted_payload) = current
-                    .get("encrypted_payload")
-                    .cloned()
-                    .map(serde_json::from_value::<nenjo_events::EncryptedPayload>)
-                    .transpose()
-                    .context("failed to parse current task encrypted payload")?
-                {
-                    let decoded_payload = self
-                        .payload_encoder
-                        .decode_payload(&serde_json::to_value(encrypted_payload)?)
-                        .await?
-                        .context("task payload encoder did not decode encrypted payload")?;
-                    current_state = serde_json::from_value(decoded_payload)
-                        .context("failed to decode current task encrypted state")?;
-                }
-                current_state
-            };
-            let payload = TaskContentPayload {
-                description: args.description.clone().or(current_state.description),
-                acceptance_criteria: args
-                    .acceptance_criteria
-                    .clone()
-                    .or(current_state.acceptance_criteria),
-                metadata: args.metadata.clone().or(current_state.metadata),
-            };
-            body.insert(
-                "encrypted_payload".into(),
-                self.encode_task_payload(task_id, &payload).await?,
-            );
-        }
-
-        Ok(serde_json::Value::Object(body))
     }
 }
 
@@ -881,20 +400,6 @@ fn notification_recipient_summaries(recipients: serde_json::Value) -> Result<ser
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ProjectRestToolKind {
-    ListProjectTasks,
-    GetProjectTask,
-    CreateProjectTasks,
-    UpdateProjectTask,
-    DeleteProjectTask,
-    ListProjectExecutionRuns,
-    GetProjectExecutionRun,
-    StartProjectExecution,
-    PauseProjectExecution,
-    ResumeProjectExecution,
-}
-
-#[derive(Debug, Clone, Copy)]
 enum NotificationToolKind {
     SearchNotificationRecipients,
     ListNotifications,
@@ -920,45 +425,6 @@ impl NotificationToolKind {
     }
 }
 
-impl ProjectRestToolKind {
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "list_project_tasks" => Some(Self::ListProjectTasks),
-            "get_project_task" => Some(Self::GetProjectTask),
-            "create_project_tasks" => Some(Self::CreateProjectTasks),
-            "update_project_task" => Some(Self::UpdateProjectTask),
-            "delete_project_task" => Some(Self::DeleteProjectTask),
-            "list_project_execution_runs" => Some(Self::ListProjectExecutionRuns),
-            "get_project_execution_run" => Some(Self::GetProjectExecutionRun),
-            "start_project_execution" => Some(Self::StartProjectExecution),
-            "pause_project_execution" => Some(Self::PauseProjectExecution),
-            "resume_project_execution" => Some(Self::ResumeProjectExecution),
-            _ => None,
-        }
-    }
-
-    fn tool_name(&self) -> &'static str {
-        match self {
-            Self::ListProjectTasks => "list_project_tasks",
-            Self::GetProjectTask => "get_project_task",
-            Self::CreateProjectTasks => "create_project_tasks",
-            Self::UpdateProjectTask => "update_project_task",
-            Self::DeleteProjectTask => "delete_project_task",
-            Self::ListProjectExecutionRuns => "list_project_execution_runs",
-            Self::GetProjectExecutionRun => "get_project_execution_run",
-            Self::StartProjectExecution => "start_project_execution",
-            Self::PauseProjectExecution => "pause_project_execution",
-            Self::ResumeProjectExecution => "resume_project_execution",
-        }
-    }
-}
-
-struct ProjectRestTool<S, E> {
-    kind: ProjectRestToolKind,
-    backend: PlatformProjectToolsBackend<S, E>,
-    spec: nenjo::ToolSpec,
-}
-
 struct NotificationTool<E> {
     kind: NotificationToolKind,
     backend: PlatformNotificationToolsBackend<E>,
@@ -976,227 +442,6 @@ where
             backend,
             spec: notification_tool_spec(kind)?,
         })
-    }
-}
-
-impl<S, E> ProjectRestTool<S, E>
-where
-    S: ManifestReader + 'static,
-    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
-{
-    fn from_name(name: &str, backend: PlatformProjectToolsBackend<S, E>) -> Option<Self> {
-        let kind = ProjectRestToolKind::from_name(name)?;
-        Some(Self {
-            kind,
-            backend,
-            spec: project_rest_tool_spec(kind)?,
-        })
-    }
-}
-
-#[async_trait]
-impl<S, E> Tool for ProjectRestTool<S, E>
-where
-    S: ManifestReader + 'static,
-    E: SensitivePayloadEncoder + Clone + Send + Sync + 'static,
-{
-    fn name(&self) -> &str {
-        &self.spec.name
-    }
-
-    fn description(&self) -> &str {
-        &self.spec.description
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        self.spec.parameters.clone()
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let output = match self.kind {
-            ProjectRestToolKind::ListProjectTasks => {
-                let args: ListProjectTasksArgs = parse_project_tool_args(
-                    args,
-                    "list_project_tasks",
-                    "Expected {\"project\":\"<project-slug>\"}.",
-                )?;
-                let tasks = self
-                    .backend
-                    .client
-                    .list_project_tasks(&ProjectTaskListQuery {
-                        project: args.project,
-                        status: args.status,
-                        priority: args.priority,
-                        task_type: args.task_type,
-                        tags: args.tags.map(|tags| tags.join(",")),
-                        routine: args.routine,
-                        assigned_agent: args.agent,
-                        limit: args.limit,
-                        offset: args.offset,
-                    })
-                    .await?;
-                json!({
-                    "tasks": self.backend.task_documents(tasks).await?
-                })
-            }
-            ProjectRestToolKind::GetProjectTask => {
-                let args: GetProjectTaskArgs = parse_project_tool_args(
-                    args,
-                    "get_project_task",
-                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\"}.",
-                )?;
-                let task_id = self
-                    .backend
-                    .resolve_project_task_id(&args.project, &args.task)
-                    .await?;
-                match self.backend.client.get_project_task(task_id).await? {
-                    Some(task) => json!({
-                        "task": self.backend.task_document(task).await?
-                    }),
-                    None => json!({ "task": null }),
-                }
-            }
-            ProjectRestToolKind::CreateProjectTasks => {
-                let args: CreateProjectTasksArgs = parse_project_tool_args(
-                    args,
-                    "create_project_tasks",
-                    "Expected {\"project\":\"<project-slug>\",\"tasks\":[{\"title\":\"...\"}]}.",
-                )?;
-                let body = self.backend.create_tasks_body(&args).await?;
-                let created = self.backend.client.bulk_create_project_tasks(&body).await?;
-                json!({
-                    "tasks": self.backend.task_documents(created).await?
-                })
-            }
-            ProjectRestToolKind::UpdateProjectTask => {
-                let args: UpdateProjectTaskArgs = parse_project_tool_args(
-                    args,
-                    "update_project_task",
-                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\", ...fields}.",
-                )?;
-                let task_id = self
-                    .backend
-                    .resolve_project_task_id(&args.project, &args.task)
-                    .await?;
-                let body = self.backend.update_task_body(&args, task_id).await?;
-                let updated = self
-                    .backend
-                    .client
-                    .update_project_task(task_id, &body)
-                    .await?;
-                json!({
-                    "task": self.backend.task_document(updated).await?
-                })
-            }
-            ProjectRestToolKind::DeleteProjectTask => {
-                let args: DeleteProjectTaskArgs = parse_project_tool_args(
-                    args,
-                    "delete_project_task",
-                    "Expected {\"project\":\"<project-slug>\",\"task\":\"<task-slug>\"}.",
-                )?;
-                let task_id = self
-                    .backend
-                    .resolve_project_task_id(&args.project, &args.task)
-                    .await?;
-                self.backend.client.delete_project_task(task_id).await?;
-                json!({ "deleted": true, "task": args.task })
-            }
-            ProjectRestToolKind::ListProjectExecutionRuns => {
-                let args: ListProjectExecutionRunsArgs = parse_project_tool_args(
-                    args,
-                    "list_project_execution_runs",
-                    "Expected {\"project\":\"<project-slug>\"}.",
-                )?;
-                self.backend
-                    .client
-                    .list_project_execution_runs(&ProjectExecutionListQuery {
-                        project: args.project,
-                        agent: args.agent,
-                        routine: args.routine,
-                        status: args.status,
-                        limit: args.limit,
-                        offset: args.offset,
-                    })
-                    .await?
-            }
-            ProjectRestToolKind::GetProjectExecutionRun => {
-                let args: GetProjectExecutionRunArgs = parse_project_tool_args(
-                    args,
-                    "get_project_execution_run",
-                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
-                )?;
-                self.backend
-                    .client
-                    .get_project_execution_run(args.execution_run_id)
-                    .await?
-                    .unwrap_or(serde_json::Value::Null)
-            }
-            ProjectRestToolKind::StartProjectExecution => {
-                let args: StartProjectExecutionArgs = parse_project_tool_args(
-                    args,
-                    "start_project_execution",
-                    "Expected {\"project\":\"<project-slug>\"}.",
-                )?;
-                let created = self
-                    .backend
-                    .client
-                    .create_execution_run(&CreateExecutionRequest {
-                        project: args.project,
-                        config: args.config.unwrap_or_else(|| json!({})),
-                        model_count: args.model_count,
-                        parallel_count: args.parallel_count,
-                        initial_status: None,
-                    })
-                    .await?;
-                let execution_run_id = created
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .context("created execution response did not include id")?
-                    .parse::<Uuid>()
-                    .context("created execution response included invalid id")?;
-
-                self.backend
-                    .client
-                    .command_project_execution_run(execution_run_id, "start")
-                    .await?
-            }
-            ProjectRestToolKind::PauseProjectExecution => {
-                let args: CommandProjectExecutionArgs = parse_project_tool_args(
-                    args,
-                    "pause_project_execution",
-                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
-                )?;
-                self.backend
-                    .client
-                    .command_project_execution_run(args.execution_run_id, "pause")
-                    .await?
-            }
-            ProjectRestToolKind::ResumeProjectExecution => {
-                let args: CommandProjectExecutionArgs = parse_project_tool_args(
-                    args,
-                    "resume_project_execution",
-                    "Expected {\"execution_run_id\":\"<canonical 8-4-4-4-12 UUID>\"}.",
-                )?;
-                self.backend
-                    .client
-                    .command_project_execution_run(args.execution_run_id, "resume")
-                    .await?
-            }
-        };
-
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string_pretty(&output)?,
-            error: None,
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        self.spec.category
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Platform
     }
 }
 
@@ -1220,7 +465,7 @@ where
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let output = match self.kind {
             NotificationToolKind::SearchNotificationRecipients => {
-                let args: SearchNotificationRecipientsArgs = parse_project_tool_args(
+                let args: SearchNotificationRecipientsArgs = parse_notification_tool_args(
                     args,
                     "search_notification_recipients",
                     "Expected optional {\"query\":\"...\"}.",
@@ -1238,7 +483,7 @@ where
                 notification_recipient_summaries(recipients)?
             }
             NotificationToolKind::ListNotifications => {
-                let args: ListNotificationsArgs = parse_project_tool_args(
+                let args: ListNotificationsArgs = parse_notification_tool_args(
                     args,
                     "list_notifications",
                     "Expected optional {\"limit\": 50, \"before\": \"<RFC3339 timestamp>\"}.",
@@ -1255,7 +500,7 @@ where
                 serde_json::to_value(self.backend.notification_list_summary(page).await?)?
             }
             NotificationToolKind::SendNotification => {
-                let args: SendNotificationArgs = parse_project_tool_args(
+                let args: SendNotificationArgs = parse_notification_tool_args(
                     args,
                     "send_notification",
                     "Expected {\"body\":\"...\"}.",
@@ -1335,147 +580,6 @@ where
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ListProjectTasksArgs {
-    project: Slug,
-    status: Option<String>,
-    priority: Option<String>,
-    #[serde(rename = "type")]
-    task_type: Option<String>,
-    tags: Option<Vec<String>>,
-    routine: Option<Slug>,
-    agent: Option<Slug>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GetProjectTaskArgs {
-    project: Slug,
-    task: Slug,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "CreateProjectTasksInput")]
-struct CreateProjectTasksArgs {
-    project: Slug,
-    tasks: Vec<CreateProjectTaskItemArgs>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[serde(untagged)]
-enum CreateProjectTasksInput {
-    Bulk {
-        project: Slug,
-        tasks: Vec<CreateProjectTaskItemArgs>,
-    },
-    SingleNested {
-        project: Slug,
-        task: CreateProjectTaskItemArgs,
-    },
-    SingleFlat {
-        project: Slug,
-        #[serde(flatten)]
-        task: CreateProjectTaskItemArgs,
-    },
-}
-
-impl TryFrom<CreateProjectTasksInput> for CreateProjectTasksArgs {
-    type Error = String;
-
-    fn try_from(input: CreateProjectTasksInput) -> std::result::Result<Self, Self::Error> {
-        let (project, tasks) = match input {
-            CreateProjectTasksInput::Bulk { project, tasks } => (project, tasks),
-            CreateProjectTasksInput::SingleNested { project, task }
-            | CreateProjectTasksInput::SingleFlat { project, task } => (project, vec![task]),
-        };
-
-        if tasks.is_empty() {
-            return Err("tasks must contain at least one task".into());
-        }
-
-        Ok(Self { project, tasks })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateProjectTaskItemArgs {
-    title: String,
-    description: Option<String>,
-    acceptance_criteria: Option<String>,
-    status: Option<String>,
-    priority: Option<String>,
-    #[serde(rename = "type")]
-    task_type: Option<String>,
-    complexity: Option<i16>,
-    tags: Option<Vec<String>>,
-    required_tags: Option<Vec<String>>,
-    order_index: Option<i32>,
-    agent: Option<Slug>,
-    routine: Option<Slug>,
-    metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateProjectTaskArgs {
-    project: Slug,
-    task: Slug,
-    title: Option<String>,
-    description: Option<String>,
-    acceptance_criteria: Option<String>,
-    status: Option<String>,
-    priority: Option<String>,
-    #[serde(rename = "type")]
-    task_type: Option<String>,
-    complexity: Option<i16>,
-    tags: Option<Vec<String>>,
-    required_tags: Option<Vec<String>>,
-    order_index: Option<i32>,
-    agent: Option<Slug>,
-    routine: Option<Slug>,
-    metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeleteProjectTaskArgs {
-    project: Slug,
-    task: Slug,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListProjectExecutionRunsArgs {
-    project: Slug,
-    agent: Option<Slug>,
-    routine: Option<Slug>,
-    status: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GetProjectExecutionRunArgs {
-    execution_run_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-struct StartProjectExecutionArgs {
-    project: Slug,
-    config: Option<serde_json::Value>,
-    model_count: Option<i32>,
-    parallel_count: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CommandProjectExecutionArgs {
-    execution_run_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SearchNotificationRecipientsArgs {
     query: Option<String>,
     limit: Option<i64>,
@@ -1497,19 +601,13 @@ struct SendNotificationArgs {
     recipient_user_id: Option<Uuid>,
 }
 
-fn project_rest_tool_spec(kind: ProjectRestToolKind) -> Option<nenjo::ToolSpec> {
-    project_rest_tools()
-        .into_iter()
-        .find(|tool| tool.name == kind.tool_name())
-}
-
 fn notification_tool_spec(kind: NotificationToolKind) -> Option<nenjo::ToolSpec> {
     notification_tools()
         .into_iter()
         .find(|tool| tool.name == kind.tool_name())
 }
 
-fn parse_project_tool_args<T>(
+fn parse_notification_tool_args<T>(
     args: serde_json::Value,
     tool_name: &str,
     expected_shape: &str,
@@ -1568,8 +666,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use nenjo::manifest::local::LocalManifestStore;
-    use tempfile::tempdir;
+
+    #[test]
+    fn task_write_dependency_bundles_include_full_reference_read_tools_only() {
+        let policy = ManifestAccessPolicy::new(vec!["tasks:write".into()]);
+
+        assert!(policy.can_expose_manifest_read_tools(ScopeResource::Agents));
+        assert_eq!(AGENT_READ_TOOLS, ["list_agents", "get_agent"]);
+        assert!(!policy.can_write_resource(ScopeResource::Agents));
+
+        assert!(policy.can_expose_manifest_read_tools(ScopeResource::Projects));
+        assert_eq!(
+            PROJECT_MANIFEST_READ_TOOLS,
+            ["list_projects", "get_project"]
+        );
+        assert!(!policy.can_write_resource(ScopeResource::Projects));
+
+        assert!(policy.can_expose_manifest_read_tools(ScopeResource::Routines));
+        assert_eq!(ROUTINE_READ_TOOLS, ["list_routines", "get_routine"]);
+        assert!(!policy.can_write_resource(ScopeResource::Routines));
+    }
 
     #[derive(Clone, Default)]
     struct RecordingPayloadEncoder {
@@ -1664,18 +780,6 @@ mod tests {
         }
     }
 
-    fn project_tools_backend(
-        encoder: RecordingPayloadEncoder,
-    ) -> PlatformProjectToolsBackend<LocalManifestStore, RecordingPayloadEncoder> {
-        let temp = tempdir().unwrap();
-        PlatformProjectToolsBackend {
-            client: Arc::new(PlatformManifestClient::new("http://localhost", "test").unwrap()),
-            manifest_store: Arc::new(LocalManifestStore::new(temp.path().join("manifests"))),
-            payload_encoder: encoder,
-            cached_org_id: Some(Uuid::new_v4()),
-        }
-    }
-
     fn notification_tools_backend(
         encoder: RecordingPayloadEncoder,
         sink: Arc<RecordingNotificationSink>,
@@ -1688,153 +792,6 @@ mod tests {
             current_session_id: None,
             notification_sink: Some(sink),
         }
-    }
-
-    #[test]
-    fn create_project_tasks_args_accept_bulk_and_single_task_shapes() {
-        let bulk: CreateProjectTasksArgs = parse_project_tool_args(
-            json!({
-                "project": "demo_project",
-                "tasks": [
-                    {
-                        "title": "Bulk task",
-                        "description": "Bulk task body"
-                    }
-                ]
-            }),
-            "create_project_tasks",
-            "expected shape",
-        )
-        .unwrap();
-        assert_eq!(bulk.project.as_str(), "demo_project");
-        assert_eq!(bulk.tasks.len(), 1);
-        assert_eq!(bulk.tasks[0].title, "Bulk task");
-
-        let nested: CreateProjectTasksArgs = parse_project_tool_args(
-            json!({
-                "project": "demo_project",
-                "task": {
-                    "title": "Nested single task"
-                }
-            }),
-            "create_project_tasks",
-            "expected shape",
-        )
-        .unwrap();
-        assert_eq!(nested.tasks.len(), 1);
-        assert_eq!(nested.tasks[0].title, "Nested single task");
-
-        let flat: CreateProjectTasksArgs = parse_project_tool_args(
-            json!({
-                "project": "demo_project",
-                "title": "Flat single task",
-                "acceptance_criteria": "Done criteria"
-            }),
-            "create_project_tasks",
-            "expected shape",
-        )
-        .unwrap();
-        assert_eq!(flat.tasks.len(), 1);
-        assert_eq!(flat.tasks[0].title, "Flat single task");
-        assert_eq!(
-            flat.tasks[0].acceptance_criteria.as_deref(),
-            Some("Done criteria")
-        );
-    }
-
-    #[test]
-    fn project_tool_arg_errors_include_received_args() {
-        let error = parse_project_tool_args::<ListProjectTasksArgs>(
-            json!({"project_id": "demo-project"}),
-            "list_project_tasks",
-            "Expected project.",
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("invalid list_project_tasks args"));
-        assert!(error.contains("Received:"));
-        assert!(error.contains("project_id"));
-    }
-
-    #[tokio::test]
-    async fn create_project_task_body_encrypts_metadata_without_plaintext_body() {
-        let encoder = RecordingPayloadEncoder::default();
-        let backend = project_tools_backend(encoder.clone());
-
-        let body = backend
-            .create_task_body(
-                &Slug::derive("demo-project"),
-                None,
-                None,
-                &CreateProjectTaskItemArgs {
-                    title: "Private task".to_string(),
-                    description: None,
-                    acceptance_criteria: None,
-                    status: None,
-                    priority: None,
-                    task_type: None,
-                    complexity: None,
-                    tags: None,
-                    required_tags: None,
-                    order_index: None,
-                    agent: None,
-                    routine: None,
-                    metadata: Some(json!({ "context": "Sensitive metadata" })),
-                },
-            )
-            .await
-            .unwrap();
-
-        assert!(body.get("metadata").is_none());
-        assert!(body.get("encrypted_payload").is_some());
-        assert!(!body.to_string().contains("Sensitive metadata"));
-        assert_eq!(
-            encoder.last_payload.lock().unwrap().as_ref().unwrap()["metadata"]["context"],
-            "Sensitive metadata"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_project_task_body_encrypts_metadata_without_plaintext_body() {
-        let encoder = RecordingPayloadEncoder::default();
-        let backend = project_tools_backend(encoder.clone());
-
-        let body = backend
-            .update_task_body(
-                &UpdateProjectTaskArgs {
-                    project: Slug::derive("demo-project"),
-                    task: Slug::derive("private-task"),
-                    title: None,
-                    description: Some("Sensitive description".to_string()),
-                    acceptance_criteria: Some("Sensitive criteria".to_string()),
-                    status: None,
-                    priority: None,
-                    task_type: None,
-                    complexity: None,
-                    tags: None,
-                    required_tags: None,
-                    order_index: None,
-                    agent: None,
-                    routine: None,
-                    metadata: Some(json!({ "context": "Sensitive metadata" })),
-                },
-                Uuid::new_v4(),
-            )
-            .await
-            .unwrap();
-
-        assert!(body.get("metadata").is_none());
-        assert!(body.get("encrypted_payload").is_some());
-        let body_text = body.to_string();
-        assert!(!body_text.contains("Sensitive metadata"));
-        assert!(!body_text.contains("Sensitive description"));
-        assert!(!body_text.contains("Sensitive criteria"));
-        let payload = encoder.last_payload.lock().unwrap();
-        let payload = payload.as_ref().unwrap();
-        assert_eq!(payload["metadata"]["context"], "Sensitive metadata");
-        assert_eq!(payload["description"], "Sensitive description");
-        assert_eq!(payload["acceptance_criteria"], "Sensitive criteria");
     }
 
     #[tokio::test]

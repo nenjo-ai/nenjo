@@ -10,8 +10,7 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
-    model_manifest_slug,
+    RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::{Slug, TaskInput};
@@ -71,7 +70,6 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
                 task_execution: "Task title: {{ task.title }}\nTask description: {{ task.description }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -84,7 +82,6 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
         script_tools: vec![],
         media: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     }
@@ -97,7 +94,6 @@ fn make_task(project: &ProjectManifest) -> TaskInput {
     )
     .with_project(project.slug.clone())
     .with_task_id(Uuid::new_v4())
-    .source("integration-test")
 }
 
 #[tokio::test]
@@ -121,7 +117,6 @@ async fn single_step_routine_with_real_llm() {
         name: "smoke-routine".into(),
         slug: routine_slug.clone(),
         description: Some("Single-step routine integration test".into()),
-        trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive("respond"),

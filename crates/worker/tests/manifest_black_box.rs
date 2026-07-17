@@ -8,7 +8,6 @@ use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, CommandManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig, Manifest,
     McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
-    RoutineTrigger,
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
@@ -378,7 +377,6 @@ fn agent(_id: Uuid, name: &str, prompt: &str) -> AgentManifest {
         media: Vec::new(),
         abilities: Vec::new(),
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     }
@@ -403,7 +401,6 @@ fn routine(_id: Uuid, name: &str) -> RoutineManifest {
         name: name.into(),
         slug: Slug::derive(name),
         description: None,
-        trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: Vec::new(),
         edges: Vec::new(),
@@ -541,7 +538,6 @@ fn agent_inline_payload(id: Uuid, slug: &str, prompt: &str) -> serde_json::Value
         "script_tools": [],
         "abilities": [],
         "prompt_locked": false,
-        "heartbeat": null,
         "source_type": "native",
         "read_only": false,
         "metadata": {},
@@ -569,7 +565,6 @@ fn agent_metadata_inline_payload(id: Uuid, slug: &str, name: &str) -> serde_json
         "script_tools": [],
         "abilities": [],
         "prompt_locked": false,
-        "heartbeat": null,
         "source_type": "native",
         "read_only": false,
         "metadata": {},

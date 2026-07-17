@@ -884,6 +884,8 @@ fn classify_wake(updates: &[AsyncOpSignalDigest]) -> &'static str {
         "operation_result"
     } else if has("stopped") {
         "stopped"
+    } else if has("progress") {
+        "progress"
     } else {
         "timeout"
     }
@@ -951,6 +953,65 @@ mod tests {
         assert_eq!(result.updates.len(), 1);
         assert_eq!(result.updates[0].operation_id, "ability_research_1");
         assert_eq!(result.updates[0].events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn task_execution_progress_stays_quiet_until_completion() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("task_execution_1"),
+                    kind: AsyncOpKind::TaskExecution,
+                    label: "release-check".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("watch_execution_run".into()),
+                    started_summary: "starting routine".into(),
+                    model_visible: true,
+                },
+                None,
+            )
+            .await;
+        manager
+            .drain_signals(AsyncOpWaitFilter::model_visible())
+            .await;
+
+        let waiting_manager = manager.clone();
+        let mut wait = tokio::spawn(async move {
+            waiting_manager
+                .wait(
+                    30,
+                    AsyncOpWaitFilter::kind(Some(AsyncOpKind::TaskExecution)),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        started
+            .handle
+            .progress("one step complete".into(), None, None)
+            .await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut wait)
+                .await
+                .is_err()
+        );
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "routine complete".into(),
+                    output: None,
+                },
+                None,
+            )
+            .await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.woken_by, "operation_result");
+        assert_eq!(result.updates[0].kind, "task_execution");
     }
 
     #[tokio::test]

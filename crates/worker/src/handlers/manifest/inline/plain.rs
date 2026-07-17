@@ -292,7 +292,6 @@ mod tests {
                 "script_tools": [],
                 "abilities": [],
                 "prompt_locked": false,
-                "heartbeat": null,
                 "source_type": "native",
                 "read_only": false,
                 "metadata": {},
@@ -320,7 +319,6 @@ mod tests {
             media: Vec::new(),
             abilities: Vec::new(),
             prompt_locked: false,
-            heartbeat: None,
             source_type: None,
             metadata: serde_json::json!({}),
         }

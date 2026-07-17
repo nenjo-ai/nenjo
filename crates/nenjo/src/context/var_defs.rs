@@ -72,23 +72,13 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Task",
                 },
                 TemplateVarDef {
-                    name: "task.description",
-                    description: "Full description with requirements",
+                    name: "task.instructions",
+                    description: "Full task instructions and outcome guidance",
                     group: "Task",
                 },
                 TemplateVarDef {
-                    name: "task.acceptance_criteria",
-                    description: "Conditions for completion",
-                    group: "Task",
-                },
-                TemplateVarDef {
-                    name: "task.tags",
+                    name: "task.labels",
                     description: "Comma-separated labels",
-                    group: "Task",
-                },
-                TemplateVarDef {
-                    name: "task.source",
-                    description: "Origin — 'user' or agent name when routed from a gate",
                     group: "Task",
                 },
                 TemplateVarDef {
@@ -102,18 +92,8 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     group: "Task",
                 },
                 TemplateVarDef {
-                    name: "task.type",
-                    description: "Work type (bug, feature, task)",
-                    group: "Task",
-                },
-                TemplateVarDef {
                     name: "task.slug",
                     description: "URL-safe task identifier",
-                    group: "Task",
-                },
-                TemplateVarDef {
-                    name: "task.complexity",
-                    description: "Estimated complexity score",
                     group: "Task",
                 },
             ],
@@ -213,31 +193,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     name: "routine.step.metadata",
                     description: "Arbitrary JSON metadata from the current step's config",
                     group: "Routine",
-                },
-            ],
-        },
-        TemplateVarGroup {
-            name: "Heartbeat",
-            variables: vec![
-                TemplateVarDef {
-                    name: "heartbeat.instructions",
-                    description: "User-configured instructions for this heartbeat run, if any",
-                    group: "Heartbeat",
-                },
-                TemplateVarDef {
-                    name: "heartbeat.previous_output",
-                    description: "Final output from the previous heartbeat run, if any",
-                    group: "Heartbeat",
-                },
-                TemplateVarDef {
-                    name: "heartbeat.last_run_at",
-                    description: "Timestamp of the previous heartbeat run, if any",
-                    group: "Heartbeat",
-                },
-                TemplateVarDef {
-                    name: "heartbeat.next_run_at",
-                    description: "Scheduled timestamp for the next heartbeat run",
-                    group: "Heartbeat",
                 },
             ],
         },

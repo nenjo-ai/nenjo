@@ -18,16 +18,17 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 nenjo = { workspace = true }
+nenjo-events = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-sessions = { workspace = true }
 parking_lot = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "process", "sync"] }
+tokio = { workspace = true, features = ["fs", "process", "sync", "time", "rt"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }

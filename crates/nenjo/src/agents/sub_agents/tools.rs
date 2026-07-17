@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::Slug;
+use crate::input::TaskInput;
 use crate::provider::ProviderRuntime;
 use crate::tools::{
     Tool, ToolCategory, ToolOrigin, ToolResult, deserialize_u64_from_json_number,
@@ -11,7 +12,7 @@ use crate::tools::{
 };
 
 use super::format::ResultFormat;
-use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle, SubAgentTask};
+use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle};
 
 pub(crate) const PARENT_TOOL_NAMES: &[&str] = &[
     "spawn_sub_agents",
@@ -97,11 +98,16 @@ struct RawSpawnAgent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSubAgentTask {
-    description: String,
-    goal: String,
+    title: String,
     #[serde(default)]
-    acceptance_criteria: Vec<String>,
+    instructions: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    status: Option<String>,
+    priority: Option<String>,
+    slug: Option<String>,
 }
 
 #[async_trait]
@@ -143,14 +149,17 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
                             "task": {
                                 "type": "object",
                                 "properties": {
-                                    "description": {"type": "string"},
-                                    "goal": {"type": "string"},
-                                    "acceptance_criteria": {
+                                    "title": {"type": "string"},
+                                    "instructions": {"type": "string"},
+                                    "slug": {"type": "string"},
+                                    "labels": {
                                         "type": "array",
                                         "items": {"type": "string"}
-                                    }
+                                    },
+                                    "status": {"type": "string"},
+                                    "priority": {"type": "string"}
                                 },
-                                "required": ["description", "goal"]
+                                "required": ["title"]
                             },
                             "context": {"type": "object"},
                             "result_format": {"type": "object"}
@@ -170,11 +179,8 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
         }
         let mut requests = Vec::with_capacity(parsed.agents.len());
         for agent in parsed.agents {
-            if agent.agent.trim().is_empty()
-                || agent.task.description.trim().is_empty()
-                || agent.task.goal.trim().is_empty()
-            {
-                return Ok(error("agent, task.description, and task.goal are required"));
+            if agent.agent.trim().is_empty() || agent.task.title.trim().is_empty() {
+                return Ok(error("agent and task.title are required"));
             }
             let slug = match agent.slug {
                 Some(raw) => Some(Slug::parse(raw)?),
@@ -186,15 +192,19 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
                 }
                 None => None,
             };
+            let mut task = TaskInput::new(
+                agent.task.title,
+                agent.task.instructions.unwrap_or_default(),
+            )
+            .labels(agent.task.labels);
+            task.status = agent.task.status;
+            task.priority = agent.task.priority;
+            task.slug = agent.task.slug;
             requests.push(SpawnRequest {
                 agent_name: agent.agent,
                 slug,
                 prompt: agent.prompt,
-                task: SubAgentTask {
-                    description: agent.task.description,
-                    goal: agent.task.goal,
-                    acceptance_criteria: agent.task.acceptance_criteria,
-                },
+                task,
                 context: agent.context,
                 result_format,
             });
@@ -545,6 +555,40 @@ fn error(message: impl Into<String>) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub_agent_task_uses_platform_task_fields() {
+        let task: RawSubAgentTask = serde_json::from_value(serde_json::json!({
+            "title": "Review auth",
+            "instructions": "Look for escalation paths",
+            "slug": "review-auth",
+            "labels": ["security"],
+            "status": "todo",
+            "priority": "high"
+        }))
+        .unwrap();
+
+        assert_eq!(task.title, "Review auth");
+        assert_eq!(
+            task.instructions.as_deref(),
+            Some("Look for escalation paths")
+        );
+        assert_eq!(task.labels, ["security"]);
+        assert_eq!(task.status.as_deref(), Some("todo"));
+        assert_eq!(task.priority.as_deref(), Some("high"));
+        assert_eq!(task.slug.as_deref(), Some("review-auth"));
+    }
+
+    #[test]
+    fn sub_agent_task_rejects_removed_acceptance_criteria() {
+        let error = serde_json::from_value::<RawSubAgentTask>(serde_json::json!({
+            "title": "Review auth",
+            "acceptance_criteria": ["Find every issue"]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("acceptance_criteria"));
+    }
 
     #[test]
     fn inspect_args_accept_whole_float_limit_from_model_args() {

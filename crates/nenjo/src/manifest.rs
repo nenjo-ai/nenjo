@@ -503,7 +503,6 @@ pub struct RoutineManifest {
     pub name: String,
     pub slug: Slug,
     pub description: Option<String>,
-    pub trigger: RoutineTrigger,
     pub metadata: RoutineMetadata,
     pub steps: Vec<RoutineStepManifest>,
     pub edges: Vec<RoutineEdgeManifest>,
@@ -521,32 +520,10 @@ impl HasManifestSlug for RoutineManifest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum RoutineTrigger {
-    #[default]
-    Task,
-    Cron,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RoutineCronTaskManifest {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_criteria: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutineMetadata {
     #[serde(default)]
-    pub schedule: Option<String>,
-    #[serde(default)]
     pub entry_steps: Vec<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron_task: Option<RoutineCronTaskManifest>,
 }
 
 /// A single step in a routine DAG (agent, gate, council, or terminal).
@@ -765,8 +742,6 @@ pub struct PromptTemplates {
     pub chat_task: String,
     #[serde(default, rename = "gate")]
     pub gate_eval: String,
-    #[serde(default, rename = "heartbeat")]
-    pub heartbeat_task: String,
 }
 
 /// Configures what a role wants its memory system to focus on.
@@ -843,9 +818,6 @@ pub struct AgentManifest {
     /// When true, prompt_config updates are blocked.
     #[builder(default)]
     pub prompt_locked: bool,
-    #[serde(default)]
-    #[builder(default, setter(strip_option))]
-    pub heartbeat: Option<AgentHeartbeatManifest>,
     /// `native` or `package` (when known).
     #[serde(default)]
     #[builder(default, setter(strip_option))]
@@ -898,21 +870,6 @@ impl HasManifestSlug for AgentManifest {
     fn manifest_slug(&self) -> Slug {
         self.slug.clone()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentHeartbeatManifest {
-    pub agent: Slug,
-    pub interval: String,
-    pub is_active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub next_run_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
 }
 
 /// Prompt configuration for an ability. This mirrors the agent pattern while

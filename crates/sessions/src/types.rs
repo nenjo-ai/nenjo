@@ -8,8 +8,6 @@ pub enum SessionKind {
     Chat,
     Task,
     Domain,
-    CronSchedule,
-    HeartbeatSchedule,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,8 +83,6 @@ pub struct SessionRecord {
     pub refs: SessionRefs,
     #[serde(default)]
     pub lease: SessionLease,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheduler: Option<ScheduleState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<DomainState>,
     #[serde(default)]
@@ -193,59 +189,6 @@ pub struct DomainState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ScheduleState {
-    Cron(CronScheduleState),
-    Heartbeat(HeartbeatScheduleState),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CronScheduleState {
-    pub schedule_expr: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_run_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completion: Option<RunCompletion>,
-    #[serde(default)]
-    pub paused: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatScheduleState {
-    pub interval_secs: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_run_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_output_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completion: Option<RunCompletion>,
-    #[serde(default)]
-    pub run_in_progress: bool,
-    #[serde(default)]
-    pub paused: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunCompletion {
-    pub success: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_summary: Option<String>,
-    pub completed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCheckpoint {
     pub session_id: Uuid,
     pub seq: u64,
@@ -256,8 +199,6 @@ pub struct SessionCheckpoint {
     pub active_tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheduler_runtime: Option<SchedulerRuntimeSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,12 +218,4 @@ pub struct WorktreeSnapshot {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerRuntimeSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_execution_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cycle: Option<u32>,
 }

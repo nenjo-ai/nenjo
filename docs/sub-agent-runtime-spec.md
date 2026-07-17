@@ -95,12 +95,11 @@ agents:
     slug: security_review
     prompt: Act as a focused security review worker. Be concise and evidence-driven.
     task:
-      description: Review the auth/session changes for security issues.
-      goal: Identify security issues and give the parent a decision-ready summary.
-      acceptance_criteria:
-        - Check for privilege escalation risk.
-        - Cite evidence for every issue.
-        - Return confidence in the result.
+      title: Review the auth/session changes for security issues.
+      instructions: Check for privilege escalation risk and cite evidence for every issue.
+      labels:
+        - security
+      priority: high
     context:
       files:
         - crates/auth/src/session.rs
@@ -123,7 +122,8 @@ Fields:
 agent          required, ephemeral child agent name
 slug           optional, caller-facing child handle
 prompt         optional child identity/guidance supplied by the parent
-task           required object with description, goal, and optional acceptance_criteria
+task           required platform-shaped task object; title is required and instructions, slug,
+               labels, status, and priority are optional
 context        optional simple structured JSON metadata
 result_format  optional lightweight final result contract
 ```

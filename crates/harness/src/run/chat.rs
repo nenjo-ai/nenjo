@@ -123,7 +123,7 @@ where
     }
 
     turn_input
-        .send_user_message(None, effective_content.clone())
+        .send_user_message(request.input_message_id, effective_content.clone())
         .map_err(|error| {
             crate::HarnessError::Other(anyhow!("failed to queue chat message: {error}"))
         })?;
@@ -161,6 +161,7 @@ where
 {
     let ChatRequest {
         session_id,
+        input_message_id,
         agent,
         message,
         project,
@@ -186,7 +187,7 @@ where
         .as_ref()
         .map(|activation| activation.domain_session_id)
         .or(domain_session_id);
-    let turn_id = Uuid::new_v4();
+    let turn_id = input_message_id.unwrap_or_else(Uuid::new_v4);
     let agent_manifest = provider
         .find_agent_manifest(&agent)
         .ok_or_else(|| anyhow!("agent not found: {}", agent))?;

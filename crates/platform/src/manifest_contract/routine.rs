@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::{
     RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    RoutineStepManifest, RoutineStepType,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -13,13 +13,6 @@ use super::wire::PlatformRecord;
 
 fn slug_from_str(value: &str) -> Slug {
     Slug::parse(value).unwrap_or_else(|_| Slug::derive(value))
-}
-
-fn parse_trigger(value: &str) -> RoutineTrigger {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "cron" => RoutineTrigger::Cron,
-        _ => RoutineTrigger::Task,
-    }
 }
 
 fn parse_step_type(value: &str) -> RoutineStepType {
@@ -83,7 +76,6 @@ pub struct RoutineRecord {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub trigger: String,
     pub is_active: bool,
     pub is_default: bool,
     pub max_retries: i32,
@@ -143,7 +135,6 @@ impl RoutineRecord {
             name: self.name.clone(),
             slug: slug_from_str(&self.slug),
             description: self.description.clone(),
-            trigger: parse_trigger(&self.trigger),
             metadata: self.routine_metadata(),
             steps: self
                 .steps
@@ -188,7 +179,6 @@ mod tests {
             slug: "handoff-routine".to_string(),
             name: "Handoff Routine".to_string(),
             description: None,
-            trigger: "task".to_string(),
             is_active: true,
             is_default: false,
             max_retries: 3,

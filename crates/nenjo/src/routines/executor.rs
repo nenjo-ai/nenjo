@@ -1,6 +1,6 @@
 //! Harness-side routine graph executor.
 //!
-//! The platform scheduler only dispatches routine runs to the harness. This
+//! Task execution dispatches routine runs to the harness. This
 //! module owns runtime step execution, parallel entry waves, fan-out/fan-in
 //! scheduling, gate retry loops, and event emission for a single routine run.
 
@@ -101,8 +101,8 @@ where
     provider.find_project(project?).cloned()
 }
 
-/// Execute a routine once (one-shot). For cron execution, the Provider
-/// wraps this in the cron poll loop.
+/// Execute a routine once for a task dispatch. Scheduled tasks use the same
+/// one-shot execution path after the task runtime admits them.
 pub(crate) async fn execute_routine<P>(
     provider: &P,
     routine: &RoutineManifest,
@@ -240,23 +240,6 @@ where
                 step_result.output_tokens,
             );
 
-            if !step_result.passed
-                && step_status == StepExecutionStatus::Completed
-                && matches!(
-                    step.step_type,
-                    RoutineStepType::Gate | RoutineStepType::Council
-                )
-            {
-                let feedback = step_result
-                    .data
-                    .get("reasoning")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| step_result.output.clone());
-                state.gate_feedback = Some(feedback);
-            }
-
             state.record_step_result(step.slug.clone(), step_result.clone());
             completed.insert(step.slug.clone());
             scheduled.remove(&step.slug);
@@ -351,9 +334,20 @@ where
         };
     }
 
+    let terminal_handoffs = if last_result.passed {
+        terminal_results
+            .iter()
+            .filter(|result| result.passed)
+            .flat_map(|result| state.handoffs_for(&result.step_slug).iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let _ = events_tx.send(RoutineEvent::Done {
         task_id: state.input.task_id,
         result: last_result.clone(),
+        handoffs: terminal_handoffs,
     });
 
     Ok(last_result)
@@ -521,7 +515,14 @@ fn routine_handoff_for_edge(
     result: &StepResult,
     edge: &RoutineEdgeManifest,
 ) -> Option<RoutineHandoff> {
-    let dynamic = route_next_step_handoff(result, &edge.target_step)?;
+    let dynamic =
+        route_next_step_handoff(result, &edge.target_step).unwrap_or_else(|| DynamicRouteHandoff {
+            handoff: serde_json::json!({
+                "output": result.output,
+                "data": result.data,
+            }),
+            summary: None,
+        });
     let purpose = edge_metadata_string(edge, "purpose");
 
     Some(RoutineHandoff {
@@ -530,6 +531,7 @@ fn routine_handoff_for_edge(
         handoff: dynamic.handoff,
         purpose,
         summary: dynamic.summary,
+        edge_condition: edge.condition,
     })
 }
 
@@ -826,11 +828,11 @@ where
     );
     let runner = builder.build().await?;
 
-    // Build the task description from template context
-    let task_description = build_task_description(state);
-
-    debug!(is_cron = state.input.is_cron_trigger, step = %step.name, "Building task for agent step");
-    let task = attach_location(AgentRun::task(build_task(state, task_description)?), state);
+    debug!(step = %step.name, "Building task for agent step");
+    let task = attach_location(
+        AgentRun::task(build_task(state, state.input.instructions.clone())?),
+        state,
+    );
 
     let output = routing::execute_with_route_next_steps(routing::ExecuteRouteNextStepsParams {
         runner: &runner,
@@ -924,7 +926,7 @@ where
             kind: AgentRunKind::Gate(GateInput {
                 previous_result,
                 project: state.input.project.clone(),
-                task: Some(build_task(state, state.input.description.clone())?),
+                task: Some(build_task(state, state.input.instructions.clone())?),
             }),
             execution: Default::default(),
         },
@@ -948,8 +950,8 @@ where
     let decision = routing::resolve_route_next_steps(&output.messages)?;
     let step_output = routing::route_next_steps_display_output(&decision, &output.text);
 
-    // Store verdict + reasoning in `data` so the event bus and gate_feedback
-    // can surface structured information instead of raw LLM text.
+    // Keep the structured verdict and reasoning available to event consumers
+    // and downstream routine handoffs.
     let data = serde_json::json!({
         "verdict": if decision.passed { "pass" } else { "fail" },
         "reasoning": decision.reasoning,
@@ -981,20 +983,12 @@ fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
     Ok(TaskInput {
         task_id: state.input.task_id.unwrap_or_else(Uuid::nil),
         title: state.input.title.clone(),
-        description,
-        acceptance_criteria: state.input.acceptance_criteria.clone(),
-        tags: state.input.tags.clone(),
-        source: state
-            .input
-            .source
-            .clone()
-            .or_else(|| Some("routine".to_string())),
+        instructions: description,
+        labels: state.input.labels.clone(),
         project: state.input.project.clone(),
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
-        task_type: state.input.task_type.clone(),
         slug: state.input.slug.clone(),
-        complexity: state.input.complexity.clone(),
     })
 }
 
@@ -1003,18 +997,4 @@ fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
         run.execution.project_location = Some(ProjectLocation::from_git(git));
     }
     run
-}
-
-/// Build the task body from routine input plus execution feedback.
-fn build_task_description(state: &RoutineState) -> String {
-    let mut description = state.input.description.clone();
-
-    // Append gate feedback if available (from a previous failed gate)
-    if let Some(ref feedback) = state.gate_feedback {
-        description.push_str(&format!(
-            "\n\n<gate_feedback>\nThe previous attempt was reviewed and rejected:\n{feedback}\n</gate_feedback>"
-        ));
-    }
-
-    description
 }

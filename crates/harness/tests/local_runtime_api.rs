@@ -87,7 +87,6 @@ async fn chat_test_provider()
         script_tools: Vec::new(),
         media: Vec::new(),
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };

@@ -16,12 +16,9 @@
 //!     .run_stream(task)
 //!     .await?;
 //!
-//! // Cancel a running cron
-//! handle.cancel();
 //! ```
 
 pub mod council;
-pub mod cron;
 pub mod event;
 pub mod executor;
 pub mod graph;
@@ -29,6 +26,7 @@ pub mod handoff_schema;
 pub mod routing;
 pub mod runner;
 pub mod types;
+pub mod watch;
 
 use crate::AgentBuilder;
 use crate::manifest::RoutineStepManifest;
@@ -38,7 +36,13 @@ use crate::provider::ProviderRuntime;
 pub use event::RoutineEvent;
 pub use runner::{RoutineExecutionHandle, RoutineRunner};
 pub use types::{
-    EdgeCondition, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics, StepResult, StepType,
+    EdgeCondition, RoutineHandoff, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics,
+    StepResult, StepType,
+};
+pub use watch::{
+    LocalRoutineExecutionRegistration, LocalRoutineExecutionWatcher, RuntimeExecutionEvent,
+    RuntimeExecutionProgress, RuntimeExecutionStatus, RuntimeExecutionSubscription,
+    RuntimeExecutionWatcher, WatchExecutionRunTool, start_runtime_execution_watch,
 };
 
 const DEFAULT_ROUTINE_STEP_MAX_TURNS: usize = 50;

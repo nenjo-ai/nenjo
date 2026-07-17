@@ -484,7 +484,7 @@ where
         builder = builder.with_project_context(project);
     }
     let runner = builder.build().await?;
-    let mut task = TaskInput::new("Delegated task", operation.task.clone()).source("delegation");
+    let mut task = TaskInput::new("Delegated task", operation.task.clone());
     if let Some(project) = &operation.project {
         task = task.with_project(project.slug.clone());
     }

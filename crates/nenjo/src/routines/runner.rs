@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::input::{RoutineRun, RoutineRunKind};
+use crate::input::RoutineRun;
 use crate::manifest::RoutineManifest;
 use crate::provider::{ErasedProvider, ProviderRuntime};
 use crate::routines::{self, RoutineEvent, SessionBinding, StepResult};
@@ -101,7 +101,7 @@ where
 /// Handle to a running routine execution.
 ///
 /// Provides a stream of [`RoutineEvent`]s as the routine progresses, plus
-/// access to the final [`StepResult`] when done. Cron routines can be
+/// access to the final [`StepResult`] when done. Running routines can be
 /// cancelled via [`cancel()`](Self::cancel).
 pub struct RoutineExecutionHandle {
     events_rx: mpsc::UnboundedReceiver<RoutineEvent>,
@@ -122,8 +122,7 @@ impl RoutineExecutionHandle {
         }
     }
 
-    /// Cancel the running routine. For cron routines, this stops the poll loop
-    /// between cycles. For one-shot routines, this stops between DAG steps.
+    /// Cancel the running routine between DAG steps.
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
@@ -159,53 +158,24 @@ where
     let cancel = CancellationToken::new();
     let cancel_inner = cancel.clone();
 
-    let cron_schedule = match &input.kind {
-        RoutineRunKind::Cron(crate::input::CronInput {
-            schedule,
-            start_at,
-            timeout,
-            ..
-        }) => Some((schedule.clone(), *start_at, *timeout)),
-        RoutineRunKind::Task(_) => None,
-    };
-
     let (events_tx, events_rx) = mpsc::unbounded_channel::<RoutineEvent>();
 
     let input = routines::types::RoutineInput::from_routine_run(input);
     let task_id = input.task_id;
-    tracing::debug!(
-        is_cron = input.is_cron_trigger,
-        "Routine input built from run"
-    );
+    tracing::debug!("Routine input built from task run");
 
     let join = tokio::spawn(async move {
         let mut state = routines::types::RoutineState::new(input);
         state.routine_name = Some(routine_name);
 
-        let mut result = if let Some((schedule, start_at, timeout)) = cron_schedule {
-            routines::cron::executor::execute_routine_cron(
-                &provider,
-                &routine,
-                &mut state,
-                routines::cron::executor::CronExecutionConfig {
-                    events_tx: &events_tx,
-                    cancel: &cancel_inner,
-                    schedule: &schedule,
-                    start_at,
-                    timeout,
-                },
-            )
-            .await
-        } else {
-            routines::executor::execute_routine(
-                &provider,
-                &routine,
-                &mut state,
-                &events_tx,
-                &cancel_inner,
-            )
-            .await
-        }?;
+        let mut result = routines::executor::execute_routine(
+            &provider,
+            &routine,
+            &mut state,
+            &events_tx,
+            &cancel_inner,
+        )
+        .await?;
         result.task_id = task_id;
         Ok(result)
     });

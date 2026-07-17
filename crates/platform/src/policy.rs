@@ -38,6 +38,21 @@ impl ManifestAccessPolicy {
         self.has_scope(PlatformScope::write(resource))
     }
 
+    /// Return whether the provider may expose a resource family's manifest read tools.
+    ///
+    /// Task authors need project and execution-target context to create useful
+    /// tasks. This is deliberately a tool-composition rule, not an authorization
+    /// implication: `tasks:write` still does not satisfy those resources' read
+    /// scopes for arbitrary API or policy checks.
+    pub(crate) fn can_expose_manifest_read_tools(&self, resource: ScopeResource) -> bool {
+        self.can_read_resource(resource)
+            || (self.can_write_resource(ScopeResource::Tasks)
+                && matches!(
+                    resource,
+                    ScopeResource::Agents | ScopeResource::Projects | ScopeResource::Routines
+                ))
+    }
+
     /// Return whether all required normalized scopes are satisfied.
     pub fn allows_all(&self, required_scopes: &[PlatformScope]) -> bool {
         required_scopes
@@ -114,6 +129,28 @@ mod tests {
     }
 
     #[test]
+    fn task_write_exposes_reference_read_tools_without_granting_reference_scopes() {
+        let policy = ManifestAccessPolicy::new(vec!["tasks:write".into()]);
+
+        for resource in [
+            ScopeResource::Agents,
+            ScopeResource::Projects,
+            ScopeResource::Routines,
+        ] {
+            assert!(policy.can_expose_manifest_read_tools(resource));
+            assert!(!policy.can_read_resource(resource));
+            assert!(!policy.can_write_resource(resource));
+        }
+        assert!(policy.can_expose_manifest_read_tools(ScopeResource::Tasks));
+        assert!(!policy.can_expose_manifest_read_tools(ScopeResource::Abilities));
+
+        let read_only = ManifestAccessPolicy::new(vec!["tasks:read".into()]);
+        assert!(!read_only.can_expose_manifest_read_tools(ScopeResource::Agents));
+        assert!(!read_only.can_expose_manifest_read_tools(ScopeResource::Projects));
+        assert!(!read_only.can_expose_manifest_read_tools(ScopeResource::Routines));
+    }
+
+    #[test]
     fn agent_and_ability_scope_checks_use_platform_scopes() {
         let policy = ManifestAccessPolicy::new(vec!["projects:read".into()]);
         let agent = AgentManifest {
@@ -130,7 +167,6 @@ mod tests {
             script_tools: vec![],
             media: Vec::new(),
             prompt_locked: false,
-            heartbeat: None,
             source_type: None,
             metadata: serde_json::json!({}),
         };

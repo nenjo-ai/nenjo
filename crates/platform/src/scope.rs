@@ -20,6 +20,8 @@ pub enum ScopeResource {
     Domains,
     /// Project manifests and project-scoped data.
     Projects,
+    /// Organization tasks and task-backed execution runs.
+    Tasks,
     /// Org-level library knowledge documents.
     Library,
     /// Routine manifests.
@@ -78,6 +80,8 @@ impl PlatformScope {
             "domains:write" => Self::write(ScopeResource::Domains),
             "projects:read" => Self::read(ScopeResource::Projects),
             "projects:write" => Self::write(ScopeResource::Projects),
+            "tasks:read" => Self::read(ScopeResource::Tasks),
+            "tasks:write" => Self::write(ScopeResource::Tasks),
             "library:write" => Self::write(ScopeResource::Library),
             "routines:read" => Self::read(ScopeResource::Routines),
             "routines:write" => Self::write(ScopeResource::Routines),
@@ -140,6 +144,7 @@ impl fmt::Display for PlatformScope {
                     ScopeResource::Abilities => "abilities",
                     ScopeResource::Domains => "domains",
                     ScopeResource::Projects => "projects",
+                    ScopeResource::Tasks => "tasks",
                     ScopeResource::Library => "library",
                     ScopeResource::Routines => "routines",
                     ScopeResource::Models => "models",
@@ -155,5 +160,23 @@ impl fmt::Display for PlatformScope {
             ),
             Self::Unknown(scope) => f.write_str(scope),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_write_scope_implies_task_read_scope() {
+        let write = PlatformScope::parse("tasks:write");
+        let read = PlatformScope::parse("tasks:read");
+        assert!(write.allows(&read));
+        assert_eq!(write.to_string(), "tasks:write");
+    }
+
+    #[test]
+    fn task_scope_does_not_grant_project_access() {
+        assert!(!PlatformScope::parse("tasks:read").allows(&PlatformScope::parse("projects:read")));
     }
 }

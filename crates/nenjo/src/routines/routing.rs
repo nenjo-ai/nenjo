@@ -269,7 +269,7 @@ pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value
 /// Resolve the required agent-step routing decision from the transcript.
 ///
 /// This parses the terminal `route_next_steps` call into the verdict fields used
-/// by the routine scheduler and step result audit data.
+/// by the task runtime and step result audit data.
 pub fn resolve_route_next_steps(messages: &[ChatMessage]) -> Result<RouteNextStepsDecision> {
     let Some(arguments) = extract_route_next_steps(messages)? else {
         bail!("Routine step did not call required route_next_steps tool");

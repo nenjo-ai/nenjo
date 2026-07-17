@@ -90,7 +90,6 @@ fn test_manifest() -> Manifest {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -103,7 +102,6 @@ fn test_manifest() -> Manifest {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -648,7 +646,6 @@ async fn ability_inherits_memory_vars() {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -661,7 +658,6 @@ async fn ability_inherits_memory_vars() {
         media: vec![],
         abilities: vec![ability.name.clone()],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -775,7 +771,6 @@ async fn domain_expansion_preserves_memory() {
                 task_execution: String::new(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -788,7 +783,6 @@ async fn domain_expansion_preserves_memory() {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };

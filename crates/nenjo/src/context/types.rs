@@ -223,19 +223,11 @@ pub struct TaskContext {
     pub status: String,
     #[serde(rename = "@priority")]
     pub priority: String,
-    #[serde(rename = "@type")]
-    pub task_type: String,
     pub title: String,
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub description: String,
+    pub instructions: String,
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub acceptance_criteria: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub tags: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub source: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub complexity: String,
+    pub labels: String,
 }
 
 impl TaskContext {
@@ -244,17 +236,18 @@ impl TaskContext {
             id: vars.get("task.id").cloned().unwrap_or_default(),
             slug: vars.get("task.slug").cloned().unwrap_or_default(),
             title: vars.get("task.title").cloned().unwrap_or_default(),
-            description: vars.get("task.description").cloned().unwrap_or_default(),
-            acceptance_criteria: vars
-                .get("task.acceptance_criteria")
+            instructions: vars
+                .get("task.instructions")
+                .or_else(|| vars.get("task.description"))
                 .cloned()
                 .unwrap_or_default(),
-            tags: vars.get("task.tags").cloned().unwrap_or_default(),
-            source: vars.get("task.source").cloned().unwrap_or_default(),
+            labels: vars
+                .get("task.labels")
+                .or_else(|| vars.get("task.tags"))
+                .cloned()
+                .unwrap_or_default(),
             status: vars.get("task.status").cloned().unwrap_or_default(),
             priority: vars.get("task.priority").cloned().unwrap_or_default(),
-            task_type: vars.get("task.type").cloned().unwrap_or_default(),
-            complexity: vars.get("task.complexity").cloned().unwrap_or_default(),
         }
     }
 
@@ -434,20 +427,16 @@ mod tests {
             slug: "fix-bug".into(),
             status: "open".into(),
             priority: "high".into(),
-            task_type: "task".into(),
             title: "Fix login bug".into(),
-            description: "SSO is broken".into(),
-            acceptance_criteria: String::new(),
-            tags: String::new(),
-            source: String::new(),
-            complexity: String::new(),
+            instructions: "SSO is broken".into(),
+            labels: String::new(),
         };
         let xml = nenjo_xml::to_xml_pretty(&task, 2);
         assert!(xml.contains("id=\"TASK-42\""));
         assert!(xml.contains("<title>Fix login bug</title>"));
-        assert!(xml.contains("<description>SSO is broken</description>"));
+        assert!(xml.contains("<instructions>SSO is broken</instructions>"));
         // Empty fields should be omitted
-        assert!(!xml.contains("acceptance_criteria"));
+        assert!(!xml.contains("<labels>"));
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod content;
 mod envelope;
 mod manifest;
 mod response;
+mod schedule;
 mod subject;
 
 pub use capability::*;
@@ -42,4 +43,5 @@ pub use content::*;
 pub use envelope::*;
 pub use manifest::*;
 pub use response::*;
+pub use schedule::*;
 pub use subject::*;

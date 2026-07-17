@@ -5,12 +5,17 @@ use std::sync::{Arc, LazyLock, RwLock};
 use async_trait::async_trait;
 use nenjo::manifest::AgentManifest;
 use nenjo::skills::{SkillProvider, SkillRuntimeState};
-use nenjo::{ToolAutonomy, ToolContext, ToolFactory, ToolSecurity};
+use nenjo::{
+    LocalRoutineExecutionWatcher, ToolAutonomy, ToolContext, ToolFactory, ToolSecurity,
+    WatchExecutionRunTool,
+};
 use nenjo_platform::{
     ManifestAccessPolicy, ManifestMcpBackend, PlatformResourceIdStore, PlatformResourceKind,
+    ScopeResource,
+    task_tools::add_task_tools,
     tools::{
         PlatformNotificationEmitter, PlatformNotificationToolsBackend, add_manifest_tools,
-        add_notification_tools, add_project_rest_tools,
+        add_notification_tools,
     },
 };
 
@@ -105,6 +110,7 @@ where
     external_mcp: Arc<ExternalMcpPool>,
     skill_registry: Arc<SkillRegistry>,
     platform: PlatformToolServices,
+    local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
 impl<R> WorkerToolFactory<R>
@@ -171,7 +177,16 @@ where
             external_mcp,
             skill_registry,
             platform,
+            local_execution_watcher: LocalRoutineExecutionWatcher::default(),
         }
+    }
+
+    pub(crate) fn with_local_execution_watcher(
+        mut self,
+        watcher: LocalRoutineExecutionWatcher,
+    ) -> Self {
+        self.local_execution_watcher = watcher;
+        self
     }
 
     /// Build the base tool set (always included).
@@ -260,8 +275,12 @@ where
             add_manifest_tools(&mut tools, backend.clone(), &policy);
         }
 
-        let project_backend = self.platform.project_backend.clone();
-        add_project_rest_tools(&mut tools, project_backend, &policy);
+        add_task_tools(&mut tools, self.platform.task_backend.clone(), &policy);
+        if policy.can_read_resource(ScopeResource::Tasks) {
+            tools.push(Arc::new(WatchExecutionRunTool::new(
+                self.local_execution_watcher.clone(),
+            )));
+        }
 
         let notification_sink = PLATFORM_NOTIFICATION_EMITTER
             .try_with(|emitter| emitter.clone())
