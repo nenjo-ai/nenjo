@@ -22,10 +22,6 @@ pub struct RenderContextVars {
 
     // Separate vars
     pub chat_message: String,
-    pub heartbeat_instructions: String,
-    pub heartbeat_previous_output: String,
-    pub heartbeat_last_run_at: String,
-    pub heartbeat_next_run_at: String,
     pub timestamp: String,
 
     // Pre-computed memory vars (memories, memories.core, etc.)
@@ -107,22 +103,16 @@ impl RenderContextVars {
             ("task", task_xml.as_str()),
             ("task.id", &self.task.id),
             ("task.title", &self.task.title),
-            ("task.description", &self.task.description),
-            ("task.acceptance_criteria", &self.task.acceptance_criteria),
-            ("task.tags", &self.task.tags),
-            ("task.source", &self.task.source),
+            ("task.instructions", &self.task.instructions),
+            // Compatibility alias for installed templates. New templates must
+            // use `task.instructions`.
+            ("task.description", &self.task.instructions),
+            ("task.labels", &self.task.labels),
             ("task.status", &self.task.status),
             ("task.priority", &self.task.priority),
-            ("task.type", &self.task.task_type),
             ("task.slug", &self.task.slug),
-            ("task.complexity", &self.task.complexity),
             // Chat
             ("chat.message", &self.chat_message),
-            // Heartbeat
-            ("heartbeat.instructions", &self.heartbeat_instructions),
-            ("heartbeat.previous_output", &self.heartbeat_previous_output),
-            ("heartbeat.last_run_at", &self.heartbeat_last_run_at),
-            ("heartbeat.next_run_at", &self.heartbeat_next_run_at),
             // Agent (self) — singular XML + fields
             ("self", self_xml.as_str()),
             ("agent.slug", &self._self.slug),

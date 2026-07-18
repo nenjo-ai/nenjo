@@ -1,8 +1,8 @@
 # nenjo-harness
 
 `nenjo-harness` is the developer-facing runtime wrapper around a typed
-`Provider`. It runs chat, task, cron, and heartbeat requests while handling
-session runtime calls, transcripts, execution trace hooks, and scheduling.
+`Provider`. It runs chat and tasks while handling session runtime calls,
+transcripts, execution trace hooks, the durable task inbox, and task schedules.
 
 The crate re-exports the main Nenjo provider assembly types, so most embedded
 apps can import `nenjo_harness` alone for both provider construction and harness
@@ -62,9 +62,7 @@ Harness execution APIs take builder-style request values. Required arguments go
 in `new`; optional context is added with `with_*` methods:
 
 ```rust
-use std::time::Duration;
-
-use nenjo_harness::{ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
+use nenjo_harness::{ChatRequest, TaskRequest};
 
 let output = harness
     .chat(ChatRequest::new("coder", "Fix the failing test")
@@ -73,18 +71,29 @@ let output = harness
     .await?;
 
 let task_output = harness
-    .task(TaskRequest::new("website", "Fix login", "Repair OAuth callback")
+    .task(TaskRequest::new("Fix login", "Repair OAuth callback")
         .with_task_id(task_id)
+        .with_project("website")
         .with_agent("coder")
         .with_slug("fix-login"))
     .await?;
-
-let mut cron = harness
-    .cron(CronRequest::new("daily_maintenance", "0 */6 * * * *")
-        .with_project("website"))
-    .await?;
-
-let mut heartbeat = harness
-    .heartbeat(HeartbeatRequest::new("coder", Duration::from_secs(300)))
-    .await?;
 ```
+
+Recurring work is not a separate execution kind. Hosts install a
+`TaskSchedule` into `TaskRuntime`; when it becomes due, the runtime creates the
+same durable inbox submission used by manual tasks. An agent-assigned schedule
+is therefore just a scheduled task with `TaskExecutionTarget::Agent`.
+
+The canonical `TaskScheduleDefinition` supports interval, daily, weekly,
+monthly, yearly, and advanced cron recurrence in an IANA timezone, plus end
+date and occurrence-count boundaries. Calendar recurrences preserve their
+local wall-clock time across daylight-saving changes. The runtime stores the
+materialized occurrence count with its inbox state so finite schedules remain
+correct during offline operation and restart recovery.
+
+`TaskRuntime::cancel` is the single local cancellation boundary. It atomically
+marks queued or running receipts Cancelled, emits that durable state before
+signalling a running `TaskExecutor`, and remembers bounded early cancellation
+intents so a later transport delivery cannot start cancelled work. Every
+receipt transition increments a persisted revision; restart recovery requeues
+interrupted work with a newer revision and an explicit recovery marker.

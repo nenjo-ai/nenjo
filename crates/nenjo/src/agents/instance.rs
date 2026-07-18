@@ -384,7 +384,6 @@ impl<P: ProviderRuntime> AgentInstance<P> {
                 prompt_config.templates.chat_task.as_str(),
                 prompt_config.templates.task_execution.as_str(),
                 prompt_config.templates.gate_eval.as_str(),
-                prompt_config.templates.heartbeat_task.as_str(),
             ],
             self.prompt.renderer.argument_selectors(),
         )?;
@@ -441,9 +440,6 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             ),
             AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
             AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
-            AgentRunKind::Heartbeat { .. } => {
-                ("Heartbeat", prompt_config.templates.heartbeat_task.as_str())
-            }
         };
         tracing::debug!(
             agent = %self.name(),

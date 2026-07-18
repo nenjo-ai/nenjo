@@ -78,7 +78,6 @@ fn test_manifest() -> Manifest {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -961,7 +960,6 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -982,7 +980,6 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -990,7 +987,6 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         name: "routine".into(),
         slug: Slug::derive("routine"),
         description: None,
-        trigger: crate::manifest::RoutineTrigger::Task,
         metadata: crate::manifest::RoutineMetadata::default(),
         steps: vec![crate::manifest::RoutineStepManifest {
             slug: Slug::derive("step"),

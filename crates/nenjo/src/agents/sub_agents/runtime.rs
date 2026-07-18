@@ -33,14 +33,10 @@ const TRANSCRIPT_CAP: usize = 256;
 const WAIT_EVENTS_PER_AGENT: usize = 12;
 const INSPECT_LIMIT_CAP: usize = 50;
 const SUB_AGENT_TASK_TEMPLATE: &str = r#"Task:
-Description:
-{{ task.description }}
-
-Goal:
 {{ task.title }}
 
-Acceptance criteria and output instructions:
-{{ task.acceptance_criteria }}
+Instructions:
+{{ task.description }}
 "#;
 
 #[derive(Debug, Clone)]
@@ -61,16 +57,9 @@ pub(crate) struct SpawnRequest {
     pub(crate) agent_name: String,
     pub(crate) slug: Option<Slug>,
     pub(crate) prompt: Option<String>,
-    pub(crate) task: SubAgentTask,
+    pub(crate) task: TaskInput,
     pub(crate) context: Option<Value>,
     pub(crate) result_format: Option<ResultFormat>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SubAgentTask {
-    pub(crate) description: String,
-    pub(crate) goal: String,
-    pub(crate) acceptance_criteria: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,7 +272,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         self.push_signal(
             &run,
             SubAgentSignal::Started {
-                task_summary: truncate(&request.task.description, 180),
+                task_summary: truncate(&request.task.title, 180),
             },
             false,
         )
@@ -299,7 +288,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
                     label: request.agent_name.clone(),
                     parent_operation_id: None,
                     parent_tool_name: Some("spawn_sub_agents".into()),
-                    started_summary: truncate(&request.task.description, 180),
+                    started_summary: truncate(&request.task.title, 180),
                     model_visible: false,
                 },
                 self.inner.events_tx.clone(),
@@ -876,35 +865,23 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
 }
 
 fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
-    let mut description = request.task.description.trim().to_string();
+    let mut task = request.task.clone();
+    task.title = task.title.trim().to_string();
+    let mut instructions = task.instructions.trim().to_string();
     if let Some(context) = &request.context {
-        description.push_str("\n\nContext metadata:\n");
-        description.push_str(
+        instructions.push_str("\n\nContext metadata:\n");
+        instructions.push_str(
             &serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string()),
         );
     }
 
-    let mut acceptance_criteria = String::new();
-    if !request.task.acceptance_criteria.is_empty() {
-        for criterion in &request.task.acceptance_criteria {
-            acceptance_criteria.push_str("- ");
-            acceptance_criteria.push_str(criterion.trim());
-            acceptance_criteria.push('\n');
-        }
-    }
     if let Some(format) = &request.result_format {
-        acceptance_criteria.push_str(&format.instructions());
+        instructions.push_str("\n\nOutput format:\n");
+        instructions.push_str(format.instructions().trim());
     }
 
-    let task = TaskInput::new(request.task.goal.trim(), description)
-        .with_project("sub_agent")
-        .source("sub_agent");
-
-    if acceptance_criteria.trim().is_empty() {
-        task
-    } else {
-        task.acceptance_criteria(acceptance_criteria)
-    }
+    task.instructions = instructions;
+    task.with_project("sub_agent")
 }
 
 fn classify_wake(updates: &[SignalDigest], operations: &[AsyncOpSignalDigest]) -> &'static str {

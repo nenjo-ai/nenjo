@@ -5,13 +5,12 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nenjo_models::ChatMessage;
 use nenjo_sessions::{
-    ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SchedulerSessionUpsert,
-    SessionCheckpoint, SessionCheckpointUpdate, SessionKind, SessionLeaseGrant,
-    SessionLeaseRequest, SessionOwnerKind, SessionRecord, SessionRefs, SessionRuntime,
-    SessionRuntimeEvent, SessionTranscriptAppend, SessionTranscriptChatMessage,
-    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord,
-    SessionTransition, SessionUpsert, SessionWriteOutcome, TaskSessionUpsert, TokenUsage,
-    TraceEvent, TracePhase, TranscriptQuery,
+    ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SessionCheckpoint,
+    SessionCheckpointUpdate, SessionKind, SessionLeaseGrant, SessionLeaseRequest, SessionOwnerKind,
+    SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionTranscriptAppend,
+    SessionTranscriptChatMessage, SessionTranscriptEvent, SessionTranscriptEventPayload,
+    SessionTranscriptRecord, SessionTransition, SessionUpsert, SessionWriteOutcome,
+    TaskSessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
 };
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -344,20 +343,6 @@ where
         Ok(true)
     }
 
-    pub async fn upsert_scheduler(&self, upsert: SchedulerSessionUpsert) -> Result<bool> {
-        let session_id = upsert.session_id;
-        let grant = self
-            .acquire_lease(session_id, "harness", SessionOwnerKind::Cron)
-            .await?;
-        let result = self
-            .record_batch(&grant, vec![SessionRuntimeEvent::SchedulerUpsert(upsert)])
-            .await;
-        let release_result = self.release_lease(grant).await;
-        result?;
-        release_result?;
-        Ok(true)
-    }
-
     pub async fn upsert_chat(&self, upsert: ChatSessionUpsert) -> Result<bool> {
         let session_id = upsert.session_id;
         let grant = self
@@ -484,7 +469,7 @@ pub fn task_session_upsert_event(upsert: TaskSessionUpsert) -> SessionRuntimeEve
         kind: SessionKind::Task,
         status: upsert.status,
         agent: upsert.agent,
-        project: Some(upsert.project),
+        project: upsert.project,
         task_id: Some(upsert.task_id),
         routine: upsert.routine,
         execution_run_id: Some(upsert.execution_run_id),

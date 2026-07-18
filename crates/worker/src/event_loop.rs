@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use dashmap::DashMap;
 use nenjo_eventbus::ReceivedEnvelope;
-use nenjo_events::{Response, StreamEvent};
+use nenjo_events::{Command, Response, StreamEvent};
+use nenjo_harness::local_runtime::FileTaskRuntimeStore;
+use nenjo_harness::{EnqueueOutcome, TaskRuntime};
 use nenjo_secure_envelope::{DecodingError, ReceivedInput, SecureEnvelopeBus};
 use serde_json::json;
 use thiserror::Error;
@@ -13,6 +15,10 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::runtime::WorkerRuntime;
+use crate::task_runtime_adapter::{
+    PendingTaskArtifacts, WorkerTaskExecutor, persist_schedule_cache, task_runtime_responses,
+    task_schedule, task_submission,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RoutedResponse {
@@ -37,7 +43,7 @@ pub struct ResponseSender {
 pub struct ResponseSenderError;
 
 impl ResponseSender {
-    fn for_actor(
+    pub(crate) fn for_actor(
         tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>,
         actor_user_id: Uuid,
     ) -> Self {
@@ -176,7 +182,7 @@ where
 
     let heartbeat_tx = system_response_tx.clone();
     let heartbeat_shutdown = runtime.shutdown_token();
-    let heartbeat_caps = capabilities;
+    let heartbeat_caps = capabilities.clone();
     let seen_message_ids = runtime.seen_message_ids();
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(45));
@@ -309,6 +315,80 @@ where
 
     let loop_shutdown = runtime.shutdown_token();
     let mut command_tasks = JoinSet::new();
+    let (state_dir, max_concurrency, terminal_receipts) = runtime.task_inbox_settings();
+    let task_store = Arc::new(FileTaskRuntimeStore::open(state_dir, terminal_receipts)?);
+    let base_context = runtime.command_context(
+        Uuid::nil(),
+        system_response_tx.clone(),
+        system_response_tx.clone(),
+    );
+    let pending_task_artifacts: PendingTaskArtifacts = Arc::new(DashMap::new());
+    let task_executor = WorkerTaskExecutor {
+        base_context,
+        response_tx: response_tx.clone(),
+        system_response_tx: system_response_tx.clone(),
+        pending_artifacts: pending_task_artifacts.clone(),
+    };
+    let task_runtime = TaskRuntime::new(
+        task_store,
+        move |submission, cancellation| {
+            let task_executor = task_executor.clone();
+            async move { task_executor.execute(submission, cancellation).await }
+        },
+        max_concurrency,
+    );
+    let cron_capable = capabilities.contains(&nenjo_events::Capability::Cron);
+    let schedule_cache_path = runtime.task_schedule_cache_path();
+    let mut cached_schedules = Vec::new();
+    for assignment in runtime.cached_task_schedules() {
+        match runtime.hydrate_task_schedule(assignment).await {
+            Ok(assignment) => cached_schedules.push(assignment),
+            Err(error) => warn!(%error, "Ignoring task schedule that could not be decrypted"),
+        }
+    }
+    persist_schedule_cache(&schedule_cache_path, &cached_schedules)?;
+    if cron_capable {
+        let mut schedules = Vec::new();
+        for assignment in cached_schedules {
+            match task_schedule(assignment) {
+                Ok(schedule) => schedules.push(schedule),
+                Err(error) => warn!(%error, "Ignoring invalid cached task schedule"),
+            }
+        }
+        task_runtime.replace_schedules(schedules).await?;
+    } else {
+        // Schedule snapshots remain in the manifest cache on every worker, but
+        // only a worker holding the exclusive cron capability activates them.
+        task_runtime.replace_schedules(Vec::new()).await?;
+    }
+    let mut task_events = task_runtime.events().await?;
+    let task_event_sender = system_response_tx.clone();
+    let task_artifact_tx = response_tx.clone();
+    let task_event_shutdown = runtime.shutdown_token();
+    let task_event_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = task_events.recv() => match event {
+                    Some(event) => {
+                        let requested_by = event.item.submission.requested_by;
+                        let responses = task_runtime_responses(event, &pending_task_artifacts);
+                        if task_event_sender.send(responses.lifecycle).is_ok()
+                            && let Some(artifacts) = responses.artifacts
+                        {
+                            let _ = ResponseSender::for_actor(
+                                task_artifact_tx.clone(),
+                                requested_by,
+                            )
+                            .send(artifacts);
+                        }
+                    }
+                    None => break,
+                },
+                _ = task_event_shutdown.cancelled() => break,
+            }
+        }
+    });
+    task_runtime.start().await?;
 
     loop {
         let received = tokio::select! {
@@ -352,6 +432,68 @@ where
                     source = ?source,
                     "Received worker command details"
                 );
+                if matches!(&command, Command::TaskExecute { .. }) {
+                    let submission = match task_submission(command, actor_user_id) {
+                        Ok(submission) => submission,
+                        Err(error) => {
+                            ack_received_envelope(ack, message_id, "invalid_task_command");
+                            warn!(%error, %message_id, "Rejecting invalid task command");
+                            continue;
+                        }
+                    };
+                    let task_id = submission.task_id;
+                    let execution_run_id = submission.execution_run_id;
+                    match task_runtime.submit(submission).await {
+                        Ok(
+                            EnqueueOutcome::Inserted(_)
+                            | EnqueueOutcome::Cancelled(_)
+                            | EnqueueOutcome::Duplicate,
+                        ) => {
+                            ack_received_envelope(ack, message_id, "task_inbox_persisted");
+                        }
+                        Err(error) => {
+                            seen_message_ids.remove(&message_id);
+                            warn!(%error, %task_id, %execution_run_id, "Failed to persist task command; leaving delivery unacknowledged");
+                        }
+                    }
+                    continue;
+                }
+                if let Command::TaskSchedulesSync { schedules } = command {
+                    let mut hydrated_assignments = Vec::new();
+                    for assignment in schedules {
+                        match runtime.hydrate_task_schedule(assignment).await {
+                            Ok(assignment) => hydrated_assignments.push(assignment),
+                            Err(error) => {
+                                warn!(%error, "Ignoring task schedule that could not be decrypted");
+                            }
+                        }
+                    }
+                    persist_schedule_cache(&schedule_cache_path, &hydrated_assignments)?;
+                    if cron_capable {
+                        let mut hydrated = Vec::new();
+                        for assignment in hydrated_assignments {
+                            match task_schedule(assignment) {
+                                Ok(schedule) => hydrated.push(schedule),
+                                Err(error) => warn!(%error, "Ignoring invalid task schedule"),
+                            }
+                        }
+                        task_runtime.replace_schedules(hydrated).await?;
+                    }
+                    ack_received_envelope(ack, message_id, "task_schedules_cached");
+                    continue;
+                }
+                if let Command::ExecutionCancel { execution_run_id } = command {
+                    match task_runtime.cancel(execution_run_id).await {
+                        Ok(()) => {
+                            ack_received_envelope(ack, message_id, "task_execution_cancelled");
+                        }
+                        Err(error) => {
+                            seen_message_ids.remove(&message_id);
+                            warn!(%error, %execution_run_id, "Failed to cancel task execution; leaving delivery unacknowledged");
+                        }
+                    }
+                    continue;
+                }
                 ack_received_envelope(ack, message_id, "command");
 
                 let ctx = runtime.command_context(
@@ -401,12 +543,14 @@ where
     }
 
     runtime.cancel_active_executions();
+    task_runtime.shutdown();
     command_tasks.abort_all();
     while let Some(result) = command_tasks.join_next().await {
         log_join_result("command_handler", result);
     }
     heartbeat_handle.abort();
     log_join_result("heartbeat", heartbeat_handle.await);
+    log_join_result("task_lifecycle_bridge", task_event_handle.await);
     drop(response_tx);
     log_join_result("response_publisher", response_handle.await);
     log_join_result("command_receiver", command_handle.await);

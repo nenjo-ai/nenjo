@@ -368,13 +368,10 @@ fn synthetic_vars() -> HashMap<String, String> {
             slug: "validate-package".into(),
             status: "in_progress".into(),
             priority: "medium".into(),
-            task_type: "task".into(),
             title: "Validate package".into(),
-            description: "Synthetic validation task".into(),
-            acceptance_criteria: "All runtime-rendered templates render strictly".into(),
-            tags: "validation,package".into(),
-            source: "nenpm".into(),
-            complexity: "medium".into(),
+            instructions:
+                "Synthetic validation task. All runtime-rendered templates render strictly".into(),
+            labels: "validation,package".into(),
         },
         project: ProjectContext {
             name: "Validation Project".into(),
@@ -429,10 +426,6 @@ fn synthetic_vars() -> HashMap<String, String> {
             work_dir: "/workspace/validation-project".into(),
         },
         chat_message: "Validate this package".into(),
-        heartbeat_instructions: "Run validation heartbeat".into(),
-        heartbeat_previous_output: "Previous heartbeat output".into(),
-        heartbeat_last_run_at: "2025-12-31T00:00:00Z".into(),
-        heartbeat_next_run_at: "2026-01-01T01:00:00Z".into(),
         timestamp: "2026-01-01T00:00:00Z".into(),
         memory_vars: HashMap::from([
             (

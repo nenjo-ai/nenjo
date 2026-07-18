@@ -77,6 +77,15 @@ impl PlatformResourceIdSnapshot {
             .copied()
     }
 
+    /// Return the slug associated with a resource UUID in this snapshot.
+    pub fn slug_for(&self, kind: PlatformResourceKind, id: Uuid) -> Option<Slug> {
+        self.entries.get(kind.as_str()).and_then(|entries| {
+            entries
+                .iter()
+                .find_map(|(slug, entry_id)| (*entry_id == id).then(|| Slug::derive(slug)))
+        })
+    }
+
     pub fn insert_knowledge_document(&mut self, pack: &str, doc: &str, id: Uuid) {
         self.knowledge_documents
             .entry(pack.to_owned())
@@ -173,6 +182,12 @@ impl PlatformResourceIdStore {
 
     pub fn get(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Option<Uuid>> {
         Ok(self.load()?.get(kind, slug))
+    }
+
+    /// Resolve the human-facing slug for a platform UUID when it is present in
+    /// the current bootstrap snapshot.
+    pub fn slug_for(&self, kind: PlatformResourceKind, id: Uuid) -> Result<Option<Slug>> {
+        Ok(self.load()?.slug_for(kind, id))
     }
 
     pub fn upsert_knowledge_document(&self, pack: &Slug, doc: &Slug, id: Uuid) -> Result<()> {
@@ -321,6 +336,23 @@ mod tests {
         assert_eq!(
             store.get(PlatformResourceKind::Routine, &new_slug).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn reverse_lookup_returns_the_manifest_slug() {
+        let dir = TempDir::new().unwrap();
+        let store = PlatformResourceIdStore::new(dir.path());
+        let id = Uuid::new_v4();
+        let slug = Slug::parse("code-generator").unwrap();
+
+        store
+            .upsert(PlatformResourceKind::Agent, &slug, id)
+            .unwrap();
+
+        assert_eq!(
+            store.slug_for(PlatformResourceKind::Agent, id).unwrap(),
+            Some(slug)
         );
     }
 }

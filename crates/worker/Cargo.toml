@@ -53,7 +53,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 # Utilities
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "v5", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
@@ -76,7 +76,7 @@ x25519-dalek = { workspace = true, features = ["static_secrets"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 glob = { workspace = true }
-cron = { workspace = true }
+chrono-tz = { workspace = true }
 nanohtml2text = { workspace = true }
 urlencoding = { workspace = true }
 which = { workspace = true }

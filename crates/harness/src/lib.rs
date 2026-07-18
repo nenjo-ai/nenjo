@@ -1,7 +1,7 @@
 //! Harness for running Nenjo agents.
 //!
-//! `nenjo-harness` wraps an assembled [`Provider`] with session,
-//! transcript, trace, and scheduling services. It is intentionally
+//! `nenjo-harness` wraps an assembled [`Provider`] with session, transcript,
+//! trace, and task runtime services. It is intentionally
 //! usable without the Nenjo platform: hosts provide runtime integrations through
 //! [`HarnessBuilder`], and omitted integrations use no-op defaults.
 //!
@@ -17,10 +17,6 @@
 //!     .task_stream(TaskRequest::new("website", "Title", "Description")
 //!         .with_task_id(task_id)
 //!         .with_routine("daily_maintenance"))
-//!     .await?;
-//!
-//! let mut schedule = harness
-//!     .heartbeat(HeartbeatRequest::new("coder", std::time::Duration::from_secs(300)))
 //!     .await?;
 //! ```
 //!
@@ -75,12 +71,13 @@ pub mod request;
 pub(crate) mod run;
 pub mod session;
 pub(crate) mod state;
+pub mod task_runtime;
+pub mod task_session;
 
 pub mod prelude {
     pub use crate::{
-        ChatRequest, CronRequest, Harness, HarnessBuilder, HarnessError, HarnessEvent,
-        HarnessExecutionHandle, HarnessScheduleEvent, HarnessScheduleHandle, HarnessSessions,
-        HeartbeatRequest, Manifest, ModelProviderFactory, Provider, ProviderBuilder,
+        ChatRequest, Harness, HarnessBuilder, HarnessError, HarnessEvent, HarnessExecutionHandle,
+        HarnessSessions, Manifest, ModelProviderFactory, Provider, ProviderBuilder,
         ProviderRuntime, Result, TaskRequest, ToolFactory, TypedModelProviderFactory,
     };
     pub use nenjo_sessions::{
@@ -88,15 +85,20 @@ pub mod prelude {
     };
 }
 
-pub use events::{HarnessEvent, HarnessScheduleEvent};
-pub use handle::{HarnessExecutionHandle, HarnessScheduleHandle};
+pub use events::HarnessEvent;
+pub use handle::HarnessExecutionHandle;
 #[cfg(feature = "local-runtime")]
 pub use local_runtime::{
     FileCheckpointStore, FileSessionRuntime, FileSessionStore, FileSessionStores, FileTraceStore,
     FileTranscriptStore, SessionRecoveryHandler,
 };
-pub use request::{ChatDomainActivation, ChatRequest, CronRequest, HeartbeatRequest, TaskRequest};
+pub use request::{ChatDomainActivation, ChatRequest, TaskRequest};
 pub use session::HarnessSessions;
+pub use task_runtime::{
+    CancellationOutcome, EnqueueOutcome, TaskContent, TaskExecutionState, TaskExecutionTarget,
+    TaskExecutorOutcome, TaskInboxItem, TaskRuntime, TaskRuntimeEvent, TaskRuntimeStore,
+    TaskSchedule, TaskSubmission, TaskTrigger,
+};
 
 /// Cloneable, thread-safe harness handle.
 ///
@@ -148,16 +150,6 @@ where
     /// Execute a task through the harness and stream harness-native events.
     pub async fn task_stream(&self, request: TaskRequest) -> Result<HarnessExecutionHandle> {
         crate::run::task::task_stream(self, request).await
-    }
-
-    /// Schedule a cron routine through the harness.
-    pub async fn cron(&self, request: CronRequest) -> Result<HarnessScheduleHandle> {
-        crate::run::cron::cron(self, request).await
-    }
-
-    /// Schedule an agent heartbeat through the harness.
-    pub async fn heartbeat(&self, request: HeartbeatRequest) -> Result<HarnessScheduleHandle> {
-        crate::run::heartbeat::heartbeat(self, request).await
     }
 
     /// Load the current provider snapshot.
@@ -277,7 +269,6 @@ mod tests {
                         current_phase: None,
                         active_tool_name: None,
                         worktree: None,
-                        scheduler_runtime: None,
                     },
                 },
             ))

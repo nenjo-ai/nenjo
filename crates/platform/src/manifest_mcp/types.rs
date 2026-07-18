@@ -6,10 +6,10 @@ use nenjo_models::NativeModelToolId;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use nenjo::manifest::{
-    AbilityManifest, AgentHeartbeatManifest, AgentManifest, CommandManifest, ContextBlockManifest,
+    AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, HasManifestSlug, ModelManifest,
     ProjectManifest, PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
-    RoutineMetadata, RoutineStepManifest, RoutineStepType, RoutineTrigger,
+    RoutineMetadata, RoutineStepManifest, RoutineStepType,
 };
 use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 use serde_json::Value;
@@ -44,8 +44,6 @@ pub struct AgentDocument {
     pub abilities: Vec<String>,
     #[serde(default)]
     pub prompt_locked: bool,
-    #[serde(default)]
-    pub heartbeat: Option<AgentHeartbeatManifest>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,17 +75,6 @@ pub struct AgentConfigureAssignments {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Heartbeat patch for `configure_agent`.
-pub struct AgentHeartbeatConfigureDocument {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Request body for configuring an agent in one backend-owned sequence.
 pub struct AgentConfigureDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,8 +89,6 @@ pub struct AgentConfigureDocument {
     pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments: Option<AgentConfigureAssignments>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat: Option<AgentHeartbeatConfigureDocument>,
 }
 
 fn deserialize_optional_slug_field<'de, D>(
@@ -132,7 +117,6 @@ impl From<AgentManifest> for AgentDocument {
             script_tools: agent.script_tools,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
-            heartbeat: agent.heartbeat,
         }
     }
 }
@@ -659,7 +643,6 @@ pub struct RoutineSummary {
     pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
-    pub trigger: RoutineTrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -794,21 +777,9 @@ pub struct RoutineConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<Option<uuid::Uuid>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<RoutineTrigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<i32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Cron task input for `configure_routine`.
-pub struct RoutineCronTaskConfigureDocument {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_criteria: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -826,8 +797,6 @@ pub struct RoutineConfigureDocument {
     pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<RoutineGraphInput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cron_task: Option<RoutineCronTaskConfigureDocument>,
 }
 
 impl RoutineDocument {
@@ -874,7 +843,6 @@ impl From<RoutineManifest> for RoutineDocument {
                 slug,
                 name: routine.name,
                 description: routine.description,
-                trigger: routine.trigger,
             },
             metadata: routine.metadata,
             steps: routine

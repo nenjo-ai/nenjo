@@ -33,6 +33,8 @@ pub mod resource_ids;
 pub mod rest;
 /// Platform scope parsing and implication rules.
 pub mod scope;
+/// Platform-backed task CRUD, dispatch, and execution history tools.
+pub mod task_tools;
 /// Tool implementations for platform manifest and REST operations.
 pub mod tools;
 /// Shared transport types used by the platform bootstrap and write APIs.
@@ -87,4 +89,9 @@ pub use manifest_mcp::{
 pub use policy::ManifestAccessPolicy;
 pub use resource_ids::{PlatformResourceIdSnapshot, PlatformResourceIdStore, PlatformResourceKind};
 pub use scope::{PlatformScope, ScopeAction, ScopeResource};
+pub use task_tools::{
+    ExecutionRunMutationResult, ExecutionRunStatus, ExecutionRunSummary, ExecutionRunTrigger,
+    ExecutionRunsListResult, ScheduledTaskState, TaskConfigureResult, TaskDispatch, TaskDocument,
+    TaskGetResult, TaskPriority, TaskSummary, TaskTarget, TasksListResult,
+};
 pub use types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};

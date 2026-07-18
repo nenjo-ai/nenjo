@@ -28,7 +28,7 @@ pub enum Capability {
     Chat,
     /// Task execution: execute, cancel, pause, resume.
     Task,
-    /// Cron scheduling: enable, disable, trigger.
+    /// Exclusive authority to activate cached task schedules.
     Cron,
     /// Manifest updates: resource created/updated/deleted.
     Manifest,

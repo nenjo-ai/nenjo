@@ -12,8 +12,6 @@ pub enum ExecutionKind {
     Chat,
     PreparingTask,
     Task,
-    Cron,
-    Heartbeat,
 }
 
 /// Tracks an active execution so it can be cancelled or paused.

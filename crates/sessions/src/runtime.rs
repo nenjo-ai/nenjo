@@ -4,10 +4,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    CheckpointQuery, DomainState, ExecutionPhase, ScheduleState, SchedulerRuntimeSnapshot,
-    SessionCheckpoint, SessionKind, SessionLeaseGrant, SessionRecord, SessionRefs, SessionStatus,
-    SessionTranscriptEvent, SessionTranscriptEventPayload, TraceEvent, TranscriptQuery,
-    TranscriptState, WorktreeSnapshot,
+    CheckpointQuery, DomainState, ExecutionPhase, SessionCheckpoint, SessionKind,
+    SessionLeaseGrant, SessionRecord, SessionRefs, SessionStatus, SessionTranscriptEvent,
+    SessionTranscriptEventPayload, TraceEvent, TranscriptQuery, TranscriptState, WorktreeSnapshot,
 };
 
 /// Host-facing session persistence abstraction.
@@ -149,7 +148,6 @@ where
 #[derive(Debug, Clone)]
 pub enum SessionRuntimeEvent {
     SessionUpsert(SessionUpsert),
-    SchedulerUpsert(SchedulerSessionUpsert),
     DomainUpsert(DomainSessionUpsert),
     Transcript(SessionTranscriptRecord),
     TranscriptAppend(SessionTranscriptAppend),
@@ -163,7 +161,6 @@ impl SessionRuntimeEvent {
     pub fn session_id(&self) -> Uuid {
         match self {
             Self::SessionUpsert(event) => event.session_id,
-            Self::SchedulerUpsert(event) => event.session_id,
             Self::DomainUpsert(event) => event.session_id,
             Self::Transcript(event) => event.session_id,
             Self::TranscriptAppend(event) => event.session_id,
@@ -177,7 +174,6 @@ impl SessionRuntimeEvent {
     pub fn event_type(&self) -> SessionRuntimeEventType {
         match self {
             Self::SessionUpsert(_) => SessionRuntimeEventType::SessionUpsert,
-            Self::SchedulerUpsert(_) => SessionRuntimeEventType::SchedulerUpsert,
             Self::DomainUpsert(_) => SessionRuntimeEventType::DomainUpsert,
             Self::Transcript(_) => SessionRuntimeEventType::Transcript,
             Self::TranscriptAppend(_) => SessionRuntimeEventType::TranscriptAppend,
@@ -192,7 +188,6 @@ impl SessionRuntimeEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRuntimeEventType {
     SessionUpsert,
-    SchedulerUpsert,
     DomainUpsert,
     Transcript,
     TranscriptAppend,
@@ -214,8 +209,6 @@ pub struct SessionLeaseRequest {
 pub enum SessionOwnerKind {
     Chat,
     Task,
-    Cron,
-    Heartbeat,
     Domain,
 }
 
@@ -269,7 +262,6 @@ pub struct SessionCheckpointUpdate {
     pub phase: ExecutionPhase,
     pub worktree: Option<WorktreeSnapshot>,
     pub active_tool_name: Option<String>,
-    pub scheduler_runtime: Option<SchedulerRuntimeSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,20 +270,6 @@ pub struct SessionTransition {
     pub worker_id: String,
     pub phase: Option<ExecutionPhase>,
     pub status: SessionStatus,
-}
-
-#[derive(Debug, Clone)]
-pub struct SchedulerSessionUpsert {
-    pub session_id: Uuid,
-    pub kind: SessionKind,
-    pub status: SessionStatus,
-    pub project: Option<String>,
-    pub agent: Option<String>,
-    pub routine: Option<String>,
-    pub worker_id: String,
-    pub memory_namespace: Option<String>,
-    pub scheduler: ScheduleState,
-    pub progress_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,7 +286,7 @@ pub struct ChatSessionUpsert {
 pub struct TaskSessionUpsert {
     pub task_id: Uuid,
     pub status: SessionStatus,
-    pub project: String,
+    pub project: Option<String>,
     pub agent: Option<String>,
     pub routine: Option<String>,
     pub execution_run_id: Uuid,

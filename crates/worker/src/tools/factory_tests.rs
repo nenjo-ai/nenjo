@@ -12,7 +12,7 @@ use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
     AbilityManifest, CommandManifest, ContextBlockManifest, CouncilDelegationStrategy,
     CouncilManifest, DomainManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest,
-    RoutineManifest, RoutineMetadata, RoutineTrigger, SkillManifest,
+    RoutineManifest, RoutineMetadata, SkillManifest,
 };
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_events::{EncryptedPayload, ModelAssignmentBinding};
@@ -75,7 +75,6 @@ fn cached_agent(
             media: Vec::new(),
             abilities: Vec::new(),
             prompt_locked: false,
-            heartbeat: None,
             source_type: None,
             metadata: serde_json::json!({}),
         },
@@ -159,7 +158,6 @@ async fn worker_factory_always_exposes_use_skill_tool() {
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -221,7 +219,6 @@ async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -334,7 +331,6 @@ async fn worker_factory_exposes_agent_native_media_tools() {
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -427,7 +423,6 @@ async fn worker_factory_exposes_assignment_only_transcribe_tool_with_custom_base
         media: Vec::new(), // no legacy media row
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -537,7 +532,6 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -629,7 +623,6 @@ async fn scoped_backend() -> (
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -647,7 +640,6 @@ async fn scoped_backend() -> (
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -770,13 +762,13 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
             "agents:read".into(),
             "agents:write".into(),
             "projects:read".into(),
+            "tasks:read".into(),
         ],
         mcp_servers: vec![],
         script_tools: Vec::new(),
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -794,14 +786,15 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
     assert!(!names.iter().any(|name| name == "delete_agent"));
     assert!(names.iter().any(|name| name == "list_projects"));
     assert!(names.iter().any(|name| name == "get_project"));
-    assert!(names.iter().any(|name| name == "list_project_tasks"));
-    assert!(names.iter().any(|name| name == "get_project_task"));
+    assert!(names.iter().any(|name| name == "list_tasks"));
+    assert!(names.iter().any(|name| name == "get_task"));
+    assert!(names.iter().any(|name| name == "list_task_execution_runs"));
     assert!(
-        names
+        !names
             .iter()
-            .any(|name| name == "list_project_execution_runs")
+            .any(|name| name == "list_active_execution_runs")
     );
-    assert!(names.iter().any(|name| name == "get_project_execution_run"));
+    assert!(names.iter().any(|name| name == "watch_execution_run"));
     assert!(!names.iter().any(|name| name == "list_builtin_docs"));
     assert!(!names.iter().any(|name| name == "list_knowledge_packs"));
     assert!(!names.iter().any(|name| name == "read_knowledge_doc"));
@@ -817,12 +810,41 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
             .iter()
             .any(|name| name == "list_builtin_doc_neighbors")
     );
-    assert!(!names.iter().any(|name| name == "create_project_task"));
-    assert!(!names.iter().any(|name| name == "start_project_execution"));
+    assert!(!names.iter().any(|name| name == "configure_task"));
+    assert!(!names.iter().any(|name| name == "dispatch_task"));
 
     assert!(!names.iter().any(|name| name == "platform_read"));
     assert!(!names.iter().any(|name| name == "platform_write"));
     assert!(!names.iter().any(|name| name == "platform_graph"));
+
+    let task_writer = AgentManifest {
+        platform_scopes: vec!["tasks:write".into()],
+        ..agent.clone()
+    };
+    let tools = factory.create_tools(&task_writer).await;
+    let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+
+    for read_tool in [
+        "list_agents",
+        "get_agent",
+        "list_projects",
+        "get_project",
+        "list_routines",
+        "get_routine",
+    ] {
+        assert!(names.iter().any(|name| name == read_tool));
+    }
+    for write_tool in [
+        "configure_agent",
+        "create_project",
+        "update_project",
+        "delete_project",
+        "configure_routine",
+    ] {
+        assert!(!names.iter().any(|name| name == write_tool));
+    }
+    assert!(names.iter().any(|name| name == "configure_task"));
+    assert!(names.iter().any(|name| name == "dispatch_task"));
 
     let agent_without_project_scope = AgentManifest {
         platform_scopes: vec!["agents:read".into()],
@@ -858,7 +880,7 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
 }
 
 #[tokio::test]
-async fn worker_factory_exposes_project_write_rest_tools_under_project_write_scope() {
+async fn worker_factory_exposes_task_tools_under_task_write_scope() {
     let temp = tempdir().unwrap();
     let root = temp.path();
 
@@ -885,13 +907,12 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
         color: None,
         model: None,
         domains: vec![],
-        platform_scopes: vec!["projects:write".into()],
+        platform_scopes: vec!["tasks:write".into()],
         mcp_servers: vec![],
         script_tools: Vec::new(),
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -899,12 +920,55 @@ async fn worker_factory_exposes_project_write_rest_tools_under_project_write_sco
     let tools = factory.create_tools(&agent).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-    assert!(names.iter().any(|name| name == "create_project_tasks"));
-    assert!(names.iter().any(|name| name == "update_project_task"));
-    assert!(names.iter().any(|name| name == "delete_project_task"));
-    assert!(names.iter().any(|name| name == "start_project_execution"));
-    assert!(names.iter().any(|name| name == "pause_project_execution"));
-    assert!(names.iter().any(|name| name == "resume_project_execution"));
+    assert!(names.iter().any(|name| name == "configure_task"));
+    assert!(!names.iter().any(|name| name == "create_task"));
+    assert!(names.iter().any(|name| name == "delete_task"));
+    assert!(names.iter().any(|name| name == "dispatch_task"));
+    assert!(names.iter().any(|name| name == "cancel_execution_run"));
+    assert!(names.iter().any(|name| name == "retry_execution_run"));
+    assert!(names.iter().any(|name| name == "watch_execution_run"));
+    assert!(!names.iter().any(|name| name == "start_project_execution"));
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_local_execution_watch_without_platform_backend() {
+    let temp = tempdir().unwrap();
+    let config = crate::config::Config {
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        manifests_dir: temp.path().join("manifests"),
+        ..Default::default()
+    };
+    let factory = WorkerToolFactory::new(
+        SecurityPolicy::with_workspace_dir(config.workspace_dir.clone()),
+        NativeRuntime,
+        config,
+        PlatformToolServices::default(),
+        Arc::new(crate::external_mcp::ExternalMcpPool::new()),
+    );
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: Vec::new(),
+        platform_scopes: vec!["tasks:read".into()],
+        mcp_servers: Vec::new(),
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: Vec::new(),
+        prompt_locked: false,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+
+    assert!(names.contains(&"watch_execution_run"));
+    assert!(!names.contains(&"list_tasks"));
 }
 
 #[tokio::test]
@@ -941,7 +1005,6 @@ async fn worker_factory_exposes_notification_tools_under_notify_scopes() {
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -1023,7 +1086,6 @@ async fn worker_factory_resolves_registered_notification_emitter_from_context() 
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -1196,7 +1258,6 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         media: Vec::new(),
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     };
@@ -1255,7 +1316,6 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         name: "Package Routine".into(),
         slug: Slug::derive("package-routine"),
         description: None,
-        trigger: RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![],
         edges: vec![],

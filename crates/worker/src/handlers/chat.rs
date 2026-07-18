@@ -301,7 +301,7 @@ where
     S: ResponseSender + Clone + 'static,
 {
     let ChatCommandRequest {
-        message_id: _,
+        message_id,
         content,
         project,
         agent,
@@ -313,6 +313,10 @@ where
         template_override,
         hook_scopes,
     } = request;
+    let input_message_id = message_id
+        .map(Uuid::parse_str)
+        .transpose()
+        .context("chat message id must be a UUID")?;
 
     let command_template = if template_override.is_none() {
         load_matching_command_template(harness, content).await?
@@ -335,6 +339,7 @@ where
             harness,
             ctx,
             CouncilChatAdapterRequest {
+                input_message_id,
                 content,
                 project,
                 council: target.context("No council target provided for chat")?,
@@ -356,6 +361,9 @@ where
     let agent_id = resolver.agent_id(&agent_slug)?;
     let mut chat = ChatRequest::new(agent_slug.clone(), effective_content.to_string())
         .with_session(session_id);
+    if let Some(input_message_id) = input_message_id {
+        chat = chat.with_input_message_id(input_message_id);
+    }
     if let Some(template_override) = template_override {
         chat = chat.with_template_override(template_override);
     }
@@ -409,6 +417,7 @@ where
         payload: StreamEvent::RunStarted {
             run_id: run_id.clone(),
             session_id: session_id.to_string(),
+            input_message_id,
             parent_run_id: None,
             agent_id: Some(agent_slug.to_string()),
             agent_name: Some(aname.clone()),
@@ -460,7 +469,8 @@ where
                 event: ev,
                 ..
             } => {
-                for se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
+                for mut se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
+                    bind_chat_response_context(&mut se, &run_id, input_message_id);
                     let buffered_events =
                         assistant_delta_buffer.push(event_session_id, se, Instant::now());
                     send_chat_stream_events(&ctx.response_sink, buffered_events, &aname);
@@ -490,6 +500,58 @@ where
         "Chat stream output completed"
     );
     Ok(())
+}
+
+fn bind_chat_response_context(
+    event: &mut StreamEvent,
+    run_id: &str,
+    input_message_id: Option<Uuid>,
+) {
+    match event {
+        StreamEvent::Done {
+            run_id: event_run_id,
+            input_message_id: event_input_message_id,
+            ..
+        } => {
+            *event_run_id = Some(run_id.to_string());
+            *event_input_message_id = input_message_id;
+        }
+        StreamEvent::AssistantResponse { payload, .. } => {
+            let Some(payload) = payload.as_mut().and_then(serde_json::Value::as_object_mut) else {
+                return;
+            };
+            payload.insert(
+                "message_id".to_string(),
+                serde_json::Value::String(Uuid::new_v4().to_string()),
+            );
+            if let Some(input_message_id) = input_message_id {
+                payload.insert(
+                    "input_message_id".to_string(),
+                    serde_json::Value::String(input_message_id.to_string()),
+                );
+            }
+        }
+        StreamEvent::RunStarted { .. }
+        | StreamEvent::RunCompleted { .. }
+        | StreamEvent::RunFailed { .. }
+        | StreamEvent::RunCancelled { .. }
+        | StreamEvent::ModelRequestStarted { .. }
+        | StreamEvent::AssistantTextDelta { .. }
+        | StreamEvent::ModelRequestCompleted { .. }
+        | StreamEvent::ToolCallStarted { .. }
+        | StreamEvent::ToolOutputDelta { .. }
+        | StreamEvent::ToolCallCompleted { .. }
+        | StreamEvent::HookStarted { .. }
+        | StreamEvent::HookCompleted { .. }
+        | StreamEvent::AsyncOperationEvent { .. }
+        | StreamEvent::AsyncOperationTranscript { .. }
+        | StreamEvent::Error { .. }
+        | StreamEvent::DomainEntered { .. }
+        | StreamEvent::DomainExited { .. }
+        | StreamEvent::MessageCompacted { .. }
+        | StreamEvent::Paused
+        | StreamEvent::Resumed => {}
+    }
 }
 
 fn send_chat_stream_events<S>(response_sink: &S, events: Vec<(Uuid, StreamEvent)>, agent_name: &str)
@@ -705,6 +767,7 @@ fn relative_manifest_path<'a>(raw_path: &'a str, label: &str) -> Result<&'a Path
 }
 
 struct CouncilChatAdapterRequest<'a> {
+    input_message_id: Option<Uuid>,
     content: &'a str,
     project: Option<&'a str>,
     council: &'a str,
@@ -749,6 +812,8 @@ where
     ctx.response_sink.send(Response::AgentResponse {
         session_id: Some(request.session_id),
         payload: StreamEvent::Done {
+            run_id: None,
+            input_message_id: request.input_message_id,
             payload: Some(payload),
             encrypted_payload: None,
             total_input_tokens: result.input_tokens,
@@ -1068,6 +1133,36 @@ mod tests {
     }
 
     #[test]
+    fn assistant_progress_response_gets_durable_chat_identity() {
+        let input_message_id = Uuid::new_v4();
+        let mut event = StreamEvent::AssistantResponse {
+            run_id: "run-1".to_string(),
+            payload: Some(serde_json::json!({
+                "message": "Still working",
+                "status": "in_progress",
+            })),
+            encrypted_payload: None,
+        };
+
+        bind_chat_response_context(&mut event, "run-1", Some(input_message_id));
+
+        let StreamEvent::AssistantResponse {
+            payload: Some(payload),
+            ..
+        } = event
+        else {
+            panic!("expected assistant response payload");
+        };
+        assert_eq!(payload["input_message_id"], input_message_id.to_string());
+        assert!(
+            payload["message_id"]
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn package_command_template_strips_frontmatter_and_expands_arguments() {
         let command = CommandManifest {
             name: "ralph-loop".to_string(),
@@ -1228,12 +1323,14 @@ Original user message: {{ chat.message }}
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
         };
+        let input_message_id = Uuid::new_v4();
+        let input_message_id_text = input_message_id.to_string();
 
         harness
             .handle_chat_command(
                 &ctx,
                 ChatSlashCommandRequest {
-                    message_id: None,
+                    message_id: Some(&input_message_id_text),
                     command: "/ralph-loop",
                     content: "/ralph-loop copy the demo repo",
                     project: Some("demo-project"),
@@ -1249,6 +1346,32 @@ Original user message: {{ chat.message }}
             .unwrap();
 
         let responses = response_sink.responses.lock().unwrap().clone();
+        let run_id = responses
+            .iter()
+            .find_map(|response| match response {
+                Response::AgentResponse {
+                    payload:
+                        StreamEvent::RunStarted {
+                            run_id,
+                            input_message_id: Some(event_input_message_id),
+                            ..
+                        },
+                    ..
+                } if *event_input_message_id == input_message_id => Some(run_id.clone()),
+                _ => None,
+            })
+            .expect("chat run should retain its input message identity");
+        assert!(responses.iter().any(|response| matches!(
+            response,
+            Response::AgentResponse {
+                payload: StreamEvent::Done {
+                    run_id: Some(done_run_id),
+                    input_message_id: Some(done_input_message_id),
+                    ..
+                },
+                ..
+            } if done_run_id == &run_id && *done_input_message_id == input_message_id
+        )));
         assert_eq!(
             count_hook_events(&responses, HookStreamKind::Started, "Stop", "command"),
             1,
@@ -1419,7 +1542,7 @@ Original user message: {{ chat.message }}
             config,
             PlatformToolServices {
                 manifest_backend: None,
-                project_backend: None,
+                task_backend: None,
                 ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
@@ -1653,7 +1776,7 @@ Original user message: {{ chat.message }}
             config,
             PlatformToolServices {
                 manifest_backend: None,
-                project_backend: None,
+                task_backend: None,
                 ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
@@ -1822,7 +1945,7 @@ Original user message: {{ chat.message }}
             config,
             PlatformToolServices {
                 manifest_backend: None,
-                project_backend: None,
+                task_backend: None,
                 ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
@@ -2022,7 +2145,7 @@ Original user message: {{ chat.message }}
             config,
             PlatformToolServices {
                 manifest_backend: None,
-                project_backend: None,
+                task_backend: None,
                 ..Default::default()
             },
             Arc::new(ExternalMcpPool::new()),
@@ -2193,7 +2316,7 @@ Original user message: {{ chat.message }}
             config,
             PlatformToolServices {
                 manifest_backend: None,
-                project_backend: None,
+                task_backend: None,
                 ..Default::default()
             },
             external_mcp,
@@ -2672,7 +2795,6 @@ Original user message: {{ chat.message }}
                 media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
-                heartbeat: None,
                 source_type: None,
                 metadata: serde_json::json!({}),
             }],
@@ -2754,7 +2876,6 @@ Original user message: {{ chat.message }}
                 media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
-                heartbeat: None,
                 source_type: None,
                 metadata: serde_json::json!({}),
             }],

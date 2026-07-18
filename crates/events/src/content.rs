@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::TaskScheduleDefinition;
+
+/// The single agent or routine target selected for task execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "slug", rename_all = "snake_case")]
+pub enum TaskExecutionTarget {
+    Agent(String),
+    Routine(String),
+}
+
 /// Encrypted content payload exchanged between the platform and trusted endpoints.
 ///
 /// The ciphertext is bound to the object identity via AEAD associated data
@@ -18,49 +28,94 @@ pub struct EncryptedPayload {
     pub ciphertext: String,
 }
 
-/// Content-bearing task execution fields carried in `task.execute`.
+/// Content-bearing task fields carried in `task.execute`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskExecuteContent {
     pub title: String,
+    /// Decrypted task instructions available after secure-envelope decoding.
+    /// Command producers must place this value in [`TaskEncryptedContent`], not
+    /// in the plaintext `task.execute.payload` object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_criteria: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
+    pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub complexity: Option<String>,
 }
 
-/// Content-bearing cron task fields carried in encrypted `cron.*` commands.
+/// One task schedule distributed to every worker as control-plane state.
+///
+/// All workers cache assignments, but only a worker with the exclusive `cron`
+/// capability materializes occurrences from them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CronTaskContent {
-    pub title: String,
+pub struct TaskScheduleAssignment {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub authorized_by_user_id: Uuid,
+    pub definition: TaskScheduleDefinition,
+    #[serde(default)]
+    pub occurrence_count: u32,
+    pub next_run_at: String,
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub project: Option<String>,
+    pub target: TaskExecutionTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_criteria: Option<String>,
+    pub payload: Option<TaskExecuteContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_payload: Option<EncryptedPayload>,
+    #[serde(default)]
+    pub runnable: bool,
+    pub updated_at: String,
 }
 
-/// Agent heartbeat instruction content carried in encrypted heartbeat commands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatInstructionsContent {
-    pub instructions: String,
-}
-
-/// Encrypted task content fields stored outside the plaintext task row.
+/// Normalized encrypted task content stored outside the plaintext task row.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskEncryptedContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_criteria: Option<String>,
+    pub instructions: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskEncryptedContent, TaskExecuteContent};
+
+    #[test]
+    fn task_execute_content_round_trips() {
+        let content: TaskExecuteContent = serde_json::from_value(serde_json::json!({
+            "title": "Current",
+            "instructions": "current instructions",
+            "labels": ["bug"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            content.instructions.as_deref(),
+            Some("current instructions")
+        );
+        assert_eq!(content.labels, ["bug"]);
+        let serialized = serde_json::to_value(content).unwrap();
+        assert_eq!(serialized["instructions"], "current instructions");
+        assert_eq!(serialized["labels"], serde_json::json!(["bug"]));
+    }
+
+    #[test]
+    fn encrypted_task_content_round_trips() {
+        let content: TaskEncryptedContent = serde_json::from_value(serde_json::json!({
+            "instructions": "new"
+        }))
+        .unwrap();
+
+        assert_eq!(content.instructions.as_deref(), Some("new"));
+        assert_eq!(
+            serde_json::to_value(content).unwrap(),
+            serde_json::json!({
+                "instructions": "new"
+            })
+        );
+    }
 }

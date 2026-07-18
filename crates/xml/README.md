@@ -181,7 +181,7 @@ The template engine uses [MiniJinja](https://docs.rs/minijinja) (Jinja2-compatib
 
 | Namespace | Variables |
 |-----------|-----------|
-| `task.*` | `id`, `title`, `description`, `acceptance_criteria`, `tags`, `source`, `status`, `priority`, `type`, `slug`, `complexity` |
+| `task.*` | `id`, `title`, `description`, `labels`, `status`, `priority`, `slug` |
 | `agent.*` | `id`, `name`, `model`, `description` |
 | `project.*` | `id`, `name`, `description`, `working_dir`, `metadata` |
 | `routine.*` | `name`, `step` |

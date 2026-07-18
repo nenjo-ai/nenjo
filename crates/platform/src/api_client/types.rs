@@ -41,23 +41,6 @@ pub struct ApiErrorDetail {
     pub details: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActiveCronRoutineState {
-    pub routine: nenjo::Slug,
-    pub project: Option<nenjo::Slug>,
-    pub schedule: String,
-    pub last_run_at: Option<String>,
-    pub next_run_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ActiveAgentHeartbeatState {
-    pub agent: nenjo::Slug,
-    pub interval: String,
-    pub last_run_at: Option<String>,
-    pub next_run_at: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerEnrollmentRequest {
     pub api_key_id: Uuid,

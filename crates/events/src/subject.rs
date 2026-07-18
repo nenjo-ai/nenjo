@@ -89,13 +89,11 @@ pub fn response_subject(org_id: Uuid, user_id: Uuid, response: &Response) -> Str
     match response {
         Response::WorkerHeartbeat { .. }
         | Response::WorkerRegistered { .. }
-        | Response::RepoSyncComplete { .. } => response_org_subject(org_id),
+        | Response::RepoSyncComplete { .. }
+        | Response::TaskExecutionState { .. } => response_org_subject(org_id),
         Response::ExecutionEvent {
             execution_run_id, ..
         } => format!("streams.execution.{org_id}.{execution_run_id}"),
-        Response::ExecutionStarted { id, .. } | Response::ExecutionCompleted { id, .. } => {
-            execution_stream_subject(org_id, *id)
-        }
         Response::AgentResponse {
             session_id: Some(session_id),
             ..
@@ -292,13 +290,11 @@ mod tests {
                 &Response::ExecutionEvent {
                     execution_run_id: execution_run_id.to_string(),
                     task_id: None,
-                    event: crate::ExecutionEventPayload::TaskCompleted(
-                        crate::ExecutionTaskCompletedEvent {
-                            success: true,
-                            error: None,
-                            merge_error: None,
+                    event: crate::ExecutionEventPayload::TaskArtifacts(
+                        crate::ExecutionTaskArtifactsEvent {
                             total_input_tokens: 0,
                             total_output_tokens: 0,
+                            attachments: Vec::new(),
                         },
                     ),
                 },

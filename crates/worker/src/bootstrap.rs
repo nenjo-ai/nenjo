@@ -29,7 +29,7 @@ use nenjo_events::{
     Capability, EncryptedPayload, ManifestResourcePayload, ModelAssignmentBinding,
     ModelAssignmentsManifestUpdate, ModelCapabilityDefaultBinding,
     ModelCapabilityDefaultsManifestUpdate, PackageArgumentBindingUpdate, ResourceAction,
-    ResourceType,
+    ResourceType, TaskScheduleAssignment,
 };
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_platform::manifest_contract::ModelRecord;
@@ -78,6 +78,8 @@ struct BootstrapManifestResponse {
     #[serde(default)]
     context_blocks: Vec<BootstrapContextBlockManifest>,
     #[serde(default)]
+    task_schedules: Vec<TaskScheduleAssignment>,
+    #[serde(default)]
     nats: BootstrapNatsConfig,
     #[serde(default)]
     packages: Option<BootstrapPackages>,
@@ -91,6 +93,7 @@ struct HydratedBootstrap {
     cached_models: Vec<CachedModelManifest>,
     cached_agents: Vec<CachedAgentManifest>,
     capability_defaults: Vec<ModelCapabilityDefaultBinding>,
+    task_schedules: Vec<TaskScheduleAssignment>,
     nats: BootstrapNatsConfig,
     packages: Option<BootstrapPackages>,
 }
@@ -268,8 +271,6 @@ struct BootstrapAgentManifest {
     #[serde(default)]
     metadata: serde_json::Value,
     #[serde(default)]
-    heartbeat: Option<nenjo::manifest::AgentHeartbeatManifest>,
-    #[serde(default)]
     encrypted_payload: Option<EncryptedPayload>,
 }
 
@@ -327,12 +328,11 @@ struct BootstrapProjectManifest {
 
 #[derive(Debug, Deserialize)]
 struct BootstrapRoutineManifest {
+    id: Uuid,
     name: String,
     #[serde(default)]
     slug: Option<Slug>,
     description: Option<String>,
-    #[serde(default)]
-    trigger: nenjo::manifest::RoutineTrigger,
     #[serde(default)]
     metadata: nenjo::manifest::RoutineMetadata,
     #[serde(default)]
@@ -568,6 +568,7 @@ async fn sync_bootstrap_manifest(
     atomic_write_json(manifests_dir, "routines.json", &manifest.routines)?;
     atomic_write_json(manifests_dir, "models.json", &data.cached_models)?;
     atomic_write_json(manifests_dir, "agents.json", &data.cached_agents)?;
+    atomic_write_json(manifests_dir, "task_schedules.json", &data.task_schedules)?;
     remove_legacy_model_cache_files(manifests_dir)?;
     atomic_write_json(manifests_dir, "councils.json", &manifest.councils)?;
     atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)?;
@@ -645,7 +646,6 @@ async fn hydrate_bootstrap_manifest(
             media: agent.media,
             abilities: agent.abilities,
             prompt_locked: agent.prompt_locked,
-            heartbeat: agent.heartbeat,
             source_type: agent.source_type,
             metadata: agent.metadata,
         };
@@ -730,11 +730,15 @@ async fn hydrate_bootstrap_manifest(
         projects.push(project_manifest);
     }
 
-    let routines = bootstrap
-        .routines
-        .into_iter()
-        .map(bootstrap_routine_manifest)
-        .collect();
+    let routines = hydrate_bootstrap_routines(bootstrap.routines, &mut resource_ids);
+    let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
+        .context("Failed to load worker auth provider for task schedule hydration")?;
+    let mut task_schedules = Vec::with_capacity(bootstrap.task_schedules.len());
+    for schedule in bootstrap.task_schedules {
+        task_schedules.push(
+            crate::task_runtime_adapter::hydrate_task_schedule(&auth_provider, schedule).await?,
+        );
+    }
 
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
@@ -759,6 +763,7 @@ async fn hydrate_bootstrap_manifest(
         cached_models,
         cached_agents,
         capability_defaults: bootstrap.capability_defaults,
+        task_schedules,
         nats: bootstrap.nats,
         packages: bootstrap.packages,
     })
@@ -974,6 +979,11 @@ pub fn load_cached_capability_defaults(manifests_dir: &Path) -> Vec<ModelCapabil
     load_cached_json_vec(manifests_dir, "capability_defaults.json")
 }
 
+/// Load the complete task schedule list cached during worker bootstrap/sync.
+pub fn load_cached_task_schedules(manifests_dir: &Path) -> Vec<TaskScheduleAssignment> {
+    load_cached_json_vec(manifests_dir, "task_schedules.json")
+}
+
 fn load_cached_json_vec<T>(manifests_dir: &Path, filename: &str) -> Vec<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -1063,7 +1073,6 @@ fn bootstrap_routine_manifest(
         name: routine.name,
         slug: routine_slug.clone(),
         description: routine.description,
-        trigger: routine.trigger,
         metadata: routine.metadata,
         steps: routine
             .steps
@@ -1091,6 +1100,21 @@ fn bootstrap_routine_manifest(
             })
             .collect(),
     }
+}
+
+fn hydrate_bootstrap_routines(
+    routines: Vec<BootstrapRoutineManifest>,
+    resource_ids: &mut PlatformResourceIdSnapshot,
+) -> Vec<nenjo::manifest::RoutineManifest> {
+    routines
+        .into_iter()
+        .map(|routine| {
+            let routine_id = routine.id;
+            let manifest = bootstrap_routine_manifest(routine);
+            resource_ids.insert(PlatformResourceKind::Routine, &manifest.slug, routine_id);
+            manifest
+        })
+        .collect()
 }
 
 pub struct WorkerManifestCache {
@@ -2205,6 +2229,26 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_routines_populate_the_slug_to_id_snapshot() {
+        let routine_id = Uuid::from_u128(42);
+        let routine: BootstrapRoutineManifest = serde_json::from_value(serde_json::json!({
+            "id": routine_id,
+            "name": "Code generation pipeline",
+            "slug": "code-generation-pipeline"
+        }))
+        .unwrap();
+        let mut resource_ids = PlatformResourceIdSnapshot::default();
+
+        let manifests = hydrate_bootstrap_routines(vec![routine], &mut resource_ids);
+
+        assert_eq!(manifests[0].slug.as_str(), "code-generation-pipeline");
+        assert_eq!(
+            resource_ids.get(PlatformResourceKind::Routine, &manifests[0].slug),
+            Some(routine_id)
+        );
+    }
+
+    #[test]
     fn bootstrap_agent_assignments_deserialize_with_configured_model_ids() {
         let assignment_id = Uuid::from_u128(1);
         let model_id = Uuid::from_u128(2);
@@ -2564,7 +2608,6 @@ mod tests {
                 media: Vec::new(),
                 abilities: Vec::new(),
                 prompt_locked: false,
-                heartbeat: None,
                 source_type: None,
                 metadata: serde_json::json!({}),
             },

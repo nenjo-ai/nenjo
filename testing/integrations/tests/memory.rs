@@ -62,7 +62,6 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
                 chat_task: "{{ chat.message }}".into(),
                 task_execution: String::new(),
                 gate_eval: String::new(),
-                ..Default::default()
             },
             ..Default::default()
         },
@@ -75,7 +74,6 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         script_tools: vec![],
         media: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     }

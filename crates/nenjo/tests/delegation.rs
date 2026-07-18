@@ -42,7 +42,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
                 task_execution: "Execute: {{ task.title }}".into(),
                 chat_task: "{{ chat.message }}".into(),
                 gate_eval: String::new(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -55,7 +54,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     }
@@ -249,12 +247,10 @@ impl ModelProvider for SubAgentScriptLlm {
                             "slug": "security_review",
                             "prompt": "Act as a focused security review worker. Be concise.",
                             "task": {
-                                "description": "Review auth/session changes.",
-                                "goal": "Identify security issues in the changed auth/session behavior.",
-                                "acceptance_criteria": [
-                                    "Check for privilege escalation risk.",
-                                    "Return a structured result with confidence."
-                                ]
+                                "title": "Identify security issues in the changed auth/session behavior.",
+                                "instructions": "Review auth/session changes. Check for privilege escalation risk and return a structured result with confidence.",
+                                "labels": ["security"],
+                                "priority": "high"
                             },
                             "context": {"files": ["crates/auth/src/session.rs"]},
                             "result_format": {
@@ -664,9 +660,8 @@ impl ModelProvider for AbortObservedLlm {
                                 "agent": "reviewer",
                                 "slug": "blocked_review",
                                 "task": {
-                                    "description": "Wait until cancelled.",
-                                    "goal": "Exercise cancellation.",
-                                    "acceptance_criteria": ["Start child execution."]
+                                    "title": "Exercise cancellation.",
+                                    "instructions": "Wait until cancelled after starting child execution."
                                 }
                             }]
                         })
@@ -989,7 +984,8 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
     let child_task_seen = child_messages.iter().any(|message| {
         message.contains("Return your final answer as a single JSON object")
             && message.contains("confidence")
-            && message.contains("Acceptance criteria and output instructions:")
+            && message.contains("Output format:")
+            && message.contains("Identify security issues in the changed auth/session behavior.")
     });
     assert!(
         child_prompt_seen,

@@ -23,11 +23,11 @@ resource_manifest_v1!(PluginManifestV1);
 resource_manifest_v1!(McpServerManifestV1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineManifestV1 {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub trigger: RoutineTriggerV1,
     #[serde(default)]
     pub metadata: Map<String, serde_json::Value>,
     #[serde(default)]
@@ -36,51 +36,6 @@ pub struct RoutineManifestV1 {
     pub steps: Vec<RoutineStepManifestV1>,
     #[serde(default)]
     pub edges: Vec<RoutineEdgeManifestV1>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RoutineTriggerV1 {
-    Kind(String),
-    Config(RoutineTriggerConfigV1),
-}
-
-impl RoutineTriggerV1 {
-    pub fn kind(&self) -> &str {
-        match self {
-            Self::Kind(kind) => kind,
-            Self::Config(config) => config.kind.as_str(),
-        }
-    }
-
-    pub fn metadata(&self) -> Map<String, serde_json::Value> {
-        let mut metadata = Map::new();
-        if let Self::Config(config) = self {
-            if let Some(schedule) = &config.schedule {
-                metadata.insert(
-                    "schedule".to_string(),
-                    serde_json::Value::String(schedule.clone()),
-                );
-            }
-            if let Some(timezone) = &config.timezone {
-                metadata.insert(
-                    "timezone".to_string(),
-                    serde_json::Value::String(timezone.clone()),
-                );
-            }
-        }
-        metadata
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutineTriggerConfigV1 {
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(default)]
-    pub schedule: Option<String>,
-    #[serde(default)]
-    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,11 +146,6 @@ mod tests {
         let value = serde_json::json!({
             "name": "review_resource_design",
             "description": "Review a proposed resource.",
-            "trigger": {
-                "type": "cron",
-                "schedule": "0 9 * * 1-5",
-                "timezone": "America/Chicago"
-            },
             "entry_steps": ["review"],
             "steps": [
                 {
@@ -225,15 +175,16 @@ mod tests {
             panic!("expected routine manifest");
         };
         assert_eq!(routine.name, "review_resource_design");
-        assert_eq!(routine.trigger.kind(), "cron");
-        assert_eq!(
-            routine
-                .trigger
-                .metadata()
-                .get("timezone")
-                .and_then(|v| v.as_str()),
-            Some("America/Chicago")
-        );
         assert_eq!(routine.edges[0].max_attempts, Some(3));
+    }
+
+    #[test]
+    fn rejects_removed_routine_trigger_field() {
+        let value = serde_json::json!({
+            "name": "scheduled_routine",
+            "trigger": "cron"
+        });
+        let error = parse_resource_manifest("nenjo.routine.v1", value).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `trigger`"));
     }
 }

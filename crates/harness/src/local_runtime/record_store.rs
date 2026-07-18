@@ -150,7 +150,6 @@ mod tests {
                 memory_namespace: Some("agent_test_core".to_string()),
             },
             lease: Default::default(),
-            scheduler: None,
             domain: None,
             summary: SessionSummary::default(),
             metadata: serde_json::Value::Null,

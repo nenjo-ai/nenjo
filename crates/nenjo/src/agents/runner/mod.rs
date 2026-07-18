@@ -538,7 +538,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             AgentRunKind::Chat { .. } => "chat",
             AgentRunKind::FollowUp { .. } => "follow_up",
             AgentRunKind::Task(_) => "task",
-            AgentRunKind::Heartbeat { .. } => "heartbeat",
             AgentRunKind::Gate { .. } => "gate",
         };
         let domain_label = inst
@@ -634,13 +633,12 @@ fn raw_user_message(run: &AgentRun) -> String {
         AgentRunKind::Chat(chat) => chat.message.clone(),
         AgentRunKind::FollowUp(follow_up) => follow_up.message.clone(),
         AgentRunKind::Task(task) => {
-            if task.description.is_empty() {
+            if task.instructions.is_empty() {
                 task.title.clone()
             } else {
-                task.description.clone()
+                task.instructions.clone()
             }
         }
-        AgentRunKind::Heartbeat(_) => String::new(),
         AgentRunKind::Gate(gate) => gate.previous_result.output.clone(),
     }
 }

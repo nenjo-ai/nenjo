@@ -127,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn configure_routine_schema_has_no_trigger_field() {
+        let tools = all_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "configure_routine")
+            .expect("missing configure_routine");
+        let metadata_properties = &tool.parameters["properties"]["metadata"]["properties"];
+
+        assert!(metadata_properties.get("trigger").is_none());
+    }
+
+    #[test]
     fn configure_routine_schema_exposes_step_instructions_config() {
         let tools = all_tools();
         let tool = tools

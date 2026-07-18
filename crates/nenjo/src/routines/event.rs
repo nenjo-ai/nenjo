@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::Slug;
 use crate::agents::runner::types::TurnEvent;
-use crate::routines::StepResult;
+use crate::routines::{RoutineHandoff, StepResult};
 
 /// Events emitted during routine execution.
 #[derive(Debug, Clone)]
@@ -61,21 +61,7 @@ pub enum RoutineEvent {
         task_id: Option<Uuid>,
         /// Final routine result.
         result: StepResult,
-    },
-    /// A cron cycle is starting.
-    CronCycleStarted {
-        /// One-based cron cycle number.
-        cycle: u32,
-    },
-    /// A cron cycle completed with a result.
-    CronCycleCompleted {
-        /// One-based cron cycle number.
-        cycle: u32,
-        /// Final result for the cycle.
-        result: StepResult,
-        /// Total input tokens across all steps in this cycle.
-        total_input_tokens: u64,
-        /// Total output tokens across all steps in this cycle.
-        total_output_tokens: u64,
+        /// Every activated incoming edge that reached a successful terminal step.
+        handoffs: Vec<RoutineHandoff>,
     },
 }

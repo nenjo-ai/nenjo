@@ -67,6 +67,10 @@ pub struct Config {
     #[serde(default)]
     pub sessions: SessionConfig,
 
+    /// Unified durable queue for manual and scheduled task executions.
+    #[serde(default)]
+    pub task_inbox: TaskInboxConfig,
+
     #[serde(default)]
     pub web: WebConfig,
 
@@ -290,6 +294,34 @@ pub struct SessionConfig {
     /// Run periodic cleanup every N hours. Set to 0 to disable periodic cleanup.
     #[serde(default = "default_session_cleanup_interval_hours")]
     pub cleanup_interval_hours: u64,
+}
+
+/// Worker-local task queue and concurrency controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskInboxConfig {
+    /// Maximum manual and scheduled task executions running at once.
+    #[serde(default = "default_task_inbox_concurrency")]
+    pub max_concurrency: usize,
+    /// Terminal inbox receipts retained for restart idempotency.
+    #[serde(default = "default_task_inbox_terminal_receipts")]
+    pub terminal_receipts: usize,
+}
+
+fn default_task_inbox_concurrency() -> usize {
+    5
+}
+
+fn default_task_inbox_terminal_receipts() -> usize {
+    1_000
+}
+
+impl Default for TaskInboxConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_task_inbox_concurrency(),
+            terminal_receipts: default_task_inbox_terminal_receipts(),
+        }
+    }
 }
 
 fn default_session_retention_days() -> u64 {
@@ -812,6 +844,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             memory: MemoryConfig::default(),
             sessions: SessionConfig::default(),
+            task_inbox: TaskInboxConfig::default(),
             web: WebConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),

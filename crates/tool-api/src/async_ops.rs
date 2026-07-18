@@ -20,6 +20,7 @@ pub enum AsyncOperationKind {
     SubAgent,
     Shell,
     Media,
+    TaskExecution,
 }
 
 impl AsyncOperationKind {
@@ -30,6 +31,7 @@ impl AsyncOperationKind {
             Self::SubAgent => "sub_agent",
             Self::Shell => "shell",
             Self::Media => "media",
+            Self::TaskExecution => "task_execution",
         }
     }
 }
@@ -179,7 +181,7 @@ pub fn send_operation_input_parameters_schema() -> serde_json::Value {
 pub fn operation_kind_schema() -> serde_json::Value {
     json!({
         "type": "string",
-        "enum": ["ability", "delegation", "sub_agent", "shell", "media"]
+        "enum": ["ability", "delegation", "sub_agent", "shell", "media", "task_execution"]
     })
 }
 
@@ -260,6 +262,7 @@ mod tests {
         assert_eq!(AsyncOperationKind::SubAgent.as_str(), "sub_agent");
         assert_eq!(AsyncOperationKind::Shell.as_str(), "shell");
         assert_eq!(AsyncOperationKind::Media.as_str(), "media");
+        assert_eq!(AsyncOperationKind::TaskExecution.as_str(), "task_execution");
     }
 
     #[test]

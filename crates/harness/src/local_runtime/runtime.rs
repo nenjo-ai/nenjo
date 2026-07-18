@@ -3,15 +3,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use dashmap::DashMap;
 use nenjo_sessions::{
-    CheckpointQuery, CheckpointStore, DomainSessionUpsert, SchedulerSessionUpsert,
-    SessionCheckpoint, SessionCheckpointUpdate, SessionKind, SessionLease, SessionLeaseGrant,
-    SessionLeaseRequest, SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent,
-    SessionStatus, SessionStore, SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent,
-    SessionTransition, SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery,
-    TranscriptStore,
+    CheckpointQuery, CheckpointStore, DomainSessionUpsert, SessionCheckpoint,
+    SessionCheckpointUpdate, SessionKind, SessionLease, SessionLeaseGrant, SessionLeaseRequest,
+    SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
+    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
+    SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery, TranscriptStore,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
@@ -24,22 +23,12 @@ use super::lease_store::SessionLeaseStore;
 /// Restores durable local sessions that were active when a process stopped.
 ///
 /// `FileSessionRuntime` calls this hook during recovery for session kinds that
-/// require host integration, such as domain runners, cron schedules, and agent
-/// heartbeats. Embedded users can keep the default no-op methods when they only
-/// need persisted records/transcripts/traces.
+/// require host integration, such as domain runners. Embedded users can keep
+/// the default no-op method when they only need persisted records, transcripts,
+/// and traces.
 pub trait SessionRecoveryHandler: Send + Sync {
     /// Recreate an in-memory domain session from a persisted domain record.
     async fn restore_domain_session(&self, _request: DomainSessionRecovery) -> Result<()> {
-        Ok(())
-    }
-
-    /// Re-register a persisted cron schedule with the host scheduler.
-    async fn restore_cron_session(&self, _request: CronSessionRecovery) -> Result<()> {
-        Ok(())
-    }
-
-    /// Re-register a persisted agent heartbeat with the host scheduler.
-    async fn restore_heartbeat_session(&self, _request: HeartbeatSessionRecovery) -> Result<()> {
         Ok(())
     }
 }
@@ -50,30 +39,6 @@ pub struct DomainSessionRecovery {
     pub project: Option<String>,
     pub agent: String,
     pub domain_command: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CronSessionRecovery {
-    pub session_id: Uuid,
-    pub project: Option<String>,
-    pub routine: Option<String>,
-    pub schedule_expr: String,
-    pub timezone: Option<String>,
-    pub task: Option<serde_json::Value>,
-    pub next_run_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HeartbeatSessionRecovery {
-    pub session_id: Uuid,
-    pub agent: String,
-    pub interval: Duration,
-    pub timezone: Option<String>,
-    pub instructions: Option<String>,
-    pub next_run_at: Option<DateTime<Utc>>,
-    pub previous_output_ref: Option<String>,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub start_paused: bool,
 }
 
 #[derive(Clone)]
@@ -160,7 +125,6 @@ impl FileSessionRuntime {
                 version: 0,
                 refs: SessionRefs::default(),
                 lease: Default::default(),
-                scheduler: None,
                 domain: None,
                 summary: SessionSummary::default(),
                 metadata: serde_json::Value::Null,
@@ -357,7 +321,6 @@ impl FileSessionRuntime {
                 current_phase: None,
                 active_tool_name: None,
                 worktree: None,
-                scheduler_runtime: None,
             });
 
         let checkpoint = SessionCheckpoint {
@@ -367,7 +330,6 @@ impl FileSessionRuntime {
             current_phase: Some(update.phase),
             active_tool_name: update.active_tool_name.or(base.active_tool_name),
             worktree: update.worktree.or(base.worktree),
-            scheduler_runtime: update.scheduler_runtime.or(base.scheduler_runtime),
         };
 
         self.checkpoints.save(checkpoint).await?;
@@ -415,7 +377,6 @@ impl FileSessionRuntime {
                     phase,
                     worktree: None,
                     active_tool_name: None,
-                    scheduler_runtime: None,
                 })
                 .await?;
         }
@@ -424,59 +385,6 @@ impl FileSessionRuntime {
 
     async fn handle_checkpoint(&self, record: nenjo_sessions::CheckpointRecord) -> Result<()> {
         self.save_checkpoint_record(record).await
-    }
-
-    async fn upsert_scheduler_session_record(
-        &self,
-        grant: &SessionLeaseGrant,
-        upsert: SchedulerSessionUpsert,
-    ) -> Result<bool> {
-        let now = Utc::now();
-        let mut record = self
-            .records
-            .get(upsert.session_id)?
-            .unwrap_or(SessionRecord {
-                session_id: upsert.session_id,
-                kind: upsert.kind,
-                status: upsert.status,
-                project: upsert.project.clone(),
-                agent: upsert.agent.clone(),
-                task_id: None,
-                routine: upsert.routine.clone(),
-                execution_run_id: None,
-                parent_session_id: None,
-                version: 0,
-                refs: SessionRefs::default(),
-                lease: Default::default(),
-                scheduler: None,
-                domain: None,
-                summary: SessionSummary::default(),
-                metadata: serde_json::Value::Null,
-                created_at: now,
-                updated_at: now,
-                completed_at: None,
-            });
-
-        record.kind = upsert.kind;
-        record.status = upsert.status;
-        record.project = upsert.project;
-        record.agent = upsert.agent;
-        record.routine = upsert.routine;
-        record.version += 1;
-        record.updated_at = now;
-        record.completed_at = if Self::is_terminal_status(upsert.status) {
-            Some(now)
-        } else {
-            None
-        };
-        record.refs.memory_namespace = upsert.memory_namespace;
-        record.scheduler = Some(upsert.scheduler);
-        if let Some(progress_message) = upsert.progress_message {
-            record.summary.last_progress_message = Some(progress_message);
-        }
-        record.lease = self.lease_from_grant_for_status(grant, upsert.status, &record.lease);
-        self.records.put(&record)?;
-        Ok(true)
     }
 
     async fn recover_reconcilable_session_record(&self, mut record: SessionRecord) -> Result<bool> {
@@ -548,49 +456,6 @@ impl FileSessionRuntime {
             SessionKind::Chat | SessionKind::Task => {
                 self.recover_reconcilable_session_record(record).await?;
             }
-            SessionKind::CronSchedule => {
-                if record.status != SessionStatus::Active {
-                    return Ok(());
-                }
-                let Some(nenjo_sessions::ScheduleState::Cron(state)) = record.scheduler.clone()
-                else {
-                    return Ok(());
-                };
-                handler
-                    .restore_cron_session(CronSessionRecovery {
-                        session_id: record.session_id,
-                        project: record.project.clone(),
-                        routine: record.routine.clone(),
-                        schedule_expr: state.schedule_expr,
-                        timezone: state.timezone,
-                        task: state.task,
-                        next_run_at: state.next_run_at,
-                    })
-                    .await?;
-            }
-            SessionKind::HeartbeatSchedule => {
-                let Some(nenjo_sessions::ScheduleState::Heartbeat(state)) =
-                    record.scheduler.clone()
-                else {
-                    return Ok(());
-                };
-                let Some(agent) = record.agent.clone() else {
-                    return Ok(());
-                };
-                handler
-                    .restore_heartbeat_session(HeartbeatSessionRecovery {
-                        session_id: record.session_id,
-                        agent,
-                        interval: std::time::Duration::from_secs(state.interval_secs.max(1)),
-                        timezone: state.timezone,
-                        instructions: state.instructions,
-                        next_run_at: state.next_run_at,
-                        previous_output_ref: state.previous_output_ref,
-                        last_run_at: state.last_run_at,
-                        start_paused: record.status == SessionStatus::Paused,
-                    })
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -617,7 +482,6 @@ impl FileSessionRuntime {
                 version: 0,
                 refs: SessionRefs::default(),
                 lease: Default::default(),
-                scheduler: None,
                 domain: None,
                 summary: SessionSummary::default(),
                 metadata: serde_json::Value::Null,
@@ -652,10 +516,6 @@ impl FileSessionRuntime {
     ) -> Result<()> {
         match event {
             SessionRuntimeEvent::SessionUpsert(upsert) => self.handle_session_upsert(grant, upsert),
-            SessionRuntimeEvent::SchedulerUpsert(upsert) => {
-                self.upsert_scheduler_session_record(grant, upsert).await?;
-                Ok(())
-            }
             SessionRuntimeEvent::DomainUpsert(upsert) => {
                 self.upsert_domain_session_record(grant, upsert).await?;
                 Ok(())
@@ -818,7 +678,6 @@ mod tests {
                 memory_namespace: Some("agent_tester_core".to_string()),
             },
             lease: Default::default(),
-            scheduler: None,
             domain: None,
             summary: SessionSummary::default(),
             metadata: serde_json::Value::Null,
@@ -1003,7 +862,6 @@ mod tests {
                         phase: ExecutionPhase::Preparing,
                         active_tool_name: None,
                         worktree: None,
-                        scheduler_runtime: None,
                     },
                 )],
             )
@@ -1025,7 +883,6 @@ mod tests {
                         phase: ExecutionPhase::Finalizing,
                         active_tool_name: None,
                         worktree: Some(worktree.clone()),
-                        scheduler_runtime: None,
                     },
                 )],
             )
@@ -1108,7 +965,6 @@ mod tests {
                 current_phase: Some(ExecutionPhase::ExecutingTools),
                 active_tool_name: None,
                 worktree: None,
-                scheduler_runtime: None,
             })
             .await
             .unwrap();

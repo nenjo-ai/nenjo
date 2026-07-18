@@ -4,15 +4,12 @@
 //! locations, such as checked-out worktrees, can be supplied by the caller via
 //! [`ProjectLocation`].
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use chrono::{DateTime, Utc};
 use nenjo_models::ChatMessage;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::arguments::ResolvedArgumentBinding;
-use crate::routines::types::{CronSchedule, SessionBinding, StepResult};
+use crate::routines::types::{SessionBinding, StepResult};
 use crate::types::GitContext;
 use crate::{IntoSlug, Slug};
 
@@ -35,18 +32,6 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             }
             ctx.git = git_to_context(run.execution.project_location.as_ref());
         }
-        AgentRunKind::Heartbeat(heartbeat) => {
-            ctx.heartbeat_instructions = heartbeat.instructions.clone().unwrap_or_default();
-            ctx.heartbeat_previous_output = heartbeat.previous_output.clone().unwrap_or_default();
-            ctx.heartbeat_last_run_at = heartbeat
-                .last_run_at
-                .map(|ts| ts.to_rfc3339())
-                .unwrap_or_default();
-            ctx.heartbeat_next_run_at = heartbeat
-                .next_run_at
-                .map(|ts| ts.to_rfc3339())
-                .unwrap_or_default();
-        }
     }
     ctx
 }
@@ -55,15 +40,11 @@ fn task_to_context(task: &TaskInput) -> crate::context::TaskContext {
     crate::context::TaskContext {
         id: task.task_id.to_string(),
         title: task.title.clone(),
-        description: task.description.clone(),
-        acceptance_criteria: task.acceptance_criteria.clone().unwrap_or_default(),
-        tags: task.tags.join(", "),
-        source: task.source.clone().unwrap_or_else(|| "task".to_string()),
+        instructions: task.instructions.clone(),
+        labels: task.labels.join(", "),
         status: task.status.clone().unwrap_or_default(),
         priority: task.priority.clone().unwrap_or_default(),
-        task_type: task.task_type.clone().unwrap_or_default(),
         slug: task.slug.clone().unwrap_or_default(),
-        complexity: task.complexity.clone().unwrap_or_default(),
     }
 }
 
@@ -85,32 +66,25 @@ pub struct TaskInput {
     pub project: Option<Slug>,
     pub task_id: Uuid,
     pub title: String,
-    pub description: String,
-    pub acceptance_criteria: Option<String>,
-    pub tags: Vec<String>,
-    pub source: Option<String>,
+    pub instructions: String,
+    pub labels: Vec<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
-    pub task_type: Option<String>,
     pub slug: Option<String>,
-    pub complexity: Option<String>,
 }
 
 impl TaskInput {
-    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+    /// Create a platform task input with normalized task instructions.
+    pub fn new(title: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self {
             project: None,
             task_id: Uuid::new_v4(),
             title: title.into(),
-            description: description.into(),
-            acceptance_criteria: None,
-            tags: Vec::new(),
-            source: None,
+            instructions: instructions.into(),
+            labels: Vec::new(),
             status: None,
             priority: None,
-            task_type: None,
             slug: None,
-            complexity: None,
         }
     }
 
@@ -124,18 +98,9 @@ impl TaskInput {
         self
     }
 
-    pub fn acceptance_criteria(mut self, value: impl Into<String>) -> Self {
-        self.acceptance_criteria = Some(value.into());
-        self
-    }
-
-    pub fn tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.tags = tags.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn source(mut self, value: impl Into<String>) -> Self {
-        self.source = Some(value.into());
+    /// Attach first-class task label names.
+    pub fn labels(mut self, labels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.labels = labels.into_iter().map(Into::into).collect();
         self
     }
 
@@ -149,18 +114,8 @@ impl TaskInput {
         self
     }
 
-    pub fn task_type(mut self, value: impl Into<String>) -> Self {
-        self.task_type = Some(value.into());
-        self
-    }
-
     pub fn slug(mut self, value: impl Into<String>) -> Self {
         self.slug = Some(value.into());
-        self
-    }
-
-    pub fn complexity(mut self, value: impl Into<String>) -> Self {
-        self.complexity = Some(value.into());
         self
     }
 }
@@ -216,28 +171,6 @@ pub struct GateInput {
     pub task: Option<TaskInput>,
 }
 
-/// Cron execution input.
-#[derive(Debug, Clone)]
-pub struct CronInput {
-    pub project: Option<Slug>,
-    pub task: Option<TaskInput>,
-    pub schedule: CronSchedule,
-    pub start_at: Option<DateTime<Utc>>,
-    pub timeout: Duration,
-}
-
-/// Heartbeat execution input.
-#[derive(Debug, Clone)]
-pub struct HeartbeatInput {
-    pub agent: Slug,
-    pub interval: Duration,
-    pub start_at: Option<DateTime<Utc>>,
-    pub instructions: Option<String>,
-    pub previous_output: Option<String>,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub next_run_at: Option<DateTime<Utc>>,
-}
-
 /// Runtime options common to agent and routine runs.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionOptions {
@@ -287,7 +220,6 @@ pub enum AgentRunKind {
     Chat(ChatInput),
     FollowUp(FollowUpInput),
     Gate(GateInput),
-    Heartbeat(HeartbeatInput),
 }
 
 impl AgentRun {
@@ -339,20 +271,12 @@ pub struct RoutineRun {
 #[derive(Debug, Clone)]
 pub enum RoutineRunKind {
     Task(TaskInput),
-    Cron(CronInput),
 }
 
 impl RoutineRun {
     pub fn task(task: TaskInput) -> Self {
         Self {
             kind: RoutineRunKind::Task(task),
-            execution: ExecutionOptions::default(),
-        }
-    }
-
-    pub fn cron(cron: CronInput) -> Self {
-        Self {
-            kind: RoutineRunKind::Cron(cron),
             execution: ExecutionOptions::default(),
         }
     }

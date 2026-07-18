@@ -10,7 +10,7 @@ use nenjo::{
         AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
         CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, DomainManifest,
         HasManifestSlug, ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeManifest,
-        RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineTrigger,
+        RoutineManifest, RoutineMetadata, RoutineStepManifest,
     },
 };
 
@@ -256,7 +256,6 @@ where
                     media: Vec::new(),
                     abilities: Vec::new(),
                     prompt_locked: false,
-                    heartbeat: None,
                     source_type: None,
                     metadata: serde_json::json!({}),
                 }
@@ -801,7 +800,6 @@ where
                 slug: Slug::derive(&name),
                 name,
                 description: None,
-                trigger: RoutineTrigger::Task,
                 metadata: RoutineMetadata::default(),
                 steps: Vec::new(),
                 edges: Vec::new(),
@@ -815,9 +813,6 @@ where
             }
             if let Some(description) = metadata.description {
                 routine.description = description;
-            }
-            if let Some(trigger) = metadata.trigger {
-                routine.trigger = trigger;
             }
         }
         if let Some(runtime_metadata) = params.data.runtime_metadata {
@@ -1270,7 +1265,6 @@ mod tests {
             script_tools: vec![],
             media: Vec::new(),
             prompt_locked: false,
-            heartbeat: None,
             source_type: None,
             metadata: serde_json::json!({}),
         };
@@ -1320,11 +1314,8 @@ mod tests {
             name: "nightly-build".into(),
             slug: Slug::derive("nightly-build"),
             description: Some("Runs the nightly build".into()),
-            trigger: RoutineTrigger::Cron,
             metadata: nenjo::manifest::RoutineMetadata {
-                schedule: Some("0 0 * * *".into()),
                 entry_steps: vec![Slug::derive("compile")],
-                cron_task: None,
             },
             steps: vec![RoutineStepManifest {
                 slug: Slug::derive("compile"),
@@ -1465,45 +1456,6 @@ mod tests {
         assert_eq!(
             value["agent"]["prompt_config"]["system_prompt"],
             "You are a coding agent."
-        );
-    }
-
-    #[tokio::test]
-    async fn get_agent_includes_heartbeat_state() {
-        let dir = tempdir().unwrap();
-        let root = dir.keep();
-        let store = Arc::new(LocalManifestStore::new(root));
-        let SampleManifest {
-            mut manifest,
-            agent,
-            ..
-        } = sample_manifest();
-        manifest.agents[0].heartbeat = Some(nenjo::manifest::AgentHeartbeatManifest {
-            agent: Slug::derive(&agent.name),
-            interval: "5m".into(),
-            is_active: true,
-            instructions: None,
-            last_run_at: None,
-            next_run_at: None,
-            metadata: serde_json::Value::Null,
-        });
-        store.replace_manifest(&manifest).await.unwrap();
-        let backend = LocalManifestMcpBackend::new(store.clone(), store);
-
-        let result = backend
-            .get_agent(AgentsGetParams {
-                agent: Slug::derive(&agent.name),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result
-                .agent
-                .heartbeat
-                .as_ref()
-                .map(|heartbeat| heartbeat.interval.as_str()),
-            Some("5m")
         );
     }
 
@@ -2259,7 +2211,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get.routine.summary.name, "nightly-build");
-        assert_eq!(get.routine.summary.trigger, RoutineTrigger::Cron);
         assert_eq!(get.routine.steps.len(), 1);
         let get_value = serde_json::to_value(&get).unwrap();
         assert!(get_value["routine"].get("id").is_none());
@@ -2281,14 +2232,12 @@ mod tests {
                         name: Some("nightly-release".into()),
                         description: None,
                         project_id: None,
-                        trigger: None,
                         is_active: None,
                         max_retries: None,
                     }),
                     runtime_metadata: None,
                     encrypted_payload: None,
                     graph: None,
-                    cron_task: None,
                     id: None,
                 },
             })
@@ -2300,11 +2249,6 @@ mod tests {
         assert_eq!(
             result.routine.summary.description,
             Some("Runs the nightly build".into())
-        );
-        assert_eq!(result.routine.summary.trigger, RoutineTrigger::Cron);
-        assert_eq!(
-            result.routine.metadata.schedule.as_deref(),
-            Some("0 0 * * *")
         );
         assert_eq!(
             result.routine.metadata.entry_steps,
@@ -2326,14 +2270,12 @@ mod tests {
                         name: None,
                         description: Some(None),
                         project_id: None,
-                        trigger: None,
                         is_active: None,
                         max_retries: None,
                     }),
                     runtime_metadata: None,
                     encrypted_payload: None,
                     graph: None,
-                    cron_task: None,
                     id: None,
                 },
             })
@@ -2356,7 +2298,6 @@ mod tests {
             serde_json::json!({
                 "routine": Slug::derive(&routine.name),
                 "runtime_metadata": {
-                    "schedule": "0 6 * * *",
                     "entry_steps": [routine.steps[0].slug]
                 }
             }),
@@ -2367,7 +2308,6 @@ mod tests {
         assert_eq!(
             result["routine"]["metadata"],
             serde_json::json!({
-                "schedule": "0 6 * * *",
                 "entry_steps": [routine.steps[0].slug]
             })
         );
@@ -2386,13 +2326,11 @@ mod tests {
                         name: Some("pipeline".into()),
                         description: Some(Some("Build workflow".into())),
                         project_id: None,
-                        trigger: Some(RoutineTrigger::Task),
                         is_active: None,
                         max_retries: None,
                     }),
                     runtime_metadata: Some(serde_json::json!({})),
                     encrypted_payload: None,
-                    cron_task: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![
@@ -2446,7 +2384,6 @@ mod tests {
                     metadata: None,
                     runtime_metadata: None,
                     encrypted_payload: None,
-                    cron_task: None,
                     graph: Some(RoutineGraphInput {
                         entry_steps: vec![Slug::derive("build")],
                         steps: vec![RoutineStepInput {

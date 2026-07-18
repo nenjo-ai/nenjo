@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -16,7 +15,7 @@ use nenjo::manifest::{
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::routines::RoutineEvent;
-use nenjo::{CronInput, ProjectLocation, RoutineRun, Slug, TaskInput};
+use nenjo::{ProjectLocation, RoutineRun, Slug, TaskInput};
 use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{
     ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
@@ -446,7 +445,6 @@ fn test_task(_project_id: Uuid, title: &str, desc: &str) -> TaskInput {
     TaskInput::new(title, desc)
         .with_project("project")
         .with_task_id(Uuid::nil())
-        .source("test")
 }
 
 fn model(_id: Uuid) -> ModelManifest {
@@ -476,7 +474,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
                 gate_eval:
                     "Evaluate:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
                         .into(),
-                heartbeat_task: String::new(),
             },
             ..Default::default()
         },
@@ -489,7 +486,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
-        heartbeat: None,
         source_type: None,
         metadata: serde_json::json!({}),
     }
@@ -661,7 +657,6 @@ async fn single_agent_step() {
         name: "simple-routine".into(),
         slug: Slug::derive("simple-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -723,7 +718,6 @@ async fn routine_agent_request_includes_route_next_steps_tool() {
         name: "tool-check-routine".into(),
         slug: Slug::derive("tool-check-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -808,7 +802,6 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         name: "agent-instructions".into(),
         slug: Slug::derive("agent-instructions"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -880,7 +873,6 @@ async fn routine_agent_step_renders_project_context() {
         name: "agent-project-context".into(),
         slug: Slug::derive("agent-project-context"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -953,7 +945,7 @@ async fn routine_agent_step_renders_project_context() {
 }
 
 #[tokio::test]
-async fn cron_triggered_agent_step_uses_task_execution_template() {
+async fn routine_agent_step_uses_task_execution_template() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
@@ -966,7 +958,6 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
         name: "cron-agent-template".into(),
         slug: Slug::derive("cron-agent-template"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1004,17 +995,11 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
         .await
         .unwrap();
 
-    let run = RoutineRun::cron(CronInput {
-        task: Some(test_task(
-            Uuid::new_v4(),
-            "Add auth",
-            "Implement JWT authentication",
-        )),
-        project: Some(Slug::derive("project")),
-        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
-        start_at: None,
-        timeout: Duration::from_secs(5),
-    });
+    let run = RoutineRun::task(test_task(
+        Uuid::new_v4(),
+        "Add auth",
+        "Implement JWT authentication",
+    ));
 
     provider
         .routine("cron-agent-template")
@@ -1026,12 +1011,12 @@ async fn cron_triggered_agent_step_uses_task_execution_template() {
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
         messages_contain(&seen_messages, "TASK TEMPLATE"),
-        "cron-triggered agent steps should use task_execution. Messages: {seen_messages:#?}"
+        "routine agent steps should use task_execution. Messages: {seen_messages:#?}"
     );
 }
 
 #[tokio::test]
-async fn cron_triggered_agent_step_without_project_uses_task_execution_template() {
+async fn routine_agent_step_without_project_uses_task_execution_template() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
@@ -1044,7 +1029,6 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
         name: "cron-agent-no-project".into(),
         slug: Slug::derive("cron-agent-no-project"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1082,13 +1066,7 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
         .await
         .unwrap();
 
-    let run = RoutineRun::cron(CronInput {
-        task: None,
-        project: None,
-        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
-        start_at: None,
-        timeout: Duration::from_secs(5),
-    });
+    let run = RoutineRun::task(TaskInput::new("Review", "Review without a project"));
 
     provider
         .routine("cron-agent-no-project")
@@ -1100,7 +1078,7 @@ async fn cron_triggered_agent_step_without_project_uses_task_execution_template(
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
         messages_contain(&seen_messages, "TASK TEMPLATE"),
-        "cron-triggered agent steps without a project should use task_execution. Messages: {seen_messages:#?}"
+        "routine agent steps without a project should use task_execution. Messages: {seen_messages:#?}"
     );
 }
 
@@ -1121,7 +1099,6 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         name: "gate-instructions".into(),
         slug: Slug::derive("gate-instructions"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1195,7 +1172,6 @@ async fn single_agent_step_retries_until_route_next_steps() {
         name: "retry-for-route-next-steps".into(),
         slug: Slug::derive("retry-for-route-next-steps"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1294,7 +1270,6 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
         name: "route-progress-reset".into(),
         slug: Slug::derive("route-progress-reset"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1385,11 +1360,8 @@ async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_hande
         name: "retry-invalid-route".into(),
         slug: Slug::derive("retry-invalid-route"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("start")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -1559,7 +1531,6 @@ async fn stream_events_single_step() {
         name: "stream-test".into(),
         slug: Slug::derive("stream-test"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -1623,7 +1594,9 @@ async fn stream_events_single_step() {
                 assert!(result.passed);
                 saw_step_completed = true;
             }
-            RoutineEvent::Done { task_id, result } => {
+            RoutineEvent::Done {
+                task_id, result, ..
+            } => {
                 assert_eq!(task_id, Some(Uuid::nil()));
                 assert_eq!(result.output, "Streamed output.");
                 saw_done = true;
@@ -1651,7 +1624,6 @@ async fn two_step_chain() {
         name: "code-review".into(),
         slug: Slug::derive("code-review"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -1756,7 +1728,6 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
         name: "agent-fail-stops-routine".into(),
         slug: Slug::derive("agent-fail-stops-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -1870,7 +1841,6 @@ async fn gate_step_pass() {
         name: "gated-routine".into(),
         slug: Slug::derive("gated-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -1982,7 +1952,6 @@ async fn gate_always_edge_is_invalid() {
         name: "invalid-gate-routing".into(),
         slug: Slug::derive("invalid-gate-routing"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -2093,7 +2062,6 @@ async fn gate_on_fail_routes_back_before_completion() {
         name: "retry-gated-routine".into(),
         slug: Slug::derive("retry-gated-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -2246,7 +2214,6 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         name: "retry-exhaustion-routine".into(),
         slug: Slug::derive("retry-exhaustion-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -2388,7 +2355,6 @@ async fn gate_execution_error_does_not_activate_on_fail_route() {
         name: "gate-provider-error-stops".into(),
         slug: Slug::derive("gate-provider-error-stops"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -2543,7 +2509,6 @@ async fn terminal_fail_step() {
         name: "fail-routine".into(),
         slug: Slug::derive("fail-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2597,7 +2562,6 @@ async fn council_decompose() {
         name: "council-routine".into(),
         slug: Slug::derive("council-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2670,7 +2634,6 @@ async fn council_broadcast() {
         name: "broadcast-council-routine".into(),
         slug: Slug::derive("broadcast-council-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2750,7 +2713,6 @@ async fn council_round_robin() {
         name: "round-robin-council-routine".into(),
         slug: Slug::derive("round-robin-council-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2830,7 +2792,6 @@ async fn council_vote() {
         name: "vote-council-routine".into(),
         slug: Slug::derive("vote-council-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2896,9 +2857,8 @@ async fn council_vote() {
     assert_eq!(result.output, "Vote tallied and accepted.");
 }
 
-/// Cron execution: runs one scheduled routine firing.
 #[tokio::test]
-async fn scheduled_cron_routine_execution() {
+async fn task_routine_execution_emits_a_terminal_result() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
@@ -2908,7 +2868,6 @@ async fn scheduled_cron_routine_execution() {
         name: "cron-routine".into(),
         slug: Slug::derive("cron-routine"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
@@ -2931,8 +2890,7 @@ async fn scheduled_cron_routine_execution() {
         ..Default::default()
     };
 
-    // Mock returns a route_next_steps tool call for the gate step. The cron
-    // wrapper should complete this scheduled firing after the DAG run.
+    // Mock returns a route_next_steps tool call for the gate step.
     let route_response = route_response(
         "Evaluation complete.",
         "pass",
@@ -2950,40 +2908,19 @@ async fn scheduled_cron_routine_execution() {
         .await
         .unwrap();
 
-    let task = RoutineRun::cron(CronInput {
-        task: None,
-        project: Some(nenjo::Slug::derive("project")),
-        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
-        start_at: None,
-        timeout: Duration::from_secs(5),
-    });
-
-    let mut handle = provider
+    let handle = provider
         .routine("cron-routine")
         .unwrap()
-        .run_stream(task)
+        .run_stream(test_task(
+            Uuid::new_v4(),
+            "Check health",
+            "Check system health",
+        ))
         .await
         .unwrap();
 
-    let mut cycles_started = 0u32;
-    let mut cycles_completed = 0u32;
-
-    while let Some(event) = handle.recv().await {
-        match event {
-            RoutineEvent::CronCycleStarted { .. } => cycles_started += 1,
-            RoutineEvent::CronCycleCompleted { .. } => cycles_completed += 1,
-            _ => {}
-        }
-    }
-
-    assert_eq!(cycles_started, 1, "should have started 1 cron cycle");
-    assert_eq!(cycles_completed, 1, "should have completed 1 cron cycle");
-
     let result = handle.output().await.unwrap();
-    assert!(
-        result.passed,
-        "cron routine should pass with route_next_steps"
-    );
+    assert!(result.passed, "routine should pass with route_next_steps");
     assert_eq!(
         result.data.get("verdict").and_then(|v| v.as_str()),
         Some("pass"),
@@ -2991,9 +2928,8 @@ async fn scheduled_cron_routine_execution() {
     );
 }
 
-/// Cron execution: agent route_next_steps routes to following terminal step.
 #[tokio::test]
-async fn cron_agent_route_next_steps_continues_to_terminal_step() {
+async fn task_agent_route_next_steps_continues_to_terminal_step() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let agent_step_id = Uuid::new_v4();
@@ -3004,7 +2940,6 @@ async fn cron_agent_route_next_steps_continues_to_terminal_step() {
         name: "cron-agent-terminal".into(),
         slug: Slug::derive("cron-agent-terminal"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Cron,
         metadata: RoutineMetadata::default(),
         steps: vec![
             RoutineStepManifest {
@@ -3062,36 +2997,21 @@ async fn cron_agent_route_next_steps_continues_to_terminal_step() {
         .await
         .unwrap();
 
-    let task = RoutineRun::cron(CronInput {
-        task: None,
-        project: None,
-        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
-        start_at: None,
-        timeout: Duration::from_secs(5),
-    });
-
     let mut handle = provider
         .routine("cron-agent-terminal")
         .unwrap()
-        .run_stream(task)
+        .run_stream(TaskInput::new("Inspect", "Inspect workspace files"))
         .await
         .unwrap();
 
-    let mut cycles_started = 0u32;
-    let mut cycles_completed = 0u32;
     let mut step_names = Vec::new();
 
     while let Some(event) = handle.recv().await {
-        match event {
-            RoutineEvent::CronCycleStarted { .. } => cycles_started += 1,
-            RoutineEvent::CronCycleCompleted { .. } => cycles_completed += 1,
-            RoutineEvent::StepStarted { step_name, .. } => step_names.push(step_name),
-            _ => {}
+        if let RoutineEvent::StepStarted { step_name, .. } = event {
+            step_names.push(step_name);
         }
     }
 
-    assert_eq!(cycles_started, 1, "should run one scheduled firing");
-    assert_eq!(cycles_completed, 1, "should complete one cron cycle");
     assert_eq!(
         step_names,
         vec!["inspect", "done"],
@@ -3103,83 +3023,6 @@ async fn cron_agent_route_next_steps_continues_to_terminal_step() {
     assert_eq!(result.output, "Found files");
 }
 
-/// Cron cancellation: cancel the handle mid-execution and verify it stops.
-#[tokio::test]
-async fn cron_cancellation() {
-    let model_id = Uuid::new_v4();
-    let agent_id = Uuid::new_v4();
-    let step_id = Uuid::new_v4();
-    let _routine_id = Uuid::new_v4();
-    let routine = RoutineManifest {
-        name: "cancel-cron".into(),
-        slug: Slug::derive("cancel-cron"),
-        description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Cron,
-        metadata: RoutineMetadata::default(),
-        steps: vec![RoutineStepManifest {
-            slug: Slug::derive(step_id.to_string()),
-            routine: Slug::derive("cancel-cron"),
-            name: "poll".into(),
-            step_type: RoutineStepType::Terminal,
-            council: None,
-            agent: None,
-            config: serde_json::json!({}),
-            order_index: 0,
-        }],
-        edges: vec![],
-    };
-
-    let manifest = Manifest {
-        agents: vec![agent(agent_id, "poller", model_id)],
-        models: vec![model(model_id)],
-        projects: vec![project()],
-        routines: vec![canonical_routine(routine)],
-        ..Default::default()
-    };
-
-    let provider = Provider::builder()
-        .with_manifest(manifest)
-        .with_model_factory(MockFactory::new("wait"))
-        .with_tool_factory(NoopToolFactory)
-        .build()
-        .await
-        .unwrap();
-
-    let task = RoutineRun::cron(CronInput {
-        task: None,
-        project: Some(nenjo::Slug::derive("project")),
-        schedule: nenjo::routines::types::CronSchedule::Interval(Duration::from_millis(50)),
-        start_at: None,
-        timeout: Duration::from_secs(30),
-    });
-
-    let mut handle = provider
-        .routine("cancel-cron")
-        .unwrap()
-        .run_stream(task)
-        .await
-        .unwrap();
-
-    // Wait for the scheduled firing to complete, then cancel. The firing may
-    // already be complete, because cron execution runs one DAG cycle.
-    let mut saw_cycle = false;
-    while let Some(event) = handle.recv().await {
-        if let RoutineEvent::CronCycleCompleted { .. } = event {
-            saw_cycle = true;
-            handle.cancel();
-            break;
-        }
-    }
-
-    assert!(
-        saw_cycle,
-        "should have seen at least one cron cycle before cancel"
-    );
-
-    let result = handle.output().await.unwrap();
-    assert!(result.passed);
-}
-
 #[tokio::test]
 async fn agent_step_receives_route_next_steps_tool() {
     let model_id = Uuid::new_v4();
@@ -3189,11 +3032,8 @@ async fn agent_step_receives_route_next_steps_tool() {
         name: "route-tool-check".into(),
         slug: Slug::derive("route-tool-check"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("work")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -3270,11 +3110,8 @@ async fn gate_step_receives_route_next_steps_tool() {
         name: "gate-route-tool-check".into(),
         slug: Slug::derive("gate-route-tool-check"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("review")],
-            cron_task: None,
         },
         steps: vec![RoutineStepManifest {
             slug: Slug::derive("review"),
@@ -3338,11 +3175,8 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
         name: "fanout-fanin".into(),
         slug: Slug::derive("fanout-fanin"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("start")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -3494,11 +3328,8 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
         name: "handoff-join".into(),
         slug: Slug::derive("handoff-join"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("left"), Slug::derive("right")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -3703,11 +3534,8 @@ async fn gate_on_fail_retry_edge_does_not_block_first_downstream_pass() {
         name: "retry-loop-first-pass".into(),
         slug: Slug::derive("retry-loop-first-pass"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("plan")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {
@@ -3851,11 +3679,8 @@ async fn route_next_steps_fail_verdict_stops_routine() {
         name: "route-fail-stops".into(),
         slug: Slug::derive("route-fail-stops"),
         description: None,
-        trigger: nenjo::manifest::RoutineTrigger::Task,
         metadata: RoutineMetadata {
-            schedule: None,
             entry_steps: vec![Slug::derive("first")],
-            cron_task: None,
         },
         steps: vec![
             RoutineStepManifest {

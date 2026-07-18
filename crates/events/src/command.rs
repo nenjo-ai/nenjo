@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Capability, CronTaskContent, EncryptedPayload, HeartbeatInstructionsContent, TaskExecuteContent,
+    Capability, EncryptedPayload, TaskExecuteContent, TaskExecutionTarget, TaskExecutionTrigger,
+    TaskScheduleAssignment,
 };
 
 /// Transport delivery policy for a backend-to-worker command.
@@ -207,12 +208,11 @@ pub enum Command {
     #[serde(rename = "task.execute")]
     TaskExecute {
         task_id: Uuid,
-        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
         execution_run_id: Uuid,
-        #[serde(default)]
-        routine: Option<String>,
-        #[serde(default)]
-        agent: Option<String>,
+        trigger: TaskExecutionTrigger,
+        target: TaskExecutionTarget,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<TaskExecuteContent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,6 +232,16 @@ pub enum Command {
     #[serde(rename = "execution.resume")]
     ExecutionResume { execution_run_id: Uuid },
 
+    /// Replace the worker's complete cached task-schedule snapshot.
+    ///
+    /// This travels on the always-subscribed broadcast control lane. Only the
+    /// exclusively cron-capable worker activates the cached definitions.
+    #[serde(rename = "task_schedules.sync")]
+    TaskSchedulesSync {
+        #[serde(default)]
+        schedules: Vec<TaskScheduleAssignment>,
+    },
+
     // -----------------------------------------------------------------
     // Repository
     // -----------------------------------------------------------------
@@ -247,67 +257,6 @@ pub enum Command {
     /// Remove a synced project repository.
     #[serde(rename = "repo.unsync")]
     RepoUnsync { project: String },
-
-    // -----------------------------------------------------------------
-    // Cron scheduling
-    // -----------------------------------------------------------------
-    /// Enable a cron schedule for a routine.
-    #[serde(rename = "cron.enable")]
-    CronEnable {
-        routine: String,
-        #[serde(default)]
-        project: Option<String>,
-        schedule: String,
-        #[serde(default)]
-        timezone: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task: Option<CronTaskContent>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_task: Option<EncryptedPayload>,
-    },
-
-    /// Disable a cron schedule.
-    #[serde(rename = "cron.disable")]
-    CronDisable { routine: String },
-
-    /// Trigger a routine immediately (manual or test run).
-    #[serde(rename = "cron.trigger")]
-    CronTrigger {
-        routine: String,
-        #[serde(default)]
-        project: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task: Option<CronTaskContent>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_task: Option<EncryptedPayload>,
-    },
-
-    /// Enable a recurring heartbeat schedule for an agent.
-    #[serde(rename = "agent_heartbeat.enable")]
-    AgentHeartbeatEnable {
-        agent: String,
-        interval: String,
-        #[serde(default)]
-        timezone: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        instructions: Option<HeartbeatInstructionsContent>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_instructions: Option<EncryptedPayload>,
-    },
-
-    /// Disable a recurring heartbeat schedule for an agent.
-    #[serde(rename = "agent_heartbeat.disable")]
-    AgentHeartbeatDisable { agent: String },
-
-    /// Trigger a one-time heartbeat run for an agent.
-    #[serde(rename = "agent_heartbeat.trigger")]
-    AgentHeartbeatTrigger {
-        agent: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        instructions: Option<HeartbeatInstructionsContent>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        encrypted_instructions: Option<EncryptedPayload>,
-    },
 
     // -----------------------------------------------------------------
     // Bootstrap
@@ -406,24 +355,11 @@ impl std::fmt::Display for Command {
             Self::ExecutionResume { execution_run_id } => {
                 write!(f, "execution.resume(run={execution_run_id})")
             }
+            Self::TaskSchedulesSync { schedules } => {
+                write!(f, "task_schedules.sync(count={})", schedules.len())
+            }
             Self::RepoSync { project, .. } => write!(f, "repo.sync(project={project})"),
             Self::RepoUnsync { project } => write!(f, "repo.unsync(project={project})"),
-            Self::CronEnable { routine, .. } => {
-                write!(f, "cron.enable(routine={routine})")
-            }
-            Self::CronDisable { routine } => {
-                write!(f, "cron.disable(routine={routine})")
-            }
-            Self::CronTrigger { routine, .. } => write!(f, "cron.trigger(routine={routine})"),
-            Self::AgentHeartbeatEnable { agent, .. } => {
-                write!(f, "agent_heartbeat.enable(agent={agent})")
-            }
-            Self::AgentHeartbeatDisable { agent } => {
-                write!(f, "agent_heartbeat.disable(agent={agent})")
-            }
-            Self::AgentHeartbeatTrigger { agent, .. } => {
-                write!(f, "agent_heartbeat.trigger(agent={agent})")
-            }
             Self::WorkerPing => write!(f, "worker.ping"),
             Self::WorkerAccountKeyUpdated { .. } => write!(f, "worker.account_key_updated"),
             Self::ManifestChanged {
@@ -455,14 +391,8 @@ impl Command {
             | Command::ExecutionPause { .. }
             | Command::ExecutionResume { .. } => Capability::Task,
 
-            Command::CronEnable { .. }
-            | Command::CronDisable { .. }
-            | Command::CronTrigger { .. }
-            | Command::AgentHeartbeatEnable { .. }
-            | Command::AgentHeartbeatDisable { .. }
-            | Command::AgentHeartbeatTrigger { .. } => Capability::Cron,
-
             Command::WorkerPing => Capability::Ping,
+            Command::TaskSchedulesSync { .. } => Capability::Manifest,
             Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
             Command::ManifestChanged { .. } => Capability::Manifest,
@@ -476,6 +406,8 @@ impl Command {
     pub fn delivery(&self) -> CommandDelivery {
         match self {
             Command::ChatCancel { .. }
+            | Command::ExecutionCancel { .. }
+            | Command::TaskSchedulesSync { .. }
             | Command::ManifestChanged { .. }
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
@@ -555,15 +487,22 @@ mod tests {
         assert_eq!(
             Command::TaskExecute {
                 task_id: id,
-                project: "demo_project".into(),
+                project: Some("demo_project".into()),
                 execution_run_id: id,
-                routine: None,
-                agent: None,
+                trigger: TaskExecutionTrigger::Manual,
+                target: TaskExecutionTarget::Agent("coder".into()),
                 payload: None,
                 encrypted_payload: None,
             }
             .delivery(),
             CommandDelivery::Queue
+        );
+        assert_eq!(
+            Command::ExecutionCancel {
+                execution_run_id: id,
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
         );
         assert_eq!(
             Command::ManifestChanged {
