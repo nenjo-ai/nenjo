@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/nenjo-ai/nenjo/compare/v0.28.0...v0.29.0) - 2026-07-18
+
+### Added
+
+- add task inbox for sole scheduling owner ([#97](https://github.com/nenjo-ai/nenjo/pull/97))
+
 ## [0.28.0](https://github.com/nenjo-ai/nenjo/compare/v0.27.2...v0.28.0) - 2026-07-15
 
 ### Added
