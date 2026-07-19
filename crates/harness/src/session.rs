@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -535,6 +536,35 @@ pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatM
         .collect()
 }
 
+/// Reconstruct each ability's conversation from its parent session transcript.
+pub fn replay_ability_histories(
+    events: &[SessionTranscriptEvent],
+) -> BTreeMap<String, Vec<ChatMessage>> {
+    let mut histories = BTreeMap::<String, Vec<ChatMessage>>::new();
+    for event in events {
+        match &event.payload {
+            SessionTranscriptEventPayload::AbilityStarted {
+                ability_name,
+                task_input,
+                ..
+            } => histories
+                .entry(ability_name.clone())
+                .or_default()
+                .push(ChatMessage::user(task_input)),
+            SessionTranscriptEventPayload::AbilityCompleted {
+                ability_name,
+                final_output,
+                ..
+            } => histories
+                .entry(ability_name.clone())
+                .or_default()
+                .push(ChatMessage::assistant(final_output)),
+            _ => {}
+        }
+    }
+    histories
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnEventContext {
     pub session_id: Uuid,
@@ -595,7 +625,7 @@ pub fn transcript_payloads_from_turn_event(
         } => vec![SessionTranscriptEventPayload::AbilityStarted {
             ability_tool_name: ability_tool_name.clone(),
             ability_name: ability_name.clone(),
-            task_input: preview(task_input),
+            task_input: task_input.clone(),
         }],
         nenjo::TurnEvent::ToolCallStart {
             batch_id: _,
@@ -631,7 +661,7 @@ pub fn transcript_payloads_from_turn_event(
             ability_tool_name: ability_tool_name.clone(),
             ability_name: ability_name.clone(),
             success: *success,
-            final_output: preview(final_output),
+            final_output: final_output.clone(),
         }],
         nenjo::TurnEvent::TranscriptMessage { message } => {
             vec![SessionTranscriptEventPayload::ChatMessage {
@@ -999,6 +1029,82 @@ mod tests {
             history[0].content,
             "Previous turn was interrupted: cancelled by user"
         );
+    }
+
+    #[test]
+    fn replay_ability_histories_groups_exchanges_by_ability() {
+        let session_id = Uuid::new_v4();
+        let recorded_at = Utc::now();
+        let payloads = vec![
+            SessionTranscriptEventPayload::AbilityStarted {
+                ability_tool_name: "use_ability".into(),
+                ability_name: "research".into(),
+                task_input: "find the source".into(),
+            },
+            SessionTranscriptEventPayload::AbilityCompleted {
+                ability_tool_name: "use_ability".into(),
+                ability_name: "research".into(),
+                success: true,
+                final_output: "found it".into(),
+            },
+            SessionTranscriptEventPayload::AbilityStarted {
+                ability_tool_name: "use_ability".into(),
+                ability_name: "writer".into(),
+                task_input: "draft a summary".into(),
+            },
+        ];
+        let events = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| SessionTranscriptEvent {
+                session_id,
+                seq: index as u64 + 1,
+                recorded_at,
+                turn_id: None,
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let histories = replay_ability_histories(&events);
+
+        assert_eq!(histories["research"].len(), 2);
+        assert_eq!(histories["research"][0].role, "user");
+        assert_eq!(histories["research"][0].content, "find the source");
+        assert_eq!(histories["research"][1].role, "assistant");
+        assert_eq!(histories["research"][1].content, "found it");
+        assert_eq!(histories["writer"].len(), 1);
+    }
+
+    #[test]
+    fn ability_transcript_payloads_preserve_full_history_content() {
+        let long_input = "i".repeat(PREVIEW_CHAR_LIMIT + 100);
+        let long_output = "o".repeat(PREVIEW_CHAR_LIMIT + 100);
+
+        let started = transcript_payloads_from_turn_event(&nenjo::TurnEvent::AbilityStarted {
+            call_id: "call-1".into(),
+            ability_tool_name: "use_ability".into(),
+            ability_name: "research".into(),
+            task_input: long_input.clone(),
+            caller_history: Vec::new(),
+        });
+        let completed = transcript_payloads_from_turn_event(&nenjo::TurnEvent::AbilityCompleted {
+            call_id: "call-1".into(),
+            ability_tool_name: "use_ability".into(),
+            ability_name: "research".into(),
+            success: true,
+            final_output: long_output.clone(),
+        });
+
+        assert!(matches!(
+            &started[0],
+            SessionTranscriptEventPayload::AbilityStarted { task_input, .. }
+                if task_input == &long_input
+        ));
+        assert!(matches!(
+            &completed[0],
+            SessionTranscriptEventPayload::AbilityCompleted { final_output, .. }
+                if final_output == &long_output
+        ));
     }
 
     #[test]

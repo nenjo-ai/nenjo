@@ -32,7 +32,7 @@ use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
-use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
+use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
@@ -661,6 +661,17 @@ where
         parent_events_tx,
     } = operation;
 
+    let ability_session = match instance.runtime.current_session_id {
+        Some(parent_session_id) => Some(
+            instance
+                .runtime
+                .ability_sessions
+                .begin(parent_session_id, &ability.name)
+                .await,
+        ),
+        None => None,
+    };
+
     let mut sub_instance = build_ability_instance(&instance, &ability).await;
     let cancel_token = op_handle.cancel_token();
     sub_instance.runtime.execution_cancel = cancel_token.clone();
@@ -695,6 +706,9 @@ where
         Ok(prompts) => prompts,
         Err(error) => {
             let error = format!("ability prompt build failed: {error}");
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), error.clone());
+            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
@@ -747,6 +761,10 @@ where
 
     if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
         messages.extend(chat.history.iter().cloned());
+    }
+
+    if let Some(session) = ability_session.as_ref() {
+        messages.extend(session.history().iter().cloned());
     }
 
     let user_message = if prompts.user_message.is_empty() {
@@ -865,6 +883,9 @@ where
 
     match result {
         Ok(output) => {
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), output.text.clone());
+            }
             turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
             op_handle
                 .complete(
@@ -894,6 +915,9 @@ where
         }
         Err(e) => {
             let error = format!("ability execution failed: {e}");
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), error.clone());
+            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
@@ -1112,7 +1136,14 @@ where
         scoped_agent.domains.clear();
         provider
             .tool_factory()
-            .create_tools_with_security(&scoped_agent, scoped_security.clone())
+            .create_tools_with_context(
+                &scoped_agent,
+                scoped_security.clone(),
+                ToolContext {
+                    project_slug: Some(caller.prompt.context.current_project.slug.to_string()),
+                    current_session_id: caller.runtime.current_session_id,
+                },
+            )
             .await
     } else {
         Vec::new()
@@ -1170,6 +1201,8 @@ where
             execution_cancel,
             execution_mode: caller.runtime.execution_mode,
             hook_runtime: None,
+            current_session_id: caller.runtime.current_session_id,
+            ability_sessions: caller.runtime.ability_sessions.clone(),
         },
     }
 }
@@ -1435,6 +1468,8 @@ mod tests {
                 execution_cancel,
                 execution_mode: AgentExecutionMode::Parent,
                 hook_runtime: None,
+                current_session_id: None,
+                ability_sessions: Default::default(),
             },
         }
     }
