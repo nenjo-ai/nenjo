@@ -601,7 +601,11 @@ where
         } else {
             builder
         };
-        builder.build().await.map_err(anyhow::Error::from)?
+        builder
+            .with_tool_current_session_id(prepared.session_id)
+            .build()
+            .await
+            .map_err(anyhow::Error::from)?
     };
 
     Ok(runner)

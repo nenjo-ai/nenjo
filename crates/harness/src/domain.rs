@@ -50,7 +50,10 @@ where
                     .join(project_slug.as_str()),
             );
         }
-        let base_runner = builder.build().await?;
+        let base_runner = builder
+            .with_tool_current_session_id(session_id)
+            .build()
+            .await?;
         let domain_runner = base_runner.domain_expansion(domain_command).await?;
 
         let mut instance = domain_runner.instance().clone();

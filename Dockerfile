@@ -2,6 +2,10 @@
 
 ARG RUST_VERSION=1.94.0
 ARG DEBIAN_VERSION=bookworm
+ARG NODE_VERSION=24
+ARG AGENT_BROWSER_VERSION=0.32.2
+
+FROM node:${NODE_VERSION}-${DEBIAN_VERSION}-slim AS node-runtime
 
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
 
@@ -118,8 +122,6 @@ RUN apt-get update \
         make \
         nano \
         netcat-openbsd \
-        nodejs \
-        npm \
         pipx \
         pkg-config \
         procps \
@@ -128,9 +130,40 @@ RUN apt-get update \
 
 COPY --from=builder --chown=nenjo:nenjo /usr/local/cargo /usr/local/cargo
 COPY --from=builder --chown=nenjo:nenjo /usr/local/rustup /usr/local/rustup
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 RUN mkdir -p /home/nenjo/.cargo \
     && chown -R nenjo:nenjo /home/nenjo/.cargo \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && if command -v corepack >/dev/null 2>&1; then corepack enable; fi
 
 USER nenjo
+
+FROM dev AS heavy
+
+ARG AGENT_BROWSER_VERSION
+
+USER root
+
+LABEL org.opencontainers.image.title="Nenjo Worker Heavy" \
+      org.opencontainers.image.description="Developer toolbox image with agent-browser and Chromium"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && npm cache clean --force \
+    && agent-browser --version
+
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
+RUN install -d -m 0700 -o nenjo -g nenjo /home/nenjo/.nenjo/browser-state \
+    && ln -s /home/nenjo/.nenjo/browser-state /home/nenjo/.agent-browser
+
+USER nenjo
+
+RUN agent-browser doctor --offline --quick --json

@@ -312,7 +312,7 @@ impl Tool for HttpRequestTool {
     }
 }
 
-// Helper functions similar to browser_open.rs
+// URL and host filtering helpers.
 
 fn normalize_allowed_hosts(hosts: Vec<String>) -> Vec<String> {
     let mut normalized = hosts

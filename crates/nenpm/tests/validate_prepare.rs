@@ -182,10 +182,58 @@ fn validate_reports_runtime_validation_stages() {
             "validating prompt selectors",
             "validating knowledge selectors",
             "validating assignments",
+            "validating MCP server configurations",
             "validating routine graphs",
             "strict-rendering prompts",
             "validating context graph",
         ]
+    );
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn validate_rejects_stdio_mcp_without_command() {
+    let workspace = temp_workspace("validate-mcp-stdio-command");
+    write_file(
+        &workspace,
+        "packages.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  connectors: packages/connectors/package.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/connectors/package.yaml",
+        r#"schema: nenjo.package.v1
+name: connectors
+version: "1.0.0"
+modules:
+  - agent-browser.yaml
+"#,
+    );
+    write_file(
+        &workspace,
+        "packages/connectors/agent-browser.yaml",
+        r#"schema: nenjo.mcp_server.v1
+manifest:
+  name: agent_browser
+  display_name: Agent Browser
+  transport: stdio
+  metadata:
+    nenjo:
+      managed_connector: agent_browser
+"#,
+    );
+
+    let error = format!(
+        "{:#}",
+        validate(ValidateOptions::new(&workspace)).expect_err("validation should fail")
+    );
+
+    assert!(
+        error.contains("requires non-empty manifest.command"),
+        "{error}"
     );
     fs::remove_dir_all(workspace).unwrap();
 }
