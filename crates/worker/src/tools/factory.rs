@@ -31,10 +31,10 @@ use crate::skills::{LocalSkillProvider, SkillRegistry};
 use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
-    AutonomyLevel, BrowserOpenTool, ContentSearchTool, FileDeleteTool, FileEditTool, FileReadTool,
-    FileWriteTool, GitOperationsTool, GlobSearchTool, HttpRequestTool, ListInstalledSkillsTool,
-    NativeMediaTool, RuntimeAdapter, ScreenshotTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool,
-    UseSkillTool, WebFetchTool, WebSearchTool,
+    AutonomyLevel, ContentSearchTool, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool,
+    GitOperationsTool, GlobSearchTool, HttpRequestTool, ListInstalledSkillsTool, NativeMediaTool,
+    RuntimeAdapter, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool,
+    WebSearchTool,
 };
 
 tokio::task_local! {
@@ -241,8 +241,9 @@ where
         let skill_runtime = Arc::new(SkillRuntimeState::default());
         let mut tools = self.base_tools_with(security, skill_runtime);
 
-        // Add MCP tools scoped to this agent's server assignments and platform scopes.
+        // MCP tools are exposed only when their server is assigned to the agent.
         if !agent.mcp_servers.is_empty() {
+            let execution_namespace = mcp_execution_namespace(tool_context.current_session_id);
             let mcp_tools = self
                 .external_mcp
                 .tools_for_agent(
@@ -252,11 +253,12 @@ where
                     } else {
                         Some(&agent.platform_scopes)
                     },
+                    &execution_namespace,
                 )
                 .await;
             // Convert Box<dyn Tool> → Arc<dyn Tool>
-            for t in mcp_tools {
-                tools.push(Arc::from(t));
+            for tool in mcp_tools {
+                tools.push(Arc::from(tool));
             }
         }
 
@@ -334,16 +336,6 @@ where
                 self.config.http_request.max_response_size,
                 self.config.http_request.timeout_secs,
             )));
-        }
-
-        // Browser
-        if self.config.browser.enabled {
-            tools.push(Arc::new(BrowserOpenTool::new(
-                security.clone(),
-                self.config.browser.allowed_hosts.clone(),
-                self.config.web.allow_private_hosts,
-            )));
-            tools.push(Arc::new(ScreenshotTool::new(security.clone())));
         }
 
         self.add_native_media_tools(agent, &mut tools);
@@ -485,5 +477,37 @@ fn extend_runtime_roots(target: &mut Vec<PathBuf>, roots: &[PathBuf]) {
         if !target.iter().any(|existing| existing == root) {
             target.push(root.clone());
         }
+    }
+}
+
+fn mcp_execution_namespace(current_session_id: Option<uuid::Uuid>) -> String {
+    match current_session_id {
+        Some(session_id) => format!("nenjo-session-{session_id}"),
+        None => format!("nenjo-ephemeral-{}", uuid::Uuid::new_v4()),
+    }
+}
+
+#[cfg(test)]
+mod browser_namespace_tests {
+    use super::mcp_execution_namespace;
+
+    #[test]
+    fn stable_sessions_get_stable_namespaces() {
+        let session_id = uuid::Uuid::new_v4();
+
+        assert_eq!(
+            mcp_execution_namespace(Some(session_id)),
+            format!("nenjo-session-{session_id}")
+        );
+    }
+
+    #[test]
+    fn missing_sessions_do_not_share_persistent_state() {
+        let first = mcp_execution_namespace(None);
+        let second = mcp_execution_namespace(None);
+
+        assert!(first.starts_with("nenjo-ephemeral-"));
+        assert!(second.starts_with("nenjo-ephemeral-"));
+        assert_ne!(first, second);
     }
 }

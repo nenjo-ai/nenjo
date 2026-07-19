@@ -580,6 +580,8 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"0.1.0"}}}'
       ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
     *'"method":"tools/list"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"review","description":"Review","inputSchema":{"type":"object","properties":{}}}]}}'
       ;;

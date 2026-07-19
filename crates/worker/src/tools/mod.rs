@@ -7,8 +7,6 @@
 // Re-export core tool types.
 pub use nenjo::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
 
-pub mod browser;
-pub mod browser_open;
 pub mod content_search;
 pub mod file_delete;
 pub mod file_edit;
@@ -26,7 +24,6 @@ pub mod native_runtime;
 pub(crate) mod platform_payload;
 pub(crate) mod platform_services;
 pub mod runtime;
-pub mod screenshot;
 pub mod security;
 pub mod shell;
 pub mod skill_mcp;
@@ -34,8 +31,6 @@ pub mod web_fetch;
 pub mod web_search_tool;
 
 // Re-export built-in tool implementations.
-pub use browser::BrowserTool;
-pub use browser_open::BrowserOpenTool;
 pub use content_search::ContentSearchTool;
 pub use file_delete::FileDeleteTool;
 pub use file_edit::FileEditTool;
@@ -51,7 +46,6 @@ pub use native_media::NativeMediaTool;
 pub use native_runtime::NativeRuntime;
 pub use nenjo::skills::{ListInstalledSkillsTool, UseSkillTool};
 pub use runtime::RuntimeAdapter;
-pub use screenshot::ScreenshotTool;
 pub use security::{AutonomyLevel, SecurityPolicy};
 pub use shell::ShellTool;
 pub use skill_mcp::SkillMcpTool;

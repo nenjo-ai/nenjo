@@ -1980,6 +1980,39 @@ mod tests {
     }
 
     #[test]
+    fn package_defaults_preserve_managed_connector_declarations() {
+        let value = with_package_defaults(
+            serde_json::json!({
+                "name": "agent_browser",
+                "display_name": "Agent Browser",
+                "transport": "stdio",
+                "metadata": {
+                    "nenjo": {
+                        "managed_connector": "agent_browser"
+                    }
+                }
+            }),
+            PackageDefaults {
+                id: uuid::Uuid::nil(),
+                package_name: "connectors",
+                package_version: "0.1.0",
+                package_source: None,
+                package_root: Path::new("/package-root"),
+                module_path: "connectors/agent-browser.yaml",
+                source_path: "connectors/agent-browser.yaml",
+                kind: PackageKind::McpServer,
+            },
+        );
+
+        assert_eq!(
+            value.pointer("/metadata/nenjo/managed_connector"),
+            Some(&serde_json::json!("agent_browser"))
+        );
+        let manifest: McpServerManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(manifest.name, "connectors-agent_browser");
+    }
+
+    #[test]
     fn package_defaults_fill_missing_agent_memory_profile_fields() {
         let value = with_package_defaults(
             serde_json::json!({

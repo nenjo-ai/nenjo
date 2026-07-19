@@ -125,9 +125,29 @@ jobs:
           docker run --rm --entrypoint sh nenjo-worker:ci-dev -c '
             rustc --version &&
             cargo --version &&
-            node --version &&
+            node --version | rg "^v24\." &&
             npm --version &&
             gh --version &&
             docker --version &&
             python3 -m venv /tmp/venv
+          '
+
+      - name: Build heavy image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: heavy
+          load: true
+          tags: nenjo-worker:ci-heavy
+
+      - name: Smoke test heavy image
+        run: |
+          docker run --rm --entrypoint sh nenjo-worker:ci-heavy -c '
+            agent-browser --version &&
+            chromium --version &&
+            test "$(readlink /home/nenjo/.agent-browser)" = "/home/nenjo/.nenjo/browser-state" &&
+            test "$(stat -c %a /home/nenjo/.nenjo/browser-state)" = "700" &&
+            agent-browser --namespace nenjo-ci --session default --restore default open --json &&
+            agent-browser --namespace nenjo-ci --session default --restore default snapshot -i --json &&
+            agent-browser --namespace nenjo-ci --session default --restore default close --json
           '

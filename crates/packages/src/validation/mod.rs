@@ -13,6 +13,7 @@
 mod assignments;
 pub mod diagnostics;
 mod graph;
+mod mcp_servers;
 mod render;
 mod routines;
 
@@ -68,6 +69,7 @@ pub enum PackageRuntimeValidationStage {
     PromptSelectors,
     KnowledgeSelectors,
     Assignments,
+    McpServers,
     Routines,
     StrictRender,
     ContextGraph,
@@ -81,6 +83,7 @@ impl PackageRuntimeValidationStage {
             Self::PromptSelectors => "validating prompt selectors",
             Self::KnowledgeSelectors => "validating knowledge selectors",
             Self::Assignments => "validating assignments",
+            Self::McpServers => "validating MCP server configurations",
             Self::Routines => "validating routine graphs",
             Self::StrictRender => "strict-rendering prompts",
             Self::ContextGraph => "validating context graph",
@@ -209,6 +212,20 @@ fn validate_packages(
                 "assignments",
                 Some("manifest.assignments"),
                 || assignments::validate_assignments(packages, module),
+                &mut report,
+            );
+        }
+    }
+
+    progress(PackageRuntimeValidationStage::McpServers);
+    for package in packages.values() {
+        for module in unique_modules(package) {
+            validate_one(
+                package,
+                module,
+                "MCP server configuration",
+                None,
+                || mcp_servers::validate_mcp_server_manifest(module),
                 &mut report,
             );
         }

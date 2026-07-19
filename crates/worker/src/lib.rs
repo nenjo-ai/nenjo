@@ -12,6 +12,7 @@
 pub mod assembly;
 pub mod bootstrap;
 pub mod config;
+mod connector_egress_proxy;
 pub mod crypto;
 pub mod event_bridge;
 pub mod event_loop;

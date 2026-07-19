@@ -194,3 +194,27 @@ jobs:
             REVISION=${{ steps.metadata.outputs.revision }}
             CREATED=${{ steps.metadata.outputs.created }}
           provenance: false
+
+      - name: Build and publish heavy image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          target: heavy
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.release.outputs.tag }}-heavy
+            ${{ env.IMAGE_NAME }}:heavy
+          labels: |
+            org.opencontainers.image.title=Nenjo Worker Heavy
+            org.opencontainers.image.description=Developer toolbox image with agent-browser and Chromium
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.tag }}-heavy
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            VERSION=${{ needs.release.outputs.tag }}-heavy
+            REVISION=${{ steps.metadata.outputs.revision }}
+            CREATED=${{ steps.metadata.outputs.created }}
+          provenance: false

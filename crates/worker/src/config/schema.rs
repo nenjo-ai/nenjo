@@ -75,9 +75,6 @@ pub struct Config {
     pub web: WebConfig,
 
     #[serde(default)]
-    pub browser: BrowserConfig,
-
-    #[serde(default)]
     pub http_request: HttpRequestConfig,
 
     #[serde(default)]
@@ -129,14 +126,6 @@ pub struct WebConfig {
     /// that tool's `allowed_hosts`.
     #[serde(default)]
     pub allow_private_hosts: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BrowserConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
 }
 
 // ── Web search ───────────────────────────────────────────────────
@@ -846,7 +835,6 @@ impl Default for Config {
             sessions: SessionConfig::default(),
             task_inbox: TaskInboxConfig::default(),
             web: WebConfig::default(),
-            browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
             web_search: WebSearchConfig::default(),
             web_fetch: WebFetchConfig::default(),

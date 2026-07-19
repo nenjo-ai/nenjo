@@ -54,12 +54,13 @@ Container updates should use `docker pull` and container replacement, not
 `nenjo update`. The images set `NENJO_NO_UPDATE_CHECK=1` so container logs do
 not suggest self-updating an immutable image.
 
-Two image variants are published:
+Three image variants are published:
 
 | Image | Use |
 |-------|-----|
 | `ghcr.io/nenjo-ai/nenjo-worker:<version>` / `latest` | Production worker baseline with `git`, `git-lfs`, shell utilities, `rg`, `curl`, `wget`, `jq`, Python, and TLS certificates |
-| `ghcr.io/nenjo-ai/nenjo-worker:<version>-dev` / `dev` | Larger toolbox image with compilers, Rust, Node/npm, GitHub CLI, Docker CLI, editors, and debugging utilities |
+| `ghcr.io/nenjo-ai/nenjo-worker:<version>-dev` / `dev` | Larger toolbox image with compilers, Rust, Node 24/npm, GitHub CLI, Docker CLI, editors, and debugging utilities |
+| `ghcr.io/nenjo-ai/nenjo-worker:<version>-heavy` / `heavy` | Dev toolbox plus pinned `agent-browser` and Chromium for browser automation |
 
 Open an interactive shell in the dev image with:
 
@@ -70,6 +71,61 @@ docker run --rm -it \
   --entrypoint bash \
   ghcr.io/nenjo-ai/nenjo-worker:dev
 ```
+
+Use the heavy image when agents need local browser automation:
+
+```bash
+docker run --rm -it \
+  -v nenjo-data:/home/nenjo/.nenjo \
+  -v "$PWD:/home/nenjo/.nenjo/workspace" \
+  ghcr.io/nenjo-ai/nenjo-worker:heavy
+```
+
+The heavy image makes the `agent-browser` CLI available, but does not expose
+browser tools automatically. Agent Browser MCP is the worker's browser automation
+path; the legacy `browser`, `browser_open`, desktop `screenshot`, and `[browser]`
+configuration surfaces have been removed. Browser access is installed and
+assigned like any other MCP server. A Connectors package can declare the
+worker-local integration without embedding a platform-specific executable path:
+
+```yaml
+schema: nenjo.mcp_server.v1
+manifest:
+  name: agent_browser
+  display_name: Agent Browser
+  description: Browser automation using the agent-browser CLI on the worker.
+  transport: stdio
+  command: agent-browser
+  args:
+    - mcp
+    - --tools
+    - core
+  metadata:
+    nenjo:
+      managed_connector: agent_browser
+```
+
+After users install the package, they assign its Agent Browser MCP server to the
+agents that need browser access. The worker resolves `agent-browser` from its own
+`PATH`; if it is unavailable, the connector remains unavailable instead of
+falling back to an untrusted command from the package. Assigned browser traffic
+is routed through a loopback-only worker proxy that resolves destinations itself.
+Connector security is composed from a destination policy, hidden or denied tool
+arguments, default or forced arguments, and optional execution namespaces. Agent
+Browser currently selects the public-only destination policy, denies arbitrary
+MCP `extraArgs`, and forces a headless, auto-restored browser session inside an
+isolated namespace per execution session. Cookies and local storage are saved as
+worker-local plaintext under `~/.nenjo/browser-state`; the heavy image links
+agent-browser's state directory there so the existing `~/.nenjo` volume preserves
+it across browser, worker, and container restarts. Agent-browser expires saved
+states after 30 days by default. Executions without a stable session id receive a
+fresh ephemeral namespace instead of sharing state through the agent slug.
+
+The worker host and its persistent volume are the browser-state trust boundary.
+Anyone who can read that volume should be treated as able to access the saved web
+sessions. The connector hides and overrides browser persistence controls so agents
+cannot switch profiles, disable restore, enable a headed browser, or select another
+execution's namespace.
 
 Docker-backed sandboxing from inside the worker is an advanced setup. Mounting
 the host Docker socket gives the container Docker access equivalent to the host
