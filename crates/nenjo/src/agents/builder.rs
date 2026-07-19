@@ -1,7 +1,7 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::async_ops::AsyncOpManager;
@@ -55,7 +55,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     child_delegation_ctx: Option<crate::types::DelegationContext>,
     execution_mode: AgentExecutionMode,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
-    /// (shell, file_read, file_write, git) operate in this directory.
+    /// (shell, read, write, edit, remove, search, repo_status) operate in this directory.
     work_dir: Option<PathBuf>,
     hook_runtime: Option<Arc<HookRuntime>>,
 }
@@ -188,7 +188,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// `{{ project.name }}`, `{{ project.description }}`, etc.
     ///
     /// Resolves git context from project settings if the repo is synced.
-    /// `working_dir` is derived from `workspace_dir/slug` in `build_prompts()`.
+    /// `working_dir` uses an explicit tool scope when one is configured, otherwise
+    /// it is derived from `workspace_dir/slug` in `build_prompts()`.
     pub fn with_project_context(mut self, project: &ProjectManifest) -> Self {
         self.pending_project_context = Some(project.clone());
         self
@@ -286,7 +287,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             }
         };
         if let Some(project) = self.pending_project_context.take() {
-            let ctx = ProjectContext::from_manifest(&project);
+            let mut ctx = ProjectContext::from_manifest(&project);
+            apply_explicit_working_directory(&mut ctx, self.work_dir.as_deref());
             let extra = &mut prompt_context.render_ctx_extra;
             // Resolve git at the top level for prompt context defaults.
             if let Some(ref git) = ctx.git {
@@ -412,7 +414,32 @@ fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
     if slug.is_empty() { None } else { Some(slug) }
 }
 
+fn apply_explicit_working_directory(project: &mut ProjectContext, work_dir: Option<&Path>) {
+    if let Some(work_dir) = work_dir {
+        project.working_dir = work_dir.to_string_lossy().into_owned();
+    }
+}
+
 fn strip_child_prompt_capabilities(prompt_context: &mut PromptContext) {
     prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
+}
+
+#[cfg(test)]
+mod working_directory_tests {
+    use super::apply_explicit_working_directory;
+    use crate::context::ProjectContext;
+
+    #[test]
+    fn explicit_worktree_becomes_the_project_working_directory() {
+        let worktree = std::path::Path::new("/workspace/project/worktrees/task-123");
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            ..ProjectContext::default()
+        };
+
+        apply_explicit_working_directory(&mut project, Some(worktree));
+
+        assert_eq!(project.working_dir, worktree.to_string_lossy());
+    }
 }

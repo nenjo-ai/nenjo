@@ -1,9 +1,7 @@
-//! Regex-based content search across workspace files using ripgrep with grep fallback.
+//! Internal regex content-search engine used by [`super::SearchTool`].
 
+use crate::tools::ToolResult;
 use crate::tools::security::SecurityPolicy;
-use crate::tools::{Tool, ToolCategory, ToolResult};
-use async_trait::async_trait;
-use serde_json::json;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
@@ -15,13 +13,13 @@ const TIMEOUT_SECS: u64 = 30;
 ///
 /// Uses ripgrep (`rg`) when available, falling back to `grep -rn -E`.
 /// All searches are confined to the workspace directory by security policy.
-pub struct ContentSearchTool {
+pub(super) struct ContentSearchEngine {
     security: Arc<SecurityPolicy>,
     has_rg: bool,
 }
 
-impl ContentSearchTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+impl ContentSearchEngine {
+    pub(super) fn new(security: Arc<SecurityPolicy>) -> Self {
         let has_rg = which::which("rg").is_ok();
         Self { security, has_rg }
     }
@@ -30,80 +28,8 @@ impl ContentSearchTool {
     fn new_with_backend(security: Arc<SecurityPolicy>, has_rg: bool) -> Self {
         Self { security, has_rg }
     }
-}
 
-#[async_trait]
-impl Tool for ContentSearchTool {
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn name(&self) -> &str {
-        "content_search"
-    }
-
-    fn description(&self) -> &str {
-        "Search file contents by regex pattern within the workspace. \
-         Supports ripgrep (rg) with grep fallback. \
-         Output modes: 'content' (matching lines with context), \
-         'files_with_matches' (file paths only), 'count' (match counts per file). \
-         Example: pattern='fn main', include='*.rs', output_mode='content'."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Regular expression pattern to search for"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Directory to search in, relative to workspace root. Defaults to '.'",
-                    "default": "."
-                },
-                "output_mode": {
-                    "type": "string",
-                    "description": "Output format: 'content' (matching lines), 'files_with_matches' (paths only), 'count' (match counts)",
-                    "enum": ["content", "files_with_matches", "count"],
-                    "default": "content"
-                },
-                "include": {
-                    "type": "string",
-                    "description": "File glob filter, e.g. '*.rs', '*.{ts,tsx}'"
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Case-sensitive matching. Defaults to true",
-                    "default": true
-                },
-                "context_before": {
-                    "type": "integer",
-                    "description": "Lines of context before each match (content mode only)",
-                    "default": 0
-                },
-                "context_after": {
-                    "type": "integer",
-                    "description": "Lines of context after each match (content mode only)",
-                    "default": 0
-                },
-                "multiline": {
-                    "type": "boolean",
-                    "description": "Enable multiline matching (ripgrep only, errors on grep fallback)",
-                    "default": false
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Defaults to 1000",
-                    "default": 1000
-                }
-            },
-            "required": ["pattern"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    pub(super) async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // --- Parse parameters ---
         let pattern = args
             .get("pattern")
@@ -673,6 +599,7 @@ fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::*;
     use crate::tools::security::{AutonomyLevel, SecurityPolicy};
+    use serde_json::json;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -711,29 +638,12 @@ mod tests {
         std::fs::write(dir.path().join("readme.txt"), "This is a readme file.\n").unwrap();
     }
 
-    #[test]
-    fn content_search_name_and_schema() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
-        assert_eq!(tool.name(), "content_search");
-
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["pattern"].is_object());
-        assert!(schema["properties"]["path"].is_object());
-        assert!(schema["properties"]["output_mode"].is_object());
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("pattern"))
-        );
-    }
-
     #[tokio::test]
-    async fn content_search_basic_match() {
+    async fn content_engine_basic_match() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "fn main"})).await.unwrap();
 
         assert!(result.success);
@@ -742,11 +652,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_files_with_matches_mode() {
+    async fn content_engine_files_with_matches_mode() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "println", "output_mode": "files_with_matches"}))
             .await
@@ -760,11 +670,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_count_mode() {
+    async fn content_engine_count_mode() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "println", "output_mode": "count"}))
             .await
@@ -777,11 +687,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_case_insensitive() {
+    async fn content_engine_case_insensitive() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.txt"), "Hello World\nhello world\n").unwrap();
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "HELLO", "case_sensitive": false}))
             .await
@@ -793,11 +703,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_include_filter() {
+    async fn content_engine_include_filter() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "fn", "include": "*.rs"}))
             .await
@@ -809,7 +719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_context_lines() {
+    async fn content_engine_context_lines() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("ctx.rs"),
@@ -817,7 +727,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "target_line", "context_before": 1, "context_after": 1}))
             .await
@@ -830,11 +740,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_no_matches() {
+    async fn content_engine_no_matches() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "nonexistent_string_xyz"}))
             .await
@@ -845,8 +755,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_empty_pattern_rejected() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
+    async fn content_engine_empty_pattern_rejected() {
+        let tool = ContentSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool.execute(json!({"pattern": ""})).await.unwrap();
 
         assert!(!result.success);
@@ -854,18 +764,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_missing_pattern() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
+    async fn content_engine_missing_pattern() {
+        let tool = ContentSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn content_search_invalid_output_mode_rejected() {
+    async fn content_engine_invalid_output_mode_rejected() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "fn", "output_mode": "invalid_mode"}))
             .await
@@ -882,13 +792,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_subdirectory() {
+    async fn content_engine_subdirectory() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("sub/deep/nested.rs"), "fn nested() {}\n").unwrap();
         std::fs::write(dir.path().join("root.rs"), "fn root() {}\n").unwrap();
 
-        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = ContentSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "fn nested", "path": "sub"}))
             .await
@@ -902,8 +812,8 @@ mod tests {
     // --- Security tests ---
 
     #[tokio::test]
-    async fn content_search_rejects_absolute_path() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
+    async fn content_engine_rejects_absolute_path() {
+        let tool = ContentSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"pattern": "test", "path": "/etc"}))
             .await
@@ -914,8 +824,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_rejects_path_traversal() {
-        let tool = ContentSearchTool::new(test_security(std::env::temp_dir()));
+    async fn content_engine_rejects_path_traversal() {
+        let tool = ContentSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"pattern": "test", "path": "../../../etc"}))
             .await
@@ -926,11 +836,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_rate_limited() {
+    async fn content_engine_rate_limited() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), "test content\n").unwrap();
 
-        let tool = ContentSearchTool::new(test_security_with(
+        let tool = ContentSearchEngine::new(test_security_with(
             dir.path().to_path_buf(),
             AutonomyLevel::Supervised,
             0,
@@ -943,7 +853,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn content_search_symlink_escape_blocked() {
+    async fn content_engine_symlink_escape_blocked() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().unwrap();
@@ -959,7 +869,7 @@ mod tests {
         // Also add a legitimate file
         std::fs::write(workspace.join("legit.txt"), "legit data\n").unwrap();
 
-        let tool = ContentSearchTool::new(test_security(workspace.clone()));
+        let tool = ContentSearchEngine::new(test_security(workspace.clone()));
         let result = tool.execute(json!({"pattern": "data"})).await.unwrap();
 
         assert!(result.success);
@@ -970,11 +880,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_search_multiline_without_rg() {
+    async fn content_engine_multiline_without_rg() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.txt"), "line1\nline2\n").unwrap();
 
-        let tool = ContentSearchTool::new_with_backend(
+        let tool = ContentSearchEngine::new_with_backend(
             test_security(dir.path().to_path_buf()),
             false, // no rg
         );

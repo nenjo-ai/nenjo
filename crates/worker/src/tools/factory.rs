@@ -28,13 +28,14 @@ use crate::media::{ModelAssignmentResolver, ResourceRef};
 use crate::providers::ModelProviderRegistry;
 use crate::skills::{LocalSkillProvider, SkillRegistry};
 
+use super::file_delete::ProtectedProjectPaths;
+use super::file_mutation::FileMutationCoordinator;
 use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
-    AutonomyLevel, ContentSearchTool, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool,
-    GitOperationsTool, GlobSearchTool, HttpRequestTool, ListInstalledSkillsTool, NativeMediaTool,
-    RuntimeAdapter, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool,
-    WebSearchTool,
+    AutonomyLevel, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool, HttpRequestTool,
+    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, SearchTool,
+    SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool, WebSearchTool,
 };
 
 tokio::task_local! {
@@ -111,6 +112,7 @@ where
     skill_registry: Arc<SkillRegistry>,
     platform: PlatformToolServices,
     local_execution_watcher: LocalRoutineExecutionWatcher,
+    file_mutations: Arc<FileMutationCoordinator>,
 }
 
 impl<R> WorkerToolFactory<R>
@@ -178,6 +180,7 @@ where
             skill_registry,
             platform,
             local_execution_watcher: LocalRoutineExecutionWatcher::default(),
+            file_mutations: Arc::new(FileMutationCoordinator::default()),
         }
     }
 
@@ -207,12 +210,23 @@ where
                 skill_runtime.clone(),
             )),
             Arc::new(FileReadTool::new(security.clone())),
-            Arc::new(FileWriteTool::new(security.clone())),
-            Arc::new(FileEditTool::new(security.clone())),
-            Arc::new(FileDeleteTool::new(security.clone())),
-            Arc::new(GitOperationsTool::new(security.clone())),
-            Arc::new(ContentSearchTool::new(security.clone())),
-            Arc::new(GlobSearchTool::new(security.clone())),
+            Arc::new(FileWriteTool::with_coordinator(
+                security.clone(),
+                self.file_mutations.clone(),
+            )),
+            Arc::new(FileEditTool::with_coordinator(
+                security.clone(),
+                self.file_mutations.clone(),
+            )),
+            Arc::new(FileDeleteTool::with_coordinator(
+                security.clone(),
+                self.file_mutations.clone(),
+                Some(ProtectedProjectPaths::new(
+                    self.config.workspace_dir.clone(),
+                )),
+            )),
+            Arc::new(RepoStatusTool::new(security.clone())),
+            Arc::new(SearchTool::new(security.clone())),
         ];
         let skill_provider: Arc<dyn SkillProvider> = Arc::new(LocalSkillProvider::with_mcp_pool(
             self.skill_registry.clone(),

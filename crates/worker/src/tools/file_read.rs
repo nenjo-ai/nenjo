@@ -7,6 +7,9 @@ use serde_json::json;
 use std::sync::Arc;
 
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_LINE_COUNT: usize = 500;
+const MAX_LINE_COUNT: usize = 2_000;
+const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Read file contents with path sandboxing
 pub struct FileReadTool {
@@ -26,11 +29,11 @@ impl Tool for FileReadTool {
     }
 
     fn name(&self) -> &str {
-        "file_read"
+        "read"
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file in the workspace"
+        "Read a bounded range of lines from a file in the scoped workspace. Reads start at line 1 and return at most 500 lines by default; use start_line and line_count to continue through large files."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -40,6 +43,19 @@ impl Tool for FileReadTool {
                 "path": {
                     "type": "string",
                     "description": "Relative path to the file within the workspace"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First line to return, using one-based line numbers",
+                    "default": 1
+                },
+                "line_count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2000,
+                    "description": "Maximum number of lines to return",
+                    "default": 500
                 }
             },
             "required": ["path"]
@@ -51,6 +67,9 @@ impl Tool for FileReadTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let start_line = parse_positive_usize(&args, "start_line", 1)?;
+        let line_count =
+            parse_positive_usize(&args, "line_count", DEFAULT_LINE_COUNT)?.min(MAX_LINE_COUNT);
 
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
@@ -129,11 +148,18 @@ impl Tool for FileReadTool {
         }
 
         match tokio::fs::read_to_string(&resolved_path).await {
-            Ok(contents) => Ok(ToolResult {
-                success: true,
-                output: contents,
-                error: None,
-            }),
+            Ok(contents) => match render_line_range(&contents, start_line, line_count) {
+                Ok(output) => Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                }),
+                Err(error) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error),
+                }),
+            },
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -141,6 +167,70 @@ impl Tool for FileReadTool {
             }),
         }
     }
+}
+
+fn parse_positive_usize(
+    args: &serde_json::Value,
+    field: &str,
+    default: usize,
+) -> anyhow::Result<usize> {
+    let Some(value) = args.get(field) else {
+        return Ok(default);
+    };
+    let value = value
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("'{field}' must be a positive integer"))?;
+    let value = usize::try_from(value)
+        .map_err(|_| anyhow::anyhow!("'{field}' is too large for this platform"))?;
+    if value == 0 {
+        anyhow::bail!("'{field}' must be a positive integer");
+    }
+    Ok(value)
+}
+
+fn render_line_range(
+    contents: &str,
+    start_line: usize,
+    line_count: usize,
+) -> Result<String, String> {
+    let total_lines = contents.lines().count();
+    if !contents.is_empty() && start_line > total_lines {
+        return Err(format!(
+            "start_line {start_line} is past the end of the file ({total_lines} lines)"
+        ));
+    }
+
+    let mut output: String = contents
+        .split_inclusive('\n')
+        .skip(start_line - 1)
+        .take(line_count)
+        .collect();
+    let last_selected_line = start_line
+        .saturating_add(line_count)
+        .saturating_sub(1)
+        .min(total_lines);
+    let has_more_lines = last_selected_line < total_lines;
+    let mut byte_truncated = false;
+    if output.len() > MAX_OUTPUT_BYTES {
+        output.truncate(output.floor_char_boundary(MAX_OUTPUT_BYTES));
+        byte_truncated = true;
+    }
+    if has_more_lines || byte_truncated {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        if byte_truncated {
+            output.push_str(&format!(
+                "... [output bounded at {MAX_OUTPUT_BYTES} bytes; request a narrower line range or use search]"
+            ));
+        } else {
+            output.push_str(&format!(
+                "... [output bounded; file has {total_lines} lines. Continue with start_line={}]",
+                last_selected_line + 1
+            ));
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -176,7 +266,7 @@ mod tests {
     #[test]
     fn file_read_name() {
         let tool = FileReadTool::new(test_security(std::env::temp_dir()));
-        assert_eq!(tool.name(), "file_read");
+        assert_eq!(tool.name(), "read");
     }
 
     #[test]
@@ -190,6 +280,8 @@ mod tests {
                 .unwrap()
                 .contains(&json!("path"))
         );
+        assert_eq!(schema["properties"]["start_line"]["minimum"], 1);
+        assert_eq!(schema["properties"]["line_count"]["maximum"], 2000);
     }
 
     #[tokio::test]
@@ -205,6 +297,59 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output, "hello world");
         assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn file_read_returns_requested_line_range() {
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
+        tokio::fs::write(dir.join("test.txt"), "one\ntwo\nthree\nfour\n")
+            .await
+            .unwrap();
+
+        let tool = FileReadTool::new(test_security(dir));
+        let result = tool
+            .execute(json!({
+                "path": "test.txt",
+                "start_line": 2,
+                "line_count": 2
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(
+            result.output,
+            "two\nthree\n... [output bounded; file has 4 lines. Continue with start_line=4]"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_rejects_start_line_past_end() {
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
+        tokio::fs::write(dir.join("test.txt"), "one\ntwo\n")
+            .await
+            .unwrap();
+
+        let tool = FileReadTool::new(test_security(dir));
+        let result = tool
+            .execute(json!({"path": "test.txt", "start_line": 3}))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("past the end"));
+    }
+
+    #[test]
+    fn byte_bounded_read_does_not_offer_a_repeating_line_cursor() {
+        let contents = "x".repeat(MAX_OUTPUT_BYTES + 1);
+        let output = render_line_range(&contents, 1, 1).unwrap();
+
+        assert!(output.contains("output bounded at 262144 bytes"));
+        assert!(output.contains("use search"));
+        assert!(!output.contains("Continue with start_line=1"));
     }
 
     #[tokio::test]

@@ -323,6 +323,7 @@ struct ShellOperationStarted<'a> {
     #[serde(flatten)]
     async_operation: AsyncOperationStartReceipt,
     command: &'a str,
+    working_directory: &'a std::path::Path,
 }
 
 /// Shell command execution tool with sandboxing
@@ -350,7 +351,7 @@ where
         runtime: Arc<R>,
         skill_runtime: Arc<SkillRuntimeState>,
     ) -> Self {
-        let description = build_shell_description();
+        let description = build_shell_description(&security.workspace_dir);
         Self {
             security,
             runtime,
@@ -368,7 +369,7 @@ where
 }
 
 /// Build the shell tool description with OS-specific guidance detected at startup.
-fn build_shell_description() -> String {
+fn build_shell_description(working_directory: &std::path::Path) -> String {
     // Detect OS name and version via `uname -sr` (works on macOS and Linux).
     // Fall back to the Rust compile-time target OS if the command fails.
     let os_label = std::process::Command::new("uname")
@@ -389,13 +390,18 @@ fn build_shell_description() -> String {
     };
 
     format!(
-        "Execute a shell command in the workspace directory. \
+        "Execute a shell command in the scoped working directory. \
+        The process already starts in: {}. Use relative paths; do not prefix commands with \
+        `cd` to this directory. stdout and stderr are captured separately and returned, with \
+        each stream truncated at 1MB. Do not add `2>&1` or pipe through `head` solely to \
+        collect or limit output. \
         Commands that remain running become asynchronous shell operations; use the controls \
         returned by the tool to inspect, wait for, or stop them. \
         Environment: {os_label}. \
         {sed_note}\
-        Output redirections (> and >>) are blocked by policy — use file_write to create or \
-        replace files instead. Prefer file_read + file_write over sed/awk for file edits."
+        Output redirections (> and >>) are blocked by policy — use write to create or \
+        replace files instead. Prefer read + write over sed/awk for file edits.",
+        working_directory.display()
     )
 }
 
@@ -424,11 +430,6 @@ where
                     "type": "string",
                     "description": "The shell command to execute"
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode",
-                    "default": false
-                }
             },
             "required": ["command"]
         })
@@ -440,11 +441,6 @@ where
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
-        let approved = args
-            .get("approved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
@@ -453,13 +449,13 @@ where
             });
         }
 
-        match self.security.validate_command_execution(command, approved) {
+        match self.security.validate_command_execution(command) {
             Ok(_) => {}
-            Err(reason) => {
+            Err(denial) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
-                    error: Some(reason),
+                    output: serde_json::to_string_pretty(&denial)?,
+                    error: Some(denial.message),
                 });
             }
         }
@@ -574,6 +570,7 @@ where
                             controls,
                         ),
                         command,
+                        working_directory: &self.security.workspace_dir,
                     })?,
                     error: None,
                 })
@@ -748,6 +745,19 @@ mod tests {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         assert!(!tool.description().is_empty());
         assert!(tool.description().contains("asynchronous shell operations"));
+        assert!(tool.description().contains("already starts in"));
+        assert!(
+            tool.description()
+                .contains("stdout and stderr are captured")
+        );
+        assert!(
+            tool.description()
+                .contains("do not prefix commands with `cd`")
+        );
+        assert!(
+            tool.description()
+                .contains(&std::env::temp_dir().display().to_string())
+        );
     }
 
     #[test]
@@ -761,7 +771,7 @@ mod tests {
                 .unwrap()
                 .contains(&json!("command"))
         );
-        assert!(schema["properties"]["approved"].is_object());
+        assert!(schema["properties"].get("approved").is_none());
     }
 
     #[tokio::test]
@@ -850,8 +860,10 @@ mod tests {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         let result = tool.execute(json!({"command": "rm -rf /"})).await.unwrap();
         assert!(!result.success);
-        let error = result.error.as_deref().unwrap_or("");
-        assert!(error.contains("not allowed") || error.contains("high-risk"));
+        let denial: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(denial["type"], "scope_violation");
+        assert_eq!(denial["rule"], "blocked_executable");
+        assert_eq!(denial["suggestion"]["tool"], "remove");
     }
 
     #[tokio::test]
@@ -859,7 +871,7 @@ mod tests {
         let tool = ShellTool::new(test_security(AutonomyLevel::ReadOnly), test_runtime());
         let result = tool.execute(json!({"command": "ls"})).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("not allowed"));
+        assert!(result.error.as_ref().unwrap().contains("disabled"));
     }
 
     #[tokio::test]
@@ -885,6 +897,23 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
+    }
+
+    #[test]
+    fn captured_shell_output_is_bounded_with_a_truncation_marker() {
+        let mut stream = CapturedStream::default();
+        let oversized = vec![b'x'; MAX_OUTPUT_BYTES + 1];
+
+        let (accepted, newly_truncated) = stream.push(&oversized);
+
+        assert_eq!(accepted.len(), MAX_OUTPUT_BYTES);
+        assert!(newly_truncated);
+        assert_eq!(stream.bytes.len(), MAX_OUTPUT_BYTES);
+        assert!(
+            stream
+                .render("\n... [output truncated at 1MB]")
+                .ends_with("\n... [output truncated at 1MB]")
+        );
     }
 
     fn test_security_with_env_cmd() -> Arc<SecurityPolicy> {
@@ -997,7 +1026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_requires_approval_for_medium_risk_command() {
+    async fn shell_allows_workspace_mutations_without_approval() {
         let temp = tempfile::tempdir().unwrap();
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
@@ -1007,27 +1036,70 @@ mod tests {
         });
 
         let tool = ShellTool::new(security.clone(), test_runtime());
-        let denied = tool
+        let result = tool
             .execute(json!({"command": "touch nenjo_shell_approval_test"}))
             .await
             .unwrap();
-        assert!(!denied.success);
-        assert!(
-            denied
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("explicit approval")
-        );
 
-        let allowed = tool
-            .execute(json!({
-                "command": "touch nenjo_shell_approval_test",
-                "approved": true
-            }))
+        assert!(result.success);
+        assert!(temp.path().join("nenjo_shell_approval_test").exists());
+    }
+
+    #[tokio::test]
+    async fn shell_allows_git_push_without_command_approval() {
+        async fn git(directory: &std::path::Path, args: &[&str]) {
+            let status = tokio::process::Command::new("git")
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(directory)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let remote = temp.path().join("remote.git");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]).await;
+        git(&workspace, &["init"]).await;
+        git(&workspace, &["config", "user.name", "Nenjo Test"]).await;
+        git(&workspace, &["config", "user.email", "nenjo@example.test"]).await;
+        tokio::fs::write(workspace.join("tracked.txt"), "initial\n")
             .await
             .unwrap();
-        assert!(allowed.success);
-        assert!(temp.path().join("nenjo_shell_approval_test").exists());
+        git(&workspace, &["add", "tracked.txt"]).await;
+        git(&workspace, &["commit", "-m", "initial"]).await;
+        git(
+            &workspace,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .await;
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            workspace_dir: workspace,
+            ..SecurityPolicy::default()
+        });
+        let tool = ShellTool::new(security, test_runtime());
+
+        let result = tool
+            .execute(json!({"command": "git push origin HEAD:main"}))
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        let pushed = tokio::process::Command::new("git")
+            .args(["rev-parse", "refs/heads/main"])
+            .current_dir(&remote)
+            .output()
+            .await
+            .unwrap();
+        assert!(pushed.status.success());
     }
 }

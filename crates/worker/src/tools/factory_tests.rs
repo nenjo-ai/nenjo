@@ -177,6 +177,34 @@ async fn worker_factory_always_exposes_use_skill_tool() {
         names.iter().any(|name| name == "call_skill_mcp_tool"),
         "worker tool belt should always include call_skill_mcp_tool, got: {names:?}"
     );
+    for expected in [
+        "shell",
+        "read",
+        "write",
+        "edit",
+        "remove",
+        "search",
+        "repo_status",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "worker tool belt should include {expected}, got: {names:?}"
+        );
+    }
+    for removed in [
+        "file_read",
+        "file_write",
+        "file_edit",
+        "file_delete",
+        "content_search",
+        "glob_search",
+        "git_operations",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == removed),
+            "worker tool belt should not include legacy tool {removed}, got: {names:?}"
+        );
+    }
 }
 
 #[tokio::test]

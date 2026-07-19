@@ -3,13 +3,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, mpsc};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind};
@@ -24,6 +26,8 @@ const SIGNAL_QUEUE_CAP: usize = 128;
 const TRANSCRIPT_CAP: usize = 256;
 const WAIT_EVENTS_PER_OPERATION: usize = 12;
 const INSPECT_LIMIT_CAP: usize = 50;
+const OPERATION_INBOX_CAP: usize = 8;
+const TERMINAL_OPERATION_CAP: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct AsyncOpId(String);
@@ -232,25 +236,97 @@ pub(crate) struct AsyncOpManager {
 
 struct ManagerInner {
     operations: Mutex<HashMap<AsyncOpId, Arc<AsyncOperation>>>,
-    notify: Notify,
+    change_tx: watch::Sender<u64>,
+    next_sequence: AtomicU64,
     cancel: CancellationToken,
 }
 
 struct AsyncOperation {
     id: AsyncOpId,
+    sequence: u64,
     kind: AsyncOpKind,
     label: String,
     parent_operation_id: Option<String>,
     parent_tool_name: Option<String>,
     model_visible: bool,
     controls: AsyncControls,
-    status: Mutex<AsyncOpStatus>,
+    lifecycle: Mutex<AsyncOpLifecycle>,
     signals: Mutex<VecDeque<AsyncOpSignal>>,
     latest_output: Mutex<Option<Value>>,
     transcript: Mutex<TranscriptState>,
-    inbox_tx: mpsc::UnboundedSender<String>,
+    inbox_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
-    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+enum AsyncOpLifecycle {
+    Active {
+        phase: AsyncOpActivePhase,
+        abort: Option<AbortHandle>,
+    },
+    Terminal(AsyncOpStatus),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncOpActivePhase {
+    Running,
+    WaitingForInput,
+}
+
+enum TerminalTransition {
+    Applied(Option<AbortHandle>),
+    AlreadyTerminal,
+}
+
+impl AsyncOpLifecycle {
+    fn status(&self) -> AsyncOpStatus {
+        match self {
+            Self::Active {
+                phase: AsyncOpActivePhase::Running,
+                ..
+            } => AsyncOpStatus::Running,
+            Self::Active {
+                phase: AsyncOpActivePhase::WaitingForInput,
+                ..
+            } => AsyncOpStatus::WaitingForInput,
+            Self::Terminal(status) => *status,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Active { .. })
+    }
+
+    fn set_active_phase(&mut self, phase: AsyncOpActivePhase) -> bool {
+        let Self::Active { phase: current, .. } = self else {
+            return false;
+        };
+        *current = phase;
+        true
+    }
+
+    fn attach_abort(&mut self, abort: AbortHandle) -> Result<(), AbortHandle> {
+        let Self::Active { abort: current, .. } = self else {
+            return Err(abort);
+        };
+        if current.is_some() {
+            return Err(abort);
+        }
+        *current = Some(abort);
+        Ok(())
+    }
+
+    fn transition_terminal(&mut self, status: AsyncOpStatus) -> TerminalTransition {
+        debug_assert!(matches!(
+            status,
+            AsyncOpStatus::Completed | AsyncOpStatus::Failed | AsyncOpStatus::Stopped
+        ));
+        let Self::Active { abort, .. } = self else {
+            return TerminalTransition::AlreadyTerminal;
+        };
+        let abort = abort.take();
+        *self = Self::Terminal(status);
+        TerminalTransition::Applied(abort)
+    }
 }
 
 #[derive(Default)]
@@ -270,7 +346,7 @@ pub(crate) struct AsyncOpHandle {
 pub(crate) struct AsyncOpChildHandle {
     manager: Weak<ManagerInner>,
     operation: Weak<AsyncOperation>,
-    inbox_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+    inbox_rx: Arc<Mutex<mpsc::Receiver<String>>>,
 }
 
 pub(crate) struct StartedAsyncOp {
@@ -298,7 +374,6 @@ pub struct AsyncOperationRuntime {
 #[derive(Clone)]
 pub struct AsyncOperationHandle {
     operation_id: String,
-    manager: AsyncOpManager,
     handle: AsyncOpHandle,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
@@ -359,7 +434,6 @@ impl AsyncOperationRuntime {
 
         AsyncOperationHandle {
             operation_id,
-            manager: self.manager.clone(),
             handle: started.handle,
             events_tx,
         }
@@ -376,9 +450,7 @@ impl AsyncOperationHandle {
     }
 
     pub async fn attach_join(&self, join: JoinHandle<()>) {
-        self.manager
-            .attach_join(&AsyncOpId::new(self.operation_id.clone()), join)
-            .await;
+        self.handle.attach_join(join, self.events_tx.clone()).await;
     }
 
     pub async fn progress(&self, summary: impl Into<String>, details: Option<String>) {
@@ -426,10 +498,12 @@ impl AsyncOpManager {
     }
 
     pub(crate) fn with_cancel(cancel: CancellationToken) -> Self {
+        let (change_tx, _change_rx) = watch::channel(0);
         Self {
             inner: Arc::new(ManagerInner {
                 operations: Mutex::new(HashMap::new()),
-                notify: Notify::new(),
+                change_tx,
+                next_sequence: AtomicU64::new(1),
                 cancel,
             }),
         }
@@ -440,22 +514,25 @@ impl AsyncOpManager {
         request: StartAsyncOp,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) -> StartedAsyncOp {
-        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        let (inbox_tx, inbox_rx) = mpsc::channel(OPERATION_INBOX_CAP);
         let operation = Arc::new(AsyncOperation {
             id: request.id.clone(),
+            sequence: self.inner.next_sequence.fetch_add(1, Ordering::Relaxed),
             kind: request.kind,
             label: request.label,
             parent_operation_id: request.parent_operation_id,
             parent_tool_name: request.parent_tool_name,
             model_visible: request.model_visible,
             controls: request.controls,
-            status: Mutex::new(AsyncOpStatus::Running),
+            lifecycle: Mutex::new(AsyncOpLifecycle::Active {
+                phase: AsyncOpActivePhase::Running,
+                abort: None,
+            }),
             signals: Mutex::new(VecDeque::new()),
             latest_output: Mutex::new(None),
             transcript: Mutex::new(TranscriptState::default()),
             inbox_tx,
             cancel: self.inner.cancel.child_token(),
-            join: Mutex::new(None),
         });
         self.inner
             .operations
@@ -497,8 +574,9 @@ impl AsyncOpManager {
             .await;
         let mut results = Vec::with_capacity(operations.len());
         for operation in operations {
-            let status = *operation.status.lock().await;
-            if !status.can_receive_input() {
+            let mut lifecycle = operation.lifecycle.lock().await;
+            let status = lifecycle.status();
+            if !lifecycle.is_active() {
                 results.push(AsyncOpDeliveryResult {
                     operation_id: operation.id.to_string(),
                     status: "not_delivered",
@@ -506,22 +584,27 @@ impl AsyncOpManager {
                 });
                 continue;
             }
-            if operation.inbox_tx.send(message.clone()).is_ok() {
-                if status == AsyncOpStatus::WaitingForInput {
-                    *operation.status.lock().await = AsyncOpStatus::Running;
+            let result = match operation.inbox_tx.try_send(message.clone()) {
+                Ok(()) => {
+                    lifecycle.set_active_phase(AsyncOpActivePhase::Running);
+                    AsyncOpDeliveryResult {
+                        operation_id: operation.id.to_string(),
+                        status: "delivered",
+                        reason: None,
+                    }
                 }
-                results.push(AsyncOpDeliveryResult {
+                Err(TrySendError::Full(_)) => AsyncOpDeliveryResult {
                     operation_id: operation.id.to_string(),
-                    status: "delivered",
-                    reason: None,
-                });
-            } else {
-                results.push(AsyncOpDeliveryResult {
+                    status: "not_delivered",
+                    reason: Some("operation inbox is full".into()),
+                },
+                Err(TrySendError::Closed(_)) => AsyncOpDeliveryResult {
                     operation_id: operation.id.to_string(),
                     status: "not_delivered",
                     reason: Some("operation inbox is closed".into()),
-                });
-            }
+                },
+            };
+            results.push(result);
         }
         results
     }
@@ -538,22 +621,31 @@ impl AsyncOpManager {
             .await;
         let mut stopped = Vec::with_capacity(operations.len());
         for operation in operations {
+            let abort = {
+                let mut lifecycle = operation.lifecycle.lock().await;
+                match lifecycle.transition_terminal(AsyncOpStatus::Stopped) {
+                    TerminalTransition::Applied(abort) => abort,
+                    TerminalTransition::AlreadyTerminal => continue,
+                }
+            };
             operation.cancel.cancel();
-            if let Some(join) = operation.join.lock().await.take() {
-                join.abort();
+            if let Some(abort) = abort {
+                abort.abort();
             }
             let handle = AsyncOpHandle {
                 manager: self.clone(),
                 operation: operation.clone(),
             };
             handle
-                .complete(
+                .push_signal(
                     AsyncOpSignal::Stopped {
                         reason: reason.clone(),
                     },
+                    true,
                     events_tx.clone(),
                 )
                 .await;
+            self.prune_terminal_operations().await;
             stopped.push(AsyncOpStopped {
                 operation_id: operation.id.to_string(),
                 status: AsyncOpStatus::Stopped.as_str(),
@@ -575,7 +667,7 @@ impl AsyncOpManager {
             .await;
         let mut inspected = Vec::with_capacity(operations.len());
         for operation in operations {
-            let status = *operation.status.lock().await;
+            let status = operation.lifecycle.lock().await.status();
             let latest_signal = operation
                 .signals
                 .lock()
@@ -618,15 +710,27 @@ impl AsyncOpManager {
     pub(crate) async fn wait(&self, seconds: u64, filter: AsyncOpWaitFilter) -> AsyncOpWaitResult {
         let seconds = seconds.clamp(1, 30);
         let started = Instant::now();
-        let mut updates = self.drain_signals(filter.clone()).await;
-        if updates.is_empty() && (!filter.model_visible_only || self.has_open_model_visible().await)
-        {
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
-                _ = self.inner.notify.notified() => {}
+        let deadline = started + std::time::Duration::from_secs(seconds);
+        let mut changes = self.inner.change_tx.subscribe();
+        let updates = loop {
+            let updates = self.drain_signals(filter.clone()).await;
+            if !updates.is_empty()
+                || (filter.model_visible_only && !self.has_open_model_visible().await)
+            {
+                break updates;
             }
-            updates = self.drain_signals(filter).await;
-        }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break updates;
+            }
+            let timed_out = tokio::select! {
+                _ = tokio::time::sleep(remaining) => true,
+                _ = changes.changed() => false,
+            };
+            if timed_out {
+                break self.drain_signals(filter.clone()).await;
+            }
+        };
         let woken_by = classify_wake(&updates);
         AsyncOpWaitResult {
             elapsed_seconds: started.elapsed().as_secs(),
@@ -641,7 +745,7 @@ impl AsyncOpManager {
             if !operation.model_visible {
                 continue;
             }
-            let status = *operation.status.lock().await;
+            let status = operation.lifecycle.lock().await.status();
             if !matches!(
                 status,
                 AsyncOpStatus::Completed | AsyncOpStatus::Failed | AsyncOpStatus::Stopped
@@ -673,7 +777,7 @@ impl AsyncOpManager {
             if filter.model_visible_only && !operation.model_visible {
                 continue;
             }
-            let status = *operation.status.lock().await;
+            let status = operation.lifecycle.lock().await.status();
             let mut signals = operation.signals.lock().await;
             if signals.is_empty() {
                 continue;
@@ -698,12 +802,6 @@ impl AsyncOpManager {
             }
         }
         updates
-    }
-
-    pub(crate) async fn attach_join(&self, id: &AsyncOpId, join: JoinHandle<()>) {
-        if let Some(operation) = self.inner.operations.lock().await.get(id).cloned() {
-            *operation.join.lock().await = Some(join);
-        }
     }
 
     pub(crate) async fn handle(&self, id: &AsyncOpId) -> Option<AsyncOpHandle> {
@@ -741,17 +839,57 @@ impl AsyncOpManager {
             .filter(|operation| control.is_none_or(|c| operation.controls.contains(c)))
             .collect()
     }
+
+    async fn prune_terminal_operations(&self) {
+        let operations = self
+            .inner
+            .operations
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut terminal = Vec::new();
+        for operation in operations {
+            if !operation.lifecycle.lock().await.is_active() {
+                terminal.push((operation.sequence, operation.id.clone(), operation));
+            }
+        }
+        if terminal.len() <= TERMINAL_OPERATION_CAP {
+            return;
+        }
+        terminal.sort_unstable_by_key(|(sequence, _, _)| *sequence);
+        let remove_count = terminal.len() - TERMINAL_OPERATION_CAP;
+        let mut operations = self.inner.operations.lock().await;
+        for (_, id, expected) in terminal.into_iter().take(remove_count) {
+            if operations
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, &expected))
+            {
+                operations.remove(&id);
+            }
+        }
+    }
+
+    fn notify_change(&self) {
+        self.inner
+            .change_tx
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
 }
 
 impl Drop for ManagerInner {
     fn drop(&mut self) {
+        self.cancel.cancel();
         if let Ok(operations) = self.operations.try_lock() {
             for operation in operations.values() {
                 operation.cancel.cancel();
-                if let Ok(mut join) = operation.join.try_lock()
-                    && let Some(handle) = join.take()
+                if let Ok(mut lifecycle) = operation.lifecycle.try_lock()
+                    && let AsyncOpLifecycle::Active {
+                        abort: Some(abort), ..
+                    } = &mut *lifecycle
                 {
-                    handle.abort();
+                    abort.abort();
                 }
             }
         }
@@ -763,18 +901,53 @@ impl AsyncOpHandle {
         self.operation.cancel.clone()
     }
 
+    pub(crate) async fn attach_join(
+        &self,
+        join: JoinHandle<()>,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) {
+        let abort = join.abort_handle();
+        let attached = self
+            .operation
+            .lifecycle
+            .lock()
+            .await
+            .attach_abort(abort.clone())
+            .is_ok();
+        if !attached {
+            abort.abort();
+        }
+
+        let manager = Arc::downgrade(&self.manager.inner);
+        let operation = Arc::downgrade(&self.operation);
+        tokio::spawn(async move {
+            let outcome = join.await;
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            let Some(operation) = operation.upgrade() else {
+                return;
+            };
+            let error = operation_task_error(outcome);
+            let handle = AsyncOpHandle {
+                manager: AsyncOpManager { inner: manager },
+                operation,
+            };
+            handle.fail_if_active(error, events_tx).await;
+        });
+    }
+
     pub(crate) async fn progress(
         &self,
         summary: String,
         details: Option<String>,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) {
-        self.push_signal(
+        self.emit_signal(
             AsyncOpSignal::Progress {
                 summary: truncate(&summary, 500),
                 details: details.map(|details| truncate(&details, 1000)),
             },
-            false,
             events_tx,
         )
         .await;
@@ -785,22 +958,71 @@ impl AsyncOpHandle {
         signal: AsyncOpSignal,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) {
-        let mut status = self.operation.status.lock().await;
-        if matches!(*status, AsyncOpStatus::Stopped) {
-            return;
-        }
-        *status = signal.status();
-        drop(status);
-        match &signal {
-            AsyncOpSignal::Completed { output, .. } | AsyncOpSignal::Failed { output, .. } => {
-                *self.operation.latest_output.lock().await = output.clone();
+        self.emit_signal(signal, events_tx).await;
+    }
+
+    async fn emit_signal(
+        &self,
+        signal: AsyncOpSignal,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) {
+        match signal.status() {
+            AsyncOpStatus::Running => {
+                let lifecycle = self.operation.lifecycle.lock().await;
+                if !lifecycle.is_active() {
+                    return;
+                }
+                self.push_signal(signal, false, events_tx).await;
             }
-            AsyncOpSignal::Started { .. }
-            | AsyncOpSignal::Progress { .. }
-            | AsyncOpSignal::NeedsInput { .. }
-            | AsyncOpSignal::Stopped { .. } => {}
+            AsyncOpStatus::WaitingForInput => {
+                let mut lifecycle = self.operation.lifecycle.lock().await;
+                if !lifecycle.set_active_phase(AsyncOpActivePhase::WaitingForInput) {
+                    return;
+                }
+                self.push_signal(signal, true, events_tx).await;
+            }
+            status
+            @ (AsyncOpStatus::Completed | AsyncOpStatus::Failed | AsyncOpStatus::Stopped) => {
+                let transition = self
+                    .operation
+                    .lifecycle
+                    .lock()
+                    .await
+                    .transition_terminal(status);
+                if matches!(transition, TerminalTransition::AlreadyTerminal) {
+                    return;
+                }
+                match &signal {
+                    AsyncOpSignal::Completed { output, .. }
+                    | AsyncOpSignal::Failed { output, .. } => {
+                        *self.operation.latest_output.lock().await = output.clone();
+                    }
+                    AsyncOpSignal::Stopped { .. } => {}
+                    AsyncOpSignal::Started { .. }
+                    | AsyncOpSignal::Progress { .. }
+                    | AsyncOpSignal::NeedsInput { .. } => unreachable!(),
+                }
+                self.push_signal(signal, true, events_tx).await;
+                self.manager.prune_terminal_operations().await;
+            }
         }
-        self.push_signal(signal, true, events_tx).await;
+    }
+
+    async fn fail_if_active(
+        &self,
+        error: String,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) {
+        if self.operation.lifecycle.lock().await.is_active() {
+            self.complete(
+                AsyncOpSignal::Failed {
+                    error: truncate(&error, 500),
+                    output: None,
+                },
+                events_tx,
+            )
+            .await;
+        }
     }
 
     async fn push_signal(
@@ -830,7 +1052,7 @@ impl AsyncOpHandle {
             let _ = tx.send(event);
         }
         if should_wake {
-            self.manager.inner.notify.notify_waiters();
+            self.manager.notify_change();
         }
     }
 
@@ -885,21 +1107,26 @@ impl AsyncOpChildHandle {
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) -> Option<String> {
         let operation = self.operation.upgrade()?;
-        *operation.status.lock().await = AsyncOpStatus::WaitingForInput;
         let manager = AsyncOpManager {
             inner: self.manager.upgrade()?,
         };
         let handle = AsyncOpHandle { manager, operation };
-        handle
-            .push_signal(
-                AsyncOpSignal::NeedsInput {
-                    question: truncate(&question, 500),
-                    context: context.map(|value| truncate(&value, 1000)),
-                },
-                true,
-                events_tx,
-            )
-            .await;
+        {
+            let mut lifecycle = handle.operation.lifecycle.lock().await;
+            if !lifecycle.set_active_phase(AsyncOpActivePhase::WaitingForInput) {
+                return None;
+            }
+            handle
+                .push_signal(
+                    AsyncOpSignal::NeedsInput {
+                        question: truncate(&question, 500),
+                        context: context.map(|value| truncate(&value, 1000)),
+                    },
+                    true,
+                    events_tx,
+                )
+                .await;
+        }
         let cancel = handle.cancel_token();
         let mut inbox = self.inbox_rx.lock().await;
         let next = tokio::select! {
@@ -910,7 +1137,11 @@ impl AsyncOpChildHandle {
             return None;
         }
         if let Some(operation) = self.operation.upgrade() {
-            *operation.status.lock().await = AsyncOpStatus::Running;
+            operation
+                .lifecycle
+                .lock()
+                .await
+                .set_active_phase(AsyncOpActivePhase::Running);
         }
         next
     }
@@ -926,7 +1157,11 @@ impl AsyncOpChildHandle {
         if cancel.is_cancelled() {
             return None;
         }
-        *operation.status.lock().await = AsyncOpStatus::Running;
+        operation
+            .lifecycle
+            .lock()
+            .await
+            .set_active_phase(AsyncOpActivePhase::Running);
         next
     }
 
@@ -947,6 +1182,17 @@ impl AsyncOpChildHandle {
         }
         .transcript(event, events_tx)
         .await;
+    }
+}
+
+fn operation_task_error(outcome: Result<(), JoinError>) -> String {
+    match outcome {
+        Ok(()) => "Async operation task ended without reporting a terminal status".into(),
+        Err(error) if error.is_panic() => format!("Async operation task panicked: {error}"),
+        Err(error) if error.is_cancelled() => {
+            "Async operation task was cancelled before reporting a terminal status".into()
+        }
+        Err(error) => format!("Async operation task failed: {error}"),
     }
 }
 
@@ -991,6 +1237,8 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
     use super::*;
 
     fn all_controls() -> AsyncControls {
@@ -998,6 +1246,19 @@ mod tests {
             .with(AsyncControl::SendInput)
             .with(AsyncControl::Stop)
             .with(AsyncControl::Wait)
+    }
+
+    fn shell_request(id: impl Into<String>) -> StartAsyncOp {
+        StartAsyncOp {
+            id: AsyncOpId::new(id),
+            kind: AsyncOpKind::Shell,
+            label: "shell".into(),
+            parent_operation_id: None,
+            parent_tool_name: Some("shell".into()),
+            started_summary: "starting shell".into(),
+            model_visible: true,
+            controls: all_controls(),
+        }
     }
 
     #[tokio::test]
@@ -1393,5 +1654,170 @@ mod tests {
         started.handle.cancel_token().cancel();
 
         assert_eq!(ask.await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn first_terminal_signal_wins() {
+        let manager = AsyncOpManager::new();
+        let started = manager.start(shell_request("shell-1"), None).await;
+        manager.drain_signals(AsyncOpWaitFilter::all()).await;
+
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "completed first".into(),
+                    output: Some(serde_json::json!({"winner": "completed"})),
+                },
+                None,
+            )
+            .await;
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Failed {
+                    error: "late failure".into(),
+                    output: Some(serde_json::json!({"winner": "failed"})),
+                },
+                None,
+            )
+            .await;
+
+        let inspection = manager
+            .inspect(vec!["shell-1".into()], None, false, 10)
+            .await;
+        assert_eq!(inspection[0].status, "completed");
+        assert_eq!(
+            inspection[0].latest_output,
+            Some(serde_json::json!({"winner": "completed"}))
+        );
+        let updates = manager.drain_signals(AsyncOpWaitFilter::all()).await;
+        assert_eq!(updates[0].events.len(), 1);
+        assert!(matches!(
+            updates[0].events[0],
+            AsyncOpSignal::Completed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn input_is_not_delivered_after_completion() {
+        let manager = AsyncOpManager::new();
+        let started = manager.start(shell_request("shell-1"), None).await;
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "done".into(),
+                    output: None,
+                },
+                None,
+            )
+            .await;
+
+        let sent = manager
+            .send_input(vec!["shell-1".into()], "too late".into())
+            .await;
+
+        assert_eq!(sent[0].status, "not_delivered");
+        assert_eq!(sent[0].reason.as_deref(), Some("operation is completed"));
+    }
+
+    #[tokio::test]
+    async fn join_attached_after_stop_is_aborted() {
+        struct Dropped(Arc<AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let manager = AsyncOpManager::new();
+        let started = manager.start(shell_request("shell-1"), None).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let join = tokio::spawn({
+            let dropped = dropped.clone();
+            async move {
+                let _guard = Dropped(dropped);
+                let _ = ready_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        ready_rx.await.expect("operation task should start");
+
+        manager.stop(vec!["shell-1".into()], None, None, None).await;
+        started.handle.attach_join(join, None).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(AtomicOrdering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late-attached task should be aborted");
+    }
+
+    #[tokio::test]
+    async fn panicked_operation_task_becomes_failed() {
+        let manager = AsyncOpManager::new();
+        let started = manager.start(shell_request("shell-1"), None).await;
+        manager.drain_signals(AsyncOpWaitFilter::all()).await;
+        started
+            .handle
+            .attach_join(tokio::spawn(async { panic!("operation panic") }), None)
+            .await;
+
+        let result = manager.wait(1, AsyncOpWaitFilter::all()).await;
+
+        assert_eq!(result.woken_by, "operation_result");
+        assert_eq!(result.updates[0].status, "failed");
+        assert!(matches!(
+            &result.updates[0].events[0],
+            AsyncOpSignal::Failed { error, .. } if error.contains("panicked")
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_operation_retention_is_bounded() {
+        let manager = AsyncOpManager::new();
+        for index in 0..(TERMINAL_OPERATION_CAP + 5) {
+            let started = manager
+                .start(shell_request(format!("shell-{index}")), None)
+                .await;
+            started
+                .handle
+                .complete(
+                    AsyncOpSignal::Completed {
+                        summary: "done".into(),
+                        output: None,
+                    },
+                    None,
+                )
+                .await;
+        }
+
+        assert_eq!(
+            manager.inner.operations.lock().await.len(),
+            TERMINAL_OPERATION_CAP
+        );
+        assert!(
+            manager
+                .inspect(vec!["shell-0".into()], None, false, 10)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            manager
+                .inspect(
+                    vec![format!("shell-{}", TERMINAL_OPERATION_CAP + 4)],
+                    None,
+                    false,
+                    10,
+                )
+                .await
+                .len(),
+            1
+        );
     }
 }

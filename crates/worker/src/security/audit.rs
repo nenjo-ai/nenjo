@@ -34,8 +34,6 @@ pub struct Actor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub command: Option<String>,
-    pub risk_level: Option<String>,
-    pub approved: bool,
     pub allowed: bool,
 }
 
@@ -102,17 +100,9 @@ impl AuditEvent {
     }
 
     /// Set the action
-    pub fn with_action(
-        mut self,
-        command: String,
-        risk_level: String,
-        approved: bool,
-        allowed: bool,
-    ) -> Self {
+    pub fn with_action(mut self, command: String, allowed: bool) -> Self {
         self.action = Some(Action {
             command: Some(command),
-            risk_level: Some(risk_level),
-            approved,
             allowed,
         });
         self
@@ -153,8 +143,6 @@ pub struct AuditLogger {
 pub struct CommandExecutionLog<'a> {
     pub channel: &'a str,
     pub command: &'a str,
-    pub risk_level: &'a str,
-    pub approved: bool,
     pub allowed: bool,
     pub success: bool,
     pub duration_ms: u64,
@@ -193,12 +181,7 @@ impl AuditLogger {
     pub fn log_command_event(&self, entry: CommandExecutionLog<'_>) -> Result<()> {
         let event = AuditEvent::new(AuditEventType::CommandExecution)
             .with_actor(entry.channel.to_string(), None, None)
-            .with_action(
-                entry.command.to_string(),
-                entry.risk_level.to_string(),
-                entry.approved,
-                entry.allowed,
-            )
+            .with_action(entry.command.to_string(), entry.allowed)
             .with_result(entry.success, None, entry.duration_ms, None);
 
         self.log(&event)
@@ -258,24 +241,20 @@ mod tests {
 
     #[test]
     fn audit_event_with_action() {
-        let event = AuditEvent::new(AuditEventType::CommandExecution).with_action(
-            "ls -la".to_string(),
-            "low".to_string(),
-            false,
-            true,
-        );
+        let event = AuditEvent::new(AuditEventType::CommandExecution)
+            .with_action("ls -la".to_string(), true);
 
         assert!(event.action.is_some());
         let action = event.action.as_ref().unwrap();
         assert_eq!(action.command, Some("ls -la".to_string()));
-        assert_eq!(action.risk_level, Some("low".to_string()));
+        assert!(action.allowed);
     }
 
     #[test]
     fn audit_event_serializes_to_json() {
         let event = AuditEvent::new(AuditEventType::CommandExecution)
             .with_actor("telegram".to_string(), None, None)
-            .with_action("ls".to_string(), "low".to_string(), false, true)
+            .with_action("ls".to_string(), true)
             .with_result(true, Some(0), 15, None);
 
         let json = serde_json::to_string(&event);

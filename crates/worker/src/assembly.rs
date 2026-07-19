@@ -522,6 +522,21 @@ mod tests {
     use nenjo::{ManifestWriter, Slug};
     use nenjo_models::MediaOperation;
 
+    #[test]
+    fn runtime_roots_keep_workspace_packages_skills_and_plugins_without_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config::new_for_dir(temp.path().join(".nenjo"));
+        let roots = package_runtime_roots(&config);
+        let workspace_runtime = config.workspace_dir.join(".nenjo");
+
+        assert!(roots.contains(&workspace_runtime.join("packages")));
+        assert!(roots.contains(&workspace_runtime.join("skills")));
+        assert!(roots.contains(&workspace_runtime.join("plugins")));
+        assert!(!roots.contains(&workspace_runtime.join("library")));
+        assert!(roots.contains(&config.config_dir.join("packages")));
+        assert!(roots.contains(&config.config_dir.join("platform_pkgs")));
+    }
+
     #[tokio::test]
     async fn platform_write_refresh_replaces_the_live_provider_snapshot() {
         let temp = tempfile::tempdir().unwrap();

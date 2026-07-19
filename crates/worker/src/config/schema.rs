@@ -342,10 +342,6 @@ pub struct AutonomyConfig {
     pub max_actions_per_hour: u32,
     pub max_cost_per_day_cents: u32,
 
-    /// Require explicit approval for medium-risk shell commands.
-    #[serde(default = "default_true")]
-    pub require_approval_for_medium_risk: bool,
-
     /// Block high-risk shell commands even if not on the blocklist.
     #[serde(default = "default_true")]
     pub block_high_risk_commands: bool,
@@ -423,7 +419,6 @@ impl Default for AutonomyConfig {
             ],
             max_actions_per_hour: 1000,
             max_cost_per_day_cents: 500,
-            require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
         }
     }

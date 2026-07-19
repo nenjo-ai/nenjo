@@ -1,7 +1,9 @@
 //! Re-exports worker tool security types and provides the
 //! worker-specific config mapping.
 
-pub use crate::tools::security::{ActionTracker, AutonomyLevel, CommandRiskLevel, SecurityPolicy};
+pub use crate::tools::security::{
+    ActionTracker, AutonomyLevel, SecurityPolicy, ShellDenial, ShellDenialRule, ShellSuggestion,
+};
 
 use std::path::Path;
 
@@ -56,7 +58,6 @@ pub fn security_policy_from_config(
         forbidden_paths: autonomy_config.forbidden_paths.clone(),
         max_actions_per_hour: autonomy_config.max_actions_per_hour,
         max_cost_per_day_cents: autonomy_config.max_cost_per_day_cents,
-        require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
         block_high_risk_commands: autonomy_config.block_high_risk_commands,
         tracker: ActionTracker::new(),
         forwarded_env: collect_forwarded_env(),
@@ -76,7 +77,6 @@ mod tests {
             forbidden_paths: vec!["/secret".into()],
             max_actions_per_hour: 100,
             max_cost_per_day_cents: 1000,
-            require_approval_for_medium_risk: false,
             block_high_risk_commands: false,
         };
         let workspace = PathBuf::from("/tmp/test-workspace");
@@ -88,7 +88,6 @@ mod tests {
         assert_eq!(policy.forbidden_paths, vec!["/secret"]);
         assert_eq!(policy.max_actions_per_hour, 100);
         assert_eq!(policy.max_cost_per_day_cents, 1000);
-        assert!(!policy.require_approval_for_medium_risk);
         assert!(!policy.block_high_risk_commands);
         assert_eq!(policy.workspace_dir, PathBuf::from("/tmp/test-workspace"));
     }
@@ -101,7 +100,6 @@ mod tests {
             forbidden_paths: vec![],
             max_actions_per_hour: 10,
             max_cost_per_day_cents: 100,
-            require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
         };
         let workspace = PathBuf::from("/tmp/test");

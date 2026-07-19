@@ -623,11 +623,7 @@ where
         })
         .await;
     });
-    instance
-        .runtime
-        .async_ops
-        .attach_join(&operation_id, join)
-        .await;
+    started.handle.attach_join(join, parent_events_tx).await;
 
     Ok(json_tool(serde_json::to_value(AbilityOperationStarted {
         ability: ability_id,

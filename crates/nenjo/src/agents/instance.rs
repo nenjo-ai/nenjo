@@ -1,9 +1,10 @@
 //! Fully configured agent instance ready for task execution.
 
-use crate::context::ContextRenderer;
+use crate::context::{ContextRenderer, ProjectContext};
 use nenjo_models::NativeModelToolId;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -320,19 +321,11 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         let mut ctx = render_context_from_agent_run(run);
         let ex = &self.prompt.context.render_ctx_extra;
 
-        // Project — merge from extras, derive working_dir from workspace/slug
+        // Project — merge from extras and preserve an explicitly scoped worktree.
         if !ex.project.name.is_empty() {
             ctx.project = ex.project.clone();
         }
-        if !ex.project.slug.is_empty() {
-            ctx.project.working_dir = self
-                .runtime
-                .security
-                .workspace_dir
-                .join(&ex.project.slug)
-                .to_string_lossy()
-                .to_string();
-        }
+        populate_project_working_directory(&mut ctx.project, &self.runtime.security.workspace_dir);
 
         // Runtime git/worktree context takes priority over project-level git.
         if ctx.git.is_empty() && !ex.git.is_empty() {
@@ -525,6 +518,15 @@ fn native_model_tool_shadows_local_tool(
         && local_tool_name == "web_search_tool"
 }
 
+fn populate_project_working_directory(project: &mut ProjectContext, workspace_dir: &Path) {
+    if !project.slug.is_empty() && project.working_dir.is_empty() {
+        project.working_dir = workspace_dir
+            .join(&project.slug)
+            .to_string_lossy()
+            .into_owned();
+    }
+}
+
 fn native_model_tool_specs(native_tools: &[NativeModelToolId]) -> Vec<ToolSpec> {
     native_tools
         .iter()
@@ -581,5 +583,30 @@ mod tests {
                 .iter()
                 .all(|spec| spec.category == crate::tools::ToolCategory::Read)
         );
+    }
+
+    #[test]
+    fn prompt_context_preserves_an_explicit_worktree_directory() {
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            working_dir: "/workspace/project/worktrees/task-123".to_string(),
+            ..ProjectContext::default()
+        };
+
+        populate_project_working_directory(&mut project, Path::new("/workspace"));
+
+        assert_eq!(project.working_dir, "/workspace/project/worktrees/task-123");
+    }
+
+    #[test]
+    fn prompt_context_derives_a_project_directory_without_an_explicit_scope() {
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            ..ProjectContext::default()
+        };
+
+        populate_project_working_directory(&mut project, Path::new("/workspace"));
+
+        assert_eq!(project.working_dir, "/workspace/project");
     }
 }

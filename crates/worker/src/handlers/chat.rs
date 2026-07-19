@@ -1677,7 +1677,7 @@ Original user message: {{ chat.message }}
                 &plugin_dir,
                 &skill_dir,
                 "PreToolUse",
-                "file_write",
+                "write",
             ),
         )
         .await
@@ -1690,7 +1690,7 @@ Original user message: {{ chat.message }}
                 &plugin_dir,
                 &skill_dir,
                 "PostToolUse",
-                "file_write",
+                "write",
             ),
         )
         .await
@@ -1752,8 +1752,8 @@ Original user message: {{ chat.message }}
                 arguments: serde_json::json!({ "name": "ralph-loop" }).to_string(),
             }),
             tool_call_response(ToolCall {
-                id: "call_file_write".to_string(),
-                name: "file_write".to_string(),
+                id: "call_write".to_string(),
+                name: "write".to_string(),
                 arguments: serde_json::json!({
                     "path": "notes.txt",
                     "content": "done"
@@ -1909,7 +1909,7 @@ Original user message: {{ chat.message }}
             "ralph-loop-pre-block",
             "PreToolUse",
             "pre_block.sh",
-            "file_write",
+            "write",
         );
         let registry = Arc::new(SkillRegistry::default());
         registry.reconcile(std::slice::from_ref(&skill), std::slice::from_ref(&hook));
@@ -1922,7 +1922,7 @@ Original user message: {{ chat.message }}
             }),
             tool_call_response(ToolCall {
                 id: "call_blocked_write".to_string(),
-                name: "file_write".to_string(),
+                name: "write".to_string(),
                 arguments: serde_json::json!({
                     "path": "blocked.txt",
                     "content": "this should not be written"
@@ -2011,7 +2011,7 @@ Original user message: {{ chat.message }}
         );
         assert!(
             !project_work_dir.join("blocked.txt").exists(),
-            "blocked file_write must not execute after a PreToolUse block"
+            "blocked write must not execute after a PreToolUse block"
         );
 
         let requests = model_requests.lock().unwrap();
@@ -2062,7 +2062,7 @@ Original user message: {{ chat.message }}
                 &hook_transcript_dir,
                 &plugin_dir,
                 &skill_dir,
-                "file_write",
+                "write",
                 true,
             ),
         )
@@ -2075,7 +2075,7 @@ Original user message: {{ chat.message }}
                 &hook_transcript_dir,
                 &plugin_dir,
                 &skill_dir,
-                "file_read",
+                "read",
                 false,
             ),
         )
@@ -2093,14 +2093,14 @@ Original user message: {{ chat.message }}
                 "ralph-loop-post-write",
                 "PostToolUse",
                 "post_write.sh",
-                "file_write",
+                "write",
             ),
             skill_hook_manifest_with_matcher(
                 &plugin_dir,
                 "ralph-loop-post-read",
                 "PostToolUse",
                 "post_read.sh",
-                "file_read",
+                "read",
             ),
         ];
         let registry = Arc::new(SkillRegistry::default());
@@ -2113,8 +2113,8 @@ Original user message: {{ chat.message }}
                 arguments: serde_json::json!({ "name": "ralph-loop" }).to_string(),
             }),
             tool_call_response(ToolCall {
-                id: "call_file_write".to_string(),
-                name: "file_write".to_string(),
+                id: "call_write".to_string(),
+                name: "write".to_string(),
                 arguments: serde_json::json!({
                     "path": "notes.txt",
                     "content": "written"
@@ -2123,7 +2123,7 @@ Original user message: {{ chat.message }}
             }),
             tool_call_response(ToolCall {
                 id: "call_missing_read".to_string(),
-                name: "file_read".to_string(),
+                name: "read".to_string(),
                 arguments: serde_json::json!({
                     "path": "missing.txt"
                 })
@@ -2228,7 +2228,7 @@ Original user message: {{ chat.message }}
             requests[3]
                 .iter()
                 .any(|message| message.content.contains("Failed to resolve file path")),
-            "model should receive the failed file_read result after the PostToolUse hook"
+            "model should receive the failed read result after the PostToolUse hook"
         );
     }
 
@@ -2924,7 +2924,7 @@ Original user message: {{ chat.message }}
         script_name: &str,
     ) -> HookManifest {
         let matcher = if matches!(event, "PreToolUse" | "PostToolUse") {
-            "file_write"
+            "write"
         } else {
             "*"
         };
@@ -3373,7 +3373,7 @@ case "$transcript_path" in
     ;;
 esac
 test "$event" = "PreToolUse"
-test "$tool" = "file_write"
+test "$tool" = "write"
 test -f "$transcript_path"
 test "$CLAUDE_PLUGIN_ROOT" = "$expected_plugin_dir"
 test "$CLAUDE_PLUGIN_DIR" = "$expected_plugin_dir"

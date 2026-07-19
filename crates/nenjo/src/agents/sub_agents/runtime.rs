@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::Slug;
@@ -90,7 +90,7 @@ struct SubAgentRun {
     agent_name: String,
     status: Mutex<SubAgentStatus>,
     cancel: CancellationToken,
-    join: Mutex<Option<JoinHandle<()>>>,
+    abort: Mutex<Option<AbortHandle>>,
 }
 
 #[derive(Clone)]
@@ -151,8 +151,8 @@ impl<P: ProviderRuntime> Drop for RuntimeInner<P> {
         if let Ok(runs) = self.runs.try_lock() {
             for run in runs.values() {
                 run.cancel.cancel();
-                if let Ok(mut join) = run.join.try_lock()
-                    && let Some(handle) = join.take()
+                if let Ok(mut abort) = run.abort.try_lock()
+                    && let Some(handle) = abort.take()
                 {
                     handle.abort();
                 }
@@ -223,7 +223,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             agent_name: request.agent_name.clone(),
             status: Mutex::new(SubAgentStatus::Running),
             cancel: started.handle.cancel_token(),
-            join: Mutex::new(None),
+            abort: Mutex::new(None),
         });
 
         {
@@ -294,7 +294,11 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
                 }
             }
         });
-        *run.join.lock().await = Some(join);
+        *run.abort.lock().await = Some(join.abort_handle());
+        started
+            .handle
+            .attach_join(join, self.inner.events_tx.clone())
+            .await;
 
         Ok(SpawnedSubAgent {
             slug: slug.to_string(),

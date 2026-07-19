@@ -400,6 +400,7 @@ where
     let op_handle = started.handle.clone();
     let join_operation_id = operation_id.to_string();
     let target_agent_slug = target_slug.to_string();
+    let join_events_tx = parent_events_tx.clone();
     let join = tokio::spawn(async move {
         run_delegation_operation(DelegationOperation {
             provider,
@@ -415,11 +416,7 @@ where
         })
         .await;
     });
-    instance
-        .runtime
-        .async_ops
-        .attach_join(&operation_id, join)
-        .await;
+    started.handle.attach_join(join, join_events_tx).await;
 
     Ok(ok(serde_json::to_value(DelegationOperationStarted {
         agent: &target_agent_slug,
