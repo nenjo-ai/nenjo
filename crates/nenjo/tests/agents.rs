@@ -297,8 +297,8 @@ async fn runner_with_custom_tool() {
     assert!(names.contains(&"echo"));
     assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
-    assert!(names.contains(&"inspect_operations"));
-    assert!(names.contains(&"stop_operations"));
+    assert!(names.contains(&"inspect"));
+    assert!(names.contains(&"stop"));
 
     let output = runner.chat("Use the echo tool").await.unwrap();
     assert_eq!(output.text, "Done!");
@@ -333,8 +333,8 @@ async fn runner_with_tool_factory() {
     assert!(names.contains(&"echo"));
     assert!(names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
-    assert!(names.contains(&"inspect_operations"));
-    assert!(names.contains(&"stop_operations"));
+    assert!(names.contains(&"inspect"));
+    assert!(names.contains(&"stop"));
 
     let output = runner.chat("Hello").await.unwrap();
     assert_eq!(output.text, "Tool factory works!");

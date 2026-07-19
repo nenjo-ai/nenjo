@@ -168,6 +168,7 @@ impl Tool for RespondToUserTool {
 mod tests {
     use super::*;
     use crate::agents::async_ops::{AsyncOpId, AsyncOpKind, AsyncOpSignal, StartAsyncOp};
+    use crate::tools::AsyncControls;
 
     #[tokio::test]
     async fn terminal_response_is_rejected_while_model_visible_async_op_is_open() {
@@ -182,6 +183,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "Building".into(),
                     model_visible: true,
+                    controls: AsyncControls::NONE,
                 },
                 None,
             )
@@ -216,6 +218,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "Building".into(),
                     model_visible: true,
+                    controls: AsyncControls::NONE,
                 },
                 None,
             )
@@ -247,6 +250,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "Building".into(),
                     model_visible: true,
+                    controls: AsyncControls::NONE,
                 },
                 None,
             )

@@ -267,10 +267,10 @@ impl ModelProvider for SubAgentScriptLlm {
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
-            1 => ChatResponse {
+            1 | 2 => ChatResponse {
                 text: None,
                 tool_calls: vec![ToolCall {
-                    id: "wait".into(),
+                    id: format!("wait-{call}"),
                     name: "wait".into(),
                     arguments: serde_json::json!({"seconds": 1}).to_string(),
                 }],
@@ -488,7 +488,9 @@ impl ModelProvider for NestedAbilityDelegateLlm {
             .unwrap()
             .push(tool_names.clone());
 
-        if tool_names.iter().any(|name| name == "update_parent_agent") {
+        if tool_names.iter().any(|name| name == "update_parent_agent")
+            && !tool_names.iter().any(|name| name == "use_ability")
+        {
             return Ok(ChatResponse {
                 text: Some("ability completed inside delegated child".into()),
                 tool_calls: vec![],
@@ -506,8 +508,8 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                         id: "use-ability".into(),
                         name: "use_ability".into(),
                         arguments: serde_json::json!({
-                            "ability": "security_review",
-                            "task": "Review the delegated change and summarize the finding."
+                            "name": "security_review",
+                            "input": "Review the delegated change and summarize the finding."
                         })
                         .to_string(),
                     }],
@@ -553,7 +555,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                 text: None,
                 tool_calls: vec![ToolCall {
                     id: format!("wait-delegation-{call}"),
-                    name: "wait_operations".into(),
+                    name: "wait".into(),
                     arguments: serde_json::json!({
                         "seconds": 1,
                         "kind": "delegation"
@@ -831,19 +833,15 @@ async fn parent_tools_are_available_during_execution() {
     runner.chat("coordinate review").await.unwrap();
 
     let first_tools = captured.tool_names().remove(0);
-    for expected in [
-        "spawn_sub_agents",
-        "send_sub_agents",
-        "inspect_sub_agents",
-        "stop_sub_agents",
-        "list_delegatable_agents",
-        "delegate_to",
-        "send_operation_input",
-        "wait_operations",
-        "wait",
-    ] {
+    for expected in ["spawn_sub_agents", "list_delegatable_agents", "delegate_to"] {
         assert!(
             first_tools.iter().any(|name| name == expected),
+            "{first_tools:?}"
+        );
+    }
+    for hidden in ["inspect", "send_input", "stop", "wait"] {
+        assert!(
+            !first_tools.iter().any(|name| name == hidden),
             "{first_tools:?}"
         );
     }
@@ -871,19 +869,15 @@ async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
 
     runner.chat("work").await.unwrap();
     let first_tools = captured.tool_names().remove(0);
-    for expected in [
-        "spawn_sub_agents",
-        "send_sub_agents",
-        "inspect_sub_agents",
-        "stop_sub_agents",
-        "list_delegatable_agents",
-        "delegate_to",
-        "send_operation_input",
-        "wait_operations",
-        "wait",
-    ] {
+    for expected in ["spawn_sub_agents", "list_delegatable_agents", "delegate_to"] {
         assert!(
             first_tools.iter().any(|name| name == expected),
+            "{first_tools:?}"
+        );
+    }
+    for hidden in ["inspect", "send_input", "stop", "wait"] {
+        assert!(
+            !first_tools.iter().any(|name| name == hidden),
             "{first_tools:?}"
         );
     }
@@ -928,7 +922,7 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
     assert!(
         tool_results
             .iter()
-            .any(|content| content.contains(r#"\"slug\":\"security_review\""#)),
+            .any(|content| content.contains(r#"\"operation_id\":\"security_review\""#)),
         "{tool_results:?}"
     );
     assert!(
@@ -945,6 +939,25 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
     );
 
     let all_tool_names = captured.tool_names();
+    let first_parent_tools = &all_tool_names[0];
+    assert!(
+        first_parent_tools
+            .iter()
+            .any(|name| name == "spawn_sub_agents")
+    );
+    assert!(
+        !first_parent_tools.iter().any(|name| name == "wait"),
+        "{all_tool_names:?}"
+    );
+    assert!(
+        all_tool_names.iter().skip(1).any(|names| {
+            names.iter().any(|name| name == "send_input")
+                && names.iter().any(|name| name == "inspect")
+                && names.iter().any(|name| name == "stop")
+                && names.iter().any(|name| name == "wait")
+        }),
+        "{all_tool_names:?}"
+    );
     assert!(
         all_tool_names
             .iter()
@@ -1079,7 +1092,6 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
         "platform_echo",
         "list_assigned_abilities",
         "use_ability",
-        "wait",
     ] {
         assert!(
             child_tools.iter().any(|name| name == expected),
@@ -1090,12 +1102,10 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
         "delegate_to",
         "list_delegatable_agents",
         "spawn_sub_agents",
-        "send_sub_agents",
-        "inspect_sub_agents",
-        "stop_sub_agents",
-        "inspect_operations",
-        "send_operation_input",
-        "stop_operations",
+        "inspect",
+        "send_input",
+        "stop",
+        "wait",
         "respond_to_user",
     ] {
         assert!(
@@ -1201,7 +1211,7 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
     assert!(
         tool_sets
             .iter()
-            .any(|names| names.iter().any(|name| name == "wait_operations")),
+            .any(|names| names.iter().any(|name| name == "wait")),
         "{tool_sets:?}"
     );
     assert!(
@@ -1209,6 +1219,13 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
             .iter()
             .any(|names| names.iter().any(|name| name == "use_ability")
                 && names.iter().any(|name| name == "wait")),
+        "{tool_sets:?}"
+    );
+    assert!(
+        tool_sets
+            .iter()
+            .any(|names| names.iter().any(|name| name == "use_ability")
+                && !names.iter().any(|name| name == "wait")),
         "{tool_sets:?}"
     );
     assert!(
@@ -1371,15 +1388,5 @@ async fn max_depth_zero_disables_parent_tools() {
 
     runner.chat("work").await.unwrap();
     let first_tools = captured.tool_names().remove(0);
-    assert_eq!(
-        first_tools,
-        vec![
-            "list_knowledge_packs",
-            "inspect_operations",
-            "send_operation_input",
-            "stop_operations",
-            "wait_operations",
-            "respond_to_user"
-        ]
-    );
+    assert_eq!(first_tools, vec!["list_knowledge_packs", "respond_to_user"]);
 }

@@ -20,12 +20,20 @@ use crate::Slug;
 use crate::input::TaskInput;
 use crate::manifest::{AgentManifest, ProjectManifest};
 use crate::provider::{ErasedProvider, ProviderRuntime};
+use crate::tools::{AsyncControl, AsyncControls, AsyncOperationStartReceipt};
 use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
 pub(crate) const DELEGATE_TO_TOOL_NAME: &str = "delegate_to";
 pub(crate) const LIST_DELEGATABLE_AGENTS_TOOL_NAME: &str = "list_delegatable_agents";
 
 static DELEGATION_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, serde::Serialize)]
+struct DelegationOperationStarted<'a> {
+    agent: &'a str,
+    #[serde(flatten)]
+    operation: AsyncOperationStartReceipt,
+}
 
 pub(crate) fn build_delegation_tools<P>(instance: Arc<AgentInstance<P>>) -> Vec<Arc<dyn Tool>>
 where
@@ -281,7 +289,7 @@ impl Tool for AskDelegationParentTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the parent agent for input and wait until it responds with send_operation_input."
+        "Ask the parent agent for input and wait until it responds with send_input."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -366,6 +374,10 @@ where
 
     let operation_id = next_delegation_operation_id(&target_slug);
     let parent_events_tx = turn_loop::current_events_tx();
+    let controls = AsyncControls::new(AsyncControl::Inspect)
+        .with(AsyncControl::SendInput)
+        .with(AsyncControl::Stop)
+        .with(AsyncControl::Wait);
     let started = instance
         .runtime
         .async_ops
@@ -378,6 +390,7 @@ where
                 parent_tool_name: Some(DELEGATE_TO_TOOL_NAME.into()),
                 started_summary: task.clone(),
                 model_visible: true,
+                controls,
             },
             parent_events_tx.clone(),
         )
@@ -408,17 +421,14 @@ where
         .attach_join(&operation_id, join)
         .await;
 
-    Ok(ok(serde_json::json!({
-        "operation_id": operation_id.to_string(),
-        "agent": target_agent_slug,
-        "status": "running",
-        "control_tools": {
-            "inspect": "inspect_operations",
-            "send_input": "send_operation_input",
-            "stop": "stop_operations",
-            "wait": "wait_operations"
-        }
-    })))
+    Ok(ok(serde_json::to_value(DelegationOperationStarted {
+        agent: &target_agent_slug,
+        operation: AsyncOperationStartReceipt::new(
+            operation_id.to_string(),
+            AsyncOpKind::Delegation,
+            controls,
+        ),
+    })?))
 }
 
 struct DelegationOperation<P: ProviderRuntime> {
@@ -461,6 +471,7 @@ where
                 .complete(
                     AsyncOpSignal::Failed {
                         error: truncate(&format!("delegation failed: {err}"), 500),
+                        output: None,
                     },
                     operation.parent_events_tx.clone(),
                 )

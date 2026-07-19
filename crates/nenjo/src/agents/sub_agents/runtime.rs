@@ -1,37 +1,29 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
-use std::time::Instant;
 
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::Slug;
 use crate::agents::AgentExecutionMode;
 use crate::agents::async_ops::{
-    AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, AsyncOpSignalDigest, AsyncOpWaitFilter,
-    StartAsyncOp,
+    AsyncOpId, AsyncOpKind, AsyncOpManager, AsyncOpSignal, StartAsyncOp,
 };
 use crate::agents::runner::types::{TurnEvent, TurnOutput};
 use crate::input::TaskInput;
 use crate::manifest::{AgentManifest, ModelManifest, model_manifest_slug};
 use crate::provider::ProviderRuntime;
-use crate::tools::Tool;
+use crate::tools::{AsyncControl, AsyncControls, AsyncOperationStartReceipt, Tool};
 use crate::types::DelegationContext;
 
 use super::error::SubAgentError;
-use super::events::{
-    SignalDigest, SubAgentSignal, SubAgentStatus, SubAgentTranscriptEvent, push_bounded,
-};
+use super::events::{SubAgentSignal, SubAgentStatus, SubAgentTranscriptEvent};
 use super::format::ResultFormat;
 
-const SIGNAL_QUEUE_CAP: usize = 128;
-const TRANSCRIPT_CAP: usize = 256;
-const WAIT_EVENTS_PER_AGENT: usize = 12;
-const INSPECT_LIMIT_CAP: usize = 50;
 const SUB_AGENT_TASK_TEMPLATE: &str = r#"Task:
 {{ task.title }}
 
@@ -48,7 +40,6 @@ pub(crate) struct SubAgentRuntimeOptions {
     pub(crate) limits: SubAgentLimits,
     pub(crate) delegation_ctx: Option<DelegationContext>,
     pub(crate) async_ops: AsyncOpManager,
-    pub(crate) cancel: CancellationToken,
     pub(crate) events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
@@ -66,8 +57,9 @@ pub(crate) struct SpawnRequest {
 pub(crate) struct SpawnedSubAgent {
     pub(crate) slug: String,
     pub(crate) agent: String,
-    pub(crate) status: &'static str,
     pub(crate) capabilities: SubAgentCapabilities,
+    #[serde(flatten)]
+    pub(crate) operation: AsyncOperationStartReceipt,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,39 +68,6 @@ pub(crate) struct SubAgentCapabilities {
     pub(crate) inherited_host_tools: Vec<String>,
     pub(crate) child_tools: &'static [&'static str],
     pub(crate) note: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct DeliveryResult {
-    pub(crate) slug: String,
-    pub(crate) status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct StoppedSubAgent {
-    pub(crate) slug: String,
-    pub(crate) status: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct InspectedSubAgent {
-    pub(crate) slug: String,
-    pub(crate) agent: String,
-    pub(crate) status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) latest_signal: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) transcript_delta: Option<Vec<SubAgentTranscriptEvent>>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct WaitResult {
-    pub(crate) elapsed_seconds: u64,
-    pub(crate) woken_by: &'static str,
-    pub(crate) updates: Vec<SignalDigest>,
-    pub(crate) operations: Vec<AsyncOpSignalDigest>,
 }
 
 pub(crate) struct SubAgentRuntime<P: ProviderRuntime> {
@@ -122,9 +81,7 @@ struct RuntimeInner<P: ProviderRuntime> {
     inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
     async_ops: AsyncOpManager,
-    cancel: CancellationToken,
     runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
-    notify: Notify,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
 
@@ -132,18 +89,8 @@ struct SubAgentRun {
     slug: Slug,
     agent_name: String,
     status: Mutex<SubAgentStatus>,
-    signals: Mutex<VecDeque<SubAgentSignal>>,
-    transcript: Mutex<TranscriptState>,
-    inbox_tx: mpsc::UnboundedSender<String>,
     cancel: CancellationToken,
     join: Mutex<Option<JoinHandle<()>>>,
-}
-
-#[derive(Default)]
-struct TranscriptState {
-    events: VecDeque<SubAgentTranscriptEvent>,
-    inspect_cursor: usize,
-    total_seen: usize,
 }
 
 #[derive(Clone)]
@@ -154,7 +101,7 @@ pub(crate) struct SubAgentHandle<P: ProviderRuntime> {
 pub(crate) struct ChildRuntimeHandle<P: ProviderRuntime> {
     inner: Weak<RuntimeInner<P>>,
     run: Weak<SubAgentRun>,
-    inbox_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+    async_op: super::super::async_ops::AsyncOpChildHandle,
 }
 
 impl<P: ProviderRuntime> Clone for ChildRuntimeHandle<P> {
@@ -162,7 +109,7 @@ impl<P: ProviderRuntime> Clone for ChildRuntimeHandle<P> {
         Self {
             inner: self.inner.clone(),
             run: self.run.clone(),
-            inbox_rx: self.inbox_rx.clone(),
+            async_op: self.async_op.clone(),
         }
     }
 }
@@ -186,9 +133,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
                 inherited_host_tools,
                 delegation_ctx,
                 async_ops: options.async_ops,
-                cancel: options.cancel,
                 runs: Mutex::new(HashMap::new()),
-                notify: Notify::new(),
                 events_tx: options.events_tx,
             }),
         }
@@ -252,15 +197,32 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             .ok_or_else(|| SubAgentError::DepthLimit(request.agent_name.clone()))?;
 
         let slug = self.reserve_slug(&request).await?;
-        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        let controls = AsyncControls::new(AsyncControl::Inspect)
+            .with(AsyncControl::SendInput)
+            .with(AsyncControl::Stop)
+            .with(AsyncControl::Wait);
+        let started = self
+            .inner
+            .async_ops
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new(slug.to_string()),
+                    kind: AsyncOpKind::SubAgent,
+                    label: request.agent_name.clone(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("spawn_sub_agents".into()),
+                    started_summary: truncate(&request.task.title, 180),
+                    model_visible: true,
+                    controls,
+                },
+                self.inner.events_tx.clone(),
+            )
+            .await;
         let run = Arc::new(SubAgentRun {
             slug: slug.clone(),
             agent_name: request.agent_name.clone(),
             status: Mutex::new(SubAgentStatus::Running),
-            signals: Mutex::new(VecDeque::new()),
-            transcript: Mutex::new(TranscriptState::default()),
-            inbox_tx,
-            cancel: self.inner.cancel.child_token(),
+            cancel: started.handle.cancel_token(),
             join: Mutex::new(None),
         });
 
@@ -274,32 +236,14 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             SubAgentSignal::Started {
                 task_summary: truncate(&request.task.title, 180),
             },
-            false,
         )
         .await;
-
-        let _ = self
-            .inner
-            .async_ops
-            .start(
-                StartAsyncOp {
-                    id: AsyncOpId::new(slug.to_string()),
-                    kind: AsyncOpKind::SubAgent,
-                    label: request.agent_name.clone(),
-                    parent_operation_id: None,
-                    parent_tool_name: Some("spawn_sub_agents".into()),
-                    started_summary: truncate(&request.task.title, 180),
-                    model_visible: false,
-                },
-                self.inner.events_tx.clone(),
-            )
-            .await;
 
         let inner = self.inner.clone();
         let child_handle = ChildRuntimeHandle {
             inner: Arc::downgrade(&inner),
             run: Arc::downgrade(&run),
-            inbox_rx: Arc::new(Mutex::new(inbox_rx)),
+            async_op: started.child,
         };
         let provider = inner.provider.clone();
         let child_model_manifest = inner.parent_model_manifest.clone();
@@ -355,13 +299,17 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         Ok(SpawnedSubAgent {
             slug: slug.to_string(),
             agent: request.agent_name,
-            status: SubAgentStatus::Running.as_str(),
             capabilities: SubAgentCapabilities {
                 mode: "isolated_ephemeral_child",
                 inherited_host_tools: self.inner.inherited_tool_names(),
                 child_tools: &["update_parent_agent", "ask_parent_agent"],
                 note: "Child agents inherit parent host tools and scoped workspace access, but not sub-agent management tools or installed-agent abilities.",
             },
+            operation: AsyncOperationStartReceipt::new(
+                slug.to_string(),
+                AsyncOpKind::SubAgent,
+                controls,
+            ),
         })
     }
 
@@ -387,199 +335,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         }
     }
 
-    pub(crate) async fn send(&self, messages: Vec<(Slug, String)>) -> Vec<DeliveryResult> {
-        let mut results = Vec::with_capacity(messages.len());
-        for (slug, message) in messages {
-            let Some(run) = self.find(&slug).await else {
-                results.push(DeliveryResult {
-                    slug: slug.to_string(),
-                    status: "not_delivered",
-                    reason: Some("sub-agent not found".into()),
-                });
-                continue;
-            };
-            let status = *run.status.lock().await;
-            if !status.can_receive_input() {
-                results.push(DeliveryResult {
-                    slug: slug.to_string(),
-                    status: "not_delivered",
-                    reason: Some(format!("sub-agent is {}", status.as_str())),
-                });
-                continue;
-            }
-            if run.inbox_tx.send(message).is_ok() {
-                if status == SubAgentStatus::WaitingForInput {
-                    *run.status.lock().await = SubAgentStatus::Running;
-                }
-                results.push(DeliveryResult {
-                    slug: slug.to_string(),
-                    status: "delivered",
-                    reason: None,
-                });
-            } else {
-                results.push(DeliveryResult {
-                    slug: slug.to_string(),
-                    status: "not_delivered",
-                    reason: Some("sub-agent inbox is closed".into()),
-                });
-            }
-        }
-        results
-    }
-
-    pub(crate) async fn stop(
-        &self,
-        slugs: Vec<Slug>,
-        reason: Option<String>,
-    ) -> Vec<StoppedSubAgent> {
-        let mut stopped = Vec::with_capacity(slugs.len());
-        for slug in slugs {
-            let Some(run) = self.find(&slug).await else {
-                continue;
-            };
-            run.cancel.cancel();
-            if let Some(handle) = run.join.lock().await.take() {
-                handle.abort();
-            }
-            *run.status.lock().await = SubAgentStatus::Stopped;
-            self.push_signal(
-                &run,
-                SubAgentSignal::Stopped {
-                    reason: reason.clone(),
-                },
-                true,
-            )
-            .await;
-            stopped.push(StoppedSubAgent {
-                slug: slug.to_string(),
-                status: SubAgentStatus::Stopped.as_str(),
-            });
-        }
-        stopped
-    }
-
-    pub(crate) async fn inspect(
-        &self,
-        slugs: Vec<Slug>,
-        include_transcript: bool,
-        limit: usize,
-    ) -> Vec<InspectedSubAgent> {
-        let limit = limit.clamp(1, INSPECT_LIMIT_CAP);
-        let selected = if slugs.is_empty() {
-            self.inner
-                .runs
-                .lock()
-                .await
-                .values()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            let mut runs = Vec::new();
-            for slug in slugs {
-                if let Some(run) = self.find(&slug).await {
-                    runs.push(run);
-                }
-            }
-            runs
-        };
-
-        let mut inspected = Vec::with_capacity(selected.len());
-        for run in selected {
-            let status = *run.status.lock().await;
-            let latest_signal = run.signals.lock().await.back().map(signal_summary);
-            let transcript_delta = if include_transcript {
-                let mut transcript = run.transcript.lock().await;
-                let start = transcript.inspect_cursor.saturating_sub(
-                    transcript
-                        .total_seen
-                        .saturating_sub(transcript.events.len()),
-                );
-                let delta = transcript
-                    .events
-                    .iter()
-                    .skip(start)
-                    .take(limit)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                transcript.inspect_cursor = transcript.total_seen;
-                Some(delta)
-            } else {
-                None
-            };
-            inspected.push(InspectedSubAgent {
-                slug: run.slug.to_string(),
-                agent: run.agent_name.clone(),
-                status: status.as_str(),
-                latest_signal,
-                transcript_delta,
-            });
-        }
-        inspected
-    }
-
-    pub(crate) async fn wait(&self, seconds: u64) -> WaitResult {
-        let seconds = seconds.clamp(1, 30);
-        let started = Instant::now();
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
-            _ = self.inner.notify.notified() => {}
-            _ = self.inner.async_ops.notified() => {}
-        }
-        let updates = self.drain_signals().await;
-        let operations = self
-            .inner
-            .async_ops
-            .drain_signals(AsyncOpWaitFilter::model_visible())
-            .await;
-        let woken_by = classify_wake(&updates, &operations);
-        WaitResult {
-            elapsed_seconds: started.elapsed().as_secs(),
-            woken_by,
-            updates,
-            operations,
-        }
-    }
-
-    async fn drain_signals(&self) -> Vec<SignalDigest> {
-        let runs = self
-            .inner
-            .runs
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut updates = Vec::new();
-        for run in runs {
-            let mut signals = run.signals.lock().await;
-            if signals.is_empty() {
-                continue;
-            }
-            let mut events = Vec::new();
-            while let Some(signal) = signals.pop_front() {
-                if matches!(signal, SubAgentSignal::Progress { .. })
-                    && events.len() >= WAIT_EVENTS_PER_AGENT
-                {
-                    continue;
-                }
-                events.push(signal);
-            }
-            if !events.is_empty() {
-                updates.push(SignalDigest {
-                    slug: run.slug.to_string(),
-                    events,
-                });
-            }
-        }
-        updates
-    }
-
-    async fn find(&self, slug: &Slug) -> Option<Arc<SubAgentRun>> {
-        self.inner.runs.lock().await.get(slug).cloned()
-    }
-
-    async fn push_signal(&self, run: &SubAgentRun, signal: SubAgentSignal, wake: bool) {
-        let should_wake = wake || signal.wakes_parent();
+    async fn push_signal(&self, run: &SubAgentRun, signal: SubAgentSignal) {
         let event = TurnEvent::SubAgentEvent {
             slug: run.slug.to_string(),
             agent_name: run.agent_name.clone(),
@@ -587,16 +343,11 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             summary: signal_summary(&signal),
             model_visible: false,
         };
-        let mut signals = run.signals.lock().await;
-        push_bounded(&mut signals, signal.clone(), SIGNAL_QUEUE_CAP);
-        drop(signals);
         if let Some(tx) = &self.inner.events_tx {
             let _ = tx.send(event);
         }
         let op_signal = match &signal {
-            SubAgentSignal::Started { task_summary } => AsyncOpSignal::Started {
-                summary: task_summary.clone(),
-            },
+            SubAgentSignal::Started { .. } => return,
             SubAgentSignal::Progress { summary, details } => AsyncOpSignal::Progress {
                 summary: summary.clone(),
                 details: details.clone(),
@@ -618,6 +369,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             },
             SubAgentSignal::Failed { error } => AsyncOpSignal::Failed {
                 error: error.clone(),
+                output: None,
             },
             SubAgentSignal::Stopped { reason } => AsyncOpSignal::Stopped {
                 reason: reason.clone(),
@@ -632,9 +384,6 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
             operation
                 .complete(op_signal, self.inner.events_tx.clone())
                 .await;
-        }
-        if should_wake {
-            self.inner.notify.notify_waiters();
         }
     }
 }
@@ -654,7 +403,6 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
                     summary: truncate(&summary, 500),
                     details: details.map(|d| truncate(&d, 1000)),
                 },
-                false,
             )
             .await;
     }
@@ -670,17 +418,9 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
                     question: truncate(&question, 500),
                     context: context.map(|c| truncate(&c, 1000)),
                 },
-                true,
             )
             .await;
-        let mut inbox = self.inbox_rx.lock().await;
-        let next = tokio::select! {
-            _ = run.cancel.cancelled() => None,
-            next = inbox.recv() => next,
-        };
-        if run.cancel.is_cancelled() {
-            return None;
-        }
+        let next = self.async_op.receive_input().await;
         *run.status.lock().await = SubAgentStatus::Running;
         next
     }
@@ -689,19 +429,22 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
         let Some(run) = self.run() else {
             return;
         };
-        let mut transcript = run.transcript.lock().await;
-        push_bounded(&mut transcript.events, event.clone(), TRANSCRIPT_CAP);
-        transcript.total_seen += 1;
-        drop(transcript);
         if let Some(handle) = self.parent()
             && let Some(tx) = &handle.inner.events_tx
         {
             let _ = tx.send(TurnEvent::SubAgentTranscript {
                 slug: run.slug.to_string(),
                 agent_name: run.agent_name.clone(),
-                event,
+                event: event.clone(),
             });
         }
+        self.async_op
+            .transcript(
+                event,
+                self.parent()
+                    .and_then(|handle| handle.inner.events_tx.clone()),
+            )
+            .await;
     }
 
     async fn complete(&self, status: SubAgentStatus, signal: SubAgentSignal) {
@@ -709,13 +452,17 @@ impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
             return;
         };
         let mut current = run.status.lock().await;
+        if run.cancel.is_cancelled() {
+            *current = SubAgentStatus::Stopped;
+            return;
+        }
         if matches!(*current, SubAgentStatus::Stopped) {
             return;
         }
         *current = status;
         drop(current);
         if let Some(handle) = self.parent() {
-            handle.push_signal(&run, signal, true).await;
+            handle.push_signal(&run, signal).await;
         }
     }
 
@@ -882,36 +629,6 @@ fn build_child_task_input(request: &SpawnRequest) -> TaskInput {
 
     task.instructions = instructions;
     task.with_project("sub_agent")
-}
-
-fn classify_wake(updates: &[SignalDigest], operations: &[AsyncOpSignalDigest]) -> &'static str {
-    let has = |kind| {
-        updates
-            .iter()
-            .flat_map(|digest| digest.events.iter())
-            .any(|signal| signal.kind() == kind)
-    };
-    let op_has = |kind| {
-        operations
-            .iter()
-            .flat_map(|digest| digest.events.iter())
-            .any(|signal| signal.kind() == kind)
-    };
-    if has("needs_input") {
-        "needs_input"
-    } else if has("completed") || has("failed") {
-        "sub_agent_result"
-    } else if has("stopped") {
-        "stopped"
-    } else if op_has("needs_input") {
-        "needs_input"
-    } else if op_has("completed") || op_has("failed") {
-        "operation_result"
-    } else if op_has("stopped") {
-        "stopped"
-    } else {
-        "timeout"
-    }
 }
 
 fn signal_summary(signal: &SubAgentSignal) -> String {

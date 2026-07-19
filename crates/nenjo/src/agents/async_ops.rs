@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::{AsyncOperationKind, AsyncOperationSignalKind};
+use crate::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind};
 pub(crate) use crate::tools::{
     AsyncOperationKind as AsyncOpKind, AsyncOperationStatus as AsyncOpStatus,
 };
@@ -61,6 +61,8 @@ pub(crate) enum AsyncOpSignal {
     },
     Failed {
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<Value>,
     },
     Stopped {
         reason: Option<String>,
@@ -109,7 +111,7 @@ impl AsyncOpSignal {
             | Self::Progress { summary, .. }
             | Self::Completed { summary, .. } => summary.clone(),
             Self::NeedsInput { question, .. } => question.clone(),
-            Self::Failed { error } => error.clone(),
+            Self::Failed { error, .. } => error.clone(),
             Self::Stopped { reason } => reason.clone().unwrap_or_else(|| "stopped".into()),
         }
     }
@@ -122,8 +124,8 @@ impl AsyncOpSignal {
             Self::NeedsInput { context, .. } => context
                 .as_ref()
                 .map(|context| serde_json::json!({ "context": context })),
-            Self::Completed { output, .. } => output.clone(),
-            Self::Started { .. } | Self::Failed { .. } | Self::Stopped { .. } => None,
+            Self::Completed { output, .. } | Self::Failed { output, .. } => output.clone(),
+            Self::Started { .. } | Self::Stopped { .. } => None,
         }
     }
 }
@@ -161,17 +163,29 @@ pub(crate) struct AsyncOpWaitResult {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AsyncOpWaitFilter {
     kind: Option<AsyncOpKind>,
+    control: Option<AsyncControl>,
     model_visible_only: bool,
 }
 
 impl AsyncOpWaitFilter {
+    #[cfg(test)]
     pub(crate) fn all() -> Self {
         Self::default()
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(kind: Option<AsyncOpKind>) -> Self {
         Self {
             kind,
+            control: None,
+            model_visible_only: false,
+        }
+    }
+
+    pub(crate) fn control(control: AsyncControl, kind: Option<AsyncOpKind>) -> Self {
+        Self {
+            kind,
+            control: Some(control),
             model_visible_only: false,
         }
     }
@@ -179,6 +193,7 @@ impl AsyncOpWaitFilter {
     pub(crate) fn model_visible() -> Self {
         Self {
             kind: None,
+            control: None,
             model_visible_only: true,
         }
     }
@@ -193,6 +208,7 @@ pub(crate) struct StartAsyncOp {
     pub(crate) parent_tool_name: Option<String>,
     pub(crate) started_summary: String,
     pub(crate) model_visible: bool,
+    pub(crate) controls: AsyncControls,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,6 +243,7 @@ struct AsyncOperation {
     parent_operation_id: Option<String>,
     parent_tool_name: Option<String>,
     model_visible: bool,
+    controls: AsyncControls,
     status: Mutex<AsyncOpStatus>,
     signals: Mutex<VecDeque<AsyncOpSignal>>,
     latest_output: Mutex<Option<Value>>,
@@ -270,6 +287,7 @@ pub struct StartAsyncOperation {
     pub parent_tool_name: Option<String>,
     pub started_summary: String,
     pub model_visible: bool,
+    pub controls: AsyncControls,
 }
 
 #[derive(Clone)]
@@ -333,6 +351,7 @@ impl AsyncOperationRuntime {
                     parent_tool_name: request.parent_tool_name,
                     started_summary: request.started_summary,
                     model_visible: request.model_visible,
+                    controls: request.controls,
                 },
                 events_tx.clone(),
             )
@@ -381,14 +400,23 @@ impl AsyncOperationHandle {
     }
 
     pub async fn fail(&self, error: impl Into<String>) {
+        self.fail_with_output(error, None).await;
+    }
+
+    pub async fn fail_with_output(&self, error: impl Into<String>, output: Option<Value>) {
         self.handle
             .complete(
                 AsyncOpSignal::Failed {
                     error: error.into(),
+                    output,
                 },
                 self.events_tx.clone(),
             )
             .await;
+    }
+
+    pub async fn transcript(&self, event: AsyncOperationTranscriptEvent) {
+        self.handle.transcript(event, self.events_tx.clone()).await;
     }
 }
 
@@ -420,6 +448,7 @@ impl AsyncOpManager {
             parent_operation_id: request.parent_operation_id,
             parent_tool_name: request.parent_tool_name,
             model_visible: request.model_visible,
+            controls: request.controls,
             status: Mutex::new(AsyncOpStatus::Running),
             signals: Mutex::new(VecDeque::new()),
             latest_output: Mutex::new(None),
@@ -463,15 +492,11 @@ impl AsyncOpManager {
         operation_ids: Vec<String>,
         message: String,
     ) -> Vec<AsyncOpDeliveryResult> {
-        let operations = self.select_operations(operation_ids, None).await;
+        let operations = self
+            .select_operations(operation_ids, None, Some(AsyncControl::SendInput))
+            .await;
         let mut results = Vec::with_capacity(operations.len());
         for operation in operations {
-            if !matches!(
-                operation.kind,
-                AsyncOpKind::Ability | AsyncOpKind::Delegation
-            ) {
-                continue;
-            }
             let status = *operation.status.lock().await;
             if !status.can_receive_input() {
                 results.push(AsyncOpDeliveryResult {
@@ -508,7 +533,9 @@ impl AsyncOpManager {
         reason: Option<String>,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) -> Vec<AsyncOpStopped> {
-        let operations = self.select_operations(operation_ids, kind).await;
+        let operations = self
+            .select_operations(operation_ids, kind, Some(AsyncControl::Stop))
+            .await;
         let mut stopped = Vec::with_capacity(operations.len());
         for operation in operations {
             operation.cancel.cancel();
@@ -543,7 +570,9 @@ impl AsyncOpManager {
         limit: usize,
     ) -> Vec<AsyncOpInspection> {
         let limit = limit.clamp(1, INSPECT_LIMIT_CAP);
-        let operations = self.select_operations(operation_ids, kind).await;
+        let operations = self
+            .select_operations(operation_ids, kind, Some(AsyncControl::Inspect))
+            .await;
         let mut inspected = Vec::with_capacity(operations.len());
         for operation in operations {
             let status = *operation.status.lock().await;
@@ -623,15 +652,22 @@ impl AsyncOpManager {
         false
     }
 
-    pub(crate) async fn notified(&self) {
-        self.inner.notify.notified().await;
+    pub(crate) async fn has_model_visible_control(&self, control: AsyncControl) -> bool {
+        self.inner
+            .operations
+            .lock()
+            .await
+            .values()
+            .any(|operation| operation.model_visible && operation.controls.contains(control))
     }
 
     pub(crate) async fn drain_signals(
         &self,
         filter: AsyncOpWaitFilter,
     ) -> Vec<AsyncOpSignalDigest> {
-        let operations = self.select_operations(Vec::new(), filter.kind).await;
+        let operations = self
+            .select_operations(Vec::new(), filter.kind, filter.control)
+            .await;
         let mut updates = Vec::new();
         for operation in operations {
             if filter.model_visible_only && !operation.model_visible {
@@ -687,12 +723,14 @@ impl AsyncOpManager {
         &self,
         operation_ids: Vec<String>,
         kind: Option<AsyncOpKind>,
+        control: Option<AsyncControl>,
     ) -> Vec<Arc<AsyncOperation>> {
         let operations = self.inner.operations.lock().await;
         if operation_ids.is_empty() {
             return operations
                 .values()
                 .filter(|operation| kind.is_none_or(|k| operation.kind == k))
+                .filter(|operation| control.is_none_or(|c| operation.controls.contains(c)))
                 .cloned()
                 .collect();
         }
@@ -700,6 +738,7 @@ impl AsyncOpManager {
             .into_iter()
             .filter_map(|id| operations.get(&AsyncOpId::new(id)).cloned())
             .filter(|operation| kind.is_none_or(|k| operation.kind == k))
+            .filter(|operation| control.is_none_or(|c| operation.controls.contains(c)))
             .collect()
     }
 }
@@ -752,8 +791,14 @@ impl AsyncOpHandle {
         }
         *status = signal.status();
         drop(status);
-        if let AsyncOpSignal::Completed { output, .. } = &signal {
-            *self.operation.latest_output.lock().await = output.clone();
+        match &signal {
+            AsyncOpSignal::Completed { output, .. } | AsyncOpSignal::Failed { output, .. } => {
+                *self.operation.latest_output.lock().await = output.clone();
+            }
+            AsyncOpSignal::Started { .. }
+            | AsyncOpSignal::Progress { .. }
+            | AsyncOpSignal::NeedsInput { .. }
+            | AsyncOpSignal::Stopped { .. } => {}
         }
         self.push_signal(signal, true, events_tx).await;
     }
@@ -869,6 +914,40 @@ impl AsyncOpChildHandle {
         }
         next
     }
+
+    pub(crate) async fn receive_input(&self) -> Option<String> {
+        let operation = self.operation.upgrade()?;
+        let cancel = operation.cancel.clone();
+        let mut inbox = self.inbox_rx.lock().await;
+        let next = tokio::select! {
+            _ = cancel.cancelled() => None,
+            next = inbox.recv() => next,
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        *operation.status.lock().await = AsyncOpStatus::Running;
+        next
+    }
+
+    pub(crate) async fn transcript(
+        &self,
+        event: AsyncOperationTranscriptEvent,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) {
+        let Some(operation) = self.operation.upgrade() else {
+            return;
+        };
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        AsyncOpHandle {
+            manager: AsyncOpManager { inner: manager },
+            operation,
+        }
+        .transcript(event, events_tx)
+        .await;
+    }
 }
 
 fn classify_wake(updates: &[AsyncOpSignalDigest]) -> &'static str {
@@ -914,6 +993,13 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn all_controls() -> AsyncControls {
+        AsyncControls::new(AsyncControl::Inspect)
+            .with(AsyncControl::SendInput)
+            .with(AsyncControl::Stop)
+            .with(AsyncControl::Wait)
+    }
+
     #[tokio::test]
     async fn operation_lifecycle_and_wait() {
         let manager = AsyncOpManager::new();
@@ -927,6 +1013,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "starting research".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -968,6 +1055,7 @@ mod tests {
                     parent_tool_name: Some("watch_execution_run".into()),
                     started_summary: "starting routine".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1027,6 +1115,7 @@ mod tests {
                     parent_tool_name: Some("generate_video".into()),
                     started_summary: "starting video".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1071,6 +1160,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspect_retains_failed_operation_output() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("shell_1"),
+                    kind: AsyncOpKind::Shell,
+                    label: "failing shell command".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("shell".into()),
+                    started_summary: "running shell command".into(),
+                    model_visible: true,
+                    controls: all_controls(),
+                },
+                None,
+            )
+            .await;
+        let output = serde_json::json!({
+            "success": false,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "command failed"
+        });
+        started
+            .handle
+            .complete(
+                AsyncOpSignal::Failed {
+                    error: "Shell command exited with exit status: 1".into(),
+                    output: Some(output.clone()),
+                },
+                None,
+            )
+            .await;
+
+        let inspected = manager
+            .inspect(vec!["shell_1".into()], Some(AsyncOpKind::Shell), false, 10)
+            .await;
+
+        assert_eq!(inspected[0].status, "failed");
+        assert_eq!(inspected[0].latest_output, Some(output));
+    }
+
+    #[tokio::test]
     async fn model_visible_wait_drains_only_model_visible_operations() {
         let manager = AsyncOpManager::new();
         let _visible = manager
@@ -1083,6 +1215,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "build library".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1097,6 +1230,7 @@ mod tests {
                     parent_tool_name: None,
                     started_summary: "hidden shell".into(),
                     model_visible: false,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1123,6 +1257,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "build library".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1158,6 +1293,7 @@ mod tests {
                     parent_tool_name: None,
                     started_summary: "started".into(),
                     model_visible: false,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1187,6 +1323,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "starting".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1217,6 +1354,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "starting".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )
@@ -1241,6 +1379,7 @@ mod tests {
                     parent_tool_name: Some("use_ability".into()),
                     started_summary: "starting".into(),
                     model_visible: true,
+                    controls: all_controls(),
                 },
                 None,
             )

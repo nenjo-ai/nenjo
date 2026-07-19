@@ -244,9 +244,19 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         self.runtime.hook_runtime = hook_runtime;
     }
 
-    /// Get tool specs for LLM function calling registration.
+    /// Get the full registered tool specs for capability introspection.
+    ///
+    /// This includes dynamically hidden tools. Model requests use the
+    /// visibility-filtered specs produced by the turn loop.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.local_tool_specs();
+        specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
+        specs
+    }
+
+    /// Get the tool specs currently visible to the model, including native tools.
+    pub(crate) async fn visible_tool_specs(&self) -> Vec<ToolSpec> {
+        let mut specs = self.visible_local_tool_specs().await;
         specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
         specs
     }
@@ -268,6 +278,20 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             })
             .map(|t| t.spec())
             .collect()
+    }
+
+    /// Get executable local tool specs currently visible to the model.
+    pub(crate) async fn visible_local_tool_specs(&self) -> Vec<ToolSpec> {
+        let mut specs = Vec::new();
+        for tool in &self.runtime.tools {
+            if native_model_tool_shadows_local_tool(&self.model_manifest.native_tools, tool.name())
+                || !tool.is_available_to_model().await
+            {
+                continue;
+            }
+            specs.push(tool.spec());
+        }
+        specs
     }
 
     /// Build the system, developer, and user prompts for an execution.

@@ -67,10 +67,10 @@ use std::path::PathBuf;
 pub mod async_ops;
 
 pub use async_ops::{
-    AsyncOperationKind, AsyncOperationSignalKind, AsyncOperationStatus,
-    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, SEND_OPERATION_INPUT_TOOL_NAME,
-    STOP_OPERATIONS_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs,
-    WAIT_OPERATIONS_TOOL_NAME, WaitOperationsArgs, deserialize_u64_from_json_number,
+    AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind,
+    AsyncOperationStartReceipt, AsyncOperationStatus, INSPECT_TOOL_NAME, InspectOperationsArgs,
+    SEND_INPUT_TOOL_NAME, STOP_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs,
+    WAIT_TOOL_NAME, WaitOperationsArgs, deserialize_u64_from_json_number,
     deserialize_usize_from_json_number, inspect_operations_parameters_schema,
     send_operation_input_parameters_schema, stop_operations_parameters_schema,
     wait_operations_parameters_schema,
@@ -201,6 +201,15 @@ pub trait Tool: Send + Sync {
     /// Whether calling this tool should immediately end the turn loop.
     fn is_terminal(&self) -> bool {
         false
+    }
+
+    /// Whether this tool should be advertised to the model for the next request.
+    ///
+    /// Tools remain registered for execution when hidden. Runtime control tools
+    /// can use this hook to appear only after their corresponding capability has
+    /// been activated.
+    async fn is_available_to_model(&self) -> bool {
+        true
     }
 
     /// Build the full spec for LLM registration.
