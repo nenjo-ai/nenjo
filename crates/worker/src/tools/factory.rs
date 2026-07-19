@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::external_mcp::ExternalMcpPool;
 use crate::media::{ModelAssignmentResolver, ResourceRef};
 use crate::providers::ModelProviderRegistry;
-use crate::skills::{LocalSkillProvider, SkillRegistry};
+use crate::skills::{LocalSkillProvider, SkillRegistry, SkillToolSet};
 
 use super::file_delete::ProtectedProjectPaths;
 use super::file_mutation::FileMutationCoordinator;
@@ -228,6 +228,28 @@ where
             Arc::new(RepoStatusTool::new(security.clone())),
             Arc::new(SearchTool::new(security.clone())),
         ];
+        match self.skill_registry.tool_set() {
+            SkillToolSet::None => {}
+            SkillToolSet::Activation => {
+                self.add_skill_activation_tools(security, skill_runtime.clone(), &mut tools);
+            }
+            SkillToolSet::ActivationWithMcp => {
+                self.add_skill_activation_tools(security, skill_runtime.clone(), &mut tools);
+                tools.push(Arc::new(SkillMcpTool::new(
+                    self.external_mcp.clone(),
+                    skill_runtime,
+                )));
+            }
+        }
+        tools
+    }
+
+    fn add_skill_activation_tools(
+        &self,
+        security: &Arc<SecurityPolicy>,
+        skill_runtime: Arc<SkillRuntimeState>,
+        tools: &mut Vec<Arc<dyn Tool>>,
+    ) {
         let skill_provider: Arc<dyn SkillProvider> = Arc::new(LocalSkillProvider::with_mcp_pool(
             self.skill_registry.clone(),
             security.clone(),
@@ -235,14 +257,9 @@ where
         ));
         tools.push(Arc::new(UseSkillTool::new(
             skill_provider.clone(),
-            skill_runtime.clone(),
-        )));
-        tools.push(Arc::new(ListInstalledSkillsTool::new(skill_provider)));
-        tools.push(Arc::new(SkillMcpTool::new(
-            self.external_mcp.clone(),
             skill_runtime,
         )));
-        tools
+        tools.push(Arc::new(ListInstalledSkillsTool::new(skill_provider)));
     }
 
     /// Build all tools for an agent with a given security policy.
