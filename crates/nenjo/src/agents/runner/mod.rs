@@ -184,7 +184,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .tools
                 .extend(build_ability_tools(&active_abilities, base_instance)?);
         }
-        if instance.runtime.execution_mode.can_orchestrate() {
+        if instance.runtime.execution_mode.has_own_capability_surface() {
             instance.runtime.tools.extend(build_async_operation_tools(
                 instance.runtime.async_ops.clone(),
             ));
@@ -526,7 +526,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                     },
                     delegation_ctx: inst.runtime.sub_agent_ctx.clone(),
                     async_ops: inst.runtime.async_ops.clone(),
-                    cancel: inst.runtime.execution_cancel.clone(),
                     events_tx: Some(events_tx.clone()),
                 },
             );

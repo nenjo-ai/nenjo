@@ -14,12 +14,12 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::tools::{
-    INSPECT_OPERATIONS_TOOL_NAME, InspectOperationsArgs, SEND_OPERATION_INPUT_TOOL_NAME,
-    STOP_OPERATIONS_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs, Tool, ToolCategory,
-    ToolOrigin, ToolResult, WAIT_OPERATIONS_TOOL_NAME, WaitOperationsArgs,
-    deserialize_u64_from_json_number, deserialize_usize_from_json_number,
-    inspect_operations_parameters_schema, send_operation_input_parameters_schema,
-    stop_operations_parameters_schema, wait_operations_parameters_schema,
+    AsyncControl, AsyncControls, AsyncOperationStartReceipt, INSPECT_TOOL_NAME,
+    InspectOperationsArgs, SEND_INPUT_TOOL_NAME, STOP_TOOL_NAME, SendOperationInputArgs,
+    StopOperationsArgs, Tool, ToolCategory, ToolOrigin, ToolResult, WAIT_TOOL_NAME,
+    WaitOperationsArgs, inspect_operations_parameters_schema,
+    send_operation_input_parameters_schema, stop_operations_parameters_schema,
+    wait_operations_parameters_schema,
 };
 
 use super::async_ops::{
@@ -32,14 +32,10 @@ use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
-use crate::provider::{ErasedProvider, ProviderRuntime, ToolFactory};
+use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
-pub const INSPECT_ABILITIES_TOOL_NAME: &str = "inspect_abilities";
-pub const SEND_ABILITIES_TOOL_NAME: &str = "send_abilities";
-pub const STOP_ABILITIES_TOOL_NAME: &str = "stop_abilities";
-pub const WAIT_TOOL_NAME: &str = "wait";
 
 static ABILITY_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -92,6 +88,13 @@ struct AbilityListItem<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
     activation_condition: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct AbilityOperationStarted<'a> {
+    ability: &'a str,
+    #[serde(flatten)]
+    operation: AsyncOperationStartReceipt,
 }
 
 /// Discover abilities assigned to the current agent.
@@ -242,18 +245,6 @@ where
     }
 }
 
-struct InspectAbilitiesTool {
-    async_ops: AsyncOpManager,
-}
-
-struct SendAbilitiesTool {
-    async_ops: AsyncOpManager,
-}
-
-struct StopAbilitiesTool {
-    async_ops: AsyncOpManager,
-}
-
 struct InspectOperationsTool {
     async_ops: AsyncOpManager,
 }
@@ -266,191 +257,18 @@ struct SendOperationInputTool {
     async_ops: AsyncOpManager,
 }
 
-struct AbilityWaitTool {
-    async_ops: AsyncOpManager,
-}
-
 struct WaitOperationsTool {
     async_ops: AsyncOpManager,
-}
-
-#[derive(Debug, Deserialize)]
-struct InspectAbilitiesArgs {
-    #[serde(default)]
-    operations: Vec<String>,
-    #[serde(default)]
-    include_transcript: bool,
-    #[serde(
-        default = "default_inspect_limit",
-        deserialize_with = "deserialize_usize_from_json_number"
-    )]
-    limit: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendAbilitiesArgs {
-    #[serde(default)]
-    operations: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct StopAbilitiesArgs {
-    #[serde(default)]
-    operations: Vec<String>,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitArgs {
-    #[serde(
-        default = "default_wait_seconds",
-        deserialize_with = "deserialize_u64_from_json_number"
-    )]
-    seconds: u64,
-    reason: Option<String>,
-}
-
-fn default_inspect_limit() -> usize {
-    30
-}
-
-fn default_wait_seconds() -> u64 {
-    10
-}
-
-#[async_trait::async_trait]
-impl Tool for InspectAbilitiesTool {
-    fn name(&self) -> &str {
-        INSPECT_ABILITIES_TOOL_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Inspect running or recently completed ability operations by operation_id. Include transcript deltas when you need evidence or nested tool activity."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operations": {"type": "array", "items": {"type": "string"}},
-                "include_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
-            },
-            "additionalProperties": false
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: InspectAbilitiesArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "abilities": self.async_ops.inspect(
-                parsed.operations,
-                Some(AsyncOpKind::Ability),
-                parsed.include_transcript,
-                parsed.limit,
-            ).await
-        })))
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for SendAbilitiesTool {
-    fn name(&self) -> &str {
-        SEND_ABILITIES_TOOL_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Send input to one or more ability operations that asked the parent agent a question."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operations": {"type": "array", "items": {"type": "string"}},
-                "message": {"type": "string"}
-            },
-            "required": ["operations", "message"],
-            "additionalProperties": false
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::ReadWrite
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: SendAbilitiesArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "sent": self.async_ops.send_input(parsed.operations, parsed.message).await
-        })))
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for StopAbilitiesTool {
-    fn name(&self) -> &str {
-        STOP_ABILITIES_TOOL_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Stop one or more running ability operations."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operations": {"type": "array", "items": {"type": "string"}},
-                "reason": {"type": "string"}
-            },
-            "required": ["operations"],
-            "additionalProperties": false
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::ReadWrite
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: StopAbilitiesArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "stopped": self.async_ops.stop(
-                parsed.operations,
-                Some(AsyncOpKind::Ability),
-                parsed.reason,
-                super::runner::turn_loop::current_events_tx(),
-            ).await
-        })))
-    }
 }
 
 #[async_trait::async_trait]
 impl Tool for InspectOperationsTool {
     fn name(&self) -> &str {
-        INSPECT_OPERATIONS_TOOL_NAME
+        INSPECT_TOOL_NAME
     }
 
     fn description(&self) -> &str {
-        "Inspect running or recently completed async operations by operation_id. Use this after wait_operations reports completion or failure when you need the final output payload or recent transcript. For media jobs, inspect the existing media operation instead of starting a new generation job for the same user request."
+        "Inspect running or recently completed async operations by operation_id. Use this after wait reports completion or failure when you need the final output payload or recent transcript."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -463,6 +281,12 @@ impl Tool for InspectOperationsTool {
 
     fn origin(&self) -> ToolOrigin {
         ToolOrigin::Harness
+    }
+
+    async fn is_available_to_model(&self) -> bool {
+        self.async_ops
+            .has_model_visible_control(AsyncControl::Inspect)
+            .await
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
@@ -481,7 +305,7 @@ impl Tool for InspectOperationsTool {
 #[async_trait::async_trait]
 impl Tool for StopOperationsTool {
     fn name(&self) -> &str {
-        STOP_OPERATIONS_TOOL_NAME
+        STOP_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -500,6 +324,12 @@ impl Tool for StopOperationsTool {
         ToolOrigin::Harness
     }
 
+    async fn is_available_to_model(&self) -> bool {
+        self.async_ops
+            .has_model_visible_control(AsyncControl::Stop)
+            .await
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: StopOperationsArgs = serde_json::from_value(args)?;
         Ok(json_tool(serde_json::json!({
@@ -516,7 +346,7 @@ impl Tool for StopOperationsTool {
 #[async_trait::async_trait]
 impl Tool for SendOperationInputTool {
     fn name(&self) -> &str {
-        SEND_OPERATION_INPUT_TOOL_NAME
+        SEND_INPUT_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -535,6 +365,12 @@ impl Tool for SendOperationInputTool {
         ToolOrigin::Harness
     }
 
+    async fn is_available_to_model(&self) -> bool {
+        self.async_ops
+            .has_model_visible_control(AsyncControl::SendInput)
+            .await
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: SendOperationInputArgs = serde_json::from_value(args)?;
         Ok(json_tool(serde_json::json!({
@@ -544,64 +380,13 @@ impl Tool for SendOperationInputTool {
 }
 
 #[async_trait::async_trait]
-impl Tool for AbilityWaitTool {
+impl Tool for WaitOperationsTool {
     fn name(&self) -> &str {
         WAIT_TOOL_NAME
     }
 
     fn description(&self) -> &str {
-        "Yield briefly while async operations continue running, then return queued operation signals."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "seconds": {"type": "integer", "minimum": 1, "maximum": 30},
-                "reason": {"type": "string"}
-            },
-            "additionalProperties": false
-        })
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: WaitArgs = serde_json::from_value(args)?;
-        let _reason = parsed.reason;
-        if let Some(turn_input) = super::runner::turn_loop::current_turn_input() {
-            let result = tokio::select! {
-                result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::all()) => result,
-                _ = turn_input.notified() => super::async_ops::AsyncOpWaitResult {
-                    elapsed_seconds: 0,
-                    woken_by: "user_message",
-                    updates: Vec::new(),
-                },
-            };
-            return Ok(json_tool(serde_json::json!(result)));
-        }
-        Ok(json_tool(serde_json::json!(
-            self.async_ops
-                .wait(parsed.seconds, AsyncOpWaitFilter::all())
-                .await
-        )))
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for WaitOperationsTool {
-    fn name(&self) -> &str {
-        WAIT_OPERATIONS_TOOL_NAME
-    }
-
-    fn description(&self) -> &str {
-        "Wait while async operations continue running, then return queued operation signals. For video or other media generation, call this with kind=media after the media tool returns job_started; repeat wait_operations until the media operation completes or fails instead of calling the generation tool again for the same request."
+        "Wait while async operations continue running, then return queued operation signals. For video or other media generation, call this with kind=media after the media tool returns job_started; repeat wait until the media operation completes or fails instead of calling the generation tool again for the same request."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -616,12 +401,18 @@ impl Tool for WaitOperationsTool {
         ToolOrigin::Harness
     }
 
+    async fn is_available_to_model(&self) -> bool {
+        self.async_ops
+            .has_model_visible_control(AsyncControl::Wait)
+            .await
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: WaitOperationsArgs = serde_json::from_value(args)?;
         let _reason = parsed.reason;
         if let Some(turn_input) = super::runner::turn_loop::current_turn_input() {
             let result = tokio::select! {
-                result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::kind(parsed.kind)) => result,
+                result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::control(AsyncControl::Wait, parsed.kind)) => result,
                 _ = turn_input.notified() => super::async_ops::AsyncOpWaitResult {
                     elapsed_seconds: 0,
                     woken_by: "user_message",
@@ -632,7 +423,10 @@ impl Tool for WaitOperationsTool {
         }
         Ok(json_tool(serde_json::json!(
             self.async_ops
-                .wait(parsed.seconds, AsyncOpWaitFilter::kind(parsed.kind))
+                .wait(
+                    parsed.seconds,
+                    AsyncOpWaitFilter::control(AsyncControl::Wait, parsed.kind),
+                )
                 .await
         )))
     }
@@ -710,7 +504,7 @@ impl Tool for AskAbilityParentTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the parent agent for input and wait until it responds with send_abilities."
+        "Ask the parent agent for input and wait until it responds with send_input."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -786,6 +580,10 @@ where
     let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
     let parent_events_tx = turn_loop::current_events_tx();
     let operation_id = next_ability_operation_id(ability_id);
+    let controls = AsyncControls::new(AsyncControl::Inspect)
+        .with(AsyncControl::SendInput)
+        .with(AsyncControl::Stop)
+        .with(AsyncControl::Wait);
     let started = instance
         .runtime
         .async_ops
@@ -798,6 +596,7 @@ where
                 parent_tool_name: Some(USE_ABILITY_TOOL_NAME.into()),
                 started_summary: task_description.to_string(),
                 model_visible: true,
+                controls,
             },
             parent_events_tx.clone(),
         )
@@ -824,23 +623,16 @@ where
         })
         .await;
     });
-    instance
-        .runtime
-        .async_ops
-        .attach_join(&operation_id, join)
-        .await;
+    started.handle.attach_join(join, parent_events_tx).await;
 
-    Ok(json_tool(serde_json::json!({
-        "ability": ability_id,
-        "operation_id": operation_id.to_string(),
-        "status": "running",
-        "control_tools": {
-            "inspect": INSPECT_ABILITIES_TOOL_NAME,
-            "send_input": SEND_ABILITIES_TOOL_NAME,
-            "stop": STOP_ABILITIES_TOOL_NAME,
-            "wait": ability_wait_tool_name(&instance.runtime)
-        }
-    })))
+    Ok(json_tool(serde_json::to_value(AbilityOperationStarted {
+        ability: ability_id,
+        operation: AsyncOperationStartReceipt::new(
+            operation_id.to_string(),
+            AsyncOpKind::Ability,
+            controls,
+        ),
+    })?))
 }
 
 struct AbilityOperation<P: ProviderRuntime> {
@@ -868,6 +660,17 @@ where
         op_handle,
         parent_events_tx,
     } = operation;
+
+    let ability_session = match instance.runtime.current_session_id {
+        Some(parent_session_id) => Some(
+            instance
+                .runtime
+                .ability_sessions
+                .begin(parent_session_id, &ability.name)
+                .await,
+        ),
+        None => None,
+    };
 
     let mut sub_instance = build_ability_instance(&instance, &ability).await;
     let cancel_token = op_handle.cancel_token();
@@ -903,10 +706,14 @@ where
         Ok(prompts) => prompts,
         Err(error) => {
             let error = format!("ability prompt build failed: {error}");
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), error.clone());
+            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
                         error: truncate(&error, 500),
+                        output: None,
                     },
                     parent_events_tx.clone(),
                 )
@@ -954,6 +761,10 @@ where
 
     if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
         messages.extend(chat.history.iter().cloned());
+    }
+
+    if let Some(session) = ability_session.as_ref() {
+        messages.extend(session.history().iter().cloned());
     }
 
     let user_message = if prompts.user_message.is_empty() {
@@ -1072,6 +883,9 @@ where
 
     match result {
         Ok(output) => {
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), output.text.clone());
+            }
             turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
             op_handle
                 .complete(
@@ -1101,10 +915,14 @@ where
         }
         Err(e) => {
             let error = format!("ability execution failed: {e}");
+            if let Some(session) = ability_session.as_ref() {
+                session.append_exchange(task_description.clone(), error.clone());
+            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
                         error: truncate(&error, 500),
+                        output: None,
                     },
                     parent_events_tx.clone(),
                 )
@@ -1208,37 +1026,10 @@ where
     P: ProviderRuntime,
 {
     let registry = Arc::new(AbilityRegistry::new(abilities)?);
-    let async_ops = instance.runtime.async_ops.clone();
-    let mut tools = vec![
+    Ok(vec![
         Arc::new(ListAssignedAbilitiesTool::new(registry.clone())) as Arc<dyn Tool>,
         Arc::new(UseAbilityTool::new(registry, instance.clone())) as Arc<dyn Tool>,
-        Arc::new(InspectAbilitiesTool {
-            async_ops: async_ops.clone(),
-        }) as Arc<dyn Tool>,
-        Arc::new(SendAbilitiesTool {
-            async_ops: async_ops.clone(),
-        }) as Arc<dyn Tool>,
-        Arc::new(StopAbilitiesTool {
-            async_ops: async_ops.clone(),
-        }) as Arc<dyn Tool>,
-    ];
-    if instance.runtime.config.max_delegation_depth == 0 {
-        tools.push(Arc::new(AbilityWaitTool { async_ops }) as Arc<dyn Tool>);
-    } else if !instance.runtime.execution_mode.can_orchestrate() {
-        tools.push(Arc::new(AbilityWaitTool { async_ops }) as Arc<dyn Tool>);
-    }
-    Ok(tools)
-}
-
-fn ability_wait_tool_name<P>(runtime: &AgentRuntime<P>) -> &'static str
-where
-    P: ProviderRuntime,
-{
-    if runtime.execution_mode.can_orchestrate() {
-        WAIT_OPERATIONS_TOOL_NAME
-    } else {
-        WAIT_TOOL_NAME
-    }
+    ])
 }
 
 pub(crate) fn build_async_operation_tools(async_ops: AsyncOpManager) -> Vec<Arc<dyn Tool>> {
@@ -1260,12 +1051,7 @@ pub(crate) fn build_async_operation_tools(async_ops: AsyncOpManager) -> Vec<Arc<
 pub(crate) fn is_ability_tool(name: &str) -> bool {
     matches!(
         name,
-        LIST_ASSIGNED_ABILITIES_TOOL_NAME
-            | USE_ABILITY_TOOL_NAME
-            | INSPECT_ABILITIES_TOOL_NAME
-            | SEND_ABILITIES_TOOL_NAME
-            | STOP_ABILITIES_TOOL_NAME
-            | WAIT_TOOL_NAME
+        LIST_ASSIGNED_ABILITIES_TOOL_NAME | USE_ABILITY_TOOL_NAME
     )
 }
 
@@ -1350,7 +1136,14 @@ where
         scoped_agent.domains.clear();
         provider
             .tool_factory()
-            .create_tools_with_security(&scoped_agent, scoped_security.clone())
+            .create_tools_with_context(
+                &scoped_agent,
+                scoped_security.clone(),
+                ToolContext {
+                    project_slug: Some(caller.prompt.context.current_project.slug.to_string()),
+                    current_session_id: caller.runtime.current_session_id,
+                },
+            )
             .await
     } else {
         Vec::new()
@@ -1408,6 +1201,8 @@ where
             execution_cancel,
             execution_mode: caller.runtime.execution_mode,
             hook_runtime: None,
+            current_session_id: caller.runtime.current_session_id,
+            ability_sessions: caller.runtime.ability_sessions.clone(),
         },
     }
 }
@@ -1673,6 +1468,8 @@ mod tests {
                 execution_cancel,
                 execution_mode: AgentExecutionMode::Parent,
                 hook_runtime: None,
+                current_session_id: None,
+                ability_sessions: Default::default(),
             },
         }
     }
@@ -2007,9 +1804,9 @@ mod tests {
     fn ability_tool_filter_does_not_match_manifest_resource_list_tool() {
         assert!(is_ability_tool("list_assigned_abilities"));
         assert!(is_ability_tool("use_ability"));
-        assert!(!is_ability_tool("inspect_operations"));
-        assert!(!is_ability_tool("stop_operations"));
-        assert!(!is_ability_tool("wait_operations"));
+        assert!(!is_ability_tool("inspect"));
+        assert!(!is_ability_tool("stop"));
+        assert!(!is_ability_tool("wait"));
         assert!(!is_ability_tool("list_abilities"));
     }
 
@@ -2018,22 +1815,76 @@ mod tests {
         let tools = build_async_operation_tools(AsyncOpManager::new());
         let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
 
-        assert!(names.contains(&"inspect_operations"));
-        assert!(names.contains(&"send_operation_input"));
-        assert!(names.contains(&"stop_operations"));
-        assert!(names.contains(&"wait_operations"));
+        assert_eq!(names, ["inspect", "send_input", "stop", "wait"]);
     }
 
-    #[test]
-    fn inspect_abilities_args_accept_whole_float_limit_from_model_args() {
-        let args: InspectAbilitiesArgs = serde_json::from_value(serde_json::json!({
-            "operations": ["ability_build_agent_2"],
-            "include_transcript": true,
-            "limit": 5.0
-        }))
-        .unwrap();
+    #[tokio::test]
+    async fn generic_async_controls_are_hidden_until_matching_operation_starts() {
+        assert!(visible_generic_control_names(None).await.is_empty());
+        let all_controls = AsyncControls::new(AsyncControl::Inspect)
+            .with(AsyncControl::SendInput)
+            .with(AsyncControl::Stop)
+            .with(AsyncControl::Wait);
+        for kind in [
+            AsyncOpKind::Ability,
+            AsyncOpKind::SubAgent,
+            AsyncOpKind::Delegation,
+        ] {
+            assert_eq!(
+                visible_generic_control_names(Some((kind, all_controls))).await,
+                ["inspect", "send_input", "stop", "wait"]
+            );
+        }
+        assert_eq!(
+            visible_generic_control_names(Some((
+                AsyncOpKind::Media,
+                AsyncControls::new(AsyncControl::Inspect)
+                    .with(AsyncControl::Stop)
+                    .with(AsyncControl::Wait),
+            )))
+            .await,
+            ["inspect", "stop", "wait"]
+        );
+    }
 
-        assert_eq!(args.limit, 5);
+    async fn visible_generic_control_names(
+        operation: Option<(AsyncOpKind, AsyncControls)>,
+    ) -> Vec<String> {
+        let mut instance = test_instance_with_active_domain();
+        let async_ops = instance.runtime.async_ops.clone();
+        instance.runtime.tools = build_async_operation_tools(async_ops.clone());
+        if let Some((kind, controls)) = operation {
+            start_model_visible_operation(&async_ops, kind, controls).await;
+        }
+        instance
+            .visible_local_tool_specs()
+            .await
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect()
+    }
+
+    async fn start_model_visible_operation(
+        async_ops: &AsyncOpManager,
+        kind: AsyncOpKind,
+        controls: AsyncControls,
+    ) {
+        let operation_id = format!("{}_1", kind.as_str());
+        let _started = async_ops
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new(operation_id),
+                    kind,
+                    label: kind.as_str().into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("starter".into()),
+                    started_summary: "started".into(),
+                    model_visible: true,
+                    controls,
+                },
+                None,
+            )
+            .await;
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::ability_sessions::AbilitySessionStore;
 use super::async_ops::AsyncOpManager;
 use super::instance::{
     AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
@@ -50,12 +51,13 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     pending_routine_context: Option<RoutineContext>,
     pending_step_context: Option<RoutineStepContext>,
     tool_current_session_id: Option<Uuid>,
+    ability_histories: BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
     // For DelegateToTool construction, set when a provider creates the builder.
     provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
     execution_mode: AgentExecutionMode,
     /// When set, overrides SecurityPolicy.workspace_dir so all tools
-    /// (shell, file_read, file_write, git) operate in this directory.
+    /// (shell, read, write, edit, remove, search, repo_status) operate in this directory.
     work_dir: Option<PathBuf>,
     hook_runtime: Option<Arc<HookRuntime>>,
 }
@@ -77,6 +79,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_routine_context: None,
             pending_step_context: None,
             tool_current_session_id: None,
+            ability_histories: BTreeMap::new(),
             provider_runtime: Some(params.provider_runtime),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -105,6 +108,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_routine_context: None,
             pending_step_context: None,
             tool_current_session_id: None,
+            ability_histories: BTreeMap::new(),
             provider_runtime: Some(provider),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -188,7 +192,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// `{{ project.name }}`, `{{ project.description }}`, etc.
     ///
     /// Resolves git context from project settings if the repo is synced.
-    /// `working_dir` is derived from `workspace_dir/slug` in `build_prompts()`.
+    /// `working_dir` uses an explicit tool scope when one is configured, otherwise
+    /// it is derived from `workspace_dir/slug` in `build_prompts()`.
     pub fn with_project_context(mut self, project: &ProjectManifest) -> Self {
         self.pending_project_context = Some(project.clone());
         self
@@ -212,6 +217,16 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Set the current transcript session id for tool-emitted side effects.
     pub fn with_tool_current_session_id(mut self, current_session_id: Uuid) -> Self {
         self.tool_current_session_id = Some(current_session_id);
+        self
+    }
+
+    /// Seed ability conversations reconstructed from the parent transcript.
+    #[doc(hidden)]
+    pub fn with_ability_histories(
+        mut self,
+        histories: BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
+    ) -> Self {
+        self.ability_histories = histories;
         self
     }
 
@@ -286,7 +301,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             }
         };
         if let Some(project) = self.pending_project_context.take() {
-            let ctx = ProjectContext::from_manifest(&project);
+            let mut ctx = ProjectContext::from_manifest(&project);
+            apply_explicit_working_directory(&mut ctx, self.work_dir.as_deref());
             let extra = &mut prompt_context.render_ctx_extra;
             // Resolve git at the top level for prompt context defaults.
             if let Some(ref git) = ctx.git {
@@ -374,6 +390,10 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
         let execution_cancel = tokio_util::sync::CancellationToken::new();
         let async_ops = AsyncOpManager::with_cancel(execution_cancel.clone());
+        let ability_sessions = Arc::new(AbilitySessionStore::default());
+        if let Some(parent_session_id) = self.tool_current_session_id {
+            ability_sessions.hydrate(parent_session_id, self.ability_histories);
+        }
 
         let instance = AgentInstance {
             manifest: agent,
@@ -395,6 +415,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 execution_cancel,
                 execution_mode: self.execution_mode,
                 hook_runtime: self.hook_runtime,
+                current_session_id: self.tool_current_session_id,
+                ability_sessions,
             },
         };
 
@@ -412,7 +434,32 @@ fn active_project_slug(prompt_context: &PromptContext) -> Option<&str> {
     if slug.is_empty() { None } else { Some(slug) }
 }
 
+fn apply_explicit_working_directory(project: &mut ProjectContext, work_dir: Option<&Path>) {
+    if let Some(work_dir) = work_dir {
+        project.working_dir = work_dir.to_string_lossy().into_owned();
+    }
+}
+
 fn strip_child_prompt_capabilities(prompt_context: &mut PromptContext) {
     prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
+}
+
+#[cfg(test)]
+mod working_directory_tests {
+    use super::apply_explicit_working_directory;
+    use crate::context::ProjectContext;
+
+    #[test]
+    fn explicit_worktree_becomes_the_project_working_directory() {
+        let worktree = std::path::Path::new("/workspace/project/worktrees/task-123");
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            ..ProjectContext::default()
+        };
+
+        apply_explicit_working_directory(&mut project, Some(worktree));
+
+        assert_eq!(project.working_dir, worktree.to_string_lossy());
+    }
 }

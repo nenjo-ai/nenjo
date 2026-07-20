@@ -9,19 +9,43 @@ use std::time::Instant;
 pub enum AutonomyLevel {
     /// Read-only: can observe but not act
     ReadOnly,
-    /// Supervised: acts but requires approval for risky operations
+    /// Supervised: retained for configuration compatibility; acts within policy bounds
     #[default]
     Supervised,
     /// Full: autonomous execution within policy bounds
     Full,
 }
 
-/// Risk score for shell command execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandRiskLevel {
-    Low,
-    Medium,
-    High,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellDenialRule {
+    ReadOnly,
+    CommandExpansion,
+    OutputRedirection,
+    BlockedExecutable,
+    ParentTraversal,
+    OutsideWorkspace,
+    EmptyCommand,
+    HighRisk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShellDenial {
+    #[serde(rename = "type")]
+    denial_type: &'static str,
+    pub rule: ShellDenialRule,
+    pub message: String,
+    pub working_directory: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offending_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<ShellSuggestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShellSuggestion {
+    pub tool: &'static str,
+    pub instruction: String,
 }
 
 /// Sliding-window action tracker for rate limiting.
@@ -86,7 +110,6 @@ pub struct SecurityPolicy {
     pub forbidden_paths: Vec<String>,
     pub max_actions_per_hour: u32,
     pub max_cost_per_day_cents: u32,
-    pub require_approval_for_medium_risk: bool,
     pub block_high_risk_commands: bool,
     pub tracker: ActionTracker,
     /// Extra environment variables forwarded to shell subprocesses.
@@ -131,7 +154,6 @@ impl Default for SecurityPolicy {
             ],
             max_actions_per_hour: 1000,
             max_cost_per_day_cents: 500,
-            require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             tracker: ActionTracker::new(),
             forwarded_env: collect_forwarded_env(),
@@ -141,7 +163,7 @@ impl Default for SecurityPolicy {
 
 fn default_runtime_roots(workspace_dir: &Path) -> Vec<PathBuf> {
     let runtime_home = workspace_dir.join(".nenjo");
-    ["skills", "plugins", "library"]
+    ["packages", "skills", "plugins"]
         .into_iter()
         .map(|name| runtime_home.join(name))
         .collect()
@@ -354,7 +376,46 @@ fn skip_env_assignments(s: &str) -> &str {
     }
 }
 
+fn blocked_command_suggestion(command: &str) -> Option<ShellSuggestion> {
+    match command {
+        "rm" => Some(ShellSuggestion {
+            tool: "remove",
+            instruction: "Remove the scoped file or directory with remove".into(),
+        }),
+        "curl" | "wget" => Some(ShellSuggestion {
+            tool: "web_fetch",
+            instruction: "Fetch the resource with web_fetch or http_request".into(),
+        }),
+        "kill" | "killall" | "pkill" => Some(ShellSuggestion {
+            tool: "stop",
+            instruction: "Stop the async shell operation with stop".into(),
+        }),
+        "mkfs" | "dd" | "shutdown" | "reboot" | "halt" | "poweroff" | "sudo" | "su" | "chown"
+        | "chmod" | "useradd" | "userdel" | "usermod" | "passwd" | "mount" | "umount"
+        | "iptables" | "ufw" | "firewall-cmd" | "nc" | "ncat" | "netcat" | "scp" | "ssh"
+        | "ftp" | "telnet" | "crontab" | "at" | "systemctl" | "service" => None,
+        _ => None,
+    }
+}
+
 impl SecurityPolicy {
+    fn shell_denial(
+        &self,
+        rule: ShellDenialRule,
+        message: impl Into<String>,
+        offending_value: Option<String>,
+        suggestion: Option<ShellSuggestion>,
+    ) -> ShellDenial {
+        ShellDenial {
+            denial_type: "scope_violation",
+            rule,
+            message: message.into(),
+            working_directory: self.workspace_dir.clone(),
+            offending_value,
+            suggestion,
+        }
+    }
+
     /// Create a SecurityPolicy with a specific workspace directory.
     ///
     /// Use this instead of `Default` when a custom nenjo directory is configured
@@ -379,20 +440,14 @@ impl SecurityPolicy {
     }
 
     pub fn is_managed_runtime_path(&self, path: &Path) -> bool {
-        let workspace_root = self
-            .workspace_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace_dir.clone());
-        let runtime_home = workspace_root.join(".nenjo");
-        ["skills", "plugins", "library"]
-            .into_iter()
-            .any(|name| path.starts_with(runtime_home.join(name)))
+        self.allowed_runtime_roots.iter().any(|root| {
+            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            path.starts_with(root)
+        })
     }
 
-    /// Classify command risk. Any high-risk segment marks the whole command high.
-    pub fn command_risk_level(&self, command: &str) -> CommandRiskLevel {
+    fn is_high_risk_command(&self, command: &str) -> bool {
         let segments = split_on_unquoted_separators(command);
-        let mut saw_medium = false;
 
         for segment in segments.iter().map(|s| s.trim()) {
             let segment = segment.trim();
@@ -412,7 +467,6 @@ impl SecurityPolicy {
                 .unwrap_or("")
                 .to_ascii_lowercase();
 
-            let args: Vec<String> = words.map(|w| w.to_ascii_lowercase()).collect();
             let joined_segment = cmd_part.to_ascii_lowercase();
 
             // High-risk commands
@@ -447,106 +501,33 @@ impl SecurityPolicy {
                     | "ftp"
                     | "telnet"
             ) {
-                return CommandRiskLevel::High;
+                return true;
             }
 
             if joined_segment.contains("rm -rf /")
                 || joined_segment.contains("rm -fr /")
                 || joined_segment.contains(":(){:|:&};:")
             {
-                return CommandRiskLevel::High;
+                return true;
             }
-
-            // Medium-risk commands
-            let medium = match base.as_str() {
-                "git" => args.first().is_some_and(|verb| {
-                    matches!(
-                        verb.as_str(),
-                        "commit"
-                            | "push"
-                            | "reset"
-                            | "clean"
-                            | "rebase"
-                            | "merge"
-                            | "cherry-pick"
-                            | "revert"
-                            | "branch"
-                            | "checkout"
-                            | "switch"
-                            | "tag"
-                    )
-                }),
-                "npm" | "pnpm" | "yarn" => args.first().is_some_and(|verb| {
-                    matches!(
-                        verb.as_str(),
-                        "install" | "add" | "remove" | "uninstall" | "update" | "publish"
-                    )
-                }),
-                "cargo" => args.first().is_some_and(|verb| {
-                    matches!(
-                        verb.as_str(),
-                        "add" | "remove" | "install" | "clean" | "publish"
-                    )
-                }),
-                "pip" | "pip3" | "uv" => args
-                    .first()
-                    .is_some_and(|verb| matches!(verb.as_str(), "install" | "uninstall")),
-                "go" => args.first().is_some_and(|verb| {
-                    matches!(verb.as_str(), "install" | "get" | "mod" | "clean")
-                }),
-                "gh" => args.first().is_some_and(|verb| {
-                    matches!(verb.as_str(), "pr" | "issue" | "release" | "repo")
-                }),
-                "make" | "cmake" => true,
-                "touch" | "mkdir" | "mv" | "cp" | "ln" => true,
-                _ => false,
-            };
-
-            saw_medium |= medium;
         }
-
-        if saw_medium {
-            CommandRiskLevel::Medium
-        } else {
-            CommandRiskLevel::Low
-        }
+        false
     }
 
-    /// Validate full command execution policy (allowlist + risk gate).
-    pub fn validate_command_execution(
-        &self,
-        command: &str,
-        approved: bool,
-    ) -> Result<CommandRiskLevel, String> {
-        if !self.is_command_allowed(command) {
-            return Err(format!("Command not allowed by security policy: {command}"));
+    /// Validate command execution against the current scope compatibility policy.
+    pub fn validate_command_execution(&self, command: &str) -> Result<(), Box<ShellDenial>> {
+        self.check_command_scope(command)?;
+
+        if self.block_high_risk_commands && self.is_high_risk_command(command) {
+            return Err(Box::new(self.shell_denial(
+                ShellDenialRule::HighRisk,
+                "Command is blocked by the compatibility policy until verified sandbox isolation is enabled",
+                Some(command.to_owned()),
+                None,
+            )));
         }
 
-        let risk = self.command_risk_level(command);
-
-        if risk == CommandRiskLevel::High {
-            if self.block_high_risk_commands {
-                return Err("Command blocked: high-risk command is disallowed by policy".into());
-            }
-            if self.autonomy == AutonomyLevel::Supervised && !approved {
-                return Err(
-                    "Command requires explicit approval (approved=true): high-risk operation"
-                        .into(),
-                );
-            }
-        }
-
-        if risk == CommandRiskLevel::Medium
-            && self.autonomy == AutonomyLevel::Supervised
-            && self.require_approval_for_medium_risk
-            && !approved
-        {
-            return Err(
-                "Command requires explicit approval (approved=true): medium-risk operation".into(),
-            );
-        }
-
-        Ok(risk)
+        Ok(())
     }
 
     /// Check if a path (absolute, `~/`-prefixed, or relative) resolves within
@@ -588,8 +569,17 @@ impl SecurityPolicy {
     }
 
     pub fn is_command_allowed(&self, command: &str) -> bool {
+        self.check_command_scope(command).is_ok()
+    }
+
+    pub fn check_command_scope(&self, command: &str) -> Result<(), Box<ShellDenial>> {
         if self.autonomy == AutonomyLevel::ReadOnly {
-            return false;
+            return Err(Box::new(self.shell_denial(
+                ShellDenialRule::ReadOnly,
+                "Shell execution is disabled for this read-only scope",
+                None,
+                None,
+            )));
         }
 
         // Block subshell/expansion operators outside of any quotes
@@ -623,7 +613,15 @@ impl SecurityPolicy {
                 || outside_quotes.contains("$(")
                 || outside_quotes.contains("${")
             {
-                return false;
+                return Err(Box::new(self.shell_denial(
+                    ShellDenialRule::CommandExpansion,
+                    "Command expansion is unavailable under the compatibility policy",
+                    Some(command.to_owned()),
+                    Some(ShellSuggestion {
+                        tool: "shell",
+                        instruction: "Run the producing command first, then pass its concrete output to a second shell call".into(),
+                    }),
+                )));
             }
         }
 
@@ -636,7 +634,15 @@ impl SecurityPolicy {
                 .replace("2>/dev/null", "")
                 .replace("1>/dev/null", "");
             if contains_unquoted(&stripped, '>') {
-                return false;
+                return Err(Box::new(self.shell_denial(
+                    ShellDenialRule::OutputRedirection,
+                    "Output redirection is unavailable under the compatibility policy",
+                    Some(command.to_owned()),
+                    Some(ShellSuggestion {
+                        tool: "write",
+                        instruction: "Run the command without redirection, then write the required content with write".into(),
+                    }),
+                )));
             }
         }
 
@@ -667,7 +673,14 @@ impl SecurityPolicy {
                 .iter()
                 .any(|blocked| blocked == base_cmd)
             {
-                return false;
+                return Err(Box::new(self.shell_denial(
+                    ShellDenialRule::BlockedExecutable,
+                    format!(
+                        "Executable '{base_cmd}' is unavailable under the compatibility policy"
+                    ),
+                    Some(base_cmd.to_owned()),
+                    blocked_command_suggestion(base_cmd),
+                )));
             }
 
             // When workspace_only is set, scan arguments for path escapes.
@@ -680,22 +693,53 @@ impl SecurityPolicy {
                         .components()
                         .any(|c| matches!(c, std::path::Component::ParentDir))
                     {
-                        return false;
+                        return Err(Box::new(self.shell_denial(
+                            ShellDenialRule::ParentTraversal,
+                            format!(
+                                "Path traversal is outside the scoped working directory: {arg}"
+                            ),
+                            Some(arg.to_owned()),
+                            Some(ShellSuggestion {
+                                tool: "shell",
+                                instruction: "Use a path relative to the scoped working directory without '..' components".into(),
+                            }),
+                        )));
                     }
                     if (arg.starts_with('/') || arg.starts_with("~/"))
                         && !self.is_within_workspace(arg)
                         && !self.is_within_allowed_runtime_root(arg)
                     {
-                        return false;
+                        return Err(Box::new(self.shell_denial(
+                            ShellDenialRule::OutsideWorkspace,
+                            format!(
+                                "Path is outside the scoped working directory '{}': {arg}",
+                                self.workspace_dir.display()
+                            ),
+                            Some(arg.to_owned()),
+                            Some(ShellSuggestion {
+                                tool: "shell",
+                                instruction:
+                                    "Use a path inside the scoped working directory".into(),
+                            }),
+                        )));
                     }
                 }
             }
         }
 
-        segments.iter().any(|s| {
+        if segments.iter().any(|s| {
             let s = skip_env_assignments(s.trim());
             s.split_whitespace().next().is_some_and(|w| !w.is_empty())
-        })
+        }) {
+            Ok(())
+        } else {
+            Err(Box::new(self.shell_denial(
+                ShellDenialRule::EmptyCommand,
+                "Shell command does not contain an executable",
+                Some(command.to_owned()),
+                None,
+            )))
+        }
     }
 
     /// Check if a file path is allowed (no path traversal, within workspace)
@@ -860,6 +904,24 @@ mod tests {
     }
 
     #[test]
+    fn command_scope_denial_identifies_rule_and_alternative() {
+        let p = default_policy();
+
+        let denial = p
+            .check_command_scope("echo result > output.txt")
+            .unwrap_err();
+        let serialized = serde_json::to_value(denial).unwrap();
+
+        assert_eq!(serialized["type"], "scope_violation");
+        assert_eq!(serialized["rule"], "output_redirection");
+        assert_eq!(serialized["suggestion"]["tool"], "write");
+        assert_eq!(
+            serialized["working_directory"],
+            p.workspace_dir.to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
     fn readonly_blocks_all_commands() {
         let p = readonly_policy();
         assert!(!p.is_command_allowed("ls"));
@@ -918,6 +980,39 @@ mod tests {
         };
         assert!(p.is_resolved_path_allowed(Path::new("/home/user/project/src/main.rs")));
         assert!(!p.is_resolved_path_allowed(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn workspace_runtime_roots_cover_packages_skills_and_plugins() {
+        let workspace = PathBuf::from("/home/user/workspace");
+        let runtime_home = workspace.join(".nenjo");
+
+        assert_eq!(
+            default_runtime_roots(&workspace),
+            vec![
+                runtime_home.join("packages"),
+                runtime_home.join("skills"),
+                runtime_home.join("plugins"),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_roots_are_managed_and_read_only() {
+        let workspace = PathBuf::from("/home/user/workspace");
+        let workspace_packages = workspace.join(".nenjo").join("packages");
+        let platform_packages = PathBuf::from("/home/user/.nenjo/platform_pkgs");
+        let mut runtime_roots = default_runtime_roots(&workspace);
+        runtime_roots.push(platform_packages.clone());
+        let policy =
+            SecurityPolicy::with_workspace_and_runtime_roots(workspace.clone(), runtime_roots);
+
+        assert!(policy.is_managed_runtime_path(&workspace_packages.join("acme/skills/review")));
+        assert!(policy.is_managed_runtime_path(&platform_packages.join("nenji/skills/design")));
+        assert!(!policy.is_managed_runtime_path(&workspace.join("src/main.rs")));
+        assert!(policy.is_managed_runtime_path(&workspace.join(".nenjo/skills/review")));
+        assert!(policy.is_managed_runtime_path(&workspace.join(".nenjo/plugins/acme")));
+        assert!(!policy.is_managed_runtime_path(&workspace.join(".nenjo/library/docs")));
     }
 
     #[test]

@@ -679,7 +679,7 @@ fn truncate_tool_arguments(tool_name: &str, arguments: &str) -> String {
         && let Some(obj) = parsed.as_object_mut()
     {
         match tool_name {
-            "file_write" => {
+            "write" | "file_write" => {
                 if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
                     let len = content.len();
                     obj.insert(
@@ -688,7 +688,7 @@ fn truncate_tool_arguments(tool_name: &str, arguments: &str) -> String {
                     );
                 }
             }
-            "file_edit" => {
+            "edit" | "file_edit" => {
                 for key in &["old_string", "new_string"] {
                     if let Some(val) = obj.get(*key).and_then(|v| v.as_str())
                         && val.len() > 200
@@ -799,17 +799,17 @@ mod tests {
     #[test]
     fn truncate_tool_arguments_small_passthrough() {
         let args = r#"{"path":"src/main.rs"}"#;
-        assert_eq!(truncate_tool_arguments("file_read", args), args);
+        assert_eq!(truncate_tool_arguments("read", args), args);
     }
 
     #[test]
-    fn truncate_tool_arguments_file_write_replaces_content() {
+    fn truncate_tool_arguments_write_replaces_content() {
         let big_content = "x".repeat(2000);
         let args = serde_json::json!({
             "path": "src/main.rs",
             "content": big_content,
         });
-        let result = truncate_tool_arguments("file_write", &args.to_string());
+        let result = truncate_tool_arguments("write", &args.to_string());
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["path"], "src/main.rs");
         let content = parsed["content"].as_str().unwrap();
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_tool_arguments_file_edit_truncates_large_strings() {
+    fn truncate_tool_arguments_edit_truncates_large_strings() {
         let big_old = "a".repeat(500);
         let big_new = "b".repeat(500);
         let args = serde_json::json!({
@@ -826,7 +826,7 @@ mod tests {
             "old_string": big_old,
             "new_string": big_new,
         });
-        let result = truncate_tool_arguments("file_edit", &args.to_string());
+        let result = truncate_tool_arguments("edit", &args.to_string());
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["path"], "src/lib.rs");
         assert!(parsed["old_string"].as_str().unwrap().contains("500 chars"));
@@ -837,7 +837,7 @@ mod tests {
     fn truncate_tool_arguments_generic_caps_large_values() {
         let big_val = "z".repeat(1000);
         let args = serde_json::json!({ "query": big_val });
-        let result = truncate_tool_arguments("content_search", &args.to_string());
+        let result = truncate_tool_arguments("search", &args.to_string());
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let query = parsed["query"].as_str().unwrap();
         assert!(query.contains("1000 chars") && query.contains("omitted"));
@@ -890,7 +890,7 @@ mod tests {
         vec![
             ChatMessage::system("system prompt"),
             ChatMessage::user("do task 1"),
-            assistant_tool_call("c1", "file_read"),
+            assistant_tool_call("c1", "read"),
             tool_result("c1", &big_result),
             assistant_tool_call("c2", "file_write"),
             tool_result("c2", &big_result),
@@ -898,7 +898,7 @@ mod tests {
             tool_result("c3", &big_result),
             ChatMessage::assistant("done with old work"),
             ChatMessage::user("do task 2"),
-            assistant_tool_call("c4", "file_read"),
+            assistant_tool_call("c4", "read"),
             tool_result("c4", &big_result),
             ChatMessage::assistant("here is the result"),
             ChatMessage::user("thanks"),
@@ -949,11 +949,11 @@ mod tests {
             small_result("c1"),
             big_assistant("c2", "shell"),
             small_result("c2"),
-            big_assistant("c3", "file_read"),
+            big_assistant("c3", "read"),
             small_result("c3"),
             ChatMessage::assistant("old summary"),
             ChatMessage::user("next task"),
-            big_assistant("c4", "file_read"),
+            big_assistant("c4", "read"),
             small_result("c4"),
             ChatMessage::assistant("recent result"),
             ChatMessage::user("thanks"),
@@ -1033,7 +1033,7 @@ mod tests {
             ChatMessage::assistant("older answer"),
             assistant_tool_call("c1", "shell"),
             tool_result("c1", &huge_result),
-            assistant_tool_call("c2", "file_read"),
+            assistant_tool_call("c2", "read"),
             tool_result("c2", &huge_result),
             ChatMessage::user("continue"),
         ];
@@ -1254,12 +1254,12 @@ mod tests {
     }
 
     #[test]
-    fn truncate_tool_arguments_file_write_preserves_path() {
+    fn truncate_tool_arguments_write_preserves_path() {
         let args = serde_json::json!({
             "path": "src/main.rs",
             "content": "x".repeat(2000),
         });
-        let result = truncate_tool_arguments("file_write", &args.to_string());
+        let result = truncate_tool_arguments("write", &args.to_string());
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["path"], "src/main.rs");
         assert!(

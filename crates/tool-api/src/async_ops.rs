@@ -7,10 +7,71 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 
-pub const WAIT_OPERATIONS_TOOL_NAME: &str = "wait_operations";
-pub const INSPECT_OPERATIONS_TOOL_NAME: &str = "inspect_operations";
-pub const STOP_OPERATIONS_TOOL_NAME: &str = "stop_operations";
-pub const SEND_OPERATION_INPUT_TOOL_NAME: &str = "send_operation_input";
+pub const INSPECT_TOOL_NAME: &str = "inspect";
+pub const SEND_INPUT_TOOL_NAME: &str = "send_input";
+pub const STOP_TOOL_NAME: &str = "stop";
+pub const WAIT_TOOL_NAME: &str = "wait";
+
+/// A model-facing action supported by an async operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncControl {
+    Inspect,
+    SendInput,
+    Stop,
+    Wait,
+}
+
+/// Compact set of controls declared when an async operation starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AsyncControls(u8);
+
+impl AsyncControls {
+    pub const NONE: Self = Self(0);
+
+    pub const fn new(control: AsyncControl) -> Self {
+        Self(control.mask())
+    }
+
+    pub const fn with(self, control: AsyncControl) -> Self {
+        Self(self.0 | control.mask())
+    }
+
+    pub const fn contains(self, control: AsyncControl) -> bool {
+        self.0 & control.mask() != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = AsyncControl> {
+        [
+            AsyncControl::Inspect,
+            AsyncControl::SendInput,
+            AsyncControl::Stop,
+            AsyncControl::Wait,
+        ]
+        .into_iter()
+        .filter(move |control| self.contains(*control))
+    }
+}
+
+impl AsyncControl {
+    pub const fn tool_name(self) -> &'static str {
+        match self {
+            Self::Inspect => INSPECT_TOOL_NAME,
+            Self::SendInput => SEND_INPUT_TOOL_NAME,
+            Self::Stop => STOP_TOOL_NAME,
+            Self::Wait => WAIT_TOOL_NAME,
+        }
+    }
+
+    const fn mask(self) -> u8 {
+        match self {
+            Self::Inspect => 1 << 0,
+            Self::SendInput => 1 << 1,
+            Self::Stop => 1 << 2,
+            Self::Wait => 1 << 3,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +120,75 @@ impl AsyncOperationStatus {
 
     pub fn can_receive_input(self) -> bool {
         matches!(self, Self::Running | Self::WaitingForInput)
+    }
+}
+
+/// Canonical model-facing receipt returned after an async operation starts.
+#[derive(Debug, Clone, Serialize)]
+pub struct AsyncOperationStartReceipt {
+    operation_id: String,
+    kind: AsyncOperationKind,
+    status: AsyncOperationStatus,
+    control_tools: Vec<AsyncControlGuide>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AsyncControlGuide {
+    control: AsyncControl,
+    tool: &'static str,
+    instruction: &'static str,
+    suggested_arguments: serde_json::Value,
+}
+
+impl AsyncOperationStartReceipt {
+    pub fn new(
+        operation_id: impl Into<String>,
+        kind: AsyncOperationKind,
+        controls: AsyncControls,
+    ) -> Self {
+        let operation_id = operation_id.into();
+        let control_tools = controls
+            .iter()
+            .map(|control| AsyncControlGuide::new(control, &operation_id, kind))
+            .collect();
+        Self {
+            operation_id,
+            kind,
+            status: AsyncOperationStatus::Running,
+            control_tools,
+        }
+    }
+}
+
+impl AsyncControlGuide {
+    fn new(control: AsyncControl, operation_id: &str, kind: AsyncOperationKind) -> Self {
+        let (instruction, suggested_arguments) = match control {
+            AsyncControl::Inspect => (
+                "Use inspect to check this operation's current state or final output. Set include_transcript=true when recent activity is needed.",
+                json!({"operations": [operation_id]}),
+            ),
+            AsyncControl::SendInput => (
+                "Use send_input only when this operation asks the parent agent for input.",
+                json!({
+                    "operations": [operation_id],
+                    "message": "<response to the operation>"
+                }),
+            ),
+            AsyncControl::Stop => (
+                "Use stop to cancel this operation when it should no longer continue.",
+                json!({"operations": [operation_id]}),
+            ),
+            AsyncControl::Wait => (
+                "Use wait while this operation is running; repeat until it completes, fails, stops, or asks for input.",
+                json!({"seconds": 10, "kind": kind}),
+            ),
+        };
+        Self {
+            control,
+            tool: control.tool_name(),
+            instruction,
+            suggested_arguments,
+        }
     }
 }
 
@@ -254,6 +384,41 @@ fn default_wait_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_controls_track_explicit_capabilities() {
+        let controls = AsyncControls::new(AsyncControl::Inspect).with(AsyncControl::Wait);
+
+        assert!(controls.contains(AsyncControl::Inspect));
+        assert!(controls.contains(AsyncControl::Wait));
+        assert!(!controls.contains(AsyncControl::SendInput));
+        assert!(!controls.contains(AsyncControl::Stop));
+    }
+
+    #[test]
+    fn start_receipt_instructs_only_supported_controls() {
+        let receipt = AsyncOperationStartReceipt::new(
+            "media_generate_video_1",
+            AsyncOperationKind::Media,
+            AsyncControls::new(AsyncControl::Inspect).with(AsyncControl::Wait),
+        );
+        let value = serde_json::to_value(receipt).unwrap();
+
+        assert_eq!(value["operation_id"], "media_generate_video_1");
+        assert_eq!(value["kind"], "media");
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["control_tools"].as_array().unwrap().len(), 2);
+        assert_eq!(value["control_tools"][0]["tool"], "inspect");
+        assert_eq!(
+            value["control_tools"][0]["suggested_arguments"]["operations"][0],
+            "media_generate_video_1"
+        );
+        assert_eq!(value["control_tools"][1]["tool"], "wait");
+        assert_eq!(
+            value["control_tools"][1]["suggested_arguments"]["kind"],
+            "media"
+        );
+    }
 
     #[test]
     fn async_operation_kind_uses_wire_names() {

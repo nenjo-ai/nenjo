@@ -21,6 +21,13 @@ pub struct SkillRegistry {
     hooks: RwLock<Vec<HookManifest>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillToolSet {
+    None,
+    Activation,
+    ActivationWithMcp,
+}
+
 impl SkillRegistry {
     pub fn reconcile(&self, skills: &[SkillManifest], hooks: &[HookManifest]) {
         let mut next = skills.to_vec();
@@ -34,6 +41,17 @@ impl SkillRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.skills.read().is_empty()
+    }
+
+    pub(crate) fn tool_set(&self) -> SkillToolSet {
+        let skills = self.skills.read();
+        if skills.is_empty() {
+            SkillToolSet::None
+        } else if skills.iter().any(|skill| !skill.mcp_servers.is_empty()) {
+            SkillToolSet::ActivationWithMcp
+        } else {
+            SkillToolSet::Activation
+        }
     }
 
     pub fn list(&self) -> Vec<SkillManifest> {
@@ -310,6 +328,29 @@ fn render_inventory_list(items: &[String]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn registry_derives_tool_set_from_installed_skill_capabilities() {
+        let registry = SkillRegistry::default();
+        assert_eq!(registry.tool_set(), SkillToolSet::None);
+
+        let plain_skill: SkillManifest = serde_json::from_value(json!({
+            "name": "review",
+            "root_dir": "/tmp/skills/review"
+        }))
+        .unwrap();
+        registry.reconcile(std::slice::from_ref(&plain_skill), &[]);
+        assert_eq!(registry.tool_set(), SkillToolSet::Activation);
+
+        let mcp_skill: SkillManifest = serde_json::from_value(json!({
+            "name": "browser",
+            "root_dir": "/tmp/skills/browser",
+            "mcp_servers": ["browser-server"]
+        }))
+        .unwrap();
+        registry.reconcile(&[plain_skill, mcp_skill], &[]);
+        assert_eq!(registry.tool_set(), SkillToolSet::ActivationWithMcp);
+    }
 
     #[test]
     fn registry_resolves_plugin_skill_aliases() {

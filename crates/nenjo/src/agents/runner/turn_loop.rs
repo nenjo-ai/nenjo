@@ -445,8 +445,8 @@ where
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
     let cancel = agent.runtime.execution_cancel.clone();
-    let visible_tool_specs = agent.tool_specs();
-    let initial_local_tool_specs = agent.local_tool_specs();
+    let visible_tool_specs = agent.visible_tool_specs().await;
+    let initial_local_tool_specs = agent.visible_local_tool_specs().await;
     let visible_tool_specs = visible_tool_specs.as_slice();
     let initial_local_tool_specs = initial_local_tool_specs.as_slice();
     let hook_runtime = agent.runtime.hook_runtime.clone();
@@ -593,7 +593,8 @@ where
                 // Call LLM
                 let hide_final_response_tool = !require_respond_to_user;
                 let local_tool_specs = agent
-                    .local_tool_specs()
+                    .visible_local_tool_specs()
+                    .await
                     .into_iter()
                     .filter(|spec| {
                         !(hide_final_response_tool && spec.name == RESPOND_TO_USER_TOOL_NAME)

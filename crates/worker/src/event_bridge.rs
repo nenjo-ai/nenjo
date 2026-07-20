@@ -1665,7 +1665,7 @@ mod tests {
                 parent_tool_name: None,
                 calls: vec![nenjo::agents::ToolCall {
                     tool_call_id: Some("call-1".to_string()),
-                    tool_name: "file_write".to_string(),
+                    tool_name: "write".to_string(),
                     tool_args: "{\"path\":\"src/app.tsx\"}".to_string(),
                     text_preview: Some("Writing src/app.tsx".to_string()),
                     metadata: None,
@@ -1702,7 +1702,7 @@ mod tests {
                 assert_eq!(run_id, "trace-run-1");
                 assert_eq!(batch_id, "batch-1");
                 assert_eq!(call_id, "call-1");
-                assert_eq!(tool_name, "file_write");
+                assert_eq!(tool_name, "write");
                 assert_eq!(
                     payload
                         .as_ref()
@@ -1788,7 +1788,7 @@ mod tests {
                     parent_tool_name: None,
                     calls: vec![nenjo::agents::ToolCall {
                         tool_call_id: Some("call-1".to_string()),
-                        tool_name: "file_write".to_string(),
+                        tool_name: "write".to_string(),
                         tool_args: "{}".to_string(),
                         text_preview: None,
                         metadata: None,
@@ -1830,7 +1830,7 @@ mod tests {
                 parent_tool_name: None,
                 calls: vec![nenjo::agents::ToolCall {
                     tool_call_id: Some("call-1".to_string()),
-                    tool_name: "file_write".to_string(),
+                    tool_name: "write".to_string(),
                     tool_args: long.clone(),
                     text_preview: Some(long.clone()),
                     metadata: Some(serde_json::json!({
@@ -1869,7 +1869,7 @@ mod tests {
                 batch_id: "batch-1".to_string(),
                 parent_tool_name: None,
                 tool_call_id: Some("call-1".to_string()),
-                tool_name: "file_write".to_string(),
+                tool_name: "write".to_string(),
                 tool_args: long.clone(),
                 result: nenjo::ToolResult {
                     success: false,
@@ -1939,7 +1939,7 @@ mod tests {
                 parent_tool_name: None,
                 calls: vec![nenjo::agents::ToolCall {
                     tool_call_id: Some("call-1".to_string()),
-                    tool_name: "file_write".to_string(),
+                    tool_name: "write".to_string(),
                     tool_args: "{}".to_string(),
                     text_preview: None,
                     metadata: None,
@@ -1959,7 +1959,7 @@ mod tests {
                 batch_id: "batch-1".to_string(),
                 parent_tool_name: None,
                 tool_call_id: Some("call-1".to_string()),
-                tool_name: "file_write".to_string(),
+                tool_name: "write".to_string(),
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
@@ -2243,5 +2243,40 @@ mod tests {
             output_preview.ends_with("..."),
             "oversized JSON should remain a truncated string preview"
         );
+        assert!(output_preview.chars().count() <= PREVIEW_MAX_CHARS + 3);
+    }
+
+    #[test]
+    fn completed_tool_output_and_error_are_bounded_before_transport() {
+        let oversized_output = "o".repeat(PREVIEW_MAX_CHARS + 256);
+        let oversized_error = "e".repeat(PREVIEW_MAX_CHARS + 256);
+        let events = turn_event_to_stream_events(
+            &nenjo::TurnEvent::ToolCallEnd {
+                batch_id: "batch-1".to_string(),
+                parent_tool_name: None,
+                tool_call_id: Some("call-1".to_string()),
+                tool_name: "shell".to_string(),
+                tool_args: r#"{"command":"cargo test"}"#.to_string(),
+                result: nenjo::ToolResult {
+                    success: false,
+                    output: oversized_output,
+                    error: Some(oversized_error),
+                },
+                metadata: None,
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        let [StreamEvent::ToolCallCompleted { payload, .. }] = events.as_slice() else {
+            panic!("unexpected stream events: {events:?}");
+        };
+        let payload = payload.as_ref().expect("tool result payload");
+        for field in ["output_preview", "error_preview"] {
+            let preview = payload[field].as_str().expect(field);
+            assert!(preview.ends_with("..."));
+            assert!(preview.chars().count() <= PREVIEW_MAX_CHARS + 3);
+        }
     }
 }

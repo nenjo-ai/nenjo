@@ -6,40 +6,18 @@ use serde_json::json;
 use crate::Slug;
 use crate::input::TaskInput;
 use crate::provider::ProviderRuntime;
-use crate::tools::{
-    Tool, ToolCategory, ToolOrigin, ToolResult, deserialize_u64_from_json_number,
-    deserialize_usize_from_json_number,
-};
+use crate::tools::{Tool, ToolCategory, ToolOrigin, ToolResult};
 
 use super::format::ResultFormat;
 use super::runtime::{ChildRuntimeHandle, SpawnRequest, SubAgentHandle};
 
-pub(crate) const PARENT_TOOL_NAMES: &[&str] = &[
-    "spawn_sub_agents",
-    "send_sub_agents",
-    "inspect_sub_agents",
-    "stop_sub_agents",
-    "wait",
-];
+pub(crate) const PARENT_TOOL_NAMES: &[&str] =
+    &["spawn_sub_agents", "inspect", "send_input", "stop", "wait"];
 
 pub(crate) fn parent_tools<P: ProviderRuntime>(
     handle: SubAgentHandle<P>,
 ) -> Vec<std::sync::Arc<dyn Tool>> {
-    vec![
-        std::sync::Arc::new(SpawnSubAgentsTool {
-            handle: handle.clone(),
-        }),
-        std::sync::Arc::new(SendSubAgentsTool {
-            handle: handle.clone(),
-        }),
-        std::sync::Arc::new(InspectSubAgentsTool {
-            handle: handle.clone(),
-        }),
-        std::sync::Arc::new(StopSubAgentsTool {
-            handle: handle.clone(),
-        }),
-        std::sync::Arc::new(WaitTool { handle }),
-    ]
+    vec![std::sync::Arc::new(SpawnSubAgentsTool { handle })]
 }
 
 pub(crate) fn child_tools<P: ProviderRuntime>(
@@ -54,22 +32,6 @@ pub(crate) fn child_tools<P: ProviderRuntime>(
 }
 
 struct SpawnSubAgentsTool<P: ProviderRuntime> {
-    handle: SubAgentHandle<P>,
-}
-
-struct SendSubAgentsTool<P: ProviderRuntime> {
-    handle: SubAgentHandle<P>,
-}
-
-struct InspectSubAgentsTool<P: ProviderRuntime> {
-    handle: SubAgentHandle<P>,
-}
-
-struct StopSubAgentsTool<P: ProviderRuntime> {
-    handle: SubAgentHandle<P>,
-}
-
-struct WaitTool<P: ProviderRuntime> {
     handle: SubAgentHandle<P>,
 }
 
@@ -232,223 +194,6 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
 }
 
 #[derive(Debug, Deserialize)]
-struct SendArgs {
-    #[serde(default)]
-    messages: Vec<SendMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendMessage {
-    slug: String,
-    message: String,
-}
-
-#[async_trait]
-impl<P: ProviderRuntime> Tool for SendSubAgentsTool<P> {
-    fn name(&self) -> &str {
-        "send_sub_agents"
-    }
-
-    fn description(&self) -> &str {
-        "Send queued input to one or more running child agents."
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::ReadWrite
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "messages": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "slug": {"type": "string"},
-                            "message": {"type": "string"}
-                        },
-                        "required": ["slug", "message"]
-                    }
-                }
-            },
-            "required": ["messages"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: SendArgs = serde_json::from_value(args)?;
-        let mut messages = Vec::with_capacity(parsed.messages.len());
-        for message in parsed.messages {
-            messages.push((Slug::parse(message.slug)?, message.message));
-        }
-        Ok(ok(json!({ "sent": self.handle.send(messages).await })))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct InspectArgs {
-    #[serde(default)]
-    sub_agents: Vec<String>,
-    #[serde(default)]
-    include_transcript: bool,
-    #[serde(
-        default = "default_inspect_limit",
-        deserialize_with = "deserialize_usize_from_json_number"
-    )]
-    limit: usize,
-}
-
-fn default_inspect_limit() -> usize {
-    30
-}
-
-#[async_trait]
-impl<P: ProviderRuntime> Tool for InspectSubAgentsTool<P> {
-    fn name(&self) -> &str {
-        "inspect_sub_agents"
-    }
-
-    fn description(&self) -> &str {
-        "Inspect bounded child state and optional transcript deltas for correction, evidence review, or debugging."
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "sub_agents": {"type": "array", "items": {"type": "string"}},
-                "include_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "minimum": 1}
-            }
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: InspectArgs = serde_json::from_value(args)?;
-        let slugs = parsed
-            .sub_agents
-            .into_iter()
-            .map(Slug::parse)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ok(json!({
-            "sub_agents": self.handle.inspect(slugs, parsed.include_transcript, parsed.limit).await
-        })))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct StopArgs {
-    #[serde(default)]
-    sub_agents: Vec<String>,
-    reason: Option<String>,
-}
-
-#[async_trait]
-impl<P: ProviderRuntime> Tool for StopSubAgentsTool<P> {
-    fn name(&self) -> &str {
-        "stop_sub_agents"
-    }
-
-    fn description(&self) -> &str {
-        "Gracefully stop one or more child agent runs."
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::ReadWrite
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "sub_agents": {"type": "array", "items": {"type": "string"}},
-                "reason": {"type": "string"}
-            },
-            "required": ["sub_agents"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: StopArgs = serde_json::from_value(args)?;
-        let slugs = parsed
-            .sub_agents
-            .into_iter()
-            .map(Slug::parse)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ok(
-            json!({ "stopped": self.handle.stop(slugs, parsed.reason).await }),
-        ))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitArgs {
-    #[serde(
-        default = "default_wait_seconds",
-        deserialize_with = "deserialize_u64_from_json_number"
-    )]
-    seconds: u64,
-    reason: Option<String>,
-}
-
-fn default_wait_seconds() -> u64 {
-    10
-}
-
-#[async_trait]
-impl<P: ProviderRuntime> Tool for WaitTool<P> {
-    fn name(&self) -> &str {
-        "wait"
-    }
-
-    fn description(&self) -> &str {
-        "Yield briefly while sub-agents continue running, then return queued sub-agent signals."
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn origin(&self) -> ToolOrigin {
-        ToolOrigin::Harness
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "seconds": {"type": "integer", "minimum": 1, "maximum": 30},
-                "reason": {"type": "string"}
-            }
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let parsed: WaitArgs = serde_json::from_value(args)?;
-        let _reason = parsed.reason;
-        Ok(ok(json!(self.handle.wait(parsed.seconds).await)))
-    }
-}
-
-#[derive(Debug, Deserialize)]
 struct UpdateArgs {
     summary: String,
     details: Option<String>,
@@ -588,17 +333,5 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("acceptance_criteria"));
-    }
-
-    #[test]
-    fn inspect_args_accept_whole_float_limit_from_model_args() {
-        let args: InspectArgs = serde_json::from_value(serde_json::json!({
-            "sub_agents": ["researcher"],
-            "include_transcript": true,
-            "limit": 5.0
-        }))
-        .unwrap();
-
-        assert_eq!(args.limit, 5);
     }
 }

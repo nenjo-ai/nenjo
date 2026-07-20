@@ -16,7 +16,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::agents::{StartAsyncOperation, current_async_operation_runtime};
-use crate::tools::AsyncOperationKind;
+use crate::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationStartReceipt};
 use crate::{RoutineEvent, Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
 
 static WATCH_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -75,6 +75,16 @@ pub struct RuntimeExecutionProgress {
     pub remaining_steps: usize,
     pub failed_attempts: usize,
     pub event: RuntimeExecutionEvent,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeExecutionWatchStarted {
+    #[serde(rename = "type")]
+    result_type: &'static str,
+    #[serde(flatten)]
+    operation: AsyncOperationStartReceipt,
+    execution_run_id: Uuid,
+    progress: RuntimeExecutionProgress,
 }
 
 impl RuntimeExecutionProgress {
@@ -382,6 +392,9 @@ pub async fn start_runtime_execution_watch<W: RuntimeExecutionWatcher>(
 
     let sequence = WATCH_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let operation_id = format!("task_execution_{execution_run_id}_{sequence}");
+    let controls = AsyncControls::new(AsyncControl::Inspect)
+        .with(AsyncControl::Stop)
+        .with(AsyncControl::Wait);
     let handle = runtime
         .start(StartAsyncOperation {
             id: operation_id.clone(),
@@ -391,6 +404,7 @@ pub async fn start_runtime_execution_watch<W: RuntimeExecutionWatcher>(
             parent_tool_name: Some("watch_execution_run".to_string()),
             started_summary: initial.summary(),
             model_visible: true,
+            controls,
         })
         .await;
 
@@ -434,18 +448,16 @@ pub async fn start_runtime_execution_watch<W: RuntimeExecutionWatcher>(
     });
     handle.attach_join(join).await;
 
-    Ok(json!({
-        "type": "operation_started",
-        "operation_id": operation_id,
-        "kind": AsyncOperationKind::TaskExecution.as_str(),
-        "execution_run_id": execution_run_id,
-        "progress": initial,
-        "next_step": {
-            "tool": "wait_operations",
-            "kind": AsyncOperationKind::TaskExecution.as_str(),
-            "reason": "Wait for routine step progress"
-        }
-    }))
+    Ok(serde_json::to_value(RuntimeExecutionWatchStarted {
+        result_type: "operation_started",
+        operation: AsyncOperationStartReceipt::new(
+            operation_id,
+            AsyncOperationKind::TaskExecution,
+            controls,
+        ),
+        execution_run_id,
+        progress: initial,
+    })?)
 }
 
 #[cfg(test)]

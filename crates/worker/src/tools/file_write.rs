@@ -1,21 +1,43 @@
 //! Write file contents with path sandboxing and auto-created parent directories.
 
+use crate::tools::file_mutation::{
+    FileMutationCoordinator, MAX_FILE_MUTATION_BYTES, WorkspacePath, atomic_replace_file_at,
+    open_workspace_parent,
+};
 use crate::tools::security::SecurityPolicy;
 use crate::tools::{Tool, ToolCategory, ToolResult};
-use anyhow::Context;
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 
 /// Write file contents with path sandboxing
 pub struct FileWriteTool {
     security: Arc<SecurityPolicy>,
+    mutations: Arc<FileMutationCoordinator>,
 }
 
 impl FileWriteTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        Self::with_coordinator(security, Arc::new(FileMutationCoordinator::default()))
     }
+
+    pub(crate) fn with_coordinator(
+        security: Arc<SecurityPolicy>,
+        mutations: Arc<FileMutationCoordinator>,
+    ) -> Self {
+        Self {
+            security,
+            mutations,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileWriteArgs {
+    path: String,
+    content: String,
 }
 
 #[async_trait]
@@ -25,15 +47,13 @@ impl Tool for FileWriteTool {
     }
 
     fn name(&self) -> &str {
-        "file_write"
+        "write"
     }
 
     fn description(&self) -> &str {
-        "Write contents to a file in the workspace. \
-        IMPORTANT: this completely replaces the entire file with the provided content. \
-        To edit an existing file, first read it with file_read, make your changes to the \
-        full content, then write the entire modified content back with file_write. \
-        Never write only the changed lines — always supply the complete file."
+        "Create or completely replace a file in the scoped workspace, creating parent \
+        directories when needed. The supplied content becomes the entire file; use edit \
+        for a precise change to an existing file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -45,31 +65,29 @@ impl Tool for FileWriteTool {
                     "description": "Relative path to the file within the workspace"
                 },
                 "content": {
-                    "description": "Content to write to the file. Strings are written exactly; non-string JSON values are written as pretty-printed JSON.",
-                    "oneOf": [
-                        {"type": "string"},
-                        {"type": "object"},
-                        {"type": "array"},
-                        {"type": "number"},
-                        {"type": "boolean"},
-                        {"type": "null"}
-                    ]
+                    "type": "string",
+                    "description": "Exact text to write to the file. Arrays, objects, numbers, booleans, and null are rejected."
                 }
             },
-            "required": ["path", "content"]
+            "required": ["path", "content"],
+            "additionalProperties": false
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+        let FileWriteArgs { path, content } = serde_json::from_value(args)
+            .map_err(|error| anyhow::anyhow!("Invalid write arguments: {error}"))?;
 
-        let content = file_content_to_string(
-            args.get("content")
-                .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?,
-        )?;
+        if content.len() > MAX_FILE_MUTATION_BYTES {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Content is too large: {} bytes (limit: {MAX_FILE_MUTATION_BYTES} bytes)",
+                    content.len()
+                )),
+            });
+        }
 
         if !self.security.can_act() {
             return Ok(ToolResult {
@@ -88,7 +106,7 @@ impl Tool for FileWriteTool {
         }
 
         // Security check: validate path is within workspace
-        if !self.security.is_path_allowed(path) {
+        if !self.security.is_path_allowed(&path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -96,70 +114,15 @@ impl Tool for FileWriteTool {
             });
         }
 
-        let full_path = self.security.workspace_dir.join(path);
-
-        let Some(parent) = full_path.parent() else {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Invalid path: missing parent directory".into()),
-            });
-        };
-
-        // Ensure parent directory exists
-        tokio::fs::create_dir_all(parent).await?;
-
-        // Resolve parent AFTER creation to block symlink escapes.
-        let resolved_parent = match tokio::fs::canonicalize(parent).await {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to resolve file path: {e}")),
-                });
-            }
-        };
-
-        if !self.security.is_resolved_path_allowed(&resolved_parent) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Resolved path escapes workspace: {}",
-                    resolved_parent.display()
-                )),
-            });
-        }
-
-        let Some(file_name) = full_path.file_name() else {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Invalid path: missing file name".into()),
-            });
-        };
-
-        let resolved_target = resolved_parent.join(file_name);
-        if self.security.is_managed_runtime_path(&resolved_target) {
+        let target = WorkspacePath::parse(&path)
+            .map_err(|error| anyhow::anyhow!("Invalid write path: {error}"))?;
+        let mutation_key = target.mutation_key(&self.security.workspace_dir);
+        let _mutation_guard = self.mutations.lock(&mutation_key).await;
+        if self.security.is_managed_runtime_path(&mutation_key) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("Path is managed by Nenjo runtime installs and is read-only".into()),
-            });
-        }
-
-        // If the target already exists and is a symlink, refuse to follow it
-        if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await
-            && meta.file_type().is_symlink()
-        {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Refusing to write through symlink: {}",
-                    resolved_target.display()
-                )),
             });
         }
 
@@ -171,10 +134,23 @@ impl Tool for FileWriteTool {
             });
         }
 
-        match tokio::fs::write(&resolved_target, &content).await {
+        let workspace_root = self.security.workspace_dir.clone();
+        let content_len = content.len();
+        let write_result = tokio::task::spawn_blocking(move || {
+            let parent = open_workspace_parent(&workspace_root, &target, true)?;
+            atomic_replace_file_at(
+                &parent.dir,
+                std::path::Path::new(&parent.file_name),
+                content.as_bytes(),
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Write task failed: {error}"))?;
+
+        match write_result {
             Ok(()) => Ok(ToolResult {
                 success: true,
-                output: format!("Written {} bytes to {path}", content.len()),
+                output: format!("Written {content_len} bytes to {path}"),
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
@@ -183,15 +159,6 @@ impl Tool for FileWriteTool {
                 error: Some(format!("Failed to write file: {e}")),
             }),
         }
-    }
-}
-
-fn file_content_to_string(content: &Value) -> anyhow::Result<String> {
-    match content {
-        Value::String(value) => Ok(value.clone()),
-        Value::Object(_) | Value::Array(_) => serde_json::to_string_pretty(content)
-            .context("Failed to serialize JSON content for file_write"),
-        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(content.to_string()),
     }
 }
 
@@ -228,7 +195,7 @@ mod tests {
     #[test]
     fn file_write_name() {
         let tool = FileWriteTool::new(test_security(std::env::temp_dir()));
-        assert_eq!(tool.name(), "file_write");
+        assert_eq!(tool.name(), "write");
     }
 
     #[test]
@@ -237,6 +204,8 @@ mod tests {
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["content"].is_object());
+        assert_eq!(schema["properties"]["content"]["type"], "string");
+        assert_eq!(schema["additionalProperties"], false);
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("path")));
         assert!(required.contains(&json!("content")));
@@ -262,31 +231,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_write_serializes_json_content() {
+    async fn file_write_rejects_non_string_content_without_touching_the_file() {
         let temp = temp_workspace();
         let dir = temp.path().to_path_buf();
+        let target = dir.join("module.py");
+        tokio::fs::write(&target, "original Python source")
+            .await
+            .unwrap();
 
         let tool = FileWriteTool::new(test_security(dir.clone()));
-        let result = tool
-            .execute(json!({
-                "path": "package.json",
-                "content": {
-                    "name": "backend",
-                    "scripts": {
-                        "start": "node server.js"
-                    }
-                }
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-
-        let content = tokio::fs::read_to_string(dir.join("package.json"))
-            .await
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["name"], "backend");
-        assert_eq!(parsed["scripts"]["start"], "node server.js");
+        for malformed in [
+            json!([["fragment", 3000]]),
+            json!({"source": "fragment"}),
+            json!(42),
+            json!(true),
+            serde_json::Value::Null,
+        ] {
+            let error = tool
+                .execute(json!({"path": "module.py", "content": malformed}))
+                .await
+                .expect_err("non-string content must be rejected");
+            assert!(error.to_string().contains("Invalid write arguments"));
+            assert_eq!(
+                tokio::fs::read_to_string(&target).await.unwrap(),
+                "original Python source"
+            );
+        }
     }
 
     #[tokio::test]
@@ -326,6 +296,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "new");
+    }
+
+    #[tokio::test]
+    async fn file_write_waits_for_the_shared_path_lock() {
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
+        let target = dir.join("locked.txt");
+        let mutations = Arc::new(FileMutationCoordinator::default());
+        let held = mutations.lock(&target).await;
+        let tool = FileWriteTool::with_coordinator(test_security(dir), mutations);
+        let write = tokio::spawn(async move {
+            tool.execute(json!({"path": "locked.txt", "content": "complete"}))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!write.is_finished());
+        drop(held);
+        assert!(write.await.unwrap().unwrap().success);
+        assert_eq!(tokio::fs::read_to_string(target).await.unwrap(), "complete");
     }
 
     #[tokio::test]
@@ -381,6 +371,24 @@ mod tests {
         assert!(result.output.contains("0 bytes"));
     }
 
+    #[tokio::test]
+    async fn file_write_rejects_oversized_content_without_creating_a_file() {
+        let temp = temp_workspace();
+        let dir = temp.path().to_path_buf();
+        let tool = FileWriteTool::new(test_security(dir.clone()));
+        let result = tool
+            .execute(json!({
+                "path": "too-large.txt",
+                "content": "x".repeat(MAX_FILE_MUTATION_BYTES + 1)
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("too large"));
+        assert!(!dir.join("too-large.txt").exists());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn file_write_blocks_symlink_escape() {
@@ -398,19 +406,12 @@ mod tests {
 
         let tool = FileWriteTool::new(test_security(workspace.clone()));
         let result = tool
-            .execute(json!({"path": "escape_dir/hijack.txt", "content": "bad"}))
+            .execute(json!({"path": "escape_dir/new/hijack.txt", "content": "bad"}))
             .await
             .unwrap();
 
         assert!(!result.success);
-        assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("escapes workspace")
-        );
-        assert!(!outside.join("hijack.txt").exists());
+        assert!(!outside.join("new").exists());
     }
 
     #[tokio::test]

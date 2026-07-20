@@ -294,12 +294,12 @@ mod tests {
     fn tool_call_serialization() {
         let tc = ToolCall {
             id: "call_123".into(),
-            name: "file_read".into(),
+            name: "read".into(),
             arguments: r#"{"path":"test.txt"}"#.into(),
         };
         let json = serde_json::to_string(&tc).unwrap();
         assert!(json.contains("call_123"));
-        assert!(json.contains("file_read"));
+        assert!(json.contains("read"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Agent building blocks: instance, builder, runner, prompts.
 
 pub mod abilities;
+#[doc(hidden)]
+pub mod ability_sessions;
 pub(crate) mod async_ops;
 pub mod builder;
 pub(crate) mod delegation;

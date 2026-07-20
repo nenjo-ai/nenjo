@@ -931,7 +931,8 @@ fn resolve_server_spec_with(
 
 /// A tool backed by an MCP server (external or platform).
 pub struct ExternalMcpTool {
-    tool_name: String,
+    model_tool_name: String,
+    mcp_tool_name: String,
     tool_description: String,
     input_schema: serde_json::Value,
     server: Slug,
@@ -943,7 +944,7 @@ pub struct ExternalMcpTool {
 #[async_trait]
 impl Tool for ExternalMcpTool {
     fn name(&self) -> &str {
-        &self.tool_name
+        &self.model_tool_name
     }
 
     fn description(&self) -> &str {
@@ -967,7 +968,7 @@ impl Tool for ExternalMcpTool {
         apply_argument_policy(&mut args, &self.forced_arguments, &self.default_arguments)?;
         match self
             .pool
-            .call_tool(&self.server, &self.tool_name, args)
+            .call_tool(&self.server, &self.mcp_tool_name, args)
             .await
         {
             Ok(output) => Ok(ToolResult {
@@ -976,7 +977,7 @@ impl Tool for ExternalMcpTool {
                 error: None,
             }),
             Err(e) => {
-                error!(tool = %self.tool_name, error = %e, "MCP tool call failed");
+                error!(tool = %self.mcp_tool_name, error = %e, "MCP tool call failed");
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -1246,7 +1247,8 @@ impl ExternalMcpPool {
                 let (forced_arguments, default_arguments) =
                     tool_argument_maps(server.policy.tools, execution_namespace);
                 tools.push(Box::new(ExternalMcpTool {
-                    tool_name: tool_def.name.clone(),
+                    model_tool_name: format!("mcp_{}", tool_def.name),
+                    mcp_tool_name: tool_def.name.clone(),
                     tool_description: tool_def.description.clone().unwrap_or_default(),
                     input_schema: tool_def.input_schema.clone(),
                     server: server_slug.clone(),
@@ -1363,7 +1365,7 @@ mod tests {
             .tools_for_agent(&[Slug::derive(&server.name)], None, "test-agent")
             .await;
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "review");
+        assert_eq!(tools[0].name(), "mcp_review");
         let result = tools[0].execute(json!({})).await.unwrap();
         assert!(result.success);
         let expected_cwd = tokio::fs::canonicalize(&plugin_dir).await.unwrap();

@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
 use nenjo_events::{
-    Command, EncryptedPayload, ExecutionEventPayload, Response, StreamEvent, TaskEncryptedContent,
-    TaskExecuteContent,
+    AsyncOperationTranscriptEvent, Command, EncryptedPayload, ExecutionEventPayload, Response,
+    StreamEvent, TaskEncryptedContent, TaskExecuteContent,
 };
 use nenjo_platform::SensitiveContentKind;
 use serde::de::DeserializeOwned;
@@ -21,6 +21,27 @@ use crate::{
 enum StreamPayloadScope<'a> {
     User { user_id: Uuid, key: &'a ContentKey },
     Org { key: &'a ContentKey },
+}
+
+fn protected_stream_payload(
+    payload: Option<Value>,
+    sensitive_fields: impl IntoIterator<Item = (&'static str, Value)>,
+) -> Value {
+    let mut protected = match payload {
+        Some(Value::Object(fields)) => fields,
+        Some(output) => {
+            let mut fields = serde_json::Map::new();
+            fields.insert("output".into(), output);
+            fields
+        }
+        None => serde_json::Map::new(),
+    };
+    protected.extend(
+        sensitive_fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value)),
+    );
+    Value::Object(protected)
 }
 
 /// Secure-envelope codec that encrypts and decrypts content-bearing command and response payloads.
@@ -480,21 +501,30 @@ impl SecureEnvelopeCodec {
                 summary,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::AsyncOperationEvent {
-                operation_id,
-                kind,
-                label,
-                status,
-                signal,
-                model_visible,
-                parent_operation_id,
-                parent_tool_name,
-                summary,
-                payload: None,
-                encrypted_payload: self
-                    .encrypt_stream_payload(scope, "async_operation_payload", payload)
-                    .await?,
-            })),
+            } => {
+                let protected = protected_stream_payload(
+                    payload,
+                    [
+                        ("label", Value::String(label)),
+                        ("summary", summary.map(Value::String).unwrap_or(Value::Null)),
+                    ],
+                );
+                Ok(Some(StreamEvent::AsyncOperationEvent {
+                    operation_id,
+                    label: kind.clone(),
+                    kind,
+                    status,
+                    signal,
+                    model_visible,
+                    parent_operation_id,
+                    parent_tool_name,
+                    summary: None,
+                    payload: None,
+                    encrypted_payload: self
+                        .encrypt_stream_payload(scope, "async_operation_payload", Some(protected))
+                        .await?,
+                }))
+            }
             StreamEvent::AsyncOperationTranscript {
                 operation_id,
                 kind,
@@ -502,16 +532,35 @@ impl SecureEnvelopeCodec {
                 event,
                 payload,
                 ..
-            } => Ok(Some(StreamEvent::AsyncOperationTranscript {
-                operation_id,
-                kind,
-                label,
-                event,
-                payload: None,
-                encrypted_payload: self
-                    .encrypt_stream_payload(scope, "async_operation_transcript_payload", payload)
-                    .await?,
-            })),
+            } => {
+                let public_event = AsyncOperationTranscriptEvent {
+                    kind: event.kind.clone(),
+                    summary: String::new(),
+                    tool: None,
+                    success: event.success,
+                };
+                let protected = protected_stream_payload(
+                    payload,
+                    [
+                        ("label", Value::String(label)),
+                        ("event", serde_json::to_value(event)?),
+                    ],
+                );
+                Ok(Some(StreamEvent::AsyncOperationTranscript {
+                    operation_id,
+                    label: kind.clone(),
+                    kind,
+                    event: public_event,
+                    payload: None,
+                    encrypted_payload: self
+                        .encrypt_stream_payload(
+                            scope,
+                            "async_operation_transcript_payload",
+                            Some(protected),
+                        )
+                        .await?,
+                }))
+            }
             StreamEvent::Error {
                 message, payload, ..
             } => Ok(Some(StreamEvent::Error {
@@ -972,9 +1021,10 @@ mod tests {
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
     use nenjo_events::{
-        Command, ExecutionEventPayload, ExecutionWorkflowStepEvent, ResourceAction, ResourceType,
-        Response, StreamEvent, TaskExecuteContent,
+        AsyncOperationTranscriptEvent, Command, ExecutionEventPayload, ExecutionWorkflowStepEvent,
+        ResourceAction, ResourceType, Response, StreamEvent, TaskExecuteContent,
     };
+    use serde_json::Value;
     use tokio::sync::RwLock;
     use uuid::Uuid;
 
@@ -1348,6 +1398,181 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn tool_result_payload_is_encrypted_at_the_worker_transport_boundary() {
+        let actor_user_id = Uuid::new_v4();
+        let actor_key = ContentKey::from_bytes([7_u8; 32]);
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider.insert_user_key(actor_user_id, actor_key).await;
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let response = Response::AgentResponse {
+            session_id: Some(Uuid::new_v4()),
+            payload: StreamEvent::ToolCallCompleted {
+                run_id: "run-1".into(),
+                batch_id: "batch-1".into(),
+                call_id: "call-1".into(),
+                parent_call_id: None,
+                success: true,
+                payload: Some(serde_json::json!({
+                    "tool_name": "shell",
+                    "output_preview": "bounded shell output",
+                })),
+                encrypted_payload: None,
+            },
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode tool result")
+            .expect("tool result should be retained");
+
+        let Response::AgentResponse {
+            payload:
+                StreamEvent::ToolCallCompleted {
+                    payload,
+                    encrypted_payload: Some(encrypted_payload),
+                    ..
+                },
+            ..
+        } = encoded
+        else {
+            panic!("unexpected encoded response: {encoded:?}");
+        };
+        assert!(payload.is_none(), "plaintext tool result must be removed");
+        assert_eq!(encrypted_payload.object_type, "tool_result_payload");
+
+        let decrypted = codec
+            .decode_payload_text(&encrypted_payload)
+            .await
+            .expect("decrypt tool result");
+        let decrypted: serde_json::Value =
+            serde_json::from_str(&decrypted).expect("tool result JSON");
+        assert_eq!(decrypted["output_preview"], "bounded shell output");
+    }
+
+    #[tokio::test]
+    async fn async_operation_sensitive_fields_are_encrypted() {
+        let actor_user_id = Uuid::new_v4();
+        let actor_key = ContentKey::from_bytes([8_u8; 32]);
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider.insert_user_key(actor_user_id, actor_key).await;
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let response = Response::AgentResponse {
+            session_id: Some(Uuid::new_v4()),
+            payload: StreamEvent::AsyncOperationEvent {
+                operation_id: "shell-1".into(),
+                kind: "shell".into(),
+                label: "cargo test --workspace".into(),
+                status: "completed".into(),
+                signal: "completed".into(),
+                model_visible: true,
+                parent_operation_id: None,
+                parent_tool_name: Some("shell".into()),
+                summary: Some("secret completion summary".into()),
+                payload: Some(serde_json::json!({"result_preview": "secret result"})),
+                encrypted_payload: None,
+            },
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode async operation")
+            .expect("async operation should be retained");
+        let Response::AgentResponse {
+            payload:
+                StreamEvent::AsyncOperationEvent {
+                    kind,
+                    label,
+                    summary,
+                    payload,
+                    encrypted_payload: Some(encrypted_payload),
+                    ..
+                },
+            ..
+        } = encoded
+        else {
+            panic!("unexpected encoded response: {encoded:?}");
+        };
+        assert_eq!(label, kind);
+        assert!(summary.is_none());
+        assert!(payload.is_none());
+
+        let decrypted = codec
+            .decode_payload_text(&encrypted_payload)
+            .await
+            .expect("decrypt async operation");
+        let decrypted: Value = serde_json::from_str(&decrypted).expect("async operation JSON");
+        assert_eq!(decrypted["label"], "cargo test --workspace");
+        assert_eq!(decrypted["summary"], "secret completion summary");
+        assert_eq!(decrypted["result_preview"], "secret result");
+    }
+
+    #[tokio::test]
+    async fn async_transcript_summary_is_encrypted() {
+        let actor_user_id = Uuid::new_v4();
+        let actor_key = ContentKey::from_bytes([9_u8; 32]);
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider.insert_user_key(actor_user_id, actor_key).await;
+        let codec = SecureEnvelopeCodec::new(provider, Uuid::new_v4());
+        let response = Response::AgentResponse {
+            session_id: Some(Uuid::new_v4()),
+            payload: StreamEvent::AsyncOperationTranscript {
+                operation_id: "shell-1".into(),
+                kind: "shell".into(),
+                label: "cargo test --workspace".into(),
+                event: AsyncOperationTranscriptEvent {
+                    kind: "output_chunk".into(),
+                    summary: "[stdout] secret output".into(),
+                    tool: None,
+                    success: None,
+                },
+                payload: None,
+                encrypted_payload: None,
+            },
+        };
+
+        let encoded = codec
+            .encode_response(&CodecContext::for_actor(actor_user_id), response)
+            .await
+            .expect("encode async transcript")
+            .expect("async transcript should be retained");
+        let Response::AgentResponse {
+            payload:
+                StreamEvent::AsyncOperationTranscript {
+                    kind,
+                    label,
+                    event,
+                    payload,
+                    encrypted_payload: Some(encrypted_payload),
+                    ..
+                },
+            ..
+        } = encoded
+        else {
+            panic!("unexpected encoded response: {encoded:?}");
+        };
+        assert_eq!(label, kind);
+        assert!(event.summary.is_empty());
+        assert!(event.tool.is_none());
+        assert!(payload.is_none());
+
+        let decrypted = codec
+            .decode_payload_text(&encrypted_payload)
+            .await
+            .expect("decrypt async transcript");
+        let decrypted: Value = serde_json::from_str(&decrypted).expect("async transcript JSON");
+        assert_eq!(decrypted["label"], "cargo test --workspace");
+        assert_eq!(decrypted["event"]["summary"], "[stdout] secret output");
     }
 
     #[tokio::test]

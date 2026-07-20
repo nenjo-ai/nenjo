@@ -7,13 +7,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use nenjo::tools::AsyncOperationKind;
-use nenjo::{AsyncOperationHandle, StartAsyncOperation, current_async_operation_runtime};
+use nenjo::{
+    AsyncControl, AsyncControls, AsyncOperationHandle, AsyncOperationStartReceipt,
+    StartAsyncOperation, current_async_operation_runtime,
+};
 use nenjo_models::{
     EditImageRequest, EditVideoRequest, ExtendVideoRequest, GenerateImageRequest,
     GenerateSpeechRequest, GenerateVideoRequest, ImageToVideoRequest, MediaOperation,
     MediaOutputAsset, MediaToolSpec, NativeMediaJob, NativeMediaJobStatus, NativeMediaRequest,
     NativeMediaResponse, ReferenceToVideoRequest, TranscribeAudioRequest,
 };
+use serde::Serialize;
 use serde_json::json;
 
 use crate::media::ResolvedMediaProvider;
@@ -22,6 +26,19 @@ use crate::tools::{Tool, ToolCategory, ToolResult};
 
 static MEDIA_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MEDIA_JOB_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Serialize)]
+struct MediaOperationStarted<'a> {
+    #[serde(rename = "type")]
+    result_type: &'static str,
+    #[serde(flatten)]
+    async_operation: AsyncOperationStartReceipt,
+    operation: MediaOperation,
+    provider: &'a str,
+    model: &'a str,
+    provider_job: NativeMediaJob,
+    instruction: &'static str,
+}
 
 pub struct NativeMediaTool {
     resolved: ResolvedMediaProvider,
@@ -131,6 +148,9 @@ impl Tool for NativeMediaTool {
                     let operation_name = tool_name(operation).unwrap_or("media");
                     let sequence = MEDIA_OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
                     let operation_id = format!("media_{operation_name}_{sequence}");
+                    let controls = AsyncControls::new(AsyncControl::Inspect)
+                        .with(AsyncControl::Stop)
+                        .with(AsyncControl::Wait);
                     let handle = runtime
                         .start(StartAsyncOperation {
                             id: operation_id.clone(),
@@ -143,6 +163,7 @@ impl Tool for NativeMediaTool {
                                 self.resolved.provider, job.job_id
                             ),
                             model_visible: true,
+                            controls,
                         })
                         .await;
                     let join = tokio::spawn(poll_media_job(
@@ -154,19 +175,19 @@ impl Tool for NativeMediaTool {
 
                     return Ok(ToolResult {
                         success: true,
-                        output: serde_json::to_string_pretty(&json!({
-                            "type": "job_started",
-                            "operation_id": operation_id,
-                            "operation": operation,
-                            "provider": &self.resolved.provider,
-                            "model": &self.resolved.model,
-                            "provider_job": job,
-                            "next_step": {
-                                "tool": "wait_operations",
-                                "kind": "media",
-                                "instruction": "This media request is still rendering asynchronously. Do not call this generation tool again for the same user request. Use wait_operations with kind=media until the operation completes or fails, then inspect_operations if you need the final output payload."
-                            }
-                        }))?,
+                        output: serde_json::to_string_pretty(&MediaOperationStarted {
+                            result_type: "job_started",
+                            async_operation: AsyncOperationStartReceipt::new(
+                                operation_id,
+                                AsyncOperationKind::Media,
+                                controls,
+                            ),
+                            operation,
+                            provider: &self.resolved.provider,
+                            model: &self.resolved.model,
+                            provider_job: job,
+                            instruction: "This media request is still rendering asynchronously. Do not call this generation tool again for the same user request.",
+                        })?,
                         error: None,
                     });
                 }
@@ -426,7 +447,7 @@ mod tests {
 
         let description = tool.description();
         assert!(description.contains("asynchronous"));
-        assert!(description.contains("wait_operations"));
+        assert!(description.contains("wait"));
         assert!(description.contains("Do not call generate_video again"));
     }
 

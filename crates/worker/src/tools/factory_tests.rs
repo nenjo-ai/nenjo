@@ -125,7 +125,7 @@ fn test_platform_services(
 }
 
 #[tokio::test]
-async fn worker_factory_always_exposes_use_skill_tool() {
+async fn worker_factory_hides_skill_tools_when_registry_is_empty() {
     let temp = tempdir().unwrap();
     let root = temp.path();
 
@@ -165,18 +165,97 @@ async fn worker_factory_always_exposes_use_skill_tool() {
     let tools = factory.create_tools(&agent).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
-    assert!(
-        names.iter().any(|name| name == "use_skill"),
-        "worker tool belt should always include use_skill, got: {names:?}"
+    for skill_tool in ["use_skill", "list_installed_skills", "call_skill_mcp_tool"] {
+        assert!(
+            !names.iter().any(|name| name == skill_tool),
+            "empty skill registry should hide {skill_tool}, got: {names:?}"
+        );
+    }
+    for expected in [
+        "shell",
+        "read",
+        "write",
+        "edit",
+        "remove",
+        "search",
+        "repo_status",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "worker tool belt should include {expected}, got: {names:?}"
+        );
+    }
+    for removed in [
+        "file_read",
+        "file_write",
+        "file_edit",
+        "file_delete",
+        "content_search",
+        "glob_search",
+        "git_operations",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == removed),
+            "worker tool belt should not include legacy tool {removed}, got: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_activation_tools_without_mcp_proxy_for_plain_skills() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let registry = Arc::new(crate::skills::SkillRegistry::default());
+    let skill: SkillManifest = serde_json::from_value(serde_json::json!({
+        "name": "review",
+        "root_dir": root.join("skills/review")
+    }))
+    .unwrap();
+    registry.reconcile(&[skill], &[]);
+
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::with_skill_registry(
+        security,
+        NativeRuntime,
+        config,
+        platform,
+        external_mcp,
+        registry,
     );
-    assert!(
-        names.iter().any(|name| name == "list_installed_skills"),
-        "worker tool belt should always include list_installed_skills, got: {names:?}"
-    );
-    assert!(
-        names.iter().any(|name| name == "call_skill_mcp_tool"),
-        "worker tool belt should always include call_skill_mcp_tool, got: {names:?}"
-    );
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+    assert!(names.contains(&"use_skill"), "got: {names:?}");
+    assert!(names.contains(&"list_installed_skills"), "got: {names:?}");
+    assert!(!names.contains(&"call_skill_mcp_tool"), "got: {names:?}");
 }
 
 #[tokio::test]

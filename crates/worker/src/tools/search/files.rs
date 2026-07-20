@@ -1,54 +1,22 @@
-//! File discovery by glob pattern within the workspace directory.
+//! Internal glob file-discovery engine used by [`super::SearchTool`].
 
+use crate::tools::ToolResult;
 use crate::tools::security::SecurityPolicy;
-use crate::tools::{Tool, ToolCategory, ToolResult};
-use async_trait::async_trait;
-use serde_json::json;
 use std::sync::Arc;
 
 const MAX_RESULTS: usize = 1000;
 
 /// Search for files by glob pattern within the workspace.
-pub struct GlobSearchTool {
+pub(super) struct FileSearchEngine {
     security: Arc<SecurityPolicy>,
 }
 
-impl GlobSearchTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+impl FileSearchEngine {
+    pub(super) fn new(security: Arc<SecurityPolicy>) -> Self {
         Self { security }
     }
-}
 
-#[async_trait]
-impl Tool for GlobSearchTool {
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Read
-    }
-
-    fn name(&self) -> &str {
-        "glob_search"
-    }
-
-    fn description(&self) -> &str {
-        "Search for files matching a glob pattern within the workspace. \
-         Returns a sorted list of matching file paths relative to the workspace root. \
-         Examples: '**/*.rs' (all Rust files), 'src/**/mod.rs' (all mod.rs in src)."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob pattern to match files, e.g. '**/*.rs', 'src/**/mod.rs'"
-                }
-            },
-            "required": ["pattern"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    pub(super) async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let pattern = args
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -180,6 +148,7 @@ impl Tool for GlobSearchTool {
 mod tests {
     use super::*;
     use crate::tools::security::{AutonomyLevel, SecurityPolicy};
+    use serde_json::json;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -204,27 +173,12 @@ mod tests {
         })
     }
 
-    #[test]
-    fn glob_search_name_and_schema() {
-        let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
-        assert_eq!(tool.name(), "glob_search");
-
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["pattern"].is_object());
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("pattern"))
-        );
-    }
-
     #[tokio::test]
-    async fn glob_search_single_file() {
+    async fn file_engine_single_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "content").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "hello.txt"})).await.unwrap();
 
         assert!(result.success);
@@ -232,13 +186,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_multiple_files() {
+    async fn file_engine_multiple_files() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "*.txt"})).await.unwrap();
 
         assert!(result.success);
@@ -248,14 +202,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_recursive() {
+    async fn file_engine_recursive() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("root.txt"), "").unwrap();
         std::fs::write(dir.path().join("sub/mid.txt"), "").unwrap();
         std::fs::write(dir.path().join("sub/deep/leaf.txt"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "**/*.txt"})).await.unwrap();
 
         assert!(result.success);
@@ -265,10 +219,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_no_matches() {
+    async fn file_engine_no_matches() {
         let dir = TempDir::new().unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool
             .execute(json!({"pattern": "*.nonexistent"}))
             .await
@@ -279,15 +233,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_missing_param() {
-        let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
+    async fn file_engine_missing_param() {
+        let tool = FileSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn glob_search_rejects_absolute_path() {
-        let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
+    async fn file_engine_rejects_absolute_path() {
+        let tool = FileSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool.execute(json!({"pattern": "/etc/**/*"})).await.unwrap();
 
         assert!(!result.success);
@@ -295,8 +249,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_rejects_path_traversal() {
-        let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
+    async fn file_engine_rejects_path_traversal() {
+        let tool = FileSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool
             .execute(json!({"pattern": "../../../etc/passwd"}))
             .await
@@ -307,8 +261,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_rejects_dotdot_only() {
-        let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
+    async fn file_engine_rejects_dotdot_only() {
+        let tool = FileSearchEngine::new(test_security(std::env::temp_dir()));
         let result = tool.execute(json!({"pattern": ".."})).await.unwrap();
 
         assert!(!result.success);
@@ -317,7 +271,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn glob_search_filters_symlink_escape() {
+    async fn file_engine_filters_symlink_escape() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().unwrap();
@@ -333,7 +287,7 @@ mod tests {
         // Also add a legitimate file
         std::fs::write(workspace.join("legit.txt"), "ok").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(workspace.clone()));
+        let tool = FileSearchEngine::new(test_security(workspace.clone()));
         let result = tool.execute(json!({"pattern": "*.txt"})).await.unwrap();
 
         assert!(result.success);
@@ -343,11 +297,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_readonly_mode() {
+    async fn file_engine_readonly_mode() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security_with(
+        let tool = FileSearchEngine::new(test_security_with(
             dir.path().to_path_buf(),
             AutonomyLevel::ReadOnly,
             20,
@@ -359,11 +313,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_rate_limited() {
+    async fn file_engine_rate_limited() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security_with(
+        let tool = FileSearchEngine::new(test_security_with(
             dir.path().to_path_buf(),
             AutonomyLevel::Supervised,
             0,
@@ -375,13 +329,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_results_sorted() {
+    async fn file_engine_results_sorted() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "*.txt"})).await.unwrap();
 
         assert!(result.success);
@@ -394,12 +348,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_excludes_directories() {
+    async fn file_engine_excludes_directories() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "*"})).await.unwrap();
 
         assert!(result.success);
@@ -408,10 +362,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_search_invalid_pattern() {
+    async fn file_engine_invalid_pattern() {
         let dir = TempDir::new().unwrap();
 
-        let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
+        let tool = FileSearchEngine::new(test_security(dir.path().to_path_buf()));
         let result = tool.execute(json!({"pattern": "[invalid"})).await.unwrap();
 
         assert!(!result.success);

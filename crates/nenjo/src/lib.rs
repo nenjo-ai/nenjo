@@ -76,6 +76,7 @@ pub use skills::{
     UseSkillTool,
 };
 pub use slug::{IntoSlug, Slug, SlugError};
+pub use tools::{AsyncControl, AsyncControls, AsyncOperationStartReceipt};
 
 pub mod knowledge {
     pub use nenjo_knowledge::*;

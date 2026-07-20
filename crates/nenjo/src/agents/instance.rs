@@ -1,13 +1,15 @@
 //! Fully configured agent instance ready for task execution.
 
-use crate::context::ContextRenderer;
+use crate::context::{ContextRenderer, ProjectContext};
 use nenjo_models::NativeModelToolId;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::agents::ability_sessions::AbilitySessionStore;
 use crate::agents::async_ops::AsyncOpManager;
 use crate::agents::prompts::PromptContext;
 use crate::arguments::{merge_argument_bindings, scan_argument_selectors};
@@ -82,6 +84,8 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) execution_cancel: CancellationToken,
     pub(crate) execution_mode: AgentExecutionMode,
     pub(crate) hook_runtime: Option<Arc<HookRuntime>>,
+    pub(crate) current_session_id: Option<Uuid>,
+    pub(crate) ability_sessions: Arc<AbilitySessionStore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +150,8 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             execution_cancel: self.execution_cancel.clone(),
             execution_mode: self.execution_mode,
             hook_runtime: self.hook_runtime.clone(),
+            current_session_id: self.current_session_id,
+            ability_sessions: self.ability_sessions.clone(),
         }
     }
 }
@@ -239,14 +245,42 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         true
     }
 
+    /// Set the parent transcript session used by nested ability executions.
+    #[doc(hidden)]
+    pub fn set_current_session_id(&mut self, session_id: Uuid) {
+        self.runtime.current_session_id = Some(session_id);
+    }
+
+    /// Hydrate ability conversations reconstructed by the session owner.
+    #[doc(hidden)]
+    pub fn hydrate_ability_histories(
+        &mut self,
+        parent_session_id: Uuid,
+        histories: std::collections::BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
+    ) {
+        self.runtime
+            .ability_sessions
+            .hydrate(parent_session_id, histories);
+    }
+
     /// Attach the active hook runtime for this execution.
     pub fn set_hook_runtime(&mut self, hook_runtime: Option<Arc<HookRuntime>>) {
         self.runtime.hook_runtime = hook_runtime;
     }
 
-    /// Get tool specs for LLM function calling registration.
+    /// Get the full registered tool specs for capability introspection.
+    ///
+    /// This includes dynamically hidden tools. Model requests use the
+    /// visibility-filtered specs produced by the turn loop.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.local_tool_specs();
+        specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
+        specs
+    }
+
+    /// Get the tool specs currently visible to the model, including native tools.
+    pub(crate) async fn visible_tool_specs(&self) -> Vec<ToolSpec> {
+        let mut specs = self.visible_local_tool_specs().await;
         specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
         specs
     }
@@ -268,6 +302,20 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             })
             .map(|t| t.spec())
             .collect()
+    }
+
+    /// Get executable local tool specs currently visible to the model.
+    pub(crate) async fn visible_local_tool_specs(&self) -> Vec<ToolSpec> {
+        let mut specs = Vec::new();
+        for tool in &self.runtime.tools {
+            if native_model_tool_shadows_local_tool(&self.model_manifest.native_tools, tool.name())
+                || !tool.is_available_to_model().await
+            {
+                continue;
+            }
+            specs.push(tool.spec());
+        }
+        specs
     }
 
     /// Build the system, developer, and user prompts for an execution.
@@ -296,19 +344,11 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         let mut ctx = render_context_from_agent_run(run);
         let ex = &self.prompt.context.render_ctx_extra;
 
-        // Project — merge from extras, derive working_dir from workspace/slug
+        // Project — merge from extras and preserve an explicitly scoped worktree.
         if !ex.project.name.is_empty() {
             ctx.project = ex.project.clone();
         }
-        if !ex.project.slug.is_empty() {
-            ctx.project.working_dir = self
-                .runtime
-                .security
-                .workspace_dir
-                .join(&ex.project.slug)
-                .to_string_lossy()
-                .to_string();
-        }
+        populate_project_working_directory(&mut ctx.project, &self.runtime.security.workspace_dir);
 
         // Runtime git/worktree context takes priority over project-level git.
         if ctx.git.is_empty() && !ex.git.is_empty() {
@@ -501,6 +541,15 @@ fn native_model_tool_shadows_local_tool(
         && local_tool_name == "web_search_tool"
 }
 
+fn populate_project_working_directory(project: &mut ProjectContext, workspace_dir: &Path) {
+    if !project.slug.is_empty() && project.working_dir.is_empty() {
+        project.working_dir = workspace_dir
+            .join(&project.slug)
+            .to_string_lossy()
+            .into_owned();
+    }
+}
+
 fn native_model_tool_specs(native_tools: &[NativeModelToolId]) -> Vec<ToolSpec> {
     native_tools
         .iter()
@@ -557,5 +606,30 @@ mod tests {
                 .iter()
                 .all(|spec| spec.category == crate::tools::ToolCategory::Read)
         );
+    }
+
+    #[test]
+    fn prompt_context_preserves_an_explicit_worktree_directory() {
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            working_dir: "/workspace/project/worktrees/task-123".to_string(),
+            ..ProjectContext::default()
+        };
+
+        populate_project_working_directory(&mut project, Path::new("/workspace"));
+
+        assert_eq!(project.working_dir, "/workspace/project/worktrees/task-123");
+    }
+
+    #[test]
+    fn prompt_context_derives_a_project_directory_without_an_explicit_scope() {
+        let mut project = ProjectContext {
+            slug: "project".to_string(),
+            ..ProjectContext::default()
+        };
+
+        populate_project_working_directory(&mut project, Path::new("/workspace"));
+
+        assert_eq!(project.working_dir, "/workspace/project");
     }
 }
