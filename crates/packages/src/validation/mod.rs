@@ -264,9 +264,10 @@ fn validate_packages(
     report
 }
 
-/// Routines, hooks, MCP servers, and models are package-local runtime
-/// configuration. They have stable registry-scoped identities, but are not
-/// reusable exports from a dependency package.
+/// Routines, hooks, and models are package-local runtime configuration. They
+/// have stable registry-scoped identities, but are not reusable exports from a
+/// dependency package. MCP servers are reusable because abilities and agents
+/// may rely on connectors supplied by dependency packages.
 fn validate_non_reusable_dependency_resources(
     graph: &ResolvedPackageGraph,
     report: &mut PackageRuntimeValidationReport,
@@ -278,10 +279,7 @@ fn validate_non_reusable_dependency_resources(
         for module in unique_modules(package) {
             if !matches!(
                 module.kind,
-                PackageKind::Routine
-                    | PackageKind::Hook
-                    | PackageKind::McpServer
-                    | PackageKind::Model
+                PackageKind::Routine | PackageKind::Hook | PackageKind::Model
             ) {
                 continue;
             }
@@ -705,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_runtime_configuration_resources_from_dependency_packages() {
+    fn rejects_non_reusable_runtime_configuration_from_dependency_packages() {
         let root = package_with_dependencies(
             "app",
             BTreeMap::from([("shared-runtime".to_string(), "^1.0.0".to_string())]),
@@ -748,7 +746,7 @@ mod tests {
             .expect_err("dependency model must be rejected")
             .to_string();
 
-        for kind in ["model", "mcp_server", "hook", "routine"] {
+        for kind in ["model", "hook", "routine"] {
             assert!(
                 error.contains(&format!(
                     "dependency package 'shared-runtime' exports {kind}"
@@ -756,6 +754,40 @@ mod tests {
                 "missing dependency validation error for {kind}: {error}"
             );
         }
+        assert!(
+            !error.contains("dependency package 'shared-runtime' exports mcp_server"),
+            "dependency MCP servers should be reusable: {error}"
+        );
+    }
+
+    #[test]
+    fn accepts_mcp_servers_from_dependency_packages() {
+        let root = package_with_dependencies(
+            "app",
+            BTreeMap::from([("connectors".to_string(), "^1.0.0".to_string())]),
+            Vec::new(),
+        );
+        let dependency = package(
+            "connectors",
+            vec![module(
+                "mcp/review.yaml",
+                PackageKind::McpServer,
+                serde_json::json!({
+                    "name": "review-server",
+                    "transport": "stdio",
+                    "command": "review-server"
+                }),
+            )],
+        );
+        let graph = ResolvedPackageGraph {
+            root_package: "app".to_string(),
+            packages: BTreeMap::from([
+                (root.name.clone(), root),
+                (dependency.name.clone(), dependency),
+            ]),
+        };
+
+        validate_package_runtime(&graph).expect("dependency MCP server should be accepted");
     }
 
     #[test]

@@ -341,15 +341,20 @@ pub fn package_module_source_path(package_path: &str, module_path: &str) -> Resu
     validate_source_path(&format!("{dir}/{module_path}"))
 }
 
-/// Return whether a package version satisfies an exact or caret major requirement.
+/// Return whether a package version satisfies an exact or semantic-version requirement.
 pub fn version_satisfies(actual: &str, required: &str) -> bool {
+    let Ok(actual) = semver::Version::parse(actual.trim().trim_start_matches('v')) else {
+        return false;
+    };
     let required = required.trim();
-    if let Some(prefix) = required.strip_prefix('^') {
-        let actual_major = actual.trim_start_matches('v').split('.').next();
-        let required_major = prefix.trim_start_matches('v').split('.').next();
-        return actual_major == required_major;
-    }
-    actual.trim_start_matches('v') == required.trim_start_matches('v')
+    let requirement = if let Some(required) = required.strip_prefix('^') {
+        format!("^{}", required.trim_start_matches('v'))
+    } else if required.starts_with(['=', '>', '<', '~', '*']) {
+        required.to_string()
+    } else {
+        format!("={}", required.trim_start_matches('v'))
+    };
+    semver::VersionReq::parse(&requirement).is_ok_and(|required| required.matches(&actual))
 }
 
 /// Parse JSON or YAML content as a generic JSON value.

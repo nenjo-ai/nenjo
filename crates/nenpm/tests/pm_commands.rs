@@ -111,7 +111,7 @@ fn update_ignores_existing_lockfile_version_pin() {
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "agent": "^0.1.0"
+  "agent": "^0"
 
 registries:
   - ../registry/registry.yaml
@@ -165,7 +165,7 @@ fn update_replaces_same_module_path_with_new_version_content() {
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "core": "^0.1.0"
+  "core": "^0"
 
 registries:
   - ../registry/registry.yaml
@@ -295,7 +295,7 @@ packages:
         .to_string();
 
     assert!(err.contains("failed to resolve core from registry"));
-    assert!(err.contains("^2.0.0 and ^1.0.0"));
+    assert!(err.contains("^2.0.0 and >=1.0.0,<2.0.0"));
     fs::remove_dir_all(workspace).unwrap();
 }
 

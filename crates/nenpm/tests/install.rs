@@ -718,6 +718,89 @@ fn install_resolves_registry_dependency_and_writes_lockfile() {
 }
 
 #[test]
+fn install_accumulates_constraints_before_finalizing_registry_version() {
+    let workspace = temp_workspace("registry-constraint-aggregation");
+    let project = workspace.join("project");
+    let registry = workspace.join("registry");
+    let packages = workspace.join("packages");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  app_a: "1.0.0"
+  app_b: "1.0.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &registry,
+        "registry.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  core:
+    - version: "1.2.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: core-v120/nenjo.package.yaml
+    - version: "1.9.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: core-v190/nenjo.package.yaml
+  app_a:
+    - version: "1.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: app-a/nenjo.package.yaml
+      dependencies:
+        core: "1.2.0"
+  app_b:
+    - version: "1.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: app-b/nenjo.package.yaml
+      dependencies:
+        core: "^1.0.0"
+"#,
+    );
+    for (path, name, version, dependency) in [
+        ("core-v120", "core", "1.2.0", None),
+        ("core-v190", "core", "1.9.0", None),
+        ("app-a", "app_a", "1.0.0", Some("1.2.0")),
+        ("app-b", "app_b", "1.0.0", Some("^1.0.0")),
+    ] {
+        let dependencies = dependency.map_or_else(String::new, |requirement| {
+            format!("dependencies:\n  core: \"{requirement}\"\n")
+        });
+        write_file(
+            &packages,
+            &format!("{path}/nenjo.package.yaml"),
+            &format!(
+                "schema: nenjo.package.v1\nname: {name}\nversion: \"{version}\"\n{dependencies}"
+            ),
+        );
+    }
+
+    let report = install(InstallOptions::new(&project).dry_run(true)).unwrap();
+    let core = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "core")
+        .expect("core is resolved");
+
+    assert_eq!(core.version, "1.2.0");
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn install_routes_scoped_packages_to_repository_registry_source() {
     let workspace = temp_workspace("scoped-repository-registry");
     copy_dir(&fixture("registry-workspace"), &workspace);

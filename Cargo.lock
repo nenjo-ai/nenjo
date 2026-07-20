@@ -2367,6 +2367,7 @@ dependencies = [
  "nenjo-models",
  "nenjo-xml",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

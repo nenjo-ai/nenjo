@@ -451,6 +451,7 @@ fn resolve_dependency_manifest(
     let mut packages = BTreeMap::new();
     let mut sources = BTreeMap::new();
     let mut registry_records: BTreeMap<String, RegistryPackageVersion> = BTreeMap::new();
+    let mut registry_requirements_by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut stack: Vec<(String, String)> = manifest
         .dependencies
         .iter()
@@ -511,25 +512,24 @@ fn resolve_dependency_manifest(
             continue;
         }
 
-        if let Some(existing) = registry_records.get(&name) {
-            if !nenjo_packages::version_satisfies(&existing.version, &requirement) {
-                bail!(
-                    "{name} was already resolved to {}, which does not satisfy {requirement}",
-                    existing.version
-                );
-            }
-            continue;
+        let requirements = registry_requirements_by_package
+            .entry(name.clone())
+            .or_default();
+        if !requirements.contains(&requirement) {
+            requirements.push(requirement);
         }
 
-        let registry = registries.for_package(&name)?;
         let requirements = registry_requirements(
-            &requirement,
+            requirements,
             locked_versions.get(&name).map(String::as_str),
             locked_version_policy,
         )?;
-        let record = registry
+        let record = registries
             .resolve_version_matching_all(&name, &requirements)
             .with_context(|| format!("failed to resolve {name} from registry"))?;
+        if registry_records.get(&name) == Some(&record) {
+            continue;
+        }
         for (dependency, requirement) in &record.dependencies {
             stack.push((dependency.clone(), requirement.clone()));
         }
@@ -549,30 +549,38 @@ fn resolve_dependency_manifest(
 }
 
 fn registry_requirements(
-    requirement: &str,
+    requirements: &[String],
     locked_version: Option<&str>,
     locked_version_policy: LockedVersionPolicy,
 ) -> Result<Vec<String>> {
     match (locked_version_policy, locked_version) {
-        (LockedVersionPolicy::Ignore, _) | (_, None) => Ok(vec![requirement.to_string()]),
+        (LockedVersionPolicy::Ignore, _) | (_, None) => Ok(requirements.to_vec()),
         (LockedVersionPolicy::Exact, Some(version))
-            if nenjo_packages::version_satisfies(version, requirement) =>
+            if requirements
+                .iter()
+                .all(|requirement| nenjo_packages::version_satisfies(version, requirement)) =>
         {
             Ok(vec![version.to_string()])
         }
-        (LockedVersionPolicy::Exact, Some(_)) => Ok(vec![requirement.to_string()]),
+        (LockedVersionPolicy::Exact, Some(_)) => Ok(requirements.to_vec()),
         (LockedVersionPolicy::SameMajor, Some(version)) => {
             let compatibility = same_major_requirement(version)?;
-            Ok(vec![requirement.to_string(), compatibility])
+            let mut requirements = requirements.to_vec();
+            requirements.push(compatibility);
+            Ok(requirements)
         }
     }
 }
 
 fn same_major_requirement(version: &str) -> Result<String> {
     let normalized = version.trim().trim_start_matches('v');
-    semver::Version::parse(normalized)
+    let version = semver::Version::parse(normalized)
         .with_context(|| format!("locked package version {version} is not semantic"))?;
-    Ok(format!("^{normalized}"))
+    let next_major = version
+        .major
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("locked package version {version} has no valid next major"))?;
+    Ok(format!(">={version},<{next_major}.0.0"))
 }
 
 fn resolve_override_source(

@@ -674,10 +674,25 @@ manifest:
 }
 
 #[test]
-fn caret_version_matches_major() {
+fn caret_version_uses_semver_compatibility() {
     assert!(version_satisfies("0.1.2", "^0.1.0"));
+    assert!(!version_satisfies("0.2.0", "^0.1.0"));
+    assert!(!version_satisfies("0.1.0", "^0.1.1"));
     assert!(version_satisfies("v1.2.3", "^1.0.0"));
+    assert!(!version_satisfies("1.1.9", "^1.2.0"));
     assert!(!version_satisfies("2.0.0", "^1.0.0"));
+}
+
+#[test]
+fn malformed_versions_never_satisfy_requirements() {
+    assert!(!version_satisfies("latest", "^1.0.0"));
+    assert!(!version_satisfies("1.0.0", "latest"));
+}
+
+#[test]
+fn semantic_version_ranges_are_supported() {
+    assert!(version_satisfies("0.2.0", ">=0.1.0,<1.0.0"));
+    assert!(!version_satisfies("1.0.0", ">=0.1.0,<1.0.0"));
 }
 
 #[test]
