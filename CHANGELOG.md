@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/nenjo-ai/nenjo/compare/v0.29.0...v0.30.0) - 2026-07-20
+
+### Added
+
+- add native agent browser support ([#99](https://github.com/nenjo-ai/nenjo/pull/99))
+
+### Fixed
+
+- host file system and async op tool improvements  ([#100](https://github.com/nenjo-ai/nenjo/pull/100))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.29.0](https://github.com/nenjo-ai/nenjo/compare/v0.28.0...v0.29.0) - 2026-07-18
 
 ### Added
