@@ -9,7 +9,7 @@ use nenjo::{
     manifest::{
         AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
         CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, DomainManifest,
-        HasManifestSlug, ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeManifest,
+        ManifestIdentity, ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeManifest,
         RoutineManifest, RoutineMetadata, RoutineStepManifest,
     },
 };
@@ -87,7 +87,7 @@ fn graph_input_to_manifest_parts(
 }
 
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
-    command.name == command_ref
+    command.manifest_slug().as_str() == command_ref
         || command.command == command_ref
         || command.command.trim_start_matches('/') == command_ref
 }
@@ -100,7 +100,7 @@ where
         .list_routines()
         .await?
         .into_iter()
-        .find(|item| Slug::derive(&item.name) == *routine)
+        .find(|item| item.manifest_slug() == routine)
         .ok_or_else(|| anyhow!("routine not found: {routine}"))
 }
 
@@ -112,7 +112,7 @@ where
         .list_councils()
         .await?
         .into_iter()
-        .find(|item| Slug::derive(&item.name) == *council)
+        .find(|item| item.manifest_slug() == council)
         .ok_or_else(|| anyhow!("council not found: {council}"))
 }
 
@@ -124,7 +124,7 @@ where
         .list_agents()
         .await?
         .into_iter()
-        .find(|item| Slug::derive(&item.name) == *agent)
+        .find(|item| item.manifest_slug() == agent)
         .ok_or_else(|| anyhow!("agent not found: {agent}"))
 }
 
@@ -136,7 +136,7 @@ where
         .list_models()
         .await?
         .into_iter()
-        .find(|item| item.manifest_slug() == *model || Slug::derive(&item.name) == *model)
+        .find(|item| item.manifest_slug() == model)
         .ok_or_else(|| anyhow!("model not found: {model}"))
 }
 
@@ -202,7 +202,7 @@ where
             .list_abilities()
             .await?
             .into_iter()
-            .find(|ability| Slug::derive(&ability.name) == *ability_ref)
+            .find(|ability| ability.manifest_slug() == ability_ref)
             .ok_or_else(|| anyhow!("ability not found: {}", ability_ref))
     }
 }
@@ -232,6 +232,7 @@ where
     }
 
     async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult> {
+        let old_slug = params.data.agent.clone();
         let mut agent = match params.data.agent.as_ref() {
             Some(agent) => local_agent_by_slug(self.reader.as_ref(), agent).await?,
             None => {
@@ -243,7 +244,12 @@ where
                     .ok_or_else(|| anyhow!("metadata.name is required when creating an agent"))?
                     .clone();
                 AgentManifest {
-                    slug: Slug::derive(&name),
+                    slug: params
+                        .data
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.slug.clone())
+                        .unwrap_or_else(|| Slug::derive(&name)),
                     name,
                     description: None,
                     prompt_config: PromptConfig::default(),
@@ -264,8 +270,10 @@ where
 
         if let Some(metadata) = params.data.metadata {
             if let Some(name) = metadata.name {
-                agent.slug = Slug::derive(&name);
                 agent.name = name;
+            }
+            if let Some(slug) = metadata.slug {
+                agent.slug = slug;
             }
             if let Some(description) = metadata.description {
                 agent.description = description;
@@ -300,6 +308,13 @@ where
         self.writer
             .upsert_resource(&ManifestResource::Agent(agent.clone()))
             .await?;
+        if let Some(old_slug) = old_slug
+            && old_slug != agent.slug
+        {
+            self.writer
+                .delete_resource(ManifestResourceKind::Agent, &old_slug)
+                .await?;
+        }
 
         Ok(AgentConfigureResult {
             agent: AgentDocument::from(agent),
@@ -351,6 +366,7 @@ where
                         anyhow!("prompt_config is required when creating an ability")
                     })?;
                 AbilityManifest {
+                    slug: Slug::derive(&name),
                     name,
                     path: None,
                     description: None,
@@ -474,10 +490,10 @@ where
                     .clone()
                     .ok_or_else(|| anyhow!("content is required when creating a command"))?;
                 CommandManifest {
+                    slug: Slug::derive(&name),
                     name,
                     path: metadata.path.clone().unwrap_or_default(),
                     command: slash_command,
-                    display_name: None,
                     description: metadata.description.clone().flatten(),
                     entry_path: "command.md".to_string(),
                     content,
@@ -569,6 +585,7 @@ where
                     .ok_or_else(|| anyhow!("metadata.command is required when creating a domain"))?
                     .clone();
                 DomainManifest {
+                    slug: Slug::derive(&name),
                     name,
                     path: String::new(),
                     description: None,
@@ -709,7 +726,7 @@ where
     async fn delete_project(&self, params: ProjectDeleteParams) -> Result<DeleteResult> {
         let project = local_project_by_slug(self.reader.as_ref(), &params.project).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Project, &project.manifest_slug())
+            .delete_resource(ManifestResourceKind::Project, project.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -786,6 +803,7 @@ where
         &self,
         params: RoutineConfigureParams,
     ) -> Result<RoutineConfigureResult> {
+        let old_slug = params.data.routine.clone();
         let mut routine = if let Some(routine_slug) = params.data.routine.as_ref() {
             local_routine_by_slug(self.reader.as_ref(), routine_slug).await?
         } else {
@@ -797,7 +815,12 @@ where
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| anyhow!("metadata.name is required when creating a routine"))?;
             RoutineManifest {
-                slug: Slug::derive(&name),
+                slug: params
+                    .data
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.slug.clone())
+                    .unwrap_or_else(|| Slug::derive(&name)),
                 name,
                 description: None,
                 metadata: RoutineMetadata::default(),
@@ -808,8 +831,10 @@ where
 
         if let Some(metadata) = params.data.metadata {
             if let Some(name) = metadata.name {
-                routine.slug = Slug::derive(&name);
                 routine.name = name;
+            }
+            if let Some(slug) = metadata.slug {
+                routine.slug = slug;
             }
             if let Some(description) = metadata.description {
                 routine.description = description;
@@ -832,6 +857,13 @@ where
         self.writer
             .upsert_resource(&ManifestResource::Routine(routine.clone()))
             .await?;
+        if let Some(old_slug) = old_slug
+            && old_slug != routine.slug
+        {
+            self.writer
+                .delete_resource(ManifestResourceKind::Routine, &old_slug)
+                .await?;
+        }
         Ok(RoutineConfigureResult {
             routine: RoutineDocument::from(routine),
             warnings: Vec::new(),
@@ -841,7 +873,7 @@ where
     async fn delete_routine(&self, params: RoutineDeleteParams) -> Result<DeleteResult> {
         let routine = local_routine_by_slug(self.reader.as_ref(), &params.slug).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Routine, &routine.manifest_slug())
+            .delete_resource(ManifestResourceKind::Routine, routine.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -875,10 +907,7 @@ where
     async fn create_model(&self, params: ModelCreateParams) -> Result<ModelMutationResult> {
         let model = ModelManifest {
             name: params.data.name,
-            slug: nenjo::manifest::model_manifest_slug(
-                params.data.model_provider.as_deref().unwrap_or("openai"),
-                &params.data.model,
-            ),
+            slug: params.data.slug,
             description: params.data.description,
             model: params.data.model,
             model_provider: params
@@ -936,7 +965,7 @@ where
     async fn delete_model(&self, params: ModelDeleteParams) -> Result<DeleteResult> {
         let model = local_model_by_slug(self.reader.as_ref(), &params.model).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Model, &model.manifest_slug())
+            .delete_resource(ManifestResourceKind::Model, model.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -969,6 +998,7 @@ where
 
     async fn create_council(&self, params: CouncilCreateParams) -> Result<CouncilMutationResult> {
         let council = CouncilManifest {
+            slug: params.data.slug,
             name: params.data.name,
             delegation_strategy: params
                 .data
@@ -1081,7 +1111,7 @@ where
     async fn delete_council(&self, params: CouncilDeleteParams) -> Result<DeleteResult> {
         let council = local_council_by_slug(self.reader.as_ref(), &params.council).await?;
         self.writer
-            .delete_resource(ManifestResourceKind::Council, &council.manifest_slug())
+            .delete_resource(ManifestResourceKind::Council, council.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1139,6 +1169,7 @@ where
                         anyhow!("template is required when creating a context block")
                     })?;
                 ContextBlockManifest {
+                    slug: Slug::derive(&name),
                     name,
                     path: String::new(),
                     description: None,
@@ -1257,7 +1288,7 @@ mod tests {
                 ..Default::default()
             },
             color: Some("#123456".into()),
-            model: Some(Slug::derive(&model.name)),
+            model: Some(model.slug.clone()),
             domains: vec![],
             platform_scopes: vec!["agents:read".into()],
             mcp_servers: vec![],
@@ -1270,6 +1301,7 @@ mod tests {
         };
 
         let ability = AbilityManifest {
+            slug: Slug::derive("review-helper"),
             name: "review_helper".into(),
             path: Some("team/core".into()),
             description: Some("Helps review code".into()),
@@ -1287,6 +1319,7 @@ mod tests {
         };
 
         let domain = DomainManifest {
+            slug: Slug::derive("creator"),
             name: "creator".into(),
             path: "team".into(),
             description: Some("Creates new resources".into()),
@@ -1323,7 +1356,7 @@ mod tests {
                 name: "compile".into(),
                 step_type: nenjo::manifest::RoutineStepType::Agent,
                 council: None,
-                agent: Some(Slug::derive(&agent.name)),
+                agent: Some(agent.slug.clone()),
                 config: serde_json::json!({}),
                 order_index: 0,
             }],
@@ -1337,9 +1370,10 @@ mod tests {
         };
 
         let council = CouncilManifest {
+            slug: Slug::derive("triage"),
             name: "triage".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
-            leader_agent: Slug::derive(&agent.name),
+            leader_agent: agent.slug.clone(),
             members: vec![CouncilMemberManifest {
                 agent: Slug::derive("worker"),
                 priority: 10,
@@ -1347,10 +1381,10 @@ mod tests {
         };
 
         let command = CommandManifest {
-            name: "design".into(),
+            slug: Slug::derive("design"),
+            name: "Design".into(),
             path: "build".into(),
             command: "/design".into(),
-            display_name: Some("Design".into()),
             description: Some("Design resources".into()),
             entry_path: "command.md".into(),
             content: "Design command body".into(),
@@ -1365,6 +1399,7 @@ mod tests {
         };
 
         let context_block = ContextBlockManifest {
+            slug: Slug::derive("repo-summary"),
             name: "repo_summary".into(),
             path: "team/core".into(),
             description: Some("Summarizes the current repository.".into()),
@@ -1446,7 +1481,7 @@ mod tests {
 
         let result = backend
             .get_agent(AgentsGetParams {
-                agent: Slug::derive(&agent.name),
+                agent: agent.slug.clone(),
             })
             .await
             .unwrap();
@@ -1466,9 +1501,10 @@ mod tests {
         let result = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: Some(crate::AgentConfigureMetadata {
                         name: Some("reviewer".into()),
+                        slug: None,
                         description: None,
                         color: None,
                         model: None,
@@ -1482,6 +1518,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.agent.summary.name, "reviewer");
+        assert_eq!(result.agent.summary.slug, agent.slug);
         assert_eq!(result.agent.summary.description, Some("writes code".into()));
         assert_eq!(result.agent.summary.color, Some("#123456".into()));
         assert_eq!(result.agent.platform_scopes, vec!["agents:read"]);
@@ -1494,9 +1531,10 @@ mod tests {
         let result = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: Some(crate::AgentConfigureMetadata {
                         name: None,
+                        slug: None,
                         description: Some(None),
                         color: Some(None),
                         model: Some(None),
@@ -1522,7 +1560,7 @@ mod tests {
         let result = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: None,
                     prompt_config: None,
                     assignments: Some(crate::AgentConfigureAssignments {
@@ -1549,9 +1587,10 @@ mod tests {
         let result = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: Some(crate::AgentConfigureMetadata {
                         name: Some("builder".into()),
+                        slug: None,
                         description: Some(Some("builds agents".into())),
                         color: None,
                         model: None,
@@ -1560,7 +1599,7 @@ mod tests {
                         "developer_prompt": "Build agent specs carefully."
                     })),
                     assignments: Some(crate::AgentConfigureAssignments {
-                        abilities: Some(vec!["design_agent".into()]),
+                        abilities: Some(vec![Slug::derive("design_agent")]),
                         domains: Some(vec![Slug::derive("creator")]),
                         mcp_servers: Some(vec![Slug::derive("review-server")]),
                     }),
@@ -1570,7 +1609,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.agent.summary.slug, Slug::derive("builder"));
+        assert_eq!(result.agent.summary.slug, agent.slug);
         assert_eq!(
             result.agent.summary.description.as_deref(),
             Some("builds agents")
@@ -1579,7 +1618,7 @@ mod tests {
             result.agent.prompt_config.developer_prompt,
             "Build agent specs carefully."
         );
-        assert_eq!(result.agent.abilities, vec!["design_agent"]);
+        assert_eq!(result.agent.abilities, vec![Slug::derive("design_agent")]);
         assert_eq!(result.agent.domains, vec![Slug::derive("creator")]);
         assert_eq!(
             result.agent.mcp_servers,
@@ -1594,7 +1633,7 @@ mod tests {
         let result = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: None,
                     prompt_config: Some(serde_json::json!({
                         "developer_prompt": "Prefer minimal diffs.",
@@ -1633,7 +1672,7 @@ mod tests {
         let error = backend
             .configure_agent(AgentConfigureParams {
                 data: crate::AgentConfigureDocument {
-                    agent: Some(Slug::derive(&agent.name)),
+                    agent: Some(agent.slug.clone()),
                     metadata: None,
                     prompt_config: Some(serde_json::json!({
                         "developer_prompt": "This should fail."
@@ -1656,7 +1695,7 @@ mod tests {
             &backend,
             "configure_agent",
             serde_json::json!({
-                "agent": Slug::derive(&agent.name),
+                "agent": agent.slug.clone(),
                 "metadata": {
                     "name": "planner"
                 },
@@ -1685,7 +1724,7 @@ mod tests {
             &backend,
             "configure_agent",
             serde_json::json!({
-                "agent": Slug::derive(&agent.name),
+                "agent": agent.slug.clone(),
                 "metadata": {
                     "name": "writer"
                 },
@@ -1735,7 +1774,7 @@ mod tests {
 
         let get = backend
             .get_ability(AbilitiesGetParams {
-                ability: Slug::derive(&ability.name),
+                ability: ability.slug.clone(),
             })
             .await
             .unwrap();
@@ -1751,7 +1790,7 @@ mod tests {
 
         let get = backend
             .get_ability(AbilitiesGetParams {
-                ability: Slug::derive(&ability.name),
+                ability: ability.slug.clone(),
             })
             .await
             .unwrap();
@@ -1771,7 +1810,7 @@ mod tests {
         let result = backend
             .configure_ability(AbilityConfigureParams {
                 data: crate::AbilityConfigureDocument {
-                    ability: Some(Slug::derive(&ability.name)),
+                    ability: Some(ability.slug.clone()),
                     metadata: Some(crate::AbilityConfigureMetadata {
                         activation_condition: Some("when reviewing code".into()),
                         ..Default::default()
@@ -1801,7 +1840,7 @@ mod tests {
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.name,
+                "ability": ability.slug.clone(),
                 "metadata": {
                     "description": "Updated"
                 },
@@ -1830,7 +1869,7 @@ mod tests {
         let result = backend
             .configure_ability(AbilityConfigureParams {
                 data: crate::AbilityConfigureDocument {
-                    ability: Some(Slug::derive(&ability.name)),
+                    ability: Some(ability.slug.clone()),
                     prompt_config: Some(AbilityPromptConfig {
                         developer_prompt: "New review prompt".into(),
                     }),
@@ -1868,7 +1907,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(get.command.name, "design");
+        assert_eq!(get.command.name, "Design");
         assert_eq!(get.command.content, "Design command body");
     }
 
@@ -1879,7 +1918,7 @@ mod tests {
         let list = ManifestMcpContract::dispatch(&backend, "list_commands", serde_json::json!({}))
             .await
             .unwrap();
-        assert_eq!(list["commands"][0]["name"], "design");
+        assert_eq!(list["commands"][0]["name"], "Design");
         assert!(list["commands"][0].get("content").is_none());
 
         let get = ManifestMcpContract::dispatch(
@@ -2022,7 +2061,7 @@ mod tests {
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.name,
+                "ability": ability.slug.clone(),
                 "metadata": {
                     "description": "Improved review helper"
                 }
@@ -2039,7 +2078,7 @@ mod tests {
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.name,
+                "ability": ability.slug.clone(),
                 "prompt_config": {
                     "developer_prompt": "Upgraded prompt"
                 }
@@ -2206,7 +2245,7 @@ mod tests {
 
         let get = backend
             .get_routine(RoutinesGetParams {
-                slug: Slug::derive(&routine.name),
+                slug: routine.slug.clone(),
             })
             .await
             .unwrap();
@@ -2227,9 +2266,10 @@ mod tests {
         let result = backend
             .configure_routine(RoutineConfigureParams {
                 data: crate::RoutineConfigureDocument {
-                    routine: Some(Slug::derive(&routine.name)),
+                    routine: Some(routine.slug.clone()),
                     metadata: Some(crate::RoutineConfigureMetadata {
                         name: Some("nightly-release".into()),
+                        slug: None,
                         description: None,
                         project_id: None,
                         is_active: None,
@@ -2245,7 +2285,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.routine.summary.name, "nightly-release");
-        assert_eq!(result.routine.summary.slug, Slug::derive("nightly-release"));
+        assert_eq!(result.routine.summary.slug, routine.slug);
         assert_eq!(
             result.routine.summary.description,
             Some("Runs the nightly build".into())
@@ -2265,9 +2305,10 @@ mod tests {
         let result = backend
             .configure_routine(RoutineConfigureParams {
                 data: crate::RoutineConfigureDocument {
-                    routine: Some(Slug::derive(&routine.name)),
+                    routine: Some(routine.slug.clone()),
                     metadata: Some(crate::RoutineConfigureMetadata {
                         name: None,
+                        slug: None,
                         description: Some(None),
                         project_id: None,
                         is_active: None,
@@ -2296,7 +2337,7 @@ mod tests {
             &backend,
             "configure_routine",
             serde_json::json!({
-                "routine": Slug::derive(&routine.name),
+                "routine": routine.slug.clone(),
                 "runtime_metadata": {
                     "entry_steps": [routine.steps[0].slug]
                 }
@@ -2324,6 +2365,7 @@ mod tests {
                     routine: None,
                     metadata: Some(crate::RoutineConfigureMetadata {
                         name: Some("pipeline".into()),
+                        slug: None,
                         description: Some(Some("Build workflow".into())),
                         project_id: None,
                         is_active: None,
@@ -2514,7 +2556,7 @@ mod tests {
             &backend,
             "update_model",
             serde_json::json!({
-                "model": Slug::derive(&model.name),
+                "model": model.slug,
                 "temperature": 0.42
             }),
         )
@@ -2538,7 +2580,7 @@ mod tests {
 
         let get = backend
             .get_council(CouncilsGetParams {
-                council: Slug::derive(&council.name),
+                council: council.slug.clone(),
             })
             .await
             .unwrap();
@@ -2554,7 +2596,7 @@ mod tests {
 
         let result = backend
             .update_council(CouncilUpdateParams {
-                council: Slug::derive(&council.name),
+                council: council.slug.clone(),
                 data: crate::CouncilUpdateDocument {
                     name: Some("dispatch".into()),
                     description: None,
@@ -2583,7 +2625,7 @@ mod tests {
             &backend,
             "update_council",
             serde_json::json!({
-                "council": Slug::derive(&council.name),
+                "council": council.slug.clone(),
                 "delegation_strategy": "broadcast"
             }),
         )
@@ -2608,7 +2650,7 @@ mod tests {
             &backend,
             "add_council_member",
             serde_json::json!({
-                "council": Slug::derive(&council.name),
+                "council": council.slug.clone(),
                 "agent": new_agent,
                 "priority": 5,
                 "config": {}
@@ -2625,7 +2667,7 @@ mod tests {
             &backend,
             "update_council_member",
             serde_json::json!({
-                "council": Slug::derive(&council.name),
+                "council": council.slug.clone(),
                 "agent": member_agent,
                 "priority": 42
             }),
@@ -2638,7 +2680,7 @@ mod tests {
             &backend,
             "remove_council_member",
             serde_json::json!({
-                "council": Slug::derive(&council.name),
+                "council": council.slug.clone(),
                 "agent": new_agent
             }),
         )
@@ -2665,10 +2707,7 @@ mod tests {
         assert_eq!(list.context_blocks.len(), 1);
         assert_eq!(list.context_blocks[0].name, context_block.name);
         assert_eq!(list.context_blocks[0].slug, context_block.slug());
-        assert_eq!(
-            list.context_blocks[0].slug.as_str(),
-            "team-core-repo_summary"
-        );
+        assert_eq!(list.context_blocks[0].slug.as_str(), "repo-summary");
         assert_eq!(
             list.context_blocks[0].selector,
             "{{ team.core.repo_summary }}"

@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{PackageError, Result};
 use anyhow::Context;
+use nenjo::Slug;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
 use crate::schema::parse_package_file_schema;
 use crate::{
-    ManifestSchemaVersion, ModulePackageManifest, PackageKind, PackageModule, ResourceSchema,
-    parse_json_or_yaml, validate_relative_module_import_path, validate_resource_name,
-    validate_source_path,
+    ManifestSchemaVersion, ModulePackageManifest, PackageKind, PackageModule, PackageResourceSlug,
+    ResourceSchema, parse_json_or_yaml, validate_relative_module_import_path,
+    validate_resource_name, validate_source_path,
 };
 
 pub(crate) fn parse_module_file(content: &str, source_path: &str) -> Result<Vec<ResourceManifest>> {
@@ -79,7 +80,7 @@ fn parse_skill_markdown(content: &str, source_path: &str) -> Result<ResourceMani
 
     Ok(ResourceManifest {
         schema: "nenjo.skill.v1".to_string(),
-        slug: None,
+        slug: Some(Slug::derive(&name).into_string()),
         root_uri: None,
         selector: None,
         imports: BTreeMap::new(),
@@ -380,6 +381,14 @@ impl ResourceManifest {
         self.slug.as_deref()
     }
 
+    /// Return the authored stable package-local resource slug.
+    pub fn resource_slug(&self) -> Result<Option<PackageResourceSlug>> {
+        self.slug
+            .as_deref()
+            .map(PackageResourceSlug::parse)
+            .transpose()
+    }
+
     /// Return the optional source root URI.
     pub fn root_uri(&self) -> Option<&str> {
         self.root_uri.as_deref()
@@ -464,11 +473,7 @@ impl ResourceManifest {
     /// Validate canonical module wrapper shape.
     pub fn validate_wrapper(&self) -> Result<()> {
         let kind = self.kind()?;
-        if self.slug.is_some() {
-            bail!(
-                "resource manifests must not define wrapper slug; package resolution derives slug from manifest.name"
-            );
-        }
+        self.resource_slug()?;
         if self
             .manifest
             .get("imports")

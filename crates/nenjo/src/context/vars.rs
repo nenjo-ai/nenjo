@@ -116,7 +116,7 @@ impl RenderContextVars {
             // Agent (self) — singular XML + fields
             ("self", self_xml.as_str()),
             ("agent.slug", &self._self.slug),
-            ("agent.name", &self._self.display_name),
+            ("agent.name", &self._self.name),
             ("agent.model", &self._self.model_name),
             (
                 "agent.description",

@@ -21,7 +21,9 @@ use super::compaction::{
     compact_messages_for_payload, compact_messages_with_summary, estimate_serialized_bytes,
     estimate_serialized_messages_bytes, truncate, truncate_old_tool_arguments, truncate_str,
 };
-use super::types::{ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnOutput};
+use super::types::{
+    ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnLoopError, TurnOutput,
+};
 use crate::agents::async_ops::{
     AsyncOpWaitFilter, AsyncOperationRuntime, scope_current_async_operation_runtime,
 };
@@ -35,6 +37,24 @@ use crate::hooks::{
 use crate::provider::ProviderRuntime;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 use nenjo_models::{ChatMessage, ChatRequest, ProviderStreamEvent, ProviderToolTrace};
+
+/// How a turn is allowed to reach a successful terminal state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnCompletion {
+    /// A non-empty assistant response may end the turn.
+    Natural,
+    /// Only a successful call to the named terminal tool may end the turn.
+    RequireTool(&'static str),
+}
+
+impl TurnCompletion {
+    fn required_tool(self) -> Option<&'static str> {
+        match self {
+            Self::Natural => None,
+            Self::RequireTool(tool) => Some(tool),
+        }
+    }
+}
 
 fn tool_for_call<'a>(
     tools: &'a [Arc<dyn Tool>],
@@ -434,7 +454,7 @@ pub async fn run<P>(
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     pause_token: Option<super::types::PauseToken>,
     turn_input: Option<TurnInputReceiver>,
-    require_respond_to_user: bool,
+    completion: TurnCompletion,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
@@ -444,6 +464,16 @@ where
     let model = &agent.model.model_name;
     let temperature = agent.model.temperature;
     let tools = &agent.runtime.tools;
+    if let Some(required_tool) = completion.required_tool()
+        && !tools
+            .iter()
+            .any(|tool| tool.name() == required_tool && tool.is_terminal())
+    {
+        return Err(TurnLoopError::RequiredCompletionToolUnavailable {
+            tool: required_tool,
+        }
+        .into());
+    }
     let cancel = agent.runtime.execution_cancel.clone();
     let visible_tool_specs = agent.visible_tool_specs().await;
     let initial_local_tool_specs = agent.visible_local_tool_specs().await;
@@ -451,7 +481,7 @@ where
     let initial_local_tool_specs = initial_local_tool_specs.as_slice();
     let hook_runtime = agent.runtime.hook_runtime.clone();
     let config = TurnLoopConfig {
-        max_turns: agent.runtime.config.max_turns as u32,
+        max_turns: agent.runtime.config.max_turns,
         parallel_tools: agent.runtime.config.parallel_tools,
     };
     let max_turns = config.max_turns;
@@ -461,6 +491,11 @@ where
     let mut total_output_tokens: u64 = 0;
     let mut total_tool_calls: u32 = 0;
     let mut user_prompt_submit_hooks_seen = HashSet::new();
+
+    enum TurnLoopExit {
+        Completed,
+        MaxTurnsReached,
+    }
 
     let nested_usage = CURRENT_NESTED_TOKEN_USAGE
         .try_with(Clone::clone)
@@ -495,6 +530,7 @@ where
                 );
             }
 
+            let mut loop_exit = TurnLoopExit::MaxTurnsReached;
             for iteration in 0..max_turns {
                 if cancel.is_cancelled() {
                     agent.runtime.async_ops.stop(
@@ -581,6 +617,7 @@ where
                         final_text =
                             format!("Blocked by hook {}: {}", block.hook, block.reason);
                         remove_latest_user_prompt(&mut messages, &prompt);
+                        loop_exit = TurnLoopExit::Completed;
                         break;
                     }
                     append_user_prompt_hook_contexts(
@@ -591,7 +628,8 @@ where
                 }
 
                 // Call LLM
-                let hide_final_response_tool = !require_respond_to_user;
+                let hide_final_response_tool =
+                    completion.required_tool() != Some(RESPOND_TO_USER_TOOL_NAME);
                 let local_tool_specs = agent
                     .visible_local_tool_specs()
                     .await
@@ -891,10 +929,14 @@ where
                     // without feeding the tool result back to the LLM.
                     let terminal_result = tool_results.iter().find(|(tc, result)| {
                         result.success
-                            && tool_for_call(tools, tc).is_some_and(|t| t.is_terminal())
+                            && tool_for_call(tools, tc).is_some_and(|tool| {
+                                tool.is_terminal()
+                                    && completion
+                                        .required_tool()
+                                        .is_none_or(|required| tool.name() == required)
+                            })
                             && RespondToUserStatus::from_tool_call(tc).is_terminal()
                     });
-                    let has_terminal = terminal_result.is_some();
                     let has_terminal_attempt = tool_results.iter().any(|(tc, _)| {
                         tool_for_call(tools, tc)
                             .is_some_and(|t| t.is_terminal())
@@ -930,40 +972,11 @@ where
                             );
                         }
 
-                        if tool_result.success
-                            && tool_for_call(tools, tool_call)
-                                .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
-                        {
-                            let status = RespondToUserStatus::from_tool_call(tool_call);
-                            let message = tool_result.output.trim().to_string();
-                            if !message.is_empty() {
-                                let assistant_message = ChatMessage::assistant(message.clone());
-                                messages.push(assistant_message.clone());
-                                emit_event(
-                                    events_tx.as_ref(),
-                                    TurnEvent::AssistantResponse {
-                                        message,
-                                        status: status.to_string(),
-                                    },
-                                );
-                                emit_event(
-                                    events_tx.as_ref(),
-                                    TurnEvent::TranscriptMessage {
-                                        message: assistant_message,
-                                    },
-                                );
-                            }
-                        }
-
-                        // Skip pushing tool results when a terminal tool succeeded —
-                        // the structured arguments are already captured in the assistant
-                        // message and no further LLM interaction is needed.
-                        if has_terminal {
-                            continue;
-                        }
-
                         // Build tool result message with tool_call_id so providers
-                        // can match each result to its corresponding tool call.
+                        // can match each result to its corresponding tool call. Keep
+                        // successful terminal results too: if a stop hook requests
+                        // continuation, the next provider request must still have a
+                        // structurally complete tool-call exchange.
                         let raw_content = if tool_result.success {
                             tool_result.output.clone()
                         } else {
@@ -996,29 +1009,47 @@ where
                                 message: tool_message,
                             },
                         );
+
+                        if tool_result.success
+                            && tool_for_call(tools, tool_call)
+                                .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
+                        {
+                            let status = RespondToUserStatus::from_tool_call(tool_call);
+                            let message = tool_result.output.trim().to_string();
+                            if !message.is_empty() {
+                                let assistant_message = ChatMessage::assistant(message.clone());
+                                messages.push(assistant_message.clone());
+                                emit_event(
+                                    events_tx.as_ref(),
+                                    TurnEvent::AssistantResponse {
+                                        message,
+                                        status: status.to_string(),
+                                    },
+                                );
+                                emit_event(
+                                    events_tx.as_ref(),
+                                    TurnEvent::TranscriptMessage {
+                                        message: assistant_message,
+                                    },
+                                );
+                            }
+                        }
                     }
 
                     // Terminal tool: stop the loop. The verdict is already recorded
                     // in the assistant message's tool_calls for extraction.
-                    if has_terminal {
+                    if let Some((terminal_tool_call, terminal_tool_result)) = terminal_result {
                         debug!(
                             agent = agent_name,
                             model, "Terminal tool called, ending turn loop"
                         );
-                        let terminal_tool_text = tool_results
-                            .iter()
-                            .find(|(tc, result)| {
-                                result.success
-                                    && tool_for_call(tools, tc)
-                                        .is_some_and(|t| t.is_terminal())
-                            })
-                            .map(|(_, result)| result.output.clone())
-                            .unwrap_or_default();
-                        let terminal_tool_name = terminal_result
-                            .and_then(|(tc, _)| tool_for_call(tools, tc))
+                        let terminal_tool_text = terminal_tool_result.output.clone();
+                        let terminal_tool_name = tool_for_call(tools, terminal_tool_call)
                             .map(|tool| tool.name())
                             .unwrap_or_default();
-                        final_text = if terminal_tool_name == RESPOND_TO_USER_TOOL_NAME {
+                        final_text = if completion.required_tool().is_some()
+                            || terminal_tool_name == RESPOND_TO_USER_TOOL_NAME
+                        {
                             terminal_tool_text
                         } else {
                             response
@@ -1045,6 +1076,7 @@ where
                             );
                             continue;
                         }
+                        loop_exit = TurnLoopExit::Completed;
                         break;
                     }
 
@@ -1091,14 +1123,9 @@ where
                     messages.push(ChatMessage::developer(message));
                     continue;
                 }
-                if agent
-                    .runtime
-                    .tools
-                    .iter()
-                    .any(|tool| require_respond_to_user && tool.name() == RESPOND_TO_USER_TOOL_NAME)
-                {
+                if let Some(required_tool) = completion.required_tool() {
                     messages.push(ChatMessage::developer(format!(
-                        "Your previous response was not delivered because this runtime requires the {RESPOND_TO_USER_TOOL_NAME} tool to end the turn. Call {RESPOND_TO_USER_TOOL_NAME} with the final user-facing message when you are ready.\n\nUndelivered response draft:\n{text}"
+                        "Your previous response was not delivered because this runtime requires the {required_tool} tool to end the turn. Continue the work, then call {required_tool} only when the requested work is fully handled.\n\nUndelivered response draft:\n{text}"
                     )));
                     continue;
                 }
@@ -1123,22 +1150,30 @@ where
                     append_hook_block_continuation(&mut messages, events_tx.as_ref(), block);
                     continue;
                 }
+                loop_exit = TurnLoopExit::Completed;
                 break;
             }
 
-            if final_text.is_empty() && max_turns > 0 {
+            if matches!(loop_exit, TurnLoopExit::MaxTurnsReached) {
+                let error = TurnLoopError::MaxTurnsReached { max_turns };
                 warn!(
                     agent = agent_name,
                     model,
                     max_turns,
-                    "Turn loop reached max turns without final response"
+                    error = %error,
+                    "Turn loop failed after reaching max turns"
                 );
-                final_text = messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant")
-                    .map(|m| m.content.clone())
-                    .unwrap_or_else(|| "Max iterations reached without a final response.".into());
+                agent
+                    .runtime
+                    .async_ops
+                    .stop(
+                        Vec::new(),
+                        None,
+                        Some(error.to_string()),
+                        events_tx.clone(),
+                    )
+                    .await;
+                return Err(error.into());
             }
 
             if run_depth == 1 {

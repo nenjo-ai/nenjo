@@ -54,6 +54,11 @@ pub(crate) enum AsyncOpSignal {
         summary: String,
         details: Option<String>,
     },
+    RecoverableToolError {
+        tool: String,
+        error: String,
+        recommended_action: AsyncOpRecommendedAction,
+    },
     NeedsInput {
         question: String,
         context: Option<String>,
@@ -73,6 +78,12 @@ pub(crate) enum AsyncOpSignal {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsyncOpRecommendedAction {
+    Wait,
+}
+
 impl AsyncOpSignal {
     pub(crate) fn kind(&self) -> &'static str {
         self.signal_kind().as_str()
@@ -82,6 +93,7 @@ impl AsyncOpSignal {
         match self {
             Self::Started { .. } => AsyncOperationSignalKind::Started,
             Self::Progress { .. } => AsyncOperationSignalKind::Progress,
+            Self::RecoverableToolError { .. } => AsyncOperationSignalKind::RecoverableToolError,
             Self::NeedsInput { .. } => AsyncOperationSignalKind::NeedsInput,
             Self::Completed { .. } => AsyncOperationSignalKind::Completed,
             Self::Failed { .. } => AsyncOperationSignalKind::Failed,
@@ -95,14 +107,17 @@ impl AsyncOpSignal {
             Self::Completed { .. } => AsyncOpStatus::Completed,
             Self::Failed { .. } => AsyncOpStatus::Failed,
             Self::Stopped { .. } => AsyncOpStatus::Stopped,
-            Self::Started { .. } | Self::Progress { .. } => AsyncOpStatus::Running,
+            Self::Started { .. } | Self::Progress { .. } | Self::RecoverableToolError { .. } => {
+                AsyncOpStatus::Running
+            }
         }
     }
 
     pub(crate) fn wakes_parent(&self) -> bool {
         matches!(
             self,
-            Self::NeedsInput { .. }
+            Self::RecoverableToolError { .. }
+                | Self::NeedsInput { .. }
                 | Self::Completed { .. }
                 | Self::Failed { .. }
                 | Self::Stopped { .. }
@@ -114,6 +129,9 @@ impl AsyncOpSignal {
             Self::Started { summary }
             | Self::Progress { summary, .. }
             | Self::Completed { summary, .. } => summary.clone(),
+            Self::RecoverableToolError { tool, .. } => format!(
+                "Tool '{tool}' failed, but the ability is still running and can self-correct"
+            ),
             Self::NeedsInput { question, .. } => question.clone(),
             Self::Failed { error, .. } => error.clone(),
             Self::Stopped { reason } => reason.clone().unwrap_or_else(|| "stopped".into()),
@@ -125,6 +143,16 @@ impl AsyncOpSignal {
             Self::Progress { details, .. } => details
                 .as_ref()
                 .map(|details| serde_json::json!({ "details": details })),
+            Self::RecoverableToolError {
+                tool,
+                error,
+                recommended_action,
+            } => Some(serde_json::json!({
+                "tool": tool,
+                "error": error,
+                "recoverable": true,
+                "recommended_action": recommended_action,
+            })),
             Self::NeedsInput { context, .. } => context
                 .as_ref()
                 .map(|context| serde_json::json!({ "context": context })),
@@ -953,6 +981,23 @@ impl AsyncOpHandle {
         .await;
     }
 
+    pub(crate) async fn recoverable_tool_error(
+        &self,
+        tool: String,
+        error: String,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) {
+        self.emit_signal(
+            AsyncOpSignal::RecoverableToolError {
+                tool: truncate(&tool, 200),
+                error: truncate(&error, 1000),
+                recommended_action: AsyncOpRecommendedAction::Wait,
+            },
+            events_tx,
+        )
+        .await;
+    }
+
     pub(crate) async fn complete(
         &self,
         signal: AsyncOpSignal,
@@ -1000,6 +1045,7 @@ impl AsyncOpHandle {
                     AsyncOpSignal::Stopped { .. } => {}
                     AsyncOpSignal::Started { .. }
                     | AsyncOpSignal::Progress { .. }
+                    | AsyncOpSignal::RecoverableToolError { .. }
                     | AsyncOpSignal::NeedsInput { .. } => unreachable!(),
                 }
                 self.push_signal(signal, true, events_tx).await;
@@ -1201,15 +1247,17 @@ fn classify_wake(updates: &[AsyncOpSignalDigest]) -> &'static str {
         updates
             .iter()
             .flat_map(|digest| digest.events.iter())
-            .any(|signal| signal.kind() == kind)
+            .any(|signal| signal.signal_kind() == kind)
     };
-    if has("needs_input") {
+    if has(AsyncOperationSignalKind::NeedsInput) {
         "needs_input"
-    } else if has("completed") || has("failed") {
+    } else if has(AsyncOperationSignalKind::Completed) || has(AsyncOperationSignalKind::Failed) {
         "operation_result"
-    } else if has("stopped") {
+    } else if has(AsyncOperationSignalKind::Stopped) {
         "stopped"
-    } else if has("progress") {
+    } else if has(AsyncOperationSignalKind::RecoverableToolError) {
+        "recoverable_error"
+    } else if has(AsyncOperationSignalKind::Progress) {
         "progress"
     } else {
         "timeout"
@@ -1301,6 +1349,49 @@ mod tests {
         assert_eq!(result.updates.len(), 1);
         assert_eq!(result.updates[0].operation_id, "ability_research_1");
         assert_eq!(result.updates[0].events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn recoverable_tool_error_wakes_wait_without_ending_operation() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_build_routine_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "build_routine".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("use_ability".into()),
+                    started_summary: "building routine".into(),
+                    model_visible: true,
+                    controls: all_controls(),
+                },
+                None,
+            )
+            .await;
+        manager
+            .drain_signals(AsyncOpWaitFilter::model_visible())
+            .await;
+
+        started
+            .handle
+            .recoverable_tool_error("configure_routine".into(), "validation failed".into(), None)
+            .await;
+
+        let result = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .await;
+        assert_eq!(result.woken_by, "recoverable_error");
+        assert_eq!(result.updates[0].status, "running");
+        assert!(matches!(
+            &result.updates[0].events[0],
+            AsyncOpSignal::RecoverableToolError {
+                tool,
+                error,
+                recommended_action: AsyncOpRecommendedAction::Wait,
+            } if tool == "configure_routine" && error == "validation failed"
+        ));
+        assert!(manager.has_open_model_visible().await);
     }
 
     #[tokio::test]

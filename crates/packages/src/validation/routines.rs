@@ -141,7 +141,7 @@ fn resolve_routine_agent_reference<'a>(
                 candidate.source_path.as_str(),
             );
             if candidate.kind == PackageKind::Agent
-                && candidate.name() == slug.as_str()
+                && candidate.manifest.slug() == Some(slug.as_str())
                 && seen.insert(key)
             {
                 matches.push(candidate);

@@ -171,6 +171,7 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         let ability = AbilityManifest {
+            slug: Slug::derive("ability"),
             name: "ability".into(),
             path: None,
             description: None,
@@ -192,6 +193,7 @@ mod tests {
     fn domains_require_allowed_manifest_scopes() {
         let policy = ManifestAccessPolicy::new(vec!["projects:read".into()]);
         let allowed_domain = DomainManifest {
+            slug: Slug::derive("domain"),
             name: "domain".into(),
             path: String::new(),
             description: None,
@@ -204,6 +206,7 @@ mod tests {
             prompt_config: DomainPromptConfig::default(),
         };
         let denied_domain = DomainManifest {
+            slug: Slug::derive("domain-2"),
             name: "domain-2".into(),
             path: String::new(),
             description: None,

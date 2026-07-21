@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
-    CouncilDelegationStrategy, CouncilManifest, DomainManifest, HasManifestSlug, ModelManifest,
+    CouncilDelegationStrategy, CouncilManifest, DomainManifest, ManifestIdentity, ModelManifest,
     ProjectManifest, PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
     RoutineMetadata, RoutineStepManifest, RoutineStepType,
 };
@@ -41,7 +41,7 @@ pub struct AgentDocument {
     #[serde(default)]
     pub script_tools: Vec<Slug>,
     #[serde(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     #[serde(default)]
     pub prompt_locked: bool,
 }
@@ -51,6 +51,8 @@ pub struct AgentDocument {
 pub struct AgentConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +69,7 @@ pub struct AgentConfigureMetadata {
 /// Full replacement assignment lists for `configure_agent`.
 pub struct AgentConfigureAssignments {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<String>>,
+    pub abilities: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domains: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +126,7 @@ impl From<AgentManifest> for AgentDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Prompt-free ability metadata returned by list/get operations.
 pub struct AbilitySummary {
+    pub slug: Slug,
     pub name: String,
     #[serde(default)]
     pub path: String,
@@ -149,6 +152,8 @@ pub struct AbilityDocument {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Metadata patch for `configure_ability`.
 pub struct AbilityConfigureMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,6 +194,7 @@ impl From<AbilityManifest> for AbilityDocument {
     fn from(ability: AbilityManifest) -> Self {
         Self {
             summary: AbilitySummary {
+                slug: ability.slug,
                 name: ability.name,
                 path: ability.path.unwrap_or_default(),
                 description: ability.description,
@@ -224,8 +230,6 @@ pub struct CommandSummary {
     pub path: String,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub hooks: Vec<Slug>,
@@ -240,11 +244,10 @@ pub struct CommandSummary {
 impl From<CommandManifest> for CommandSummary {
     fn from(command: CommandManifest) -> Self {
         Self {
-            slug: command.manifest_slug(),
+            slug: command.manifest_slug().clone(),
             name: command.name,
             path: command.path,
             command: command.command,
-            display_name: command.display_name,
             description: command.description,
             hooks: command.hooks,
             source_type: command.source_type,
@@ -290,7 +293,7 @@ pub struct DomainDocument {
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     #[serde(default)]
     pub mcp_servers: Vec<Slug>,
     #[serde(default)]
@@ -300,6 +303,8 @@ pub struct DomainDocument {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 /// Metadata patch for `configure_domain`.
 pub struct DomainConfigureMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,7 +319,7 @@ pub struct DomainConfigureMetadata {
 /// Full replacement assignment lists for `configure_domain`.
 pub struct DomainConfigureAssignments {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<String>>,
+    pub abilities: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<Slug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +367,8 @@ pub struct ContextBlockDocument {
 /// Metadata patch for `configure_context_block`.
 pub struct ContextBlockConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -386,7 +393,7 @@ pub struct ContextBlockConfigureDocument {
 
 impl From<DomainManifest> for DomainDocument {
     fn from(domain: DomainManifest) -> Self {
-        let slug = domain.slug();
+        let slug = domain.slug.clone();
         Self {
             summary: DomainSummary {
                 name: domain.name,
@@ -406,11 +413,17 @@ impl From<DomainManifest> for DomainDocument {
 
 impl From<ContextBlockManifest> for ContextBlockDocument {
     fn from(context_block: ContextBlockManifest) -> Self {
-        let slug = context_block.slug();
-        let selector = format!(
-            "{{{{ {} }}}}",
-            context_block_selector(&context_block.path, &context_block.name)
-        );
+        let slug = context_block.slug.clone();
+        let dotted_selector = if context_block.path.is_empty() {
+            context_block.name.clone()
+        } else {
+            format!(
+                "{}.{}",
+                context_block.path.replace('/', "."),
+                context_block.name
+            )
+        };
+        let selector = format!("{{{{ {dotted_selector} }}}}");
         Self {
             template: context_block.template,
             summary: ContextBlockSummary {
@@ -421,19 +434,6 @@ impl From<ContextBlockManifest> for ContextBlockDocument {
                 description: context_block.description,
             },
         }
-    }
-}
-
-fn context_block_selector(path: &str, name: &str) -> String {
-    if path.trim().is_empty() {
-        name.to_string()
-    } else {
-        let path = path
-            .split('/')
-            .filter(|part| !part.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(".");
-        format!("{path}.{name}")
     }
 }
 
@@ -773,6 +773,8 @@ pub struct RoutineConfigureMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<Slug>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<Option<uuid::Uuid>>,
@@ -909,9 +911,10 @@ pub struct ModelDocument {
     pub native_tools: Vec<NativeModelToolId>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Request body for creating a model.
 pub struct ModelCreateDocument {
+    pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
     pub model: String,
@@ -969,6 +972,7 @@ impl From<ModelManifest> for ModelDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Council metadata returned by list/get operations.
 pub struct CouncilSummary {
+    pub slug: Slug,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
     pub leader_agent: Slug,
@@ -1020,6 +1024,7 @@ impl CouncilMemberUpdateDocument {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Request body for creating a council.
 pub struct CouncilCreateDocument {
+    pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
     pub leader_agent: Slug,
@@ -1048,6 +1053,7 @@ impl From<CouncilManifest> for CouncilDocument {
     fn from(council: CouncilManifest) -> Self {
         Self {
             summary: CouncilSummary {
+                slug: council.slug,
                 name: council.name,
                 delegation_strategy: council.delegation_strategy,
                 leader_agent: council.leader_agent,

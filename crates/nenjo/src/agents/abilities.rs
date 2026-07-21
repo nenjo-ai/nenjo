@@ -27,7 +27,7 @@ use super::async_ops::{
     StartAsyncOp, truncate,
 };
 use super::delegation::DELEGATE_TO_TOOL_NAME;
-use super::instance::{AgentInstance, AgentPromptState, AgentRuntime};
+use super::instance::{AgentExecutionMode, AgentInstance, AgentPromptState, AgentRuntime};
 use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
@@ -36,6 +36,9 @@ use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory}
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
+pub(crate) const FINISH_ABILITY_TOOL_NAME: &str = "finish";
+
+const ABILITY_COMPLETION_GUIDANCE: &str = "Complete this ability execution through the `finish` tool. Ordinary assistant prose does not end an ability. Use status `completed` only after the requested work and its required verification are complete. Use status `failed` when the work cannot be completed, and explain the concrete blocker. Use `ask_parent_agent` instead when parent input could unblock the work.";
 
 static ABILITY_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -309,7 +312,7 @@ impl Tool for StopOperationsTool {
     }
 
     fn description(&self) -> &str {
-        "Stop one or more running async operations. Filter by kind to avoid stopping unrelated work."
+        "Stop one or more running async operations. Filter by kind to avoid stopping unrelated work. Do not stop and restart an operation solely because an internal tool call failed while its status remains running."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -386,7 +389,7 @@ impl Tool for WaitOperationsTool {
     }
 
     fn description(&self) -> &str {
-        "Wait while async operations continue running, then return queued operation signals. For video or other media generation, call this with kind=media after the media tool returns job_started; repeat wait until the media operation completes or fails instead of calling the generation tool again for the same request."
+        "Wait while async operations continue running, then return queued operation signals. A recoverable_tool_error keeps the operation running and recommends waiting rather than stopping and reinvoking it. For video or other media generation, call this with kind=media after the media tool returns job_started; repeat wait until the media operation completes or fails instead of calling the generation tool again for the same request."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -438,6 +441,23 @@ struct UpdateAbilityParentTool {
 
 struct AskAbilityParentTool {
     handle: AsyncOpChildHandle,
+}
+
+struct FinishAbilityTool;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AbilityFinishStatus {
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct AbilityFinish {
+    status: AbilityFinishStatus,
+    summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
 }
 
 #[async_trait::async_trait]
@@ -553,12 +573,71 @@ impl Tool for AskAbilityParentTool {
     }
 }
 
+#[async_trait::async_trait]
+impl Tool for FinishAbilityTool {
+    fn name(&self) -> &str {
+        FINISH_ABILITY_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Finish this ability operation. Use completed only after all requested actions and verification have succeeded. Use failed when the ability cannot complete the request. Ordinary assistant prose does not finish an ability."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["completed", "failed"]
+                },
+                "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A concise account of the completed result or concrete failure."
+                },
+                "result": {
+                    "description": "Optional structured result for the parent agent."
+                }
+            },
+            "required": ["status", "summary"]
+        })
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Write
+    }
+
+    fn origin(&self) -> ToolOrigin {
+        ToolOrigin::Harness
+    }
+
+    fn is_terminal(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let mut finish: AbilityFinish = serde_json::from_value(args)?;
+        finish.summary = finish.summary.trim().to_string();
+        if finish.summary.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("summary is required".into()),
+            });
+        }
+        Ok(json_tool(serde_json::to_value(finish)?))
+    }
+}
+
 fn ability_child_tools(handle: AsyncOpChildHandle) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(UpdateAbilityParentTool {
             handle: handle.clone(),
         }),
         Arc::new(AskAbilityParentTool { handle }),
+        Arc::new(FinishAbilityTool),
     ]
 }
 
@@ -661,17 +740,6 @@ where
         parent_events_tx,
     } = operation;
 
-    let ability_session = match instance.runtime.current_session_id {
-        Some(parent_session_id) => Some(
-            instance
-                .runtime
-                .ability_sessions
-                .begin(parent_session_id, &ability.name)
-                .await,
-        ),
-        None => None,
-    };
-
     let mut sub_instance = build_ability_instance(&instance, &ability).await;
     let cancel_token = op_handle.cancel_token();
     sub_instance.runtime.execution_cancel = cancel_token.clone();
@@ -706,9 +774,6 @@ where
         Ok(prompts) => prompts,
         Err(error) => {
             let error = format!("ability prompt build failed: {error}");
-            if let Some(session) = ability_session.as_ref() {
-                session.append_exchange(task_description.clone(), error.clone());
-            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
@@ -758,13 +823,12 @@ where
         .supports_developer_role(&sub_instance.model.model_name);
     let mut messages =
         build_instruction_messages(&prompts.system, &prompts.developer, supports_developer_role);
+    messages.push(nenjo_models::ChatMessage::developer(
+        ABILITY_COMPLETION_GUIDANCE.to_string(),
+    ));
 
     if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
         messages.extend(chat.history.iter().cloned());
-    }
-
-    if let Some(session) = ability_session.as_ref() {
-        messages.extend(session.history().iter().cloned());
     }
 
     let user_message = if prompts.user_message.is_empty() {
@@ -874,7 +938,14 @@ where
         _ = cancel_token.cancelled() => {
             Err(anyhow::anyhow!("ability operation stopped"))
         }
-        result = turn_loop::run(&sub_instance, messages, Some(nested_tx), None, None, false) => result,
+        result = turn_loop::run(
+            &sub_instance,
+            messages,
+            Some(nested_tx),
+            None,
+            None,
+            turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+        ) => result,
     };
 
     if let Some(bridge) = bridge {
@@ -883,41 +954,72 @@ where
 
     match result {
         Ok(output) => {
-            if let Some(session) = ability_session.as_ref() {
-                session.append_exchange(task_description.clone(), output.text.clone());
-            }
             turn_loop::record_nested_token_usage(output.input_tokens, output.output_tokens);
-            op_handle
-                .complete(
-                    AsyncOpSignal::Completed {
-                        summary: truncate(&output.text, 500),
-                        output: Some(serde_json::json!({
-                            "result_preview": output.text,
-                        })),
-                    },
-                    parent_events_tx.clone(),
-                )
-                .await;
-            if let Some(parent_tx) = parent_events_tx.clone() {
-                debug!(
-                    ability = ability.name,
-                    ability_tool_name = USE_ABILITY_TOOL_NAME,
-                    "Emitting AbilityCompleted success=true"
-                );
-                let _ = parent_tx.send(TurnEvent::AbilityCompleted {
-                    call_id: call_id.clone(),
-                    ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
-                    ability_name: ability.name.clone(),
-                    success: true,
-                    final_output: output.text.clone(),
-                });
+            match serde_json::from_str::<AbilityFinish>(&output.text) {
+                Ok(finish) => {
+                    let summary = truncate(&finish.summary, 500);
+                    let output = Some(serde_json::json!({
+                        "summary": finish.summary,
+                        "result": finish.result,
+                    }));
+                    let (signal, success) = match finish.status {
+                        AbilityFinishStatus::Completed => (
+                            AsyncOpSignal::Completed {
+                                summary: summary.clone(),
+                                output,
+                            },
+                            true,
+                        ),
+                        AbilityFinishStatus::Failed => (
+                            AsyncOpSignal::Failed {
+                                error: summary.clone(),
+                                output,
+                            },
+                            false,
+                        ),
+                    };
+                    op_handle.complete(signal, parent_events_tx.clone()).await;
+                    if let Some(parent_tx) = parent_events_tx.clone() {
+                        debug!(
+                            ability = ability.name,
+                            ability_tool_name = USE_ABILITY_TOOL_NAME,
+                            success,
+                            "Emitting AbilityCompleted"
+                        );
+                        let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                            call_id: call_id.clone(),
+                            ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+                            ability_name: ability.name.clone(),
+                            success,
+                            final_output: summary,
+                        });
+                    }
+                }
+                Err(error) => {
+                    let error = format!("ability finish result was invalid: {error}");
+                    op_handle
+                        .complete(
+                            AsyncOpSignal::Failed {
+                                error: truncate(&error, 500),
+                                output: None,
+                            },
+                            parent_events_tx.clone(),
+                        )
+                        .await;
+                    if let Some(parent_tx) = parent_events_tx.clone() {
+                        let _ = parent_tx.send(TurnEvent::AbilityCompleted {
+                            call_id: call_id.clone(),
+                            ability_tool_name: USE_ABILITY_TOOL_NAME.to_string(),
+                            ability_name: ability.name.clone(),
+                            success: false,
+                            final_output: error,
+                        });
+                    }
+                }
             }
         }
         Err(e) => {
             let error = format!("ability execution failed: {e}");
-            if let Some(session) = ability_session.as_ref() {
-                session.append_exchange(task_description.clone(), error.clone());
-            }
             op_handle
                 .complete(
                     AsyncOpSignal::Failed {
@@ -970,6 +1072,18 @@ async fn bridge_ability_transcript(
         TurnEvent::ToolCallEnd {
             tool_name, result, ..
         } => {
+            if !result.success {
+                handle
+                    .recoverable_tool_error(
+                        tool_name.clone(),
+                        result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| result.output.clone()),
+                        events_tx.clone(),
+                    )
+                    .await;
+            }
             handle
                 .transcript(
                     AsyncOperationTranscriptEvent::ToolResult {
@@ -1199,10 +1313,9 @@ where
             sub_agent_ctx: caller.runtime.sub_agent_ctx.clone(),
             async_ops,
             execution_cancel,
-            execution_mode: caller.runtime.execution_mode,
+            execution_mode: AgentExecutionMode::Ability,
             hook_runtime: None,
             current_session_id: caller.runtime.current_session_id,
-            ability_sessions: caller.runtime.ability_sessions.clone(),
         },
     }
 }
@@ -1231,9 +1344,12 @@ fn ability_runtime_env_names(ability: &AbilityManifest) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::AgentExecutionMode;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::agents::instance::AgentModel;
     use crate::agents::prompts::PromptContext;
+    use crate::agents::respond::RESPOND_TO_USER_TOOL_NAME;
     use crate::config::AgentConfig;
     use crate::context::{ContextRenderer, types::RenderContextBlock};
     use crate::manifest::{
@@ -1244,7 +1360,9 @@ mod tests {
     use crate::tools::{ToolCategory, ToolResult, ToolSecurity};
     use crate::types::ActiveDomain;
     use anyhow::Result;
-    use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider};
+    use nenjo_models::traits::{
+        ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
+    };
 
     struct NoopProvider;
 
@@ -1272,6 +1390,45 @@ mod tests {
         }
     }
 
+    struct SequentialProvider {
+        responses: Vec<ChatResponse>,
+        next: AtomicUsize,
+        seen_messages: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for SequentialProvider {
+        async fn chat(
+            &self,
+            request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> Result<ChatResponse> {
+            self.seen_messages
+                .lock()
+                .unwrap()
+                .push(request.messages.to_vec());
+            let index = self.next.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .responses
+                .get(index)
+                .unwrap_or_else(|| self.responses.last().unwrap())
+                .clone())
+        }
+
+        fn context_window(&self, _model: &str) -> Option<usize> {
+            Some(128_000)
+        }
+
+        fn supports_native_tools(&self) -> bool {
+            true
+        }
+
+        fn supports_developer_role(&self, _model: &str) -> bool {
+            true
+        }
+    }
+
     struct TestModelFactory;
 
     impl ModelProviderFactory for TestModelFactory {
@@ -1283,6 +1440,43 @@ mod tests {
     struct TestTool {
         name: &'static str,
         origin: ToolOrigin,
+    }
+
+    struct OtherTerminalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for OtherTerminalTool {
+        fn name(&self) -> &str {
+            "other_terminal"
+        }
+
+        fn description(&self) -> &str {
+            "An unrelated terminal tool used to verify completion selection."
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Read
+        }
+
+        fn is_terminal(&self) -> bool {
+            true
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: "unrelated terminal output".into(),
+                error: None,
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -1433,9 +1627,8 @@ mod tests {
                     },
                     active_domain: Some(ActiveDomain {
                         session_id: uuid::Uuid::new_v4(),
-                        domain_slug: crate::Slug::derive("creator"),
-                        domain_name: "creator".into(),
                         manifest: DomainManifest {
+                            slug: crate::Slug::derive("creator"),
                             name: "creator".into(),
                             path: "nenjo/creator".into(),
                             description: None,
@@ -1469,7 +1662,6 @@ mod tests {
                 execution_mode: AgentExecutionMode::Parent,
                 hook_runtime: None,
                 current_session_id: None,
-                ability_sessions: Default::default(),
             },
         }
     }
@@ -1477,9 +1669,10 @@ mod tests {
     #[tokio::test]
     async fn ability_sub_instance_uses_ability_prompt_without_domain_addon() {
         let mut caller = test_instance_with_active_domain();
-        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.abilities = vec![crate::Slug::derive("caller_ability")];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("agent-builder"),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1529,9 +1722,10 @@ mod tests {
     async fn ability_sub_instance_does_not_inherit_caller_scopes_or_assignments() {
         let mut caller = test_instance_with_active_domain();
         caller.manifest.platform_scopes = vec!["agents:read".into()];
-        caller.manifest.abilities = vec!["caller_ability".into()];
+        caller.manifest.abilities = vec![crate::Slug::derive("caller_ability")];
         caller.manifest.domains = vec![crate::Slug::derive("creator")];
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("isolated"),
             name: "isolated".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Runs isolated".into()),
@@ -1558,10 +1752,385 @@ mod tests {
 
         assert!(!tool_names.contains(&"list_agents"));
         assert!(!tool_names.contains(&"create_agent"));
+        assert!(!tool_names.contains(&RESPOND_TO_USER_TOOL_NAME));
+        assert_eq!(
+            sub_instance.runtime.execution_mode,
+            AgentExecutionMode::Ability
+        );
         assert!(sub_instance.manifest.platform_scopes.is_empty());
         assert!(sub_instance.manifest.abilities.is_empty());
         assert!(sub_instance.manifest.domains.is_empty());
         assert!(sub_instance.prompt.context.active_domain.is_none());
+    }
+
+    #[tokio::test]
+    async fn ability_completion_rejects_plain_prose_until_finish_is_called() {
+        let provider = Arc::new(SequentialProvider {
+            responses: vec![
+                ChatResponse {
+                    text: Some("The prerequisites exist. I'll create it now.".into()),
+                    tool_calls: Vec::new(),
+                    provider_tool_calls: Vec::new(),
+                    usage: TokenUsage::default(),
+                },
+                ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "finish_1".into(),
+                        name: FINISH_ABILITY_TOOL_NAME.into(),
+                        arguments: serde_json::json!({
+                            "status": "completed",
+                            "summary": "Created and verified the routine",
+                            "result": {"slug": "code-generation"}
+                        })
+                        .to_string(),
+                    }],
+                    provider_tool_calls: Vec::new(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            next: AtomicUsize::new(0),
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let mut instance = test_instance_with_active_domain();
+        instance.model.model_provider = provider.clone();
+        instance.runtime.tools = vec![Arc::new(FinishAbilityTool)];
+
+        let output = turn_loop::run(
+            &instance,
+            vec![ChatMessage::user("Create the routine")],
+            None,
+            None,
+            None,
+            turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+        )
+        .await
+        .unwrap();
+
+        let finish: AbilityFinish = serde_json::from_str(&output.text).unwrap();
+        assert!(matches!(finish.status, AbilityFinishStatus::Completed));
+        assert_eq!(finish.summary, "Created and verified the routine");
+        assert_eq!(output.tool_calls, 1);
+
+        let seen_messages = provider.seen_messages.lock().unwrap();
+        assert_eq!(seen_messages.len(), 2);
+        assert!(seen_messages[1].iter().any(|message| {
+            message.role == "developer"
+                && message.content.contains("requires the finish tool")
+                && message.content.contains("I'll create it now")
+        }));
+    }
+
+    #[tokio::test]
+    async fn required_finish_uses_its_own_result_when_another_terminal_tool_runs_first() {
+        let provider = Arc::new(SequentialProvider {
+            responses: vec![ChatResponse {
+                text: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: "other_1".into(),
+                        name: "other_terminal".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "finish_1".into(),
+                        name: FINISH_ABILITY_TOOL_NAME.into(),
+                        arguments: serde_json::json!({
+                            "status": "completed",
+                            "summary": "Created the routine",
+                            "result": {"slug": "code-generation"}
+                        })
+                        .to_string(),
+                    },
+                ],
+                provider_tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+            }],
+            next: AtomicUsize::new(0),
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let mut instance = test_instance_with_active_domain();
+        instance.model.model_provider = provider;
+        instance.runtime.tools = vec![Arc::new(OtherTerminalTool), Arc::new(FinishAbilityTool)];
+
+        let output = turn_loop::run(
+            &instance,
+            vec![ChatMessage::user("Create the routine")],
+            None,
+            None,
+            None,
+            turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+        )
+        .await
+        .unwrap();
+
+        let finish: AbilityFinish = serde_json::from_str(&output.text).unwrap();
+        assert!(matches!(finish.status, AbilityFinishStatus::Completed));
+        assert_eq!(finish.summary, "Created the routine");
+        assert_eq!(output.tool_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_finish_result_is_recoverable_within_the_same_ability_run() {
+        let provider = Arc::new(SequentialProvider {
+            responses: vec![
+                ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "finish_invalid".into(),
+                        name: FINISH_ABILITY_TOOL_NAME.into(),
+                        arguments: serde_json::json!({
+                            "status": "completed",
+                            "summary": " "
+                        })
+                        .to_string(),
+                    }],
+                    provider_tool_calls: Vec::new(),
+                    usage: TokenUsage::default(),
+                },
+                ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "finish_valid".into(),
+                        name: FINISH_ABILITY_TOOL_NAME.into(),
+                        arguments: serde_json::json!({
+                            "status": "completed",
+                            "summary": "Created and verified the routine"
+                        })
+                        .to_string(),
+                    }],
+                    provider_tool_calls: Vec::new(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            next: AtomicUsize::new(0),
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let mut instance = test_instance_with_active_domain();
+        instance.model.model_provider = provider.clone();
+        instance.runtime.tools = vec![Arc::new(FinishAbilityTool)];
+
+        let output = turn_loop::run(
+            &instance,
+            vec![ChatMessage::user("Create the routine")],
+            None,
+            None,
+            None,
+            turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+        )
+        .await
+        .unwrap();
+
+        let finish: AbilityFinish = serde_json::from_str(&output.text).unwrap();
+        assert_eq!(finish.summary, "Created and verified the routine");
+        let seen_messages = provider.seen_messages.lock().unwrap();
+        assert_eq!(seen_messages.len(), 2);
+        assert!(seen_messages[1].iter().any(|message| {
+            message.role == "tool" && message.content.contains("summary is required")
+        }));
+    }
+
+    #[tokio::test]
+    async fn required_completion_tool_must_be_registered_and_terminal() {
+        let mut instance = test_instance_with_active_domain();
+        instance.runtime.tools.clear();
+
+        let error = turn_loop::run(
+            &instance,
+            vec![ChatMessage::user("Create the routine")],
+            None,
+            None,
+            None,
+            turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("required completion tool 'finish'")
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_requires_a_nonempty_summary() {
+        let result = FinishAbilityTool
+            .execute(serde_json::json!({
+                "status": "completed",
+                "summary": "  "
+            }))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("summary is required"));
+    }
+
+    #[tokio::test]
+    async fn failed_finish_propagates_to_async_state_and_parent_event() {
+        let provider = Arc::new(SequentialProvider {
+            responses: vec![ChatResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "finish_failed".into(),
+                    name: FINISH_ABILITY_TOOL_NAME.into(),
+                    arguments: serde_json::json!({
+                        "status": "failed",
+                        "summary": "Routine verification failed",
+                        "result": {"slug": "code-generation", "verified": false}
+                    })
+                    .to_string(),
+                }],
+                provider_tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+            }],
+            next: AtomicUsize::new(0),
+            seen_messages: Mutex::new(Vec::new()),
+        });
+        let mut instance = test_instance_with_active_domain();
+        instance.model.model_provider = provider;
+        let instance = Arc::new(instance);
+        let manager = instance.runtime.async_ops.clone();
+        let operation_id = AsyncOpId::new("ability_build_routine_failed");
+        let controls = AsyncControls::new(AsyncControl::Inspect).with(AsyncControl::Wait);
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: operation_id.clone(),
+                    kind: AsyncOpKind::Ability,
+                    label: "build_routine".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some(USE_ABILITY_TOOL_NAME.into()),
+                    started_summary: "Build the routine".into(),
+                    model_visible: true,
+                    controls,
+                },
+                None,
+            )
+            .await;
+        manager
+            .drain_signals(AsyncOpWaitFilter::model_visible())
+            .await;
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let ability = AbilityManifest {
+            slug: crate::Slug::derive("build_routine"),
+            name: "build_routine".into(),
+            path: None,
+            description: Some("Build a routine".into()),
+            activation_condition: "When a routine is requested".into(),
+            prompt_config: AbilityPromptConfig {
+                developer_prompt: "Build and verify the requested routine.".into(),
+            },
+            platform_scopes: Vec::new(),
+            mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
+            media: Vec::new(),
+            source_type: "native".into(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+
+        run_ability_operation(AbilityOperation {
+            instance,
+            ability,
+            call_id: operation_id.to_string(),
+            task_description: "Build the routine".into(),
+            caller_history_snapshot: Vec::new(),
+            child_handle: started.child,
+            op_handle: started.handle,
+            parent_events_tx: Some(events_tx),
+        })
+        .await;
+
+        let signals = manager
+            .drain_signals(AsyncOpWaitFilter::model_visible())
+            .await;
+        assert!(signals.iter().flat_map(|digest| &digest.events).any(
+            |signal| matches!(signal, AsyncOpSignal::Failed { error, .. } if error == "Routine verification failed")
+        ));
+        let inspections = manager
+            .inspect(
+                vec![operation_id.to_string()],
+                Some(AsyncOpKind::Ability),
+                true,
+                10,
+            )
+            .await;
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].status, "failed");
+        assert_eq!(
+            inspections[0]
+                .latest_output
+                .as_ref()
+                .and_then(|output| output.pointer("/result/verified")),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert!(
+            std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+                matches!(
+                    event,
+                    TurnEvent::AbilityCompleted {
+                        success: false,
+                        final_output,
+                        ..
+                    } if final_output == "Routine verification failed"
+                )
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_ability_tool_call_emits_a_recoverable_running_signal() {
+        let manager = AsyncOpManager::new();
+        let started = manager
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("ability_build_routine_1"),
+                    kind: AsyncOpKind::Ability,
+                    label: "build_routine".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some(USE_ABILITY_TOOL_NAME.into()),
+                    started_summary: "building routine".into(),
+                    model_visible: true,
+                    controls: AsyncControls::new(AsyncControl::Inspect).with(AsyncControl::Wait),
+                },
+                None,
+            )
+            .await;
+        manager
+            .drain_signals(AsyncOpWaitFilter::model_visible())
+            .await;
+
+        bridge_ability_transcript(
+            &started.handle,
+            &TurnEvent::ToolCallEnd {
+                batch_id: "batch_1".into(),
+                parent_tool_name: None,
+                tool_call_id: Some("call_1".into()),
+                tool_name: "configure_routine".into(),
+                tool_args: "{}".into(),
+                result: ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("graph validation failed".into()),
+                },
+                metadata: None,
+            },
+            None,
+        )
+        .await;
+
+        let result = manager
+            .wait(1, AsyncOpWaitFilter::kind(Some(AsyncOpKind::Ability)))
+            .await;
+        assert_eq!(result.woken_by, "recoverable_error");
+        assert_eq!(result.updates[0].status, "running");
+        assert!(matches!(
+            &result.updates[0].events[0],
+            AsyncOpSignal::RecoverableToolError { tool, error, .. }
+                if tool == "configure_routine" && error == "graph validation failed"
+        ));
     }
 
     #[tokio::test]
@@ -1585,6 +2154,7 @@ mod tests {
             },
         ]);
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("agent-builder"),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1640,6 +2210,7 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("agent-builder"),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1687,6 +2258,7 @@ mod tests {
             }),
         ];
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("agent-builder"),
             name: "agent_builder".into(),
             path: Some("nenjo/platform".into()),
             description: Some("Builds agents".into()),
@@ -1719,6 +2291,7 @@ mod tests {
     #[test]
     fn use_ability_schema_requires_self_contained_input() {
         let ability = AbilityManifest {
+            slug: crate::Slug::derive("review"),
             name: "review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1752,6 +2325,7 @@ mod tests {
     #[tokio::test]
     async fn list_assigned_abilities_returns_all_assigned_ability_metadata() {
         let review = AbilityManifest {
+            slug: crate::Slug::derive("code-review"),
             name: "Code Review".into(),
             path: Some("review".into()),
             description: Some("Reviews code".into()),
@@ -1768,6 +2342,7 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let docs = AbilityManifest {
+            slug: crate::Slug::derive("search-docs"),
             name: "Search Docs!".into(),
             path: Some("docs".into()),
             description: None,
@@ -1890,6 +2465,7 @@ mod tests {
     #[test]
     fn duplicate_ability_ids_are_rejected() {
         let first = AbilityManifest {
+            slug: crate::Slug::derive("frontend-code-review"),
             name: "code_review".into(),
             path: Some("frontend".into()),
             description: None,
@@ -1906,6 +2482,7 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         let second = AbilityManifest {
+            slug: crate::Slug::derive("backend-code-review"),
             name: "code_review".into(),
             path: Some("backend".into()),
             description: None,

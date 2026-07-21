@@ -173,7 +173,7 @@ where
     let council = manifest
         .councils
         .iter()
-        .find(|c| Slug::derive(&c.name) == *council_slug)
+        .find(|c| c.slug == *council_slug)
         .with_context(|| format!("Council {council_slug} not found in manifest"))?
         .clone();
 

@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use nenjo::LocalRoutineExecutionWatcher;
 use nenjo::Manifest;
 use nenjo::arguments::{ArgumentValueType, ResolvedArgumentBinding};
-use nenjo::manifest::HasManifestSlug;
+use nenjo::manifest::ManifestIdentity;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
@@ -427,7 +427,7 @@ fn validate_runtime_media_requirements(
 
     for agent in &manifest.agents {
         let slug = agent.manifest_slug();
-        let resource_id = resource_ids.get(PlatformResourceKind::Agent, &slug);
+        let resource_id = resource_ids.get(PlatformResourceKind::Agent, slug);
         let resource = ResourceRef {
             resource_type: "agent",
             resource_id,
@@ -725,6 +725,7 @@ mod tests {
 
         let manifest = Manifest {
             domains: vec![DomainManifest {
+                slug: Slug::derive("creative"),
                 name: "creative".to_string(),
                 path: "domains".to_string(),
                 description: None,
@@ -809,6 +810,7 @@ packages:
             package_root.join("core/manifest.yaml"),
             r#"
 schema: nenjo.knowledge.v1
+slug: nenjo-core
 selector: ignored.authored.selector
 root_uri: pkg://nenjo/knowledge/
 manifest:

@@ -123,7 +123,7 @@ fn upgrade_reresolves_package_versions() {
 schema: nenjo.dependencies.v1
 
 dependencies:
-  "agent": "^0.1.0"
+  "agent": ">=0.1.0,<1.0.0"
 
 registries:
   - ../registry/registry.yaml

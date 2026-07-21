@@ -69,6 +69,7 @@ modules:
         &foo,
         "packages/app/agent.yaml",
         r#"schema: nenjo.agent.v1
+slug: app-agent
 manifest:
   name: app_agent
   prompt_config:
@@ -98,6 +99,7 @@ modules:
         &bar,
         "packages/core/context.yaml",
         r#"schema: nenjo.context_block.v1
+slug: core-context
 manifest:
   name: core_context
   template: External core context.
@@ -216,9 +218,9 @@ modules:
         &workspace,
         "packages/connectors/agent-browser.yaml",
         r#"schema: nenjo.mcp_server.v1
+slug: agent-browser
 manifest:
-  name: agent_browser
-  display_name: Agent Browser
+  name: Agent Browser
   transport: stdio
   metadata:
     nenjo:
@@ -245,6 +247,7 @@ fn validate_rejects_manifest_imports() {
         &workspace,
         r#"
 schema: nenjo.agent.v1
+slug: broken
 manifest:
   name: broken
   imports:
@@ -272,6 +275,7 @@ fn validate_rejects_package_refs_in_module_imports() {
         &workspace,
         r#"
 schema: nenjo.agent.v1
+slug: broken
 imports:
   context:
     - "@acme/core/methodology"
@@ -296,6 +300,7 @@ fn validate_rejects_undeclared_pkg_selector() {
         &workspace,
         r#"
 schema: nenjo.agent.v1
+slug: broken
 manifest:
   name: broken
   prompt_config:
@@ -320,6 +325,7 @@ fn validate_rejects_context_selector_without_import() {
         &workspace,
         r#"
 schema: nenjo.context_block.v1
+slug: broken
 manifest:
   name: broken
   template: |
@@ -362,6 +368,7 @@ modules:
         &workspace,
         "packages/context/knowledge.yml",
         r#"schema: nenjo.context_block.v1
+slug: knowledge-routing
 manifest:
   name: knowledge_routing
   template: "Use knowledge carefully."
@@ -383,6 +390,7 @@ modules:
         &workspace,
         "packages/agent/agent.yml",
         r#"schema: nenjo.agent.v1
+slug: agent
 manifest:
   name: agent
   prompt_config:
@@ -421,6 +429,7 @@ modules:
         &workspace,
         "packages/knowledge/core/manifest.yaml",
         r#"schema: nenjo.knowledge.v1
+slug: core
 manifest:
   name: Core
   docs:
@@ -451,6 +460,7 @@ modules:
         &workspace,
         "packages/agent/agent.yml",
         r#"schema: nenjo.agent.v1
+slug: agent
 manifest:
   name: agent
   prompt_config:
@@ -500,6 +510,7 @@ modules:
         &workspace,
         "packages/agents/coder.yaml",
         r#"schema: nenjo.agent.v1
+slug: coder
 manifest:
   name: coder
   prompt_config: {}
@@ -509,6 +520,7 @@ manifest:
         &workspace,
         "packages/agents/reviewer.yaml",
         r#"schema: nenjo.agent.v1
+slug: reviewer
 manifest:
   name: reviewer
   prompt_config: {}
@@ -518,6 +530,7 @@ manifest:
         &workspace,
         "packages/routines/review.yaml",
         r#"schema: nenjo.routine.v1
+slug: review-flow
 manifest:
   name: review_flow
   entry_steps:
@@ -615,6 +628,7 @@ modules:
         &workspace,
         "packages/agents/coder.yaml",
         r#"schema: nenjo.agent.v1
+slug: coder
 manifest:
   name: coder
   prompt_config: {}
@@ -624,6 +638,7 @@ manifest:
         &workspace,
         "packages/routines/review.yaml",
         r#"schema: nenjo.routine.v1
+slug: review-flow
 manifest:
   name: review_flow
   entry_steps:
@@ -692,6 +707,7 @@ modules:
         &workspace,
         "packages/agents/coder.yaml",
         r#"schema: nenjo.agent.v1
+slug: coder
 manifest:
   name: coder
   prompt_config: {}
@@ -701,6 +717,7 @@ manifest:
         &workspace,
         "packages/agents/reviewer.yaml",
         r#"schema: nenjo.agent.v1
+slug: reviewer
 manifest:
   name: reviewer
   prompt_config: {}
@@ -710,6 +727,7 @@ manifest:
         &workspace,
         "packages/routines/review.yaml",
         r#"schema: nenjo.routine.v1
+slug: review-flow
 manifest:
   name: review_flow
   entry_steps:
@@ -790,6 +808,7 @@ modules:
         &workspace,
         "packages/agent/a.yml",
         r#"schema: nenjo.context_block.v1
+slug: a
 imports:
   context:
     - ./b.yml
@@ -802,6 +821,7 @@ manifest:
         &workspace,
         "packages/agent/b.yml",
         r#"schema: nenjo.context_block.v1
+slug: b
 imports:
   context:
     - ./a.yml

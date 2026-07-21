@@ -1,4 +1,5 @@
 use crate::{PackageError, Result};
+use nenjo::Slug;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, uuid};
@@ -106,27 +107,320 @@ pub fn validate_package_slug(name: &str) -> Result<()> {
 
 const PACKAGE_RESOURCE_NAMESPACE: Uuid = uuid!("a2b4e19a-9f34-5cc7-8fc7-c0f2f5f60f1c");
 
+/// Canonical GitHub repository coordinate used as the global package registry
+/// namespace, for example `@nenjo-ai/packages`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct GitHubRepositoryRef(String);
+
+impl GitHubRepositoryRef {
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        validate_package_name(value)?;
+        if !value.starts_with('@') {
+            return Err(PackageError::invalid_package_name(
+                value,
+                "GitHub repository references must look like @owner/repository",
+            ));
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    pub fn from_owner_repo(owner: &str, repository: &str) -> Result<Self> {
+        Self::parse(&format!("@{owner}/{repository}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn owner(&self) -> &str {
+        self.0
+            .trim_start_matches('@')
+            .split_once('/')
+            .map(|(owner, _)| owner)
+            .expect("validated GitHub repository reference has an owner")
+    }
+
+    pub fn repository(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map(|(_, repository)| repository)
+            .expect("validated GitHub repository reference has a repository")
+    }
+}
+
+impl std::fmt::Display for GitHubRepositoryRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GitHubRepositoryRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Authored, stable package-local resource slug.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PackageResourceSlug(String);
+
+impl PackageResourceSlug {
+    pub fn parse(value: &str) -> Result<Self> {
+        Slug::parse(value)
+            .map(|slug| Self(slug.into_string()))
+            .map_err(|error| PackageError::invalid_resource_name(value, error.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PackageResourceSlug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageResourceSlug {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Canonical authored path of one resolved package resource.
+///
+/// This is deliberately distinct from a manifest display name. For resources
+/// selected from a multi-resource module, the path may include a `#selector`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackageResourcePath(String);
+
+impl PackageResourcePath {
+    /// Parse and normalize a repository-relative resource path.
+    pub fn parse(path: &str) -> Result<Self> {
+        validate_source_path(path).map(Self)
+    }
+
+    /// Return the normalized authored resource path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Build the canonical authored path for a resolved module map entry.
+    ///
+    /// Single-resource modules retain their source path. Multi-resource module
+    /// entries are qualified by their authored selector so they remain unique.
+    pub fn for_module(
+        module_key: &str,
+        module_path: &str,
+        source_path: &str,
+        resource_selector: &str,
+    ) -> Result<Self> {
+        let path = if module_key == module_path {
+            source_path.to_string()
+        } else {
+            format!("{source_path}#{resource_selector}")
+        };
+        Self::parse(&path)
+    }
+
+    /// Derive the identity-safe name used inside logical and instance keys.
+    pub fn identity_name(&self) -> PackageResourceIdentityName {
+        let mut name = String::with_capacity(self.0.len());
+        for character in self.0.chars() {
+            if character == '#' {
+                // Preserve the existing key format for already-valid selectors.
+                name.push('.');
+            } else if character.is_whitespace() || character == ':' {
+                let mut bytes = [0; 4];
+                for byte in character.encode_utf8(&mut bytes).as_bytes() {
+                    use std::fmt::Write as _;
+                    write!(name, "%{byte:02X}").expect("writing to String cannot fail");
+                }
+            } else {
+                name.push(character);
+            }
+        }
+        PackageResourceIdentityName(name)
+    }
+}
+
+impl std::fmt::Display for PackageResourcePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Validated key component derived from a package resource path.
+///
+/// Callers cannot construct this from a display name, which prevents names
+/// such as `Shop Manager` from accidentally becoming identity components.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackageResourceIdentityName(String);
+
+impl PackageResourceIdentityName {
+    /// Return the validated identity component.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PackageResourceIdentityName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Canonical logical and exact identities for one resolved package resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageResourceIdentity {
+    resource_path: PackageResourcePath,
+    resource_slug: PackageResourceSlug,
+    logical_ref: PackageResourceLogicalRef,
+    instance_key: PackageResourceInstanceKey,
+}
+
+impl PackageResourceIdentity {
+    /// Construct all package resource identities from authored graph facts.
+    pub fn new(
+        repository: &GitHubRepositoryRef,
+        package: &str,
+        package_version: &str,
+        kind: PackageKind,
+        resource_slug: &PackageResourceSlug,
+        resource_path: &str,
+    ) -> Result<Self> {
+        let resource_path = PackageResourcePath::parse(resource_path)?;
+        Self::from_resource_path(
+            repository,
+            package,
+            package_version,
+            kind,
+            resource_slug,
+            resource_path,
+        )
+    }
+
+    /// Construct all identities from an already validated authored path.
+    pub fn from_resource_path(
+        repository: &GitHubRepositoryRef,
+        package: &str,
+        package_version: &str,
+        kind: PackageKind,
+        resource_slug: &PackageResourceSlug,
+        resource_path: PackageResourcePath,
+    ) -> Result<Self> {
+        let logical_ref = PackageResourceLogicalRef::new(repository, package, kind, resource_slug)?;
+        let instance_key = PackageResourceInstanceKey::new(
+            repository,
+            package,
+            package_version,
+            kind,
+            resource_slug,
+        )?;
+        Ok(Self {
+            resource_path,
+            resource_slug: resource_slug.clone(),
+            logical_ref,
+            instance_key,
+        })
+    }
+
+    pub fn resource_path(&self) -> &PackageResourcePath {
+        &self.resource_path
+    }
+
+    pub fn resource_slug(&self) -> &PackageResourceSlug {
+        &self.resource_slug
+    }
+
+    pub fn logical_key(&self) -> &PackageResourceLogicalKey {
+        &self.logical_ref
+    }
+
+    pub fn logical_ref(&self) -> &PackageResourceLogicalRef {
+        &self.logical_ref
+    }
+
+    pub fn instance_key(&self) -> &PackageResourceInstanceKey {
+        &self.instance_key
+    }
+}
+
 /// Stable logical identity for a package resource.
 ///
 /// Logical keys intentionally omit version, install scope, org id, source id,
 /// and install id. Those values belong in metadata. The logical key is the
 /// dashboard/runtime identity that survives package upgrades.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PackageResourceLogicalKey(String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PackageResourceLogicalRef(String);
 
-impl PackageResourceLogicalKey {
-    /// Build a logical key from parsed package resource parts.
+/// Compatibility name for callers that treated logical references as keys.
+pub type PackageResourceLogicalKey = PackageResourceLogicalRef;
+
+impl PackageResourceLogicalRef {
+    /// Build the canonical GitHub-repository-qualified logical reference.
     pub fn new(
-        logical_package_name: &str,
+        repository: &GitHubRepositoryRef,
+        package: &str,
+        kind: PackageKind,
+        resource_slug: &PackageResourceSlug,
+    ) -> Result<Self> {
+        validate_package_slug(package)?;
+        Ok(Self(format!(
+            "pkg:{repository}:{package}:{}:{resource_slug}",
+            kind.as_str(),
+        )))
+    }
+
+    /// Parse and validate a canonical logical reference.
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        let Some(parts) = value.strip_prefix("pkg:") else {
+            return Err(PackageError::invalid_resource_name(
+                value,
+                "logical references must start with 'pkg:'",
+            ));
+        };
+        let components = parts.split(':').collect::<Vec<_>>();
+        let [repository, package, kind, resource_slug] = components.as_slice() else {
+            return Err(PackageError::invalid_resource_name(
+                value,
+                "logical references must look like pkg:@owner/repository:package:kind:resource-slug",
+            ));
+        };
+        let repository = GitHubRepositoryRef::parse(repository)?;
+        let kind = kind.parse::<PackageKind>()?;
+        let resource_slug = PackageResourceSlug::parse(resource_slug)?;
+        Self::new(&repository, package, kind, &resource_slug)
+    }
+
+    /// Construct a path-based key only for reading pre-logical-ref installs.
+    pub fn legacy(
+        package_name: &str,
         kind: PackageKind,
         module_path: &str,
         resource_name: &str,
     ) -> Result<Self> {
-        validate_package_name(logical_package_name)?;
+        validate_package_name(package_name)?;
         let module_path = validate_source_path(module_path)?;
         let resource_name = validate_resource_name(resource_name)?;
         Ok(Self(format!(
-            "pkg:{logical_package_name}:{}:{module_path}#{resource_name}",
+            "pkg:{package_name}:{}:{module_path}#{resource_name}",
             kind.as_str()
         )))
     }
@@ -136,13 +430,57 @@ impl PackageResourceLogicalKey {
         &self.0
     }
 
+    pub fn resource_slug(&self) -> Option<&str> {
+        self.canonical_components()
+            .map(|(_, _, _, resource_slug)| resource_slug)
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.canonical_components()
+            .map(|(repository, _, _, _)| repository)
+    }
+
+    pub fn package(&self) -> Option<&str> {
+        self.canonical_components()
+            .map(|(_, package, _, _)| package)
+    }
+
+    pub fn kind(&self) -> Option<PackageKind> {
+        self.canonical_components()
+            .and_then(|(_, _, kind, _)| kind.parse().ok())
+    }
+
+    fn canonical_components(&self) -> Option<(&str, &str, &str, &str)> {
+        if self.0.contains('#') {
+            return None;
+        }
+        let components = self.0.strip_prefix("pkg:")?.split(':').collect::<Vec<_>>();
+        let [repository, package, kind, resource_slug] = components.as_slice() else {
+            return None;
+        };
+        Some((repository, package, kind, resource_slug))
+    }
+
     /// Return the deterministic platform/runtime UUID for this logical key.
     pub fn resource_id(&self) -> Uuid {
         Uuid::new_v5(&PACKAGE_RESOURCE_NAMESPACE, self.0.as_bytes())
     }
 }
 
-impl std::fmt::Display for PackageResourceLogicalKey {
+impl<'de> Deserialize<'de> for PackageResourceLogicalRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.contains('#') {
+            return Ok(Self(value));
+        }
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for PackageResourceLogicalRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -152,12 +490,52 @@ impl std::fmt::Display for PackageResourceLogicalKey {
 ///
 /// Instance keys include the concrete package version and are used for
 /// provenance, locks, cache records, and debugging.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct PackageResourceInstanceKey(String);
 
 impl PackageResourceInstanceKey {
     /// Build an instance key from parsed package resource parts.
     pub fn new(
+        repository: &GitHubRepositoryRef,
+        package: &str,
+        package_version: &str,
+        kind: PackageKind,
+        resource_slug: &PackageResourceSlug,
+    ) -> Result<Self> {
+        validate_package_slug(package)?;
+        let package_version = validate_package_version(package_version)?;
+        Ok(Self(format!(
+            "pkg:{repository}:{package}@{package_version}:{}:{resource_slug}",
+            kind.as_str(),
+        )))
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        let Some(parts) = value.strip_prefix("pkg:") else {
+            return Err(PackageError::invalid_resource_name(
+                value,
+                "instance references must start with 'pkg:'",
+            ));
+        };
+        let components = parts.split(':').collect::<Vec<_>>();
+        let [repository, package_version, kind, resource_slug] = components.as_slice() else {
+            return Err(PackageError::invalid_resource_name(
+                value,
+                "instance references must look like pkg:@owner/repository:package@version:kind:resource-slug",
+            ));
+        };
+        let repository = GitHubRepositoryRef::parse(repository)?;
+        let (package, version) = package_version.rsplit_once('@').ok_or_else(|| {
+            PackageError::invalid_resource_name(value, "instance reference is missing version")
+        })?;
+        let kind = kind.parse::<PackageKind>()?;
+        let resource_slug = PackageResourceSlug::parse(resource_slug)?;
+        Self::new(&repository, package, version, kind, &resource_slug)
+    }
+
+    pub fn legacy(
         package_name: &str,
         package_version: &str,
         kind: PackageKind,
@@ -177,6 +555,19 @@ impl PackageResourceInstanceKey {
     /// Return the serialized instance key.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageResourceInstanceKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.contains('#') {
+            return Ok(Self(value));
+        }
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 

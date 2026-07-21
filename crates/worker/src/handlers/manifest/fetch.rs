@@ -121,11 +121,7 @@ pub(super) async fn apply_upsert(
             Some(record) => {
                 let item = record.to_manifest();
                 let item_slug = Slug::derive(&record.slug);
-                if let Some(pos) = manifest
-                    .councils
-                    .iter()
-                    .position(|r| Slug::derive(&r.name) == item_slug)
-                {
+                if let Some(pos) = manifest.councils.iter().position(|r| r.slug == item_slug) {
                     manifest.councils[pos] = item;
                     debug!(%rt, %item_slug, "Updated existing resource");
                 } else {
@@ -134,16 +130,14 @@ pub(super) async fn apply_upsert(
                 }
             }
             None => {
-                manifest
-                    .councils
-                    .retain(|r| Slug::derive(&r.name) != *resource);
+                manifest.councils.retain(|r| r.slug != *resource);
                 debug!(%rt, %resource, "Resource returned 404, removing");
             }
         },
         ResourceType::Ability => upsert!(
             abilities,
             fetch_ability,
-            |r: &nenjo::manifest::AbilityManifest| { r.slug() }
+            |r: &nenjo::manifest::AbilityManifest| { r.slug.clone() }
         ),
         ResourceType::Command => {
             anyhow::bail!("command incremental fetch is not supported")
@@ -154,9 +148,7 @@ pub(super) async fn apply_upsert(
                 let existing_template = manifest
                     .context_blocks
                     .iter()
-                    .find(|block| {
-                        nenjo::manifest::context_block_slug(&block.path, &block.name) == block_slug
-                    })
+                    .find(|block| block.slug == block_slug)
                     .map(|block| block.template.clone())
                     .unwrap_or_default();
                 let content = client.fetch_context_block_content(resource).await?;
@@ -167,9 +159,11 @@ pub(super) async fn apply_upsert(
 
                 let block = summary.to_manifest(template);
 
-                if let Some(pos) = manifest.context_blocks.iter().position(|r| {
-                    nenjo::manifest::context_block_slug(&r.path, &r.name) == block_slug
-                }) {
+                if let Some(pos) = manifest
+                    .context_blocks
+                    .iter()
+                    .position(|r| r.slug == block_slug)
+                {
                     manifest.context_blocks[pos] = block;
                     debug!(%rt, %block_slug, "Updated existing resource");
                 } else {
@@ -178,23 +172,19 @@ pub(super) async fn apply_upsert(
                 }
             }
             None => {
-                manifest
-                    .context_blocks
-                    .retain(|r| nenjo::manifest::context_block_slug(&r.path, &r.name) != *resource);
+                manifest.context_blocks.retain(|r| r.slug != *resource);
                 debug!(%rt, %resource, "Resource returned 404, removing");
             }
         },
         ResourceType::McpServer => upsert!(
             mcp_servers,
             fetch_mcp_server,
-            |r: &nenjo::manifest::McpServerManifest| { Slug::derive(&r.name) }
+            |r: &nenjo::manifest::McpServerManifest| { r.slug.clone() }
         ),
         ResourceType::Domain => upsert!(
             domains,
             fetch_domain,
-            |r: &nenjo::manifest::DomainManifest| {
-                nenjo::manifest::domain_slug(&r.path, &r.name)
-            }
+            |r: &nenjo::manifest::DomainManifest| { r.slug.clone() }
         ),
         ResourceType::ModelAssignment
         | ResourceType::ModelCapabilityDefault

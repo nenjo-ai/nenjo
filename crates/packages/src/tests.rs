@@ -575,8 +575,8 @@ manifest:
 }
 
 #[test]
-fn rejects_wrapper_slug_for_package_resource_manifests() {
-    let err = parse_module_file(
+fn accepts_authored_stable_wrapper_slug_for_package_resources() {
+    let modules = parse_module_file(
         r#"
 schema: nenjo.agent.v1
 slug: authored-slug
@@ -585,9 +585,29 @@ manifest:
 "#,
         "agents/nenji.yaml",
     )
+    .unwrap();
+
+    assert_eq!(modules[0].slug(), Some("authored-slug"));
+    assert_eq!(
+        modules[0].resource_slug().unwrap().unwrap().as_str(),
+        "authored-slug"
+    );
+}
+
+#[test]
+fn rejects_derived_or_display_shaped_wrapper_slugs() {
+    let err = parse_module_file(
+        r#"
+schema: nenjo.agent.v1
+slug: Shop Manager
+manifest:
+  name: Shop Manager
+"#,
+        "agents/shop-manager.yaml",
+    )
     .unwrap_err();
-    let err = format!("{err:?}");
-    assert!(err.contains("must not define wrapper slug"), "{err}");
+
+    assert!(err.to_string().contains("invalid package resource name"));
 }
 
 #[test]
@@ -1245,31 +1265,103 @@ manifest:
 }
 
 #[test]
-fn package_resource_logical_id_ignores_version_and_scope() {
+fn package_resource_logical_ref_uses_repository_package_kind_and_authored_slug() {
+    let repository = GitHubRepositoryRef::parse("@nenjo-ai/packages").unwrap();
+    let slug = PackageResourceSlug::parse("nenji").unwrap();
     let key =
-        PackageResourceLogicalKey::new("nenji", PackageKind::Agent, "agents/nenji.yaml", "nenji")
-            .unwrap();
+        PackageResourceLogicalKey::new(&repository, "nenji", PackageKind::Agent, &slug).unwrap();
     let same_key =
-        PackageResourceLogicalKey::new("nenji", PackageKind::Agent, "agents/nenji.yaml", "nenji")
+        PackageResourceLogicalKey::parse("pkg:@nenjo-ai/packages:nenji:agent:nenji").unwrap();
+    let instance_v1 =
+        PackageResourceInstanceKey::new(&repository, "nenji", "0.1.0", PackageKind::Agent, &slug)
             .unwrap();
-    let instance_v1 = PackageResourceInstanceKey::new(
-        "nenji",
+    let instance_v2 =
+        PackageResourceInstanceKey::new(&repository, "nenji", "0.2.0", PackageKind::Agent, &slug)
+            .unwrap();
+
+    assert_eq!(key.as_str(), "pkg:@nenjo-ai/packages:nenji:agent:nenji");
+    assert_eq!(key.resource_id(), same_key.resource_id());
+    assert_ne!(instance_v1.as_str(), instance_v2.as_str());
+}
+
+#[test]
+fn package_resource_logical_refs_do_not_collide_across_repositories_or_kinds() {
+    let packages_repository = GitHubRepositoryRef::parse("@nenjo-ai/packages").unwrap();
+    let other_repository = GitHubRepositoryRef::parse("@nenjo-ai/other-registry").unwrap();
+    let slug = PackageResourceSlug::parse("manage-tasks").unwrap();
+
+    let packages_ability =
+        PackageResourceLogicalKey::new(&packages_repository, "nenji", PackageKind::Ability, &slug)
+            .unwrap();
+    let other_ability =
+        PackageResourceLogicalKey::new(&other_repository, "nenji", PackageKind::Ability, &slug)
+            .unwrap();
+    let packages_agent =
+        PackageResourceLogicalKey::new(&packages_repository, "nenji", PackageKind::Agent, &slug)
+            .unwrap();
+
+    assert_ne!(packages_ability, other_ability);
+    assert_ne!(packages_ability.resource_id(), other_ability.resource_id());
+    assert_ne!(packages_ability, packages_agent);
+    assert_ne!(packages_ability.resource_id(), packages_agent.resource_id());
+}
+
+#[test]
+fn package_resource_identity_uses_authored_slug_not_path_or_display_name() {
+    let repository = GitHubRepositoryRef::parse("@0xkr8os/packages").unwrap();
+    let slug = PackageResourceSlug::parse("shop-manager").unwrap();
+    let identity = PackageResourceIdentity::new(
+        &repository,
+        "agenticauto",
         "0.1.0",
         PackageKind::Agent,
-        "agents/nenji.yaml",
-        "nenji",
-    )
-    .unwrap();
-    let instance_v2 = PackageResourceInstanceKey::new(
-        "nenji",
-        "0.2.0",
-        PackageKind::Agent,
-        "agents/nenji.yaml",
-        "nenji",
+        &slug,
+        "agents/shop-manager-agent.yaml",
     )
     .unwrap();
 
-    assert_eq!(key.as_str(), "pkg:nenji:agent:agents/nenji.yaml#nenji");
-    assert_eq!(key.resource_id(), same_key.resource_id());
-    assert_ne!(instance_v1.as_str(), instance_v2.as_str());
+    assert_eq!(
+        identity.resource_path().as_str(),
+        "agents/shop-manager-agent.yaml"
+    );
+    assert_eq!(identity.resource_slug().as_str(), "shop-manager");
+    assert_eq!(
+        identity.logical_key().as_str(),
+        "pkg:@0xkr8os/packages:agenticauto:agent:shop-manager"
+    );
+    assert_eq!(
+        identity.instance_key().as_str(),
+        "pkg:@0xkr8os/packages:agenticauto@0.1.0:agent:shop-manager"
+    );
+}
+
+#[test]
+fn package_resource_path_qualifies_multi_resource_modules_and_encodes_display_selectors() {
+    let path = PackageResourcePath::for_module(
+        "agents/shops.yaml#Shop Manager: East",
+        "agents/shops.yaml",
+        "packages/agenticauto/agents/shops.yaml",
+        "Shop Manager: East",
+    )
+    .unwrap();
+    assert_eq!(
+        path.as_str(),
+        "packages/agenticauto/agents/shops.yaml#Shop Manager: East"
+    );
+
+    let repository = GitHubRepositoryRef::parse("@0xkr8os/packages").unwrap();
+    let slug = PackageResourceSlug::parse("shop-manager-east").unwrap();
+    let identity = PackageResourceIdentity::from_resource_path(
+        &repository,
+        "agenticauto",
+        "0.1.0",
+        PackageKind::Agent,
+        &slug,
+        path,
+    )
+    .expect("display selectors do not participate in identity keys");
+    assert_eq!(
+        identity.logical_key().as_str(),
+        "pkg:@0xkr8os/packages:agenticauto:agent:shop-manager-east"
+    );
 }

@@ -211,7 +211,7 @@ packages:
         "packages/core-v020/nenjo.package.yaml"
     );
     assert_eq!(module.source_path, "packages/core-v020/context/core.yaml");
-    assert_eq!(module.name, "methodology");
+    assert_eq!(module.resource, "methodology");
     assert_ne!(module.hash, "old-module-hash");
     fs::remove_dir_all(workspace).unwrap();
 }

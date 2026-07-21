@@ -134,6 +134,59 @@ impl ToolFactory for EchoToolFactory {
     }
 }
 
+struct MarkerTool(&'static str);
+
+#[async_trait::async_trait]
+impl Tool for MarkerTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        "Domain assignment marker"
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Read
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult {
+            success: true,
+            output: self.0.to_string(),
+            error: None,
+        })
+    }
+}
+
+struct DomainAssignmentToolFactory;
+
+#[async_trait::async_trait]
+impl ToolFactory for DomainAssignmentToolFactory {
+    async fn create_tools(&self, agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+        let mut tools = Vec::<Arc<dyn Tool>>::new();
+        if agent
+            .platform_scopes
+            .iter()
+            .any(|scope| scope == "tasks:write")
+        {
+            tools.push(Arc::new(MarkerTool("domain_scope_tool")));
+        }
+        if agent
+            .mcp_servers
+            .iter()
+            .any(|slug| slug.as_str() == "nenjo-ai-packages-agent-browser")
+        {
+            tools.push(Arc::new(MarkerTool("domain_mcp_tool")));
+        }
+        tools
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -192,6 +245,7 @@ fn test_manifest() -> Manifest {
             settings: serde_json::Value::Null,
         }],
         context_blocks: vec![ContextBlockManifest {
+            slug: Slug::derive("agent-notes"),
             name: "agent_notes".into(),
             path: "nenjo".into(),
             description: None,
@@ -441,6 +495,7 @@ async fn instance_renders_self_prompt_var() {
 
 fn ability_manifest(name: &str, scopes: Vec<&str>) -> AbilityManifest {
     AbilityManifest {
+        slug: Slug::derive(name),
         name: name.into(),
         path: None,
         description: Some(format!("{name} ability")),
@@ -462,10 +517,11 @@ fn domain_manifest_with_config(
     name: &str,
     developer_prompt_addon: Option<&str>,
     platform_scopes: Vec<String>,
-    abilities: Vec<String>,
+    abilities: Vec<Slug>,
     mcp_servers: Vec<Slug>,
 ) -> DomainManifest {
     DomainManifest {
+        slug: Slug::derive(name),
         name: name.into(),
         path: String::new(),
         description: Some(format!("{name} domain")),
@@ -482,7 +538,7 @@ fn domain_manifest_with_config(
 }
 
 fn manifest_with_abilities_and_domains(
-    agent_abilities: Vec<String>,
+    agent_abilities: Vec<Slug>,
     agent_domains: Vec<Slug>,
     agent_scopes: Vec<&str>,
     abilities: Vec<AbilityManifest>,
@@ -550,7 +606,7 @@ fn manifest_with_abilities_and_domains(
 async fn ability_agent_has_ability_invoke_tool_only() {
     let ability = ability_manifest("writer", vec!["agents:write"]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.name.clone()],
+        vec![ability.slug.clone()],
         vec![],
         vec!["projects:read"],
         vec![ability],
@@ -612,17 +668,59 @@ async fn ability_agent_has_ability_invoke_tool_only() {
 }
 
 #[tokio::test]
+async fn ability_agent_resolves_assigned_canonical_slug() {
+    let mut ability = ability_manifest("manage_tasks", vec!["tasks:write"]);
+    ability.slug = Slug::derive("nenjo-ai-packages-manage-tasks");
+    let manifest = manifest_with_abilities_and_domains(
+        vec![ability.slug.clone()],
+        vec![],
+        vec!["projects:read"],
+        vec![ability],
+        vec![],
+    );
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let tool_names = runner
+        .instance()
+        .tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+
+    assert!(
+        tool_names
+            .iter()
+            .any(|name| name == "list_assigned_abilities")
+    );
+    assert!(tool_names.iter().any(|name| name == "use_ability"));
+}
+
+#[tokio::test]
 async fn duplicate_ability_ids_are_rejected() {
     let mut frontend = ability_manifest("review", vec!["projects:read"]);
     frontend.path = Some("frontend".into());
-    let frontend_name = frontend.name.clone();
+    let frontend_slug = frontend.slug.clone();
 
     let mut backend = ability_manifest("review", vec!["projects:read"]);
     backend.path = Some("backend".into());
-    let backend_name = backend.name.clone();
+    let backend_slug = backend.slug.clone();
 
     let manifest = manifest_with_abilities_and_domains(
-        vec![frontend_name, backend_name],
+        vec![frontend_slug, backend_slug],
         vec![],
         vec!["projects:read"],
         vec![frontend, backend],
@@ -701,7 +799,7 @@ async fn domain_expansion_preserves_tool_set() {
     );
     let manifest = manifest_with_abilities_and_domains(
         vec![],
-        vec![Slug::derive(&domain.name)],
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![],
         vec![domain],
@@ -755,8 +853,8 @@ async fn domain_expansion_preserves_existing_abilities() {
     let domain =
         domain_manifest_with_config("reviewer", Some("Review mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.name.clone()],
-        vec![Slug::derive(&domain.name)],
+        vec![ability.slug.clone()],
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![ability.clone()],
         vec![domain],
@@ -801,8 +899,8 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
     let ability = ability_manifest("deployer", vec!["projects:read"]);
     let domain = domain_manifest_with_config("ops", Some("Ops mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.name.clone()],
-        vec![Slug::derive(&domain.name)],
+        vec![ability.slug.clone()],
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![ability.clone()],
         vec![domain],
@@ -868,8 +966,8 @@ async fn domain_expansion_preserves_existing_ability_without_duplication() {
     let domain =
         domain_manifest_with_config("creator", Some("Creator mode"), vec![], vec![], vec![]);
     let manifest = manifest_with_abilities_and_domains(
-        vec![ability.name.clone()], // agent already has this ability
-        vec![Slug::derive(&domain.name)],
+        vec![ability.slug.clone()], // agent already has this ability
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![ability],
         vec![domain],
@@ -913,12 +1011,12 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
         "review",
         Some("Review mode"),
         vec!["projects:write".into()],
-        vec![domain_ability.name.clone()],
+        vec![domain_ability.slug.clone()],
         vec![],
     );
     let manifest = manifest_with_abilities_and_domains(
-        vec![assigned_ability.name.clone()],
-        vec![Slug::derive(&domain.name)],
+        vec![assigned_ability.slug.clone()],
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![assigned_ability, domain_ability],
         vec![domain],
@@ -948,7 +1046,7 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
             .prompt_context()
             .active_domain
             .as_ref()
-            .map(|domain| domain.domain_name.as_str()),
+            .map(|domain| domain.manifest.name.as_str()),
         Some("review")
     );
 
@@ -957,6 +1055,100 @@ async fn domain_expansion_adds_domain_scopes_and_abilities() {
     assert!(tool_names.contains(&"list_assigned_abilities"));
     assert!(tool_names.contains(&"use_ability"));
     assert!(!tool_names.contains(&"writer"));
+}
+
+#[tokio::test]
+async fn domain_expansion_uses_canonical_assignment_and_layers_runtime_tools() {
+    let mut domain = domain_manifest_with_config(
+        "browser",
+        Some("Browser mode"),
+        vec!["tasks:write".into()],
+        vec![],
+        vec![Slug::derive("nenjo-ai-packages-agent-browser")],
+    );
+    domain.slug = Slug::derive("nenjo-ai-packages-browser-domain");
+    let manifest = manifest_with_abilities_and_domains(
+        vec![],
+        vec![domain.slug.clone()],
+        vec!["projects:read"],
+        vec![],
+        vec![domain],
+    );
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(DomainAssignmentToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let base_tool_names = runner
+        .instance()
+        .tool_specs()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert!(
+        !base_tool_names
+            .iter()
+            .any(|name| name == "domain_scope_tool")
+    );
+    assert!(!base_tool_names.iter().any(|name| name == "domain_mcp_tool"));
+
+    let domain_runner = runner.domain_expansion("browser").await.unwrap();
+    let tool_names = domain_runner
+        .instance()
+        .tool_specs()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert!(tool_names.iter().any(|name| name == "domain_scope_tool"));
+    assert!(tool_names.iter().any(|name| name == "domain_mcp_tool"));
+}
+
+#[tokio::test]
+async fn domain_expansion_rejects_name_derived_assignment_for_canonical_domain() {
+    let mut domain =
+        domain_manifest_with_config("browser", Some("Browser mode"), vec![], vec![], vec![]);
+    domain.slug = Slug::derive("nenjo-ai-packages-browser-domain");
+    let name_derived_assignment = Slug::derive(&domain.name);
+    let manifest = manifest_with_abilities_and_domains(
+        vec![],
+        vec![name_derived_assignment],
+        vec!["projects:read"],
+        vec![],
+        vec![domain],
+    );
+
+    let provider = Provider::builder()
+        .with_manifest(manifest)
+        .with_model_factory(MockModelProviderFactory::new("ok"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let error = runner
+        .domain_expansion("browser")
+        .await
+        .err()
+        .expect("name-derived assignment must not authorize a canonical domain slug");
+    assert!(error.to_string().contains("domain 'browser' not found"));
 }
 
 #[tokio::test]
@@ -971,7 +1163,7 @@ async fn domain_expansion_tracks_active_domain_without_available_context() {
     );
     let mut manifest = manifest_with_abilities_and_domains(
         vec![],
-        vec![Slug::derive(&domain.name)],
+        vec![domain.slug.clone()],
         vec!["projects:read"],
         vec![],
         vec![domain],
@@ -979,8 +1171,8 @@ async fn domain_expansion_tracks_active_domain_without_available_context() {
     manifest
         .mcp_servers
         .push(nenjo::manifest::McpServerManifest {
-            name: "github".into(),
-            display_name: "GitHub".into(),
+            slug: Slug::derive("github"),
+            name: "GitHub".into(),
             description: Some("GitHub API".into()),
             transport: "stdio".into(),
             command: None,
@@ -1014,6 +1206,6 @@ async fn domain_expansion_tracks_active_domain_without_available_context() {
         .prompt_context()
         .active_domain
         .as_ref()
-        .map(|domain| domain.domain_name.as_str());
+        .map(|domain| domain.manifest.name.as_str());
     assert_eq!(active_domain, Some("github"));
 }

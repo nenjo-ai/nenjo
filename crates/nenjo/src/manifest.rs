@@ -97,52 +97,104 @@ impl Manifest {
         }
     }
 
+    /// Clone one resource snapshot from this manifest by canonical kind and slug.
+    pub fn resource_snapshot(
+        &self,
+        kind: ManifestResourceKind,
+        slug: &Slug,
+    ) -> Option<ManifestResource> {
+        match kind {
+            ManifestResourceKind::Agent => manifest_by_slug(&self.agents, slug)
+                .cloned()
+                .map(ManifestResource::Agent),
+            ManifestResourceKind::Model => manifest_by_slug(&self.models, slug)
+                .cloned()
+                .map(ManifestResource::Model),
+            ManifestResourceKind::Routine => manifest_by_slug(&self.routines, slug)
+                .cloned()
+                .map(ManifestResource::Routine),
+            ManifestResourceKind::Project => manifest_by_slug(&self.projects, slug)
+                .cloned()
+                .map(ManifestResource::Project),
+            ManifestResourceKind::Council => manifest_by_slug(&self.councils, slug)
+                .cloned()
+                .map(ManifestResource::Council),
+            ManifestResourceKind::Domain => manifest_by_slug(&self.domains, slug)
+                .cloned()
+                .map(ManifestResource::Domain),
+            ManifestResourceKind::McpServer => manifest_by_slug(&self.mcp_servers, slug)
+                .cloned()
+                .map(ManifestResource::McpServer),
+            ManifestResourceKind::Ability => manifest_by_slug(&self.abilities, slug)
+                .cloned()
+                .map(ManifestResource::Ability),
+            ManifestResourceKind::ContextBlock => manifest_by_slug(&self.context_blocks, slug)
+                .cloned()
+                .map(ManifestResource::ContextBlock),
+            ManifestResourceKind::Skill => manifest_by_slug(&self.skills, slug)
+                .cloned()
+                .map(ManifestResource::Skill),
+            ManifestResourceKind::Command => manifest_by_slug(&self.commands, slug)
+                .cloned()
+                .map(ManifestResource::Command),
+            ManifestResourceKind::Hook => manifest_by_slug(&self.hooks, slug)
+                .cloned()
+                .map(ManifestResource::Hook),
+            ManifestResourceKind::ScriptTool => manifest_by_slug(&self.script_tools, slug)
+                .cloned()
+                .map(ManifestResource::ScriptTool),
+            ManifestResourceKind::KnowledgePack => manifest_by_slug(&self.knowledge_packs, slug)
+                .cloned()
+                .map(ManifestResource::KnowledgePack),
+        }
+    }
+
     /// Remove a single resource from this manifest by type and slug.
     pub fn delete_resource(&mut self, kind: ManifestResourceKind, slug: &Slug) {
         match kind {
-            ManifestResourceKind::Agent => self.agents.retain(|item| item.manifest_slug() != *slug),
-            ManifestResourceKind::Model => self.models.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Agent => self.agents.retain(|item| item.manifest_slug() != slug),
+            ManifestResourceKind::Model => self.models.retain(|item| item.manifest_slug() != slug),
             ManifestResourceKind::Routine => {
-                self.routines.retain(|item| item.manifest_slug() != *slug)
+                self.routines.retain(|item| item.manifest_slug() != slug)
             }
             ManifestResourceKind::Project => {
-                self.projects.retain(|item| item.manifest_slug() != *slug)
+                self.projects.retain(|item| item.manifest_slug() != slug)
             }
             ManifestResourceKind::Council => {
-                self.councils.retain(|item| item.manifest_slug() != *slug)
+                self.councils.retain(|item| item.manifest_slug() != slug)
             }
             ManifestResourceKind::Domain => {
-                self.domains.retain(|item| item.manifest_slug() != *slug)
+                self.domains.retain(|item| item.manifest_slug() != slug)
             }
-            ManifestResourceKind::McpServer => self
-                .mcp_servers
-                .retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::McpServer => {
+                self.mcp_servers.retain(|item| item.manifest_slug() != slug)
+            }
             ManifestResourceKind::Ability => {
-                self.abilities.retain(|item| item.manifest_slug() != *slug)
+                self.abilities.retain(|item| item.manifest_slug() != slug)
             }
             ManifestResourceKind::ContextBlock => self
                 .context_blocks
-                .retain(|item| item.manifest_slug() != *slug),
-            ManifestResourceKind::Skill => self.skills.retain(|item| item.manifest_slug() != *slug),
+                .retain(|item| item.manifest_slug() != slug),
+            ManifestResourceKind::Skill => self.skills.retain(|item| item.manifest_slug() != slug),
             ManifestResourceKind::Command => {
-                self.commands.retain(|item| item.manifest_slug() != *slug)
+                self.commands.retain(|item| item.manifest_slug() != slug)
             }
-            ManifestResourceKind::Hook => self.hooks.retain(|item| item.manifest_slug() != *slug),
+            ManifestResourceKind::Hook => self.hooks.retain(|item| item.manifest_slug() != slug),
             ManifestResourceKind::ScriptTool => self
                 .script_tools
-                .retain(|item| item.manifest_slug() != *slug),
+                .retain(|item| item.manifest_slug() != slug),
             ManifestResourceKind::KnowledgePack => self
                 .knowledge_packs
-                .retain(|item| item.manifest_slug() != *slug),
+                .retain(|item| item.manifest_slug() != slug),
         }
     }
 }
 
-fn upsert_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: T) {
-    let incoming_slug = incoming.manifest_slug();
+fn upsert_by_slug<T: ManifestIdentity>(items: &mut Vec<T>, incoming: T) {
+    let incoming_slug = incoming.manifest_slug().clone();
     if let Some(existing) = items
         .iter_mut()
-        .find(|item| item.manifest_slug() == incoming_slug)
+        .find(|item| item.manifest_slug() == &incoming_slug)
     {
         *existing = incoming;
     } else {
@@ -150,17 +202,17 @@ fn upsert_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: T) {
     }
 }
 
-fn merge_by_slug<T: HasManifestSlug>(items: &mut Vec<T>, incoming: Vec<T>) {
+fn merge_by_slug<T: ManifestIdentity>(items: &mut Vec<T>, incoming: Vec<T>) {
     for item in incoming {
         upsert_by_slug(items, item);
     }
 }
 
 fn upsert_command(items: &mut Vec<CommandManifest>, mut incoming: CommandManifest) {
-    let incoming_slug = incoming.manifest_slug();
+    let incoming_slug = incoming.manifest_slug().clone();
     if let Some(existing) = items
         .iter_mut()
-        .find(|item| item.manifest_slug() == incoming_slug)
+        .find(|item| item.manifest_slug() == &incoming_slug)
     {
         preserve_command_runtime_paths(existing, &mut incoming);
         *existing = incoming;
@@ -194,8 +246,53 @@ fn preserve_command_runtime_paths(existing: &CommandManifest, incoming: &mut Com
     }
 }
 
-pub trait HasManifestSlug {
-    fn manifest_slug(&self) -> Slug;
+mod private {
+    pub trait Sealed {}
+}
+
+/// Canonical identity and human-readable label shared by manifest resources.
+///
+/// Runtime lookup, indexing, and mutation must use [`Self::manifest_slug`].
+/// [`Self::manifest_name`] exists only for presentation, diagnostics, and authored
+/// content. The trait is sealed so those semantics cannot be redefined outside
+/// this crate.
+pub trait ManifestIdentity: private::Sealed {
+    fn manifest_slug(&self) -> &Slug;
+    fn manifest_name(&self) -> &str;
+}
+
+macro_rules! impl_manifest_identity {
+    ($type:ty) => {
+        impl private::Sealed for $type {}
+
+        impl ManifestIdentity for $type {
+            fn manifest_slug(&self) -> &Slug {
+                &self.slug
+            }
+
+            fn manifest_name(&self) -> &str {
+                &self.name
+            }
+        }
+    };
+}
+
+/// Find one manifest resource by its canonical slug.
+pub fn manifest_by_slug<'a, T: ManifestIdentity>(items: &'a [T], slug: &Slug) -> Option<&'a T> {
+    items.iter().find(|item| item.manifest_slug() == slug)
+}
+
+/// Find one mutable manifest resource by its canonical slug.
+pub fn manifest_by_slug_mut<'a, T: ManifestIdentity>(
+    items: &'a mut [T],
+    slug: &Slug,
+) -> Option<&'a mut T> {
+    items.iter_mut().find(|item| item.manifest_slug() == slug)
+}
+
+/// Remove a manifest resource by its canonical slug.
+pub fn remove_manifest_by_slug<T: ManifestIdentity>(items: &mut Vec<T>, slug: &Slug) {
+    items.retain(|item| item.manifest_slug() != slug);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +302,8 @@ pub trait HasManifestSlug {
 /// An external MCP server (stdio or HTTP transport) providing tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerManifest {
+    pub slug: Slug,
     pub name: String,
-    pub display_name: String,
     pub description: Option<String>,
     pub transport: String,
     pub command: Option<String>,
@@ -226,18 +323,13 @@ fn default_mcp_source_type() -> String {
     "native".to_string()
 }
 
-impl HasManifestSlug for McpServerManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(McpServerManifest);
 
 /// A Claude-style local skill installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
+    pub slug: Slug,
     pub name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
@@ -278,22 +370,17 @@ fn default_skill_source_type() -> String {
     "package".to_string()
 }
 
-impl HasManifestSlug for SkillManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(SkillManifest);
 
 /// A user-facing slash command installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandManifest {
+    pub slug: Slug,
     pub name: String,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
     pub command: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default = "default_command_entry_path")]
@@ -326,18 +413,13 @@ fn default_command_source_type() -> String {
     "package".to_string()
 }
 
-impl HasManifestSlug for CommandManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(CommandManifest);
 
 /// A dormant runtime hook installed from a package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookManifest {
+    pub slug: Slug,
     pub name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     pub event: String,
@@ -372,18 +454,13 @@ fn default_hook_source_type() -> String {
     "package".to_string()
 }
 
-impl HasManifestSlug for HookManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(HookManifest);
 
 /// A native Nenjo typed script execution tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptToolManifest {
+    pub slug: Slug,
     pub name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default = "default_script_tool_category")]
@@ -426,11 +503,7 @@ fn default_script_tool_source_type() -> String {
     "package".to_string()
 }
 
-impl HasManifestSlug for ScriptToolManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(ScriptToolManifest);
 
 /// A project — the top-level organizational unit for agents, routines, and documents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,11 +514,7 @@ pub struct ProjectManifest {
     pub settings: serde_json::Value,
 }
 
-impl HasManifestSlug for ProjectManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug.clone()
-    }
-}
+impl_manifest_identity!(ProjectManifest);
 
 /// A knowledge pack manifest entry.
 ///
@@ -469,11 +538,7 @@ pub struct KnowledgePackManifest {
     pub metadata: serde_json::Value,
 }
 
-impl HasManifestSlug for KnowledgePackManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug.clone()
-    }
-}
+impl_manifest_identity!(KnowledgePackManifest);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -509,16 +574,12 @@ pub struct RoutineManifest {
 }
 
 impl RoutineManifest {
-    pub fn slug(&self) -> &Slug {
-        &self.slug
+    pub fn slug(&self) -> Slug {
+        self.slug.clone()
     }
 }
 
-impl HasManifestSlug for RoutineManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug().clone()
-    }
-}
+impl_manifest_identity!(RoutineManifest);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutineMetadata {
@@ -642,11 +703,7 @@ pub struct ModelManifest {
     pub native_tools: Vec<NativeModelToolId>,
 }
 
-impl HasManifestSlug for ModelManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug.clone()
-    }
-}
+impl_manifest_identity!(ModelManifest);
 
 pub fn model_manifest_slug(model_provider: &str, model: &str) -> Slug {
     Slug::derive(format!(
@@ -814,7 +871,7 @@ pub struct AgentManifest {
     /// Ability slugs assigned to this agent.
     #[serde(default)]
     #[builder(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     /// When true, prompt_config updates are blocked.
     #[builder(default)]
     pub prompt_locked: bool,
@@ -866,11 +923,7 @@ impl AgentManifestBuilder {
     }
 }
 
-impl HasManifestSlug for AgentManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug.clone()
-    }
-}
+impl_manifest_identity!(AgentManifest);
 
 /// Prompt configuration for an ability. This mirrors the agent pattern while
 /// staying intentionally narrow: abilities contribute only developer guidance.
@@ -888,9 +941,10 @@ pub struct AbilityPromptConfig {
 ///
 /// ```
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// use nenjo::manifest::AbilityManifest;
+/// use nenjo::{Slug, manifest::AbilityManifest};
 ///
 /// let ability = AbilityManifest::builder()
+///     .with_slug(Slug::parse("review")?)
 ///     .with_name("review")
 ///     .with_description("Reviews code changes")
 ///     .with_activation_condition("When code review is requested")
@@ -903,7 +957,10 @@ pub struct AbilityPromptConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", setter(prefix = "with", into))]
 pub struct AbilityManifest {
-    /// Stable slug used by agents to assign and invoke this ability.
+    /// Stable agent-facing identity. This does not change when the resource is
+    /// renamed or moved in the local manifest tree.
+    pub slug: Slug,
+    /// Human-readable authored name.
     pub name: String,
     /// Optional folder path used only for local manifest tree organization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -949,11 +1006,7 @@ fn default_ability_source_type() -> String {
     "native".to_string()
 }
 
-impl HasManifestSlug for AbilityManifest {
-    fn manifest_slug(&self) -> Slug {
-        ability_slug(self.path.as_deref(), &self.name)
-    }
-}
+impl_manifest_identity!(AbilityManifest);
 
 impl AbilityManifest {
     /// Create a builder for an ability manifest.
@@ -961,14 +1014,14 @@ impl AbilityManifest {
         AbilityManifestBuilder::default()
     }
 
-    /// Stable path-aware identity for multi-version coexistence.
+    /// Stable agent-facing identity.
     pub fn slug(&self) -> Slug {
-        ability_slug(self.path.as_deref(), &self.name)
+        self.slug.clone()
     }
 }
 
-/// Ability identity for manifest merge: path+name when path is set (package
-/// multi-version), otherwise name-only (native abilities).
+/// Legacy path/name identity derivation used only while reading records that
+/// predate explicit authored slugs.
 pub fn ability_slug(path: Option<&str>, name: &str) -> Slug {
     match path {
         Some(path) if !path.trim().is_empty() => domain_slug(path, name),
@@ -989,6 +1042,7 @@ impl AbilityManifestBuilder {
 /// Lightweight ability metadata — kept in memory for lazy loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbilityMeta {
+    pub slug: Slug,
     pub name: String,
     pub path: Option<String>,
     pub description: Option<String>,
@@ -998,6 +1052,7 @@ pub struct AbilityMeta {
 impl From<&AbilityManifest> for AbilityMeta {
     fn from(a: &AbilityManifest) -> Self {
         Self {
+            slug: a.slug.clone(),
             name: a.name.clone(),
             path: a.path.clone(),
             description: a.description.clone(),
@@ -1009,6 +1064,7 @@ impl From<&AbilityManifest> for AbilityMeta {
 /// Lightweight context block metadata — kept in memory for lazy loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextBlockMeta {
+    pub slug: Slug,
     pub name: String,
     pub path: String,
 }
@@ -1016,6 +1072,7 @@ pub struct ContextBlockMeta {
 impl From<&ContextBlockManifest> for ContextBlockMeta {
     fn from(b: &ContextBlockManifest) -> Self {
         Self {
+            slug: b.slug.clone(),
             name: b.name.clone(),
             path: b.path.clone(),
         }
@@ -1025,6 +1082,7 @@ impl From<&ContextBlockManifest> for ContextBlockMeta {
 /// A context block — a MiniJinja template injected into the agent's prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextBlockManifest {
+    pub slug: Slug,
     pub name: String,
     pub path: String,
     pub description: Option<String>,
@@ -1033,15 +1091,11 @@ pub struct ContextBlockManifest {
 
 impl ContextBlockManifest {
     pub fn slug(&self) -> Slug {
-        context_block_slug(&self.path, &self.name)
+        self.slug.clone()
     }
 }
 
-impl HasManifestSlug for ContextBlockManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug()
-    }
-}
+impl_manifest_identity!(ContextBlockManifest);
 
 pub fn context_block_slug(path: &str, name: &str) -> Slug {
     if path.trim().is_empty() {
@@ -1066,6 +1120,7 @@ pub struct DomainPromptConfig {
 /// A domain — an activatable execution mode with its own prompt addons and tool config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainManifest {
+    pub slug: Slug,
     pub name: String,
     pub path: String,
     pub description: Option<String>,
@@ -1073,7 +1128,7 @@ pub struct DomainManifest {
     pub platform_scopes: Vec<String>,
     /// Ability slugs activated by this domain.
     #[serde(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     pub mcp_servers: Vec<Slug>,
     #[serde(default)]
     pub script_tools: Vec<Slug>,
@@ -1083,15 +1138,11 @@ pub struct DomainManifest {
     pub prompt_config: DomainPromptConfig,
 }
 
-impl HasManifestSlug for DomainManifest {
-    fn manifest_slug(&self) -> Slug {
-        self.slug()
-    }
-}
+impl_manifest_identity!(DomainManifest);
 
 impl DomainManifest {
     pub fn slug(&self) -> Slug {
-        domain_slug(&self.path, &self.name)
+        self.slug.clone()
     }
 }
 
@@ -1106,17 +1157,14 @@ pub fn domain_slug(path: &str, name: &str) -> Slug {
 /// A council — a multi-agent deliberation group with a leader and delegation strategy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouncilManifest {
+    pub slug: Slug,
     pub name: String,
     pub delegation_strategy: CouncilDelegationStrategy,
     pub leader_agent: Slug,
     pub members: Vec<CouncilMemberManifest>,
 }
 
-impl HasManifestSlug for CouncilManifest {
-    fn manifest_slug(&self) -> Slug {
-        Slug::derive(&self.name)
-    }
-}
+impl_manifest_identity!(CouncilManifest);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1179,6 +1227,10 @@ impl ManifestResource {
     }
 
     pub fn slug(&self) -> Slug {
+        self.slug_ref().clone()
+    }
+
+    pub fn slug_ref(&self) -> &Slug {
         match self {
             Self::Agent(item) => item.manifest_slug(),
             Self::Model(item) => item.manifest_slug(),
@@ -1255,10 +1307,10 @@ mod tests {
     fn command_merge_preserves_existing_runtime_paths_when_incoming_lacks_them() {
         let mut manifest = Manifest {
             commands: vec![CommandManifest {
-                name: "ralph_loop__ralph_loop".to_string(),
+                slug: Slug::derive("ralph-loop"),
+                name: "Ralph Loop".to_string(),
                 path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
-                display_name: Some("ralph-loop".to_string()),
                 description: Some("local".to_string()),
                 entry_path: "ralph-loop.md".to_string(),
                 content: String::new(),
@@ -1276,10 +1328,10 @@ mod tests {
 
         manifest.merge(Manifest {
             commands: vec![CommandManifest {
-                name: "ralph_loop__ralph_loop".to_string(),
+                slug: Slug::derive("ralph-loop"),
+                name: "Ralph Loop".to_string(),
                 path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
-                display_name: Some("ralph-loop".to_string()),
                 description: Some("platform".to_string()),
                 entry_path: "ralph-loop.md".to_string(),
                 content: String::new(),

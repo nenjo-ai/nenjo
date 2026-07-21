@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::Slug;
-use crate::manifest::{CommandManifest, HasManifestSlug, HookManifest, SkillManifest};
+use crate::manifest::{CommandManifest, HookManifest, ManifestIdentity, SkillManifest};
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
 const MAX_HOOK_OUTPUT_BYTES: usize = 128 * 1024;
@@ -128,7 +128,6 @@ pub struct ResolvedHookCommand {
 pub struct ResolvedHook {
     pub slug: Slug,
     pub name: String,
-    pub display_name: Option<String>,
     pub event: HookEvent,
     pub matcher: Option<String>,
     pub hook_type: String,
@@ -141,9 +140,8 @@ pub struct ResolvedHook {
 impl ResolvedHook {
     pub fn from_manifest(hook: &HookManifest) -> Self {
         Self {
-            slug: hook.manifest_slug(),
+            slug: hook.manifest_slug().clone(),
             name: hook.name.clone(),
-            display_name: hook.display_name.clone(),
             event: HookEvent::from_name(hook.event.clone()),
             matcher: hook.matcher.clone(),
             hook_type: hook.hook_type.clone(),
@@ -158,7 +156,7 @@ impl ResolvedHook {
     }
 
     pub fn label(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(self.name.as_str())
+        &self.name
     }
 }
 
@@ -635,7 +633,7 @@ pub fn resolve_skill_hooks(
 }
 
 fn hook_matches_ref(hook: &HookManifest, hook_ref: &Slug) -> bool {
-    hook_ref.as_str() == hook.name || hook_ref.as_str() == Slug::derive(&hook.name).as_str()
+    hook_ref == &hook.slug
 }
 
 fn matcher_matches(matcher: Option<&str>, subject: Option<&str>) -> bool {
@@ -857,8 +855,8 @@ printf '{"decision":"block","reason":"continue please","systemMessage":"again"}'
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
+            slug: crate::Slug::derive("stop-hook"),
             name: "stop-hook".to_string(),
-            display_name: None,
             description: None,
             event: "Stop".to_string(),
             matcher: Some("*".to_string()),
@@ -930,8 +928,8 @@ printf '{"decision":"request_next_turn","prompt":"revise before stopping","syste
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
+            slug: crate::Slug::derive("stop-hook"),
             name: "stop-hook".to_string(),
-            display_name: None,
             description: None,
             event: "Stop".to_string(),
             matcher: Some("*".to_string()),
@@ -1006,8 +1004,8 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
         .unwrap();
 
         let hook = ResolvedHook::from_manifest(&HookManifest {
+            slug: crate::Slug::derive("prompt-hook"),
             name: "prompt-hook".to_string(),
-            display_name: None,
             description: None,
             event: "UserPromptSubmit".to_string(),
             matcher: Some("*".to_string()),
@@ -1063,8 +1061,8 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
     #[test]
     fn resolves_and_activates_skill_hooks_once() {
         let hook_manifest = HookManifest {
-            name: "acme__stop_review".to_string(),
-            display_name: None,
+            slug: crate::Slug::derive("acme-stop-review"),
+            name: "Acme Stop Review".to_string(),
             description: None,
             event: "Stop".to_string(),
             matcher: Some("*".to_string()),
@@ -1082,9 +1080,10 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
         };
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": Uuid::new_v4(),
-            "name": "acme__review",
+            "slug": "acme-review",
+            "name": "Acme Review",
             "root_dir": "/tmp/acme/skills/review",
-            "hooks": ["acme__stop_review"]
+            "hooks": ["acme-stop-review"]
         }))
         .unwrap();
         let resolved_hooks = resolve_skill_hooks(&[hook_manifest], &skill);
@@ -1103,7 +1102,7 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
         assert_eq!(runtime.matching_hooks(&HookEvent::Stop, None).len(), 1);
         assert_eq!(
             runtime.matching_hooks(&HookEvent::Stop, None)[0].hook.slug,
-            Slug::derive("acme__stop_review")
+            Slug::derive("acme-stop-review")
         );
     }
 }

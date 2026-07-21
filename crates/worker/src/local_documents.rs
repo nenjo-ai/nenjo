@@ -433,7 +433,7 @@ pub async fn sync_pack_by_slug(
     state_dir: &Path,
     manifests_dir: &Path,
     pack_slug: &nenjo::Slug,
-) -> Result<()> {
+) -> Result<Option<KnowledgePackManifest>> {
     let packs = api
         .list_knowledge_packs()
         .await
@@ -443,7 +443,7 @@ pub async fn sync_pack_by_slug(
         .find(|pack| nenjo::Slug::derive(&pack.slug) == *pack_slug)
     else {
         warn!(%pack_slug, "Knowledge pack not found during sync");
-        return Ok(());
+        return Ok(None);
     };
 
     if !is_uploaded_library_pack(&pack) {
@@ -453,13 +453,15 @@ pub async fn sync_pack_by_slug(
             source_type = %pack.source_type,
             "Skipping knowledge pack sync for non-uploaded pack"
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let pack_dir = nenjo_home.join("library").join(&pack.slug);
+    let manifest = library_knowledge_pack_manifest(&pack, &nenjo_home.join("library"));
     upsert_library_knowledge_pack_manifest(manifests_dir, &nenjo_home.join("library"), &pack)
         .await?;
-    sync_pack(api, &pack_dir, &pack.slug, state_dir, manifests_dir).await
+    sync_pack(api, &pack_dir, &pack.slug, state_dir, manifests_dir).await?;
+    Ok(Some(manifest))
 }
 
 /// Sync knowledge documents for a single pack.

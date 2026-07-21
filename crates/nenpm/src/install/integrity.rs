@@ -50,12 +50,12 @@ fn verify_locked_modules(expected: &LockedPackage, actual: &LockedPackage) -> Re
     let actual_modules: BTreeMap<_, _> = actual
         .modules
         .iter()
-        .map(|module| ((module.path.as_str(), module.resource.as_deref()), module))
+        .map(|module| ((module.path.as_str(), module.resource.as_str()), module))
         .collect();
     for expected_module in &expected.modules {
         let key = (
             expected_module.path.as_str(),
-            expected_module.resource.as_deref(),
+            expected_module.resource.as_str(),
         );
         let actual_module = actual_modules.get(&key).ok_or_else(|| {
             anyhow!(

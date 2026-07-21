@@ -46,18 +46,20 @@ pub fn validate_package_runtime(
 }
 
 pub fn validate_registry_runtime(
-    _registry: &PackageRegistryManifest,
+    registry: &PackageRegistryManifest,
     packages: &BTreeMap<String, ResolvedPackage>,
 ) -> crate::Result<PackageRuntimeValidationReport> {
+    validate_registry_resource_slugs(registry, packages)?;
     let report = validate_packages(packages, |_| {});
     finish_report(report)
 }
 
 pub fn validate_registry_runtime_with_progress(
-    _registry: &PackageRegistryManifest,
+    registry: &PackageRegistryManifest,
     packages: &BTreeMap<String, ResolvedPackage>,
     progress: impl FnMut(PackageRuntimeValidationStage),
 ) -> crate::Result<PackageRuntimeValidationReport> {
+    validate_registry_resource_slugs(registry, packages)?;
     let report = validate_packages(packages, progress);
     finish_report(report)
 }
@@ -126,6 +128,9 @@ fn validate_packages(
 
     progress(PackageRuntimeValidationStage::ModuleImports);
     for package in packages.values() {
+        if let Err(error) = validate_package_resource_slugs(package) {
+            push_package_error(package, None, Some("slug"), error, &mut report);
+        }
         for module in unique_modules(package) {
             validate_one(
                 package,
@@ -262,6 +267,77 @@ fn validate_packages(
     }
 
     report
+}
+
+fn validate_package_resource_slugs(package: &ResolvedPackage) -> anyhow::Result<()> {
+    let mut slugs = BTreeMap::new();
+    for module in unique_modules(package) {
+        let slug = module.manifest.resource_slug()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "package {} {} resource in {} is missing required top-level slug",
+                package.name,
+                module.kind.as_str(),
+                module.path
+            )
+        })?;
+        if let Some((existing_kind, existing_path)) = slugs.insert(
+            slug.as_str().to_string(),
+            (module.kind.as_str(), module.path.as_str()),
+        ) {
+            anyhow::bail!(
+                "package {} declares duplicate resource slug '{}' for {} in {} and {} in {}",
+                package.name,
+                slug,
+                existing_kind,
+                existing_path,
+                module.kind.as_str(),
+                module.path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_registry_resource_slugs(
+    registry: &PackageRegistryManifest,
+    packages: &BTreeMap<String, ResolvedPackage>,
+) -> crate::Result<()> {
+    let mut slugs = BTreeMap::new();
+    for package_name in registry.packages.keys() {
+        let Some(package) = packages.get(package_name) else {
+            continue;
+        };
+        for module in unique_modules(package) {
+            let slug = module.manifest.resource_slug()?.ok_or_else(|| {
+                PackageError::Message(format!(
+                    "registry package {} {} resource in {} is missing required top-level slug",
+                    package.name,
+                    module.kind.as_str(),
+                    module.path
+                ))
+            })?;
+            if let Some((existing_package, existing_kind, existing_path)) = slugs.insert(
+                slug.as_str().to_string(),
+                (
+                    package.name.as_str(),
+                    module.kind.as_str(),
+                    module.path.as_str(),
+                ),
+            ) {
+                return Err(PackageError::Message(format!(
+                    "registry declares duplicate resource slug '{}' for {} {} in {} and {} {} in {}",
+                    slug,
+                    existing_package,
+                    existing_kind,
+                    existing_path,
+                    package.name,
+                    module.kind.as_str(),
+                    module.path
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Routines, hooks, and models are package-local runtime configuration. They
@@ -656,6 +732,11 @@ mod tests {
     }
 
     fn module(path: &str, kind: PackageKind, manifest: serde_json::Value) -> ResolvedModule {
+        let slug = manifest
+            .get("slug")
+            .or_else(|| manifest.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(|value| nenjo::Slug::derive(value).into_string());
         ResolvedModule {
             package_name: "pkg".to_string(),
             package_version: "1.0.0".to_string(),
@@ -665,7 +746,7 @@ mod tests {
             kind,
             manifest: ResourceManifest {
                 schema: format!("nenjo.{}.v1", kind.as_str()),
-                slug: None,
+                slug,
                 root_uri: None,
                 selector: None,
                 imports: BTreeMap::new(),
@@ -674,6 +755,17 @@ mod tests {
             imports: Vec::new(),
             files: Vec::new(),
         }
+    }
+
+    fn module_with_slug(
+        path: &str,
+        kind: PackageKind,
+        slug: &str,
+        manifest: serde_json::Value,
+    ) -> ResolvedModule {
+        let mut module = module(path, kind, manifest);
+        module.manifest.slug = Some(slug.to_string());
+        module
     }
 
     fn validate_single(package: ResolvedPackage) -> String {
@@ -700,6 +792,110 @@ mod tests {
         };
         let packages = BTreeMap::from([(package.name.clone(), package)]);
         validate_registry_runtime(&registry, &packages).expect("validation should pass");
+    }
+
+    #[test]
+    fn rejects_package_resource_without_authored_wrapper_slug() {
+        let mut resource = module(
+            "abilities/review.yaml",
+            PackageKind::Ability,
+            serde_json::json!({ "name": "Review" }),
+        );
+        resource.manifest.slug = None;
+
+        let error = validate_single(package("pkg", vec![resource]));
+        assert!(error.contains("missing required top-level slug"));
+    }
+
+    #[test]
+    fn rejects_duplicate_authored_resource_slugs_within_a_package() {
+        let first = module_with_slug(
+            "abilities/first.yaml",
+            PackageKind::Ability,
+            "manage-tasks",
+            serde_json::json!({ "name": "Manage Tasks" }),
+        );
+        let second = module_with_slug(
+            "abilities/second.yaml",
+            PackageKind::Ability,
+            "manage-tasks",
+            serde_json::json!({ "name": "Manage Tasks Alternate" }),
+        );
+
+        let error = validate_single(package("pkg", vec![first, second]));
+
+        assert!(error.contains("duplicate resource slug 'manage-tasks'"));
+        assert!(error.contains("abilities/first.yaml"));
+        assert!(error.contains("abilities/second.yaml"));
+    }
+
+    #[test]
+    fn rejects_same_authored_resource_slug_for_different_kinds() {
+        let ability = module_with_slug(
+            "abilities/review.yaml",
+            PackageKind::Ability,
+            "review",
+            serde_json::json!({ "name": "Review" }),
+        );
+        let agent = module_with_slug(
+            "agents/review.yaml",
+            PackageKind::Agent,
+            "review",
+            serde_json::json!({ "name": "Review" }),
+        );
+
+        let error = validate_single(package("pkg", vec![ability, agent]));
+
+        assert!(error.contains("duplicate resource slug 'review'"));
+        assert!(error.contains("ability"));
+        assert!(error.contains("agent"));
+    }
+
+    #[test]
+    fn rejects_duplicate_authored_resource_slugs_across_registry_packages() {
+        let ability_package = package(
+            "capabilities",
+            vec![module_with_slug(
+                "abilities/review.yaml",
+                PackageKind::Ability,
+                "review",
+                serde_json::json!({ "name": "Review Ability" }),
+            )],
+        );
+        let agent_package = package(
+            "agents",
+            vec![module_with_slug(
+                "agents/review.yaml",
+                PackageKind::Agent,
+                "review",
+                serde_json::json!({ "name": "Review Agent" }),
+            )],
+        );
+        let registry = PackageRegistryManifest {
+            schema: "nenjo.registry.v1".to_string(),
+            name: None,
+            description: None,
+            registries: Vec::new(),
+            packages: BTreeMap::from([
+                (
+                    "capabilities".to_string(),
+                    "capabilities/package.yaml".to_string(),
+                ),
+                ("agents".to_string(), "agents/package.yaml".to_string()),
+            ]),
+        };
+        let packages = BTreeMap::from([
+            (ability_package.name.clone(), ability_package),
+            (agent_package.name.clone(), agent_package),
+        ]);
+
+        let error = validate_registry_runtime(&registry, &packages)
+            .expect_err("duplicate registry slug should fail")
+            .to_string();
+
+        assert!(error.contains("registry declares duplicate resource slug 'review'"));
+        assert!(error.contains("capabilities"));
+        assert!(error.contains("agents"));
     }
 
     #[test]
@@ -971,6 +1167,55 @@ mod tests {
     }
 
     #[test]
+    fn accepts_github_repository_qualified_logical_assignment_ref() {
+        let agent = module_with_slug(
+            "agents/automation.yaml",
+            PackageKind::Agent,
+            "automation",
+            serde_json::json!({
+                "name": "Automation",
+                "assignments": {
+                    "abilities": [
+                        "pkg:@nenjo-ai/packages:nenji:ability:manage-tasks"
+                    ]
+                }
+            }),
+        );
+        let ability = module_with_slug(
+            "capabilities/build/manage_tasks.yaml",
+            PackageKind::Ability,
+            "manage-tasks",
+            serde_json::json!({
+                "name": "Manage Tasks",
+                "prompt_config": { "developer_prompt": "Manage tasks." }
+            }),
+        );
+        let packages = BTreeMap::from([
+            (
+                "@0xkr8os/agenticauto".to_string(),
+                package_with_dependencies(
+                    "@0xkr8os/agenticauto",
+                    BTreeMap::from([("@nenjo-ai/nenji".to_string(), "1.2.0".to_string())]),
+                    vec![agent],
+                ),
+            ),
+            (
+                "@nenjo-ai/nenji".to_string(),
+                package("@nenjo-ai/nenji", vec![ability]),
+            ),
+        ]);
+        let registry = PackageRegistryManifest {
+            schema: "nenjo.registry.v1".to_string(),
+            name: None,
+            description: None,
+            registries: Vec::new(),
+            packages: BTreeMap::new(),
+        };
+
+        validate_registry_runtime(&registry, &packages).unwrap();
+    }
+
+    #[test]
     fn accepts_routine_agent_reference_by_slug() {
         let routine = module(
             "routines/review.yaml",
@@ -1005,6 +1250,77 @@ mod tests {
         );
 
         validate_single_ok(package("pkg", vec![routine, reviewer]));
+    }
+
+    #[test]
+    fn accepts_routine_agent_reference_by_authored_slug() {
+        let routine = module(
+            "routines/review.yaml",
+            PackageKind::Routine,
+            serde_json::json!({
+                "name": "review_flow",
+                "entry_steps": ["start"],
+                "steps": [
+                    {"ref": "start", "type": "agent", "agent": "review-agent"},
+                    {"ref": "done", "type": "terminal"}
+                ],
+                "edges": [
+                    {
+                        "from": "start",
+                        "to": "done",
+                        "condition": "always",
+                        "metadata": {"handoff_schema": {"type": "object"}}
+                    }
+                ]
+            }),
+        );
+        let mut reviewer = module(
+            "agents/reviewer.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "reviewer",
+                "prompt_config": {}
+            }),
+        );
+        reviewer.manifest.slug = Some("review-agent".to_string());
+
+        validate_single_ok(package("pkg", vec![routine, reviewer]));
+    }
+
+    #[test]
+    fn rejects_routine_agent_manifest_name_when_authored_slug_differs() {
+        let routine = module(
+            "routines/review.yaml",
+            PackageKind::Routine,
+            serde_json::json!({
+                "name": "review_flow",
+                "entry_steps": ["start"],
+                "steps": [
+                    {"ref": "start", "type": "agent", "agent": "reviewer"},
+                    {"ref": "done", "type": "terminal"}
+                ],
+                "edges": [
+                    {
+                        "from": "start",
+                        "to": "done",
+                        "condition": "always",
+                        "metadata": {"handoff_schema": {"type": "object"}}
+                    }
+                ]
+            }),
+        );
+        let reviewer = module_with_slug(
+            "agents/reviewer.yaml",
+            PackageKind::Agent,
+            "review-agent",
+            serde_json::json!({
+                "name": "reviewer",
+                "prompt_config": {}
+            }),
+        );
+
+        let error = validate_single(package("pkg", vec![routine, reviewer]));
+        assert!(error.contains("no resolved package defines an agent with that slug"));
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct DomainRecord {
     #[serde(default)]
     pub platform_scopes: Vec<String>,
     #[serde(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
     #[serde(default)]
@@ -67,6 +67,7 @@ impl DomainRecord {
 
     pub fn to_manifest(&self, prompt_config: DomainPromptConfig) -> DomainManifest {
         DomainManifest {
+            slug: slug_from_str(&self.slug),
             name: self.name.clone(),
             path: self.path.clone(),
             description: self.description.clone(),

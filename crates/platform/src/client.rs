@@ -223,6 +223,7 @@ fn response_error_preview(body: &str) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct CouncilResponseRow {
+    slug: Slug,
     name: String,
     leader_agent: Slug,
     delegation_strategy: CouncilDelegationStrategy,
@@ -252,6 +253,7 @@ struct CouncilResponseDetail {
 fn council_document_from_detail(detail: CouncilResponseDetail) -> CouncilDocument {
     CouncilDocument {
         summary: crate::manifest_mcp::CouncilSummary {
+            slug: detail.council.slug,
             name: detail.council.name,
             delegation_strategy: detail.council.delegation_strategy,
             leader_agent: detail.council.leader_agent,
@@ -273,6 +275,7 @@ fn council_document_from_detail(detail: CouncilResponseDetail) -> CouncilDocumen
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct CouncilCreateApiBody {
+    pub slug: Slug,
     pub name: String,
     pub description: Option<String>,
     pub leader_agent: Slug,
@@ -1387,7 +1390,13 @@ impl PlatformManifestClient {
             .context("failed to list tasks")?;
         match response.status() {
             StatusCode::OK => response.json().await.context("failed to decode task list"),
-            status => bail!("task list failed with status {status}"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "task list failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
         }
     }
 
@@ -1405,7 +1414,13 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode task labels"),
-            status => bail!("task label list failed with status {status}"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!(
+                    "task label list failed with status {status}: {}",
+                    response_error_preview(&body)
+                )
+            }
         }
     }
 
@@ -1788,21 +1803,11 @@ impl PlatformManifestClient {
         &self,
         model: &ModelCreateDocument,
     ) -> Result<ModelDocument> {
-        let body = serde_json::json!({
-            "name": model.name,
-            "description": model.description,
-            "model": model.model,
-            "model_provider": model.model_provider.clone().unwrap_or_else(|| "openai".into()),
-            "temperature": model.temperature.unwrap_or(0.7),
-            "context_window": model.context_window,
-            "base_url": model.base_url,
-            "native_tools": model.native_tools.clone(),
-        });
         let response = self
             .http
             .post(format!("{}/api/v1/models", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(model)
             .send_with_platform_retry()
             .await
             .context("failed to create model")?;
@@ -1812,7 +1817,10 @@ impl PlatformManifestClient {
                 .json()
                 .await
                 .context("failed to decode created model"),
-            status => bail!("model create failed with status {status}"),
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("model create failed with status {status}: {body}")
+            }
         }
     }
 

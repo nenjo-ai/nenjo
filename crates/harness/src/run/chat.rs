@@ -25,8 +25,8 @@ use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::ChatRequest;
 use crate::session::{
-    TurnEventContext, chat_message_to_transcript, replay_ability_histories,
-    replay_transcript_history, session_runtime_events_from_turn_event,
+    TurnEventContext, chat_message_to_transcript, replay_transcript_history,
+    session_runtime_events_from_turn_event,
 };
 use crate::{Harness, ProviderRuntime};
 
@@ -145,7 +145,6 @@ struct PreparedChatExecution {
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
     history: Vec<ChatMessage>,
-    ability_histories: std::collections::BTreeMap<String, Vec<ChatMessage>>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
     lease: SessionLeaseGrant,
@@ -423,7 +422,6 @@ where
         worker_id,
     } = input;
     let history: Vec<ChatMessage> = replay_transcript_history(&transcript_events);
-    let ability_histories = replay_ability_histories(&transcript_events);
     sessions.record_events(
         lease.clone(),
         vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
@@ -463,7 +461,6 @@ where
         hook_scopes,
         hook_transcript_dir,
         history,
-        ability_histories,
         events_tx,
         worker_id,
         lease,
@@ -524,10 +521,6 @@ where
                 let mut instance = rebuilt.runner.instance().clone();
                 instance.set_active_domain_session_id(dsid);
                 instance.set_current_session_id(prepared.session_id);
-                instance.hydrate_ability_histories(
-                    prepared.session_id,
-                    prepared.ability_histories.clone(),
-                );
                 instance.set_hook_runtime(hook_runtime.clone());
                 let runner = nenjo::AgentRunner::from_instance(
                     instance,
@@ -611,7 +604,6 @@ where
         };
         builder
             .with_tool_current_session_id(prepared.session_id)
-            .with_ability_histories(prepared.ability_histories.clone())
             .build()
             .await
             .map_err(anyhow::Error::from)?

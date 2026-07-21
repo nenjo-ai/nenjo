@@ -60,7 +60,7 @@ fn adapts_claude_plugin_fixture_to_native_resources() {
         .unwrap();
     assert_eq!(
         command_resource.manifest.manifest["name"],
-        "ralph_loop__ralph_loop"
+        "Ralph Loop: ralph-loop"
     );
     assert_eq!(
         command_resource.manifest.manifest["path"],
@@ -69,7 +69,7 @@ fn adapts_claude_plugin_fixture_to_native_resources() {
     assert_eq!(command_resource.manifest.manifest["command"], "/ralph-loop");
     assert_eq!(
         command_resource.manifest.manifest["hooks"],
-        json!(["ralph_loop__stop_ralph_loop_stop"])
+        json!(["ralph_loop-hook-stop_ralph_loop_stop"])
     );
 
     let skill_resource = resources
@@ -79,11 +79,11 @@ fn adapts_claude_plugin_fixture_to_native_resources() {
     assert_eq!(skill.hooks, vec!["Stop ralph-loop-stop"]);
     assert_eq!(
         skill_resource.manifest.manifest["name"],
-        "ralph_loop__ralph_loop"
+        "Ralph Loop: ralph-loop"
     );
     assert_eq!(
         skill_resource.manifest.manifest["hooks"],
-        json!(["ralph_loop__stop_ralph_loop_stop"])
+        json!(["ralph_loop-hook-stop_ralph_loop_stop"])
     );
 
     let hook_resource = resources

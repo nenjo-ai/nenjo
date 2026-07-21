@@ -164,7 +164,7 @@ impl AsyncControlGuide {
     fn new(control: AsyncControl, operation_id: &str, kind: AsyncOperationKind) -> Self {
         let (instruction, suggested_arguments) = match control {
             AsyncControl::Inspect => (
-                "Use inspect to check this operation's current state or final output. Set include_transcript=true when recent activity is needed.",
+                "Use inspect to check this operation's current state or final output. Set include_transcript=true when recent activity is needed. A nested tool error while status is running is recoverable; use wait rather than stopping and restarting the operation.",
                 json!({"operations": [operation_id]}),
             ),
             AsyncControl::SendInput => (
@@ -175,11 +175,11 @@ impl AsyncControlGuide {
                 }),
             ),
             AsyncControl::Stop => (
-                "Use stop to cancel this operation when it should no longer continue.",
+                "Use stop to cancel this operation when it should no longer continue. Do not stop solely because a nested tool failed while the operation remains running.",
                 json!({"operations": [operation_id]}),
             ),
             AsyncControl::Wait => (
-                "Use wait while this operation is running; repeat until it completes, fails, stops, or asks for input.",
+                "Use wait while this operation is running; repeat until it completes, fails, stops, or asks for input. A recoverable_tool_error means the operation is still running and the default next action is wait.",
                 json!({"seconds": 10, "kind": kind}),
             ),
         };
@@ -197,6 +197,7 @@ impl AsyncControlGuide {
 pub enum AsyncOperationSignalKind {
     Started,
     Progress,
+    RecoverableToolError,
     NeedsInput,
     Completed,
     Failed,
@@ -208,6 +209,7 @@ impl AsyncOperationSignalKind {
         match self {
             Self::Started => "started",
             Self::Progress => "progress",
+            Self::RecoverableToolError => "recoverable_tool_error",
             Self::NeedsInput => "needs_input",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -218,11 +220,11 @@ impl AsyncOperationSignalKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InspectOperationsArgs {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_operation_ids")]
     pub operations: Vec<String>,
     #[serde(default)]
     pub kind: Option<AsyncOperationKind>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_string")]
     pub include_transcript: bool,
     #[serde(
         default = "default_inspect_limit",
@@ -233,7 +235,7 @@ pub struct InspectOperationsArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopOperationsArgs {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_operation_ids")]
     pub operations: Vec<String>,
     #[serde(default)]
     pub kind: Option<AsyncOperationKind>,
@@ -254,7 +256,7 @@ pub struct WaitOperationsArgs {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendOperationInputArgs {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_operation_ids")]
     pub operations: Vec<String>,
     pub message: String,
 }
@@ -319,33 +321,57 @@ fn default_inspect_limit() -> usize {
     30
 }
 
+fn deserialize_operation_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let array = match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(values),
+        serde_json::Value::String(encoded) => {
+            let decoded = serde_json::from_str::<serde_json::Value>(&encoded).map_err(|_| {
+                serde::de::Error::custom(
+                    "expected an array of operation ids or a JSON-encoded array",
+                )
+            })?;
+            if !decoded.is_array() {
+                return Err(serde::de::Error::custom(
+                    "expected an array of operation ids or a JSON-encoded array",
+                ));
+            }
+            decoded
+        }
+        _ => {
+            return Err(serde::de::Error::custom(
+                "expected an array of operation ids or a JSON-encoded array",
+            ));
+        }
+    };
+
+    serde_json::from_value(array).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_bool_or_string<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(value) => Ok(value),
+        serde_json::Value::String(value) if value == "true" => Ok(true),
+        serde_json::Value::String(value) if value == "false" => Ok(false),
+        _ => Err(serde::de::Error::custom(
+            "expected a boolean or the string \"true\" or \"false\"",
+        )),
+    }
+}
+
 pub fn deserialize_usize_from_json_number<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Number(number) => {
-            if let Some(raw) = number.as_u64() {
-                usize::try_from(raw).map_err(serde::de::Error::custom)
-            } else if let Some(raw) = number.as_f64() {
-                if raw.is_finite() && raw.fract() == 0.0 && raw >= 0.0 {
-                    usize::try_from(raw as u64).map_err(serde::de::Error::custom)
-                } else {
-                    Err(serde::de::Error::custom(
-                        "expected a non-negative whole number",
-                    ))
-                }
-            } else {
-                Err(serde::de::Error::custom(
-                    "expected a non-negative whole number",
-                ))
-            }
-        }
-        other => Err(serde::de::Error::custom(format!(
-            "expected a non-negative whole number, got {other}"
-        ))),
-    }
+    let number = deserialize_non_negative_whole_number(value)?;
+    usize::try_from(number).map_err(serde::de::Error::custom)
 }
 
 pub fn deserialize_u64_from_json_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -353,25 +379,36 @@ where
     D: Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
+    deserialize_non_negative_whole_number(value)
+}
+
+fn deserialize_non_negative_whole_number<E>(value: serde_json::Value) -> Result<u64, E>
+where
+    E: serde::de::Error,
+{
     match value {
         serde_json::Value::Number(number) => {
             if let Some(raw) = number.as_u64() {
                 Ok(raw)
             } else if let Some(raw) = number.as_f64() {
-                if raw.is_finite() && raw.fract() == 0.0 && raw >= 0.0 {
+                // `u64::MAX as f64` rounds up to 2^64. A strict comparison is
+                // therefore required or the first out-of-range float silently
+                // saturates to `u64::MAX` during the cast.
+                if raw.is_finite() && raw.fract() == 0.0 && raw >= 0.0 && raw < u64::MAX as f64 {
                     Ok(raw as u64)
                 } else {
-                    Err(serde::de::Error::custom(
-                        "expected a non-negative whole number",
-                    ))
+                    Err(E::custom("expected a non-negative whole number"))
                 }
             } else {
-                Err(serde::de::Error::custom(
-                    "expected a non-negative whole number",
-                ))
+                Err(E::custom("expected a non-negative whole number"))
             }
         }
-        other => Err(serde::de::Error::custom(format!(
+        serde_json::Value::String(raw)
+            if !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            raw.parse::<u64>().map_err(E::custom)
+        }
+        other => Err(E::custom(format!(
             "expected a non-negative whole number, got {other}"
         ))),
     }
@@ -393,6 +430,37 @@ mod tests {
         assert!(controls.contains(AsyncControl::Wait));
         assert!(!controls.contains(AsyncControl::SendInput));
         assert!(!controls.contains(AsyncControl::Stop));
+    }
+
+    #[test]
+    fn recoverable_tool_error_has_a_stable_wire_name() {
+        assert_eq!(
+            AsyncOperationSignalKind::RecoverableToolError.as_str(),
+            "recoverable_tool_error"
+        );
+    }
+
+    #[test]
+    fn start_receipt_guides_recovery_without_restarting() {
+        let receipt = AsyncOperationStartReceipt::new(
+            "ability_build_routine_1",
+            AsyncOperationKind::Ability,
+            AsyncControls::new(AsyncControl::Inspect)
+                .with(AsyncControl::Stop)
+                .with(AsyncControl::Wait),
+        );
+        let value = serde_json::to_value(receipt).unwrap();
+        let instructions = value["control_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|control| control["instruction"].as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(instructions.contains("recoverable"));
+        assert!(instructions.contains("Do not stop solely"));
+        assert!(instructions.contains("default next action is wait"));
     }
 
     #[test]
@@ -451,6 +519,18 @@ mod tests {
     }
 
     #[test]
+    fn wait_args_accept_digit_string_seconds_from_model_args() {
+        let args: WaitOperationsArgs = serde_json::from_value(json!({
+            "kind": "ability",
+            "seconds": "10"
+        }))
+        .unwrap();
+
+        assert_eq!(args.seconds, 10);
+        assert_eq!(args.kind, Some(AsyncOperationKind::Ability));
+    }
+
+    #[test]
     fn wait_args_reject_fractional_seconds() {
         let err = serde_json::from_value::<WaitOperationsArgs>(json!({
             "seconds": 5.5
@@ -458,6 +538,44 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("whole number"));
+    }
+
+    #[test]
+    fn numeric_coercion_accepts_u64_max_without_rounding() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_u64_from_json_number")]
+            value: u64,
+        }
+
+        let integer: Args = serde_json::from_str(r#"{"value":18446744073709551615}"#).unwrap();
+        let string: Args = serde_json::from_value(json!({
+            "value": "18446744073709551615"
+        }))
+        .unwrap();
+
+        assert_eq!(integer.value, u64::MAX);
+        assert_eq!(string.value, u64::MAX);
+    }
+
+    #[test]
+    fn numeric_coercion_rejects_values_at_or_above_two_to_the_64th() {
+        #[derive(Debug, Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_u64_from_json_number")]
+            #[allow(dead_code)]
+            value: u64,
+        }
+
+        let numeric =
+            serde_json::from_str::<Args>(r#"{"value":1.8446744073709552e19}"#).unwrap_err();
+        let string = serde_json::from_value::<Args>(json!({
+            "value": "18446744073709551616"
+        }))
+        .unwrap_err();
+
+        assert!(numeric.to_string().contains("whole number"));
+        assert!(string.to_string().contains("number too large"));
     }
 
     #[test]
@@ -473,6 +591,51 @@ mod tests {
     }
 
     #[test]
+    fn inspect_args_accept_json_encoded_model_values() {
+        let args: InspectOperationsArgs = serde_json::from_value(json!({
+            "operations": "[\"ability_build_routine_1\"]",
+            "include_transcript": "true",
+            "limit": "5"
+        }))
+        .unwrap();
+
+        assert_eq!(args.operations, ["ability_build_routine_1"]);
+        assert!(args.include_transcript);
+        assert_eq!(args.limit, 5);
+    }
+
+    #[test]
+    fn operation_controls_share_json_encoded_operation_id_compatibility() {
+        let stop: StopOperationsArgs = serde_json::from_value(json!({
+            "operations": "[\"ability_build_routine_1\"]"
+        }))
+        .unwrap();
+        let send: SendOperationInputArgs = serde_json::from_value(json!({
+            "operations": "[\"ability_build_routine_1\"]",
+            "message": "continue"
+        }))
+        .unwrap();
+
+        assert_eq!(stop.operations, ["ability_build_routine_1"]);
+        assert_eq!(send.operations, ["ability_build_routine_1"]);
+    }
+
+    #[test]
+    fn inspect_args_reject_ambiguous_string_values() {
+        let operations_err = serde_json::from_value::<InspectOperationsArgs>(json!({
+            "operations": "ability_build_routine_1"
+        }))
+        .unwrap_err();
+        let bool_err = serde_json::from_value::<InspectOperationsArgs>(json!({
+            "include_transcript": "yes"
+        }))
+        .unwrap_err();
+
+        assert!(operations_err.to_string().contains("JSON-encoded array"));
+        assert!(bool_err.to_string().contains("expected a boolean"));
+    }
+
+    #[test]
     fn inspect_args_reject_fractional_limit() {
         let err = serde_json::from_value::<InspectOperationsArgs>(json!({
             "limit": 5.5
@@ -480,5 +643,17 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("whole number"));
+    }
+
+    #[test]
+    fn wait_args_reject_non_digit_string_seconds() {
+        for seconds in ["5.5", "-1", "ten"] {
+            let err = serde_json::from_value::<WaitOperationsArgs>(json!({
+                "seconds": seconds
+            }))
+            .unwrap_err();
+
+            assert!(err.to_string().contains("whole number"));
+        }
     }
 }

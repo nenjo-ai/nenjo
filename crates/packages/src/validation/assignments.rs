@@ -1,6 +1,8 @@
 use anyhow::anyhow;
 
-use crate::{PackageKind, ResolvedModule, ResolvedPackage, validate_source_path};
+use crate::{
+    PackageKind, PackageResourceLogicalKey, ResolvedModule, ResolvedPackage, validate_source_path,
+};
 
 pub(crate) fn validate_assignments(
     packages: &std::collections::BTreeMap<String, ResolvedPackage>,
@@ -59,10 +61,34 @@ fn validate_assignment_field(
         .as_array()
         .ok_or_else(|| anyhow!("manifest.assignments.{field} must be an array"))?;
     for item in items {
-        let path = item
+        let reference = item
             .as_str()
-            .ok_or_else(|| anyhow!("manifest.assignments.{field} entries must be package paths"))?;
-        let path = validate_source_path(path)?;
+            .ok_or_else(|| anyhow!("manifest.assignments.{field} entries must be package refs"))?;
+        if reference.starts_with("pkg:") {
+            let logical_ref = PackageResourceLogicalKey::parse(reference)?;
+            if logical_ref.kind() != Some(expected) {
+                anyhow::bail!(
+                    "manifest.assignments.{field} references {reference}, but it is {} not {}",
+                    logical_ref
+                        .kind()
+                        .map(PackageKind::as_str)
+                        .unwrap_or("invalid"),
+                    expected.as_str()
+                );
+            }
+            let matches = find_modules_by_logical_ref(packages, &logical_ref)?;
+            match matches.as_slice() {
+                [_] => continue,
+                [] => anyhow::bail!(
+                    "manifest.assignments.{field} references logical ref '{reference}' that was not resolved"
+                ),
+                _ => anyhow::bail!(
+                    "manifest.assignments.{field} references ambiguous logical ref '{reference}'"
+                ),
+            }
+        }
+
+        let path = validate_source_path(reference)?;
         let Some(target) = find_module_by_source_path(packages, &path) else {
             anyhow::bail!(
                 "manifest.assignments.{field} references package path '{path}' that was not resolved"
@@ -77,6 +103,43 @@ fn validate_assignment_field(
         }
     }
     Ok(())
+}
+
+fn find_modules_by_logical_ref<'a>(
+    packages: &'a std::collections::BTreeMap<String, ResolvedPackage>,
+    logical_ref: &PackageResourceLogicalKey,
+) -> anyhow::Result<Vec<&'a ResolvedModule>> {
+    let repository = logical_ref
+        .repository()
+        .ok_or_else(|| anyhow!("logical ref is missing GitHub repository"))?;
+    let package_slug = logical_ref
+        .package()
+        .ok_or_else(|| anyhow!("logical ref is missing package"))?;
+    let resource_slug = logical_ref
+        .resource_slug()
+        .ok_or_else(|| anyhow!("logical ref is missing resource slug"))?;
+    let owner = repository
+        .trim_start_matches('@')
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or_else(|| anyhow!("logical ref has invalid GitHub repository"))?;
+    let scoped_package = format!("@{owner}/{package_slug}");
+
+    Ok(packages
+        .values()
+        .filter(|package| package.name == scoped_package || package.name == package_slug)
+        .flat_map(|package| {
+            package
+                .modules
+                .iter()
+                .filter(|(key, module)| *key == &module.key())
+                .map(|(_, module)| module)
+        })
+        .filter(|module| {
+            module.kind == logical_ref.kind().expect("logical ref kind was parsed")
+                && module.manifest.slug() == Some(resource_slug)
+        })
+        .collect())
 }
 
 pub(crate) fn find_module_by_source_path<'a>(

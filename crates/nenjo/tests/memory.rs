@@ -12,6 +12,7 @@ use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
+use nenjo_tool_api::ToolCall;
 
 // ---------------------------------------------------------------------------
 // Mock Provider
@@ -38,8 +39,16 @@ impl ModelProvider for MockProvider {
         _temperature: f64,
     ) -> Result<ChatResponse> {
         Ok(ChatResponse {
-            text: Some(self.response_text.clone()),
-            tool_calls: vec![],
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "memory-response".into(),
+                name: "respond_to_user".into(),
+                arguments: serde_json::json!({
+                    "message": self.response_text,
+                    "status": "completed"
+                })
+                .to_string(),
+            }],
             provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
@@ -620,6 +629,7 @@ async fn ability_inherits_memory_vars() {
     };
 
     let ability = AbilityManifest {
+        slug: Slug::derive("code-review"),
         name: "code-review".into(),
         path: None,
         description: Some("Reviews code".into()),
@@ -656,7 +666,7 @@ async fn ability_inherits_memory_vars() {
         mcp_servers: vec![],
         script_tools: vec![],
         media: vec![],
-        abilities: vec![ability.name.clone()],
+        abilities: vec![ability.slug.clone()],
         prompt_locked: false,
         source_type: None,
         metadata: serde_json::json!({}),
@@ -747,6 +757,7 @@ async fn domain_expansion_preserves_memory() {
     };
 
     let domain = DomainManifest {
+        slug: Slug::derive("prd"),
         name: "prd".into(),
         path: String::new(),
         description: Some("Product requirements".into()),
@@ -776,7 +787,7 @@ async fn domain_expansion_preserves_memory() {
         },
         color: None,
         model: Some(model_manifest_slug(&model.model_provider, &model.model)),
-        domains: vec![Slug::derive(&domain.name)],
+        domains: vec![domain.slug.clone()],
         platform_scopes: vec![],
         mcp_servers: vec![],
         script_tools: vec![],

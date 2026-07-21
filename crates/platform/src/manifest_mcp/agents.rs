@@ -69,11 +69,15 @@ fn prompt_config_schema() -> serde_json::Value {
 fn configure_metadata_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Agent metadata patch. Required on create because metadata.name is required when agent is omitted. On update, omitted fields are unchanged. Local manifest backend stores color as optional; platform backend resets color to its default when color is null because platform color is non-null.",
+        "description": "Agent metadata patch. Required on create because metadata.name is required when agent is omitted. On update, omitted fields are unchanged. Changing name does not change slug; set slug explicitly to rename the stable locator of a dashboard-authored agent. Local manifest backend stores color as optional; platform backend resets color to its default when color is null because platform color is non-null.",
         "properties": {
             "name": {
                 "type": "string",
                 "description": "Agent runtime/display name. Required when creating a new agent."
+            },
+            "slug": {
+                "type": "string",
+                "description": "Stable agent locator. Optional on create (derived from name when omitted). On update, omit to preserve it or set it explicitly to rename a dashboard-authored agent."
             },
             "description": {
                 "type": ["string", "null"],

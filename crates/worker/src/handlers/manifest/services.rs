@@ -3,12 +3,109 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use nenjo::Slug;
+use nenjo::manifest::{KnowledgePackManifest, ManifestResource, ManifestResourceKind};
 use nenjo_events::ResourceType;
 use nenjo_platform::PlatformResourceKind;
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use uuid::Uuid;
 
 use super::knowledge::DocumentEdgesSource;
+
+/// One canonical cache change derived from a single platform manifest event.
+///
+/// The mutation deliberately contains no aggregate [`nenjo::Manifest`]. Runtime
+/// manifests may include package and workspace overlays that are not platform
+/// records and therefore must never be written into the canonical cache.
+#[derive(Debug, Clone)]
+pub enum ManifestCacheMutation {
+    Upsert {
+        resource_id: Option<Uuid>,
+        previous_slug: Option<Slug>,
+        resource: Box<ManifestResource>,
+    },
+    Delete {
+        kind: ManifestResourceKind,
+        resource_id: Option<Uuid>,
+        slug: Slug,
+        previous_slug: Option<Slug>,
+    },
+}
+
+impl ManifestCacheMutation {
+    /// Construct an event-scoped upsert. Agent cache entries require their
+    /// platform id because `agents.json` retains that id alongside the manifest.
+    pub fn upsert(
+        resource_id: Option<Uuid>,
+        previous_slug: Option<Slug>,
+        resource: ManifestResource,
+    ) -> Result<Self> {
+        let kind = resource.kind();
+        let slug = resource.slug();
+        if kind == ManifestResourceKind::Agent && resource_id.is_none() {
+            anyhow::bail!("agent '{}' is missing a platform id", slug);
+        }
+        Ok(Self::Upsert {
+            previous_slug,
+            resource_id,
+            resource: Box::new(resource),
+        })
+    }
+
+    /// Construct an event-scoped deletion. `previous_slug` also removes a stale
+    /// alias when an upsert fetch concludes that a renamed resource is gone.
+    pub fn delete(
+        kind: ManifestResourceKind,
+        resource_id: Option<Uuid>,
+        slug: Slug,
+        previous_slug: Option<Slug>,
+    ) -> Self {
+        Self::Delete {
+            kind,
+            slug,
+            previous_slug,
+            resource_id,
+        }
+    }
+
+    pub fn kind(&self) -> ManifestResourceKind {
+        match self {
+            Self::Upsert { resource, .. } => resource.kind(),
+            Self::Delete { kind, .. } => *kind,
+        }
+    }
+
+    pub fn slug(&self) -> &Slug {
+        match self {
+            Self::Upsert { resource, .. } => resource.slug_ref(),
+            Self::Delete { slug, .. } => slug,
+        }
+    }
+
+    pub fn previous_slug(&self) -> Option<&Slug> {
+        match self {
+            Self::Upsert { previous_slug, .. } | Self::Delete { previous_slug, .. } => {
+                previous_slug.as_ref()
+            }
+        }
+    }
+
+    pub fn resource_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Upsert { resource_id, .. } | Self::Delete { resource_id, .. } => *resource_id,
+        }
+    }
+
+    pub fn resource(&self) -> Option<&ManifestResource> {
+        match self {
+            Self::Upsert { resource, .. } => Some(resource.as_ref()),
+            Self::Delete { .. } => None,
+        }
+    }
+
+    pub fn is_delete(&self) -> bool {
+        matches!(self, Self::Delete { .. })
+    }
+}
 
 /// Host-owned manifest persistence and document side-effect hooks.
 ///
@@ -29,22 +126,8 @@ pub trait ManifestStore: Send + Sync {
         Ok(())
     }
 
-    /// Persist the current manifest cache for one resource type.
-    async fn persist_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()>;
-
-    /// Persist removal of one resource from the manifest cache.
-    async fn remove_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-        _resource: &Slug,
-    ) -> Result<()> {
-        self.persist_resource(manifest, resource_type).await
-    }
+    /// Persist only the canonical resource affected by the current event.
+    async fn persist_change(&self, mutation: &ManifestCacheMutation) -> Result<()>;
 
     /// Apply host-owned cleanup for a deleted resource using the optional
     /// inline tombstone payload sent with the delete event.
@@ -66,6 +149,15 @@ pub trait ManifestStore: Send + Sync {
         _resource_id: Option<Uuid>,
     ) -> Result<()> {
         Ok(())
+    }
+
+    /// Resolve the currently cached slug for a platform resource UUID.
+    async fn platform_resource_slug_for_id(
+        &self,
+        _kind: PlatformResourceKind,
+        _resource_id: Uuid,
+    ) -> Result<Option<Slug>> {
+        Ok(None)
     }
 
     /// Remove all slug aliases for one platform resource id (e.g. after rename + delete).
@@ -126,8 +218,12 @@ pub trait ManifestStore: Send + Sync {
     }
 
     /// Sync a whole library knowledge pack into the host's local cache.
-    async fn sync_knowledge_pack(&self, _client: &ApiClient, _pack: &Slug) -> Result<()> {
-        Ok(())
+    async fn sync_knowledge_pack(
+        &self,
+        _client: &ApiClient,
+        _pack: &Slug,
+    ) -> Result<Option<KnowledgePackManifest>> {
+        Ok(None)
     }
 
     /// Write decrypted document content into the host's local cache.
@@ -146,11 +242,7 @@ pub struct NoopManifestStore;
 
 #[async_trait]
 impl ManifestStore for NoopManifestStore {
-    async fn persist_resource(
-        &self,
-        _manifest: &nenjo::Manifest,
-        _resource_type: ResourceType,
-    ) -> Result<()> {
+    async fn persist_change(&self, _mutation: &ManifestCacheMutation) -> Result<()> {
         Ok(())
     }
 
@@ -172,23 +264,8 @@ where
         (**self).prepare_resource(manifest, resource_type).await
     }
 
-    async fn persist_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()> {
-        (**self).persist_resource(manifest, resource_type).await
-    }
-
-    async fn remove_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-        resource: &Slug,
-    ) -> Result<()> {
-        (**self)
-            .remove_resource(manifest, resource_type, resource)
-            .await
+    async fn persist_change(&self, mutation: &ManifestCacheMutation) -> Result<()> {
+        (**self).persist_change(mutation).await
     }
 
     async fn cleanup_deleted_resource(
@@ -215,6 +292,16 @@ where
     ) -> Result<()> {
         (**self)
             .update_platform_resource_id(kind, resource, resource_id)
+            .await
+    }
+
+    async fn platform_resource_slug_for_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource_id: Uuid,
+    ) -> Result<Option<Slug>> {
+        (**self)
+            .platform_resource_slug_for_id(kind, resource_id)
             .await
     }
 
@@ -274,7 +361,11 @@ where
         (**self).remove_document(doc, metadata).await
     }
 
-    async fn sync_knowledge_pack(&self, client: &ApiClient, pack: &Slug) -> Result<()> {
+    async fn sync_knowledge_pack(
+        &self,
+        client: &ApiClient,
+        pack: &Slug,
+    ) -> Result<Option<KnowledgePackManifest>> {
         (**self).sync_knowledge_pack(client, pack).await
     }
 

@@ -70,6 +70,7 @@ fn project() -> ProjectManifest {
 
 fn ability(name: &str) -> AbilityManifest {
     AbilityManifest {
+        slug: Slug::derive(name),
         name: name.into(),
         path: None,
         description: Some(format!("{name} ability")),
@@ -103,6 +104,23 @@ impl CapturedRequests {
     }
 }
 
+fn completed_response(id: &str, message: &str) -> ChatResponse {
+    ChatResponse {
+        text: None,
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: "respond_to_user".into(),
+            arguments: serde_json::json!({
+                "message": message,
+                "status": "completed"
+            })
+            .to_string(),
+        }],
+        provider_tool_calls: vec![],
+        usage: TokenUsage::default(),
+    }
+}
+
 struct FixedLlm {
     response: String,
     captured: CapturedRequests,
@@ -124,15 +142,12 @@ impl ModelProvider for FixedLlm {
                 .map(|tool| tool.name.clone())
                 .collect(),
         );
-        Ok(ChatResponse {
-            text: Some(self.response.clone()),
-            tool_calls: vec![],
-            provider_tool_calls: vec![],
-            usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-            },
-        })
+        let mut response = completed_response("fixed-response", &self.response);
+        response.usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+        };
+        Ok(response)
     }
 
     fn context_window(&self, _model: &str) -> Option<usize> {
@@ -277,12 +292,7 @@ impl ModelProvider for SubAgentScriptLlm {
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
-            _ => ChatResponse {
-                text: Some("parent complete".into()),
-                tool_calls: vec![],
-                provider_tool_calls: vec![],
-                usage: TokenUsage::default(),
-            },
+            _ => completed_response("parent-complete", "parent complete"),
         })
     }
 
@@ -414,12 +424,7 @@ impl ModelProvider for DelegateScriptLlm {
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
-            _ => ChatResponse {
-                text: Some("parent saw delegated result".into()),
-                tool_calls: vec![],
-                provider_tool_calls: vec![],
-                usage: TokenUsage::default(),
-            },
+            _ => completed_response("parent-complete", "parent saw delegated result"),
         })
     }
 
@@ -565,12 +570,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
-            _ => ChatResponse {
-                text: Some("parent saw delegated ability result".into()),
-                tool_calls: vec![],
-                provider_tool_calls: vec![],
-                usage: TokenUsage::default(),
-            },
+            _ => completed_response("parent-complete", "parent saw delegated ability result"),
         })
     }
 
@@ -1023,7 +1023,7 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let mut reviewer = agent(Uuid::new_v4(), "reviewer", model_id);
-    reviewer.abilities = vec!["security_review".into()];
+    reviewer.abilities = vec![Slug::derive("security_review")];
     let manifest = Manifest {
         agents: vec![agent(Uuid::new_v4(), "coder", model_id), reviewer],
         abilities: vec![ability("security_review")],
@@ -1180,7 +1180,7 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
     let captured = CapturedRequests::default();
     let model_id = Uuid::new_v4();
     let mut reviewer = agent(Uuid::new_v4(), "reviewer", model_id);
-    reviewer.abilities = vec!["security_review".into()];
+    reviewer.abilities = vec![Slug::derive("security_review")];
     let manifest = Manifest {
         agents: vec![agent(Uuid::new_v4(), "coder", model_id), reviewer],
         abilities: vec![ability("security_review")],

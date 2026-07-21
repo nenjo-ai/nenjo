@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::ability_sessions::AbilitySessionStore;
 use crate::agents::async_ops::AsyncOpManager;
 use crate::agents::prompts::PromptContext;
 use crate::arguments::{merge_argument_bindings, scan_argument_selectors};
@@ -85,12 +84,12 @@ pub(crate) struct AgentRuntime<P: ProviderRuntime = ErasedProvider> {
     pub(crate) execution_mode: AgentExecutionMode,
     pub(crate) hook_runtime: Option<Arc<HookRuntime>>,
     pub(crate) current_session_id: Option<Uuid>,
-    pub(crate) ability_sessions: Arc<AbilitySessionStore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentExecutionMode {
     Parent,
+    Ability,
     EphemeralChild,
     DelegatedChild,
 }
@@ -113,13 +112,16 @@ impl AgentExecutionMode {
     }
 
     pub(crate) fn strips_prompt_capabilities(self) -> bool {
-        matches!(self, Self::EphemeralChild | Self::DelegatedChild)
+        matches!(
+            self,
+            Self::Ability | Self::EphemeralChild | Self::DelegatedChild
+        )
     }
 
     fn delegation_prompt_guard(self) -> Option<&'static str> {
         match self {
             Self::DelegatedChild => Some(DELEGATED_CHILD_PROMPT_GUARD),
-            Self::Parent | Self::EphemeralChild => None,
+            Self::Parent | Self::Ability | Self::EphemeralChild => None,
         }
     }
 }
@@ -151,7 +153,6 @@ impl<P: ProviderRuntime> Clone for AgentRuntime<P> {
             execution_mode: self.execution_mode,
             hook_runtime: self.hook_runtime.clone(),
             current_session_id: self.current_session_id,
-            ability_sessions: self.ability_sessions.clone(),
         }
     }
 }
@@ -245,22 +246,10 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         true
     }
 
-    /// Set the parent transcript session used by nested ability executions.
+    /// Set the current transcript session for tools created by this instance.
     #[doc(hidden)]
     pub fn set_current_session_id(&mut self, session_id: Uuid) {
         self.runtime.current_session_id = Some(session_id);
-    }
-
-    /// Hydrate ability conversations reconstructed by the session owner.
-    #[doc(hidden)]
-    pub fn hydrate_ability_histories(
-        &mut self,
-        parent_session_id: Uuid,
-        histories: std::collections::BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
-    ) {
-        self.runtime
-            .ability_sessions
-            .hydrate(parent_session_id, histories);
     }
 
     /// Attach the active hook runtime for this execution.
@@ -365,7 +354,7 @@ impl<P: ProviderRuntime> AgentInstance<P> {
 
         // Agent (self)
         ctx._self.slug = self.manifest.slug().to_string();
-        ctx._self.display_name = self.name().to_string();
+        ctx._self.name = self.name().to_string();
         ctx._self.model_name = self.model.model_name.clone();
         ctx._self.description = Some(self.description().to_string());
 

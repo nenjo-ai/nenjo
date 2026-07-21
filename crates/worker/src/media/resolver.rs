@@ -675,6 +675,7 @@ mod tests {
             &capabilities,
         );
         let domain = DomainManifest {
+            slug: Slug::derive("creative"),
             name: "creative".to_string(),
             path: "domains".to_string(),
             description: None,

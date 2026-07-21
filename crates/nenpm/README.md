@@ -17,7 +17,7 @@ let plan = InstallPlan::from_local_repository("../packages", "@nenjo-ai/nenji")?
 for package in plan.packages() {
     println!("{}@{}", package.name, package.version);
     for module in package.modules {
-        println!("{} {} {}", module.kind.as_str(), module.name, module.path);
+        println!("{} {} {}", module.kind.as_str(), module.resource, module.path);
     }
 }
 # Ok(())

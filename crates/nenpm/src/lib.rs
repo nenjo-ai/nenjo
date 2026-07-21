@@ -10,6 +10,7 @@ macro_rules! bail {
     };
 }
 
+mod content_path;
 mod dependency;
 mod error;
 mod github;
@@ -18,6 +19,7 @@ mod lockfile;
 mod plan;
 mod pm;
 mod registry;
+mod runtime_naming;
 mod source;
 mod validate;
 
@@ -26,6 +28,7 @@ pub mod packages {
     pub use nenjo_packages::*;
 }
 
+pub use content_path::{PackageContentPath, PackageCoordinateError, PackageCoordinates};
 pub use dependency::{
     DependencyManifest, DependencyOverride, LoadedDependencyManifest, RegistryReference,
 };
@@ -50,9 +53,14 @@ pub use registry::{
     InMemoryRegistry, PackageRegistry, RegistryIndex, RegistryIndexVersion,
     RegistryPackageResolver, RegistryPackageVersion,
 };
+pub use runtime_naming::{
+    package_runtime_scope, package_runtime_scope_with_repository, package_runtime_slug,
+    package_runtime_slug_with_repository, package_runtime_versioned_slug,
+    package_runtime_versioned_slug_with_repository,
+};
 pub use source::{
     DefaultPackageSourceFetcher, FetchMode, FetchedPackageSource, PackageSource,
-    PackageSourceFetcher, package_source_scope,
+    PackageSourceFetcher, package_source_github_repository, package_source_scope,
 };
 pub use validate::{
     PrepareOptions, PrepareReport, PreparedModule, PreparedPackage, PreparedRegistry,

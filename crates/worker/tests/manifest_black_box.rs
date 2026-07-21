@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, CommandManifest, ContextBlockManifest,
-    CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig, Manifest,
-    McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
+    CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig,
+    KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestResourceKind, McpServerManifest,
+    ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
@@ -22,8 +23,8 @@ use nenjo_worker::bootstrap::{
     load_cached_capability_defaults, load_cached_model_runtime,
 };
 use nenjo_worker::handlers::manifest::{
-    ManifestChangedCommand, ManifestCommandContext, ManifestStore, McpRuntime,
-    WorkerManifestHarnessExt,
+    ManifestCacheMutation, ManifestChangedCommand, ManifestCommandContext, ManifestStore,
+    McpRuntime, WorkerManifestHarnessExt,
 };
 use uuid::Uuid;
 
@@ -34,27 +35,19 @@ struct RecordingManifestStore {
     metadata_syncs: Mutex<Vec<String>>,
     content_syncs: Mutex<Vec<String>>,
     removals: Mutex<Vec<String>>,
+    knowledge_syncs: Mutex<Vec<String>>,
     bootstrap_refreshes: Mutex<usize>,
 }
 
 #[async_trait]
 impl ManifestStore for RecordingManifestStore {
-    async fn persist_resource(
-        &self,
-        _manifest: &Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()> {
-        self.persisted.lock().unwrap().push(resource_type);
-        Ok(())
-    }
-
-    async fn remove_resource(
-        &self,
-        _manifest: &Manifest,
-        resource_type: ResourceType,
-        _resource: &Slug,
-    ) -> Result<()> {
-        self.removed.lock().unwrap().push(resource_type);
+    async fn persist_change(&self, mutation: &ManifestCacheMutation) -> Result<()> {
+        let resource_type = event_resource_type(mutation.kind());
+        if mutation.is_delete() {
+            self.removed.lock().unwrap().push(resource_type);
+        } else {
+            self.persisted.lock().unwrap().push(resource_type);
+        }
         Ok(())
     }
 
@@ -96,6 +89,26 @@ impl ManifestStore for RecordingManifestStore {
         Ok(())
     }
 
+    async fn sync_knowledge_pack(
+        &self,
+        _client: &nenjo_platform::api_client::ApiClient,
+        pack: &Slug,
+    ) -> Result<Option<KnowledgePackManifest>> {
+        self.knowledge_syncs.lock().unwrap().push(pack.to_string());
+        Ok(Some(KnowledgePackManifest {
+            slug: pack.clone(),
+            name: pack.to_string(),
+            description: None,
+            source_type: KnowledgePackSource::Library,
+            selector: format!("lib:{pack}"),
+            version: None,
+            root_uri: format!("library://{pack}/"),
+            root_path: None,
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        }))
+    }
+
     fn write_document_content(
         &self,
         _pack: &Slug,
@@ -106,15 +119,94 @@ impl ManifestStore for RecordingManifestStore {
     }
 }
 
+#[tokio::test]
+async fn knowledge_pack_sync_owns_persistence_and_updates_the_runtime_manifest() {
+    let env = test_harness(Manifest::default()).await;
+    let pack = Slug::derive("product-guides");
+
+    env.harness
+        .handle_manifest_changed(
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_id: Uuid::from_u128(44),
+                resource_type: ResourceType::KnowledgePack,
+                resource: pack.clone(),
+                action: ResourceAction::Created,
+                project: None,
+                payload: None,
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let manifest = env.harness.provider().manifest_snapshot();
+    assert!(
+        manifest
+            .knowledge_packs
+            .iter()
+            .any(|knowledge_pack| knowledge_pack.slug == pack)
+    );
+    assert_eq!(
+        env.store.knowledge_syncs.lock().unwrap().as_slice(),
+        &["product-guides"]
+    );
+    assert!(env.store.persisted.lock().unwrap().is_empty());
+    assert!(env.store.removed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn knowledge_pack_delete_updates_runtime_without_a_generic_cache_mutation() {
+    let pack = Slug::derive("product-guides");
+    let env = test_harness(Manifest {
+        knowledge_packs: vec![KnowledgePackManifest {
+            slug: pack.clone(),
+            name: "Product guides".into(),
+            description: None,
+            source_type: KnowledgePackSource::Library,
+            selector: "lib:product-guides".into(),
+            version: None,
+            root_uri: "library://product-guides/".into(),
+            root_path: None,
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    })
+    .await;
+
+    env.harness
+        .handle_manifest_changed(
+            &env.manifest_context(),
+            ManifestChangedCommand {
+                resource_id: Uuid::from_u128(44),
+                resource_type: ResourceType::KnowledgePack,
+                resource: pack,
+                action: ResourceAction::Deleted,
+                project: None,
+                payload: None,
+                encrypted_payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        env.harness
+            .provider()
+            .manifest_snapshot()
+            .knowledge_packs
+            .is_empty()
+    );
+    assert!(env.store.persisted.lock().unwrap().is_empty());
+    assert!(env.store.removed.lock().unwrap().is_empty());
+}
+
 struct DelayedManifestStore;
 
 #[async_trait]
 impl ManifestStore for DelayedManifestStore {
-    async fn persist_resource(
-        &self,
-        _manifest: &Manifest,
-        _resource_type: ResourceType,
-    ) -> Result<()> {
+    async fn persist_change(&self, _mutation: &ManifestCacheMutation) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
         Ok(())
     }
@@ -124,6 +216,25 @@ impl ManifestStore for DelayedManifestStore {
         _client: &nenjo_platform::api_client::ApiClient,
     ) -> Result<Manifest> {
         Ok(Manifest::default())
+    }
+}
+
+fn event_resource_type(kind: ManifestResourceKind) -> ResourceType {
+    match kind {
+        ManifestResourceKind::Agent => ResourceType::Agent,
+        ManifestResourceKind::Model => ResourceType::Model,
+        ManifestResourceKind::Routine => ResourceType::Routine,
+        ManifestResourceKind::Project => ResourceType::Project,
+        ManifestResourceKind::Council => ResourceType::Council,
+        ManifestResourceKind::Domain => ResourceType::Domain,
+        ManifestResourceKind::McpServer => ResourceType::McpServer,
+        ManifestResourceKind::Ability => ResourceType::Ability,
+        ManifestResourceKind::ContextBlock => ResourceType::ContextBlock,
+        ManifestResourceKind::Command => ResourceType::Command,
+        ManifestResourceKind::KnowledgePack => ResourceType::KnowledgePack,
+        ManifestResourceKind::Skill
+        | ManifestResourceKind::Hook
+        | ManifestResourceKind::ScriptTool => unreachable!("unsupported platform event kind"),
     }
 }
 
@@ -418,6 +529,7 @@ fn project(_id: Uuid, name: &str) -> ProjectManifest {
 
 fn council(_id: Uuid, name: &str) -> CouncilManifest {
     CouncilManifest {
+        slug: Slug::derive(name),
         name: name.into(),
         delegation_strategy: CouncilDelegationStrategy::Decompose,
         leader_agent: Slug::derive("leader"),
@@ -427,6 +539,7 @@ fn council(_id: Uuid, name: &str) -> CouncilManifest {
 
 fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
     AbilityManifest {
+        slug: nenjo::Slug::derive(name),
         name: name.into(),
         path: None,
         description: None,
@@ -447,9 +560,9 @@ fn ability(_id: Uuid, name: &str, prompt: &str) -> AbilityManifest {
 fn command(_id: Uuid, name: &str, content: &str) -> CommandManifest {
     CommandManifest {
         name: name.into(),
+        slug: Slug::derive(name),
         path: String::new(),
         command: format!("/{name}"),
-        display_name: None,
         description: None,
         entry_path: "command.md".into(),
         content: content.into(),
@@ -466,6 +579,7 @@ fn command(_id: Uuid, name: &str, content: &str) -> CommandManifest {
 
 fn context_block(_id: Uuid, name: &str, template: &str) -> ContextBlockManifest {
     ContextBlockManifest {
+        slug: nenjo::Slug::derive(name),
         name: name.into(),
         path: String::new(),
         description: None,
@@ -475,8 +589,8 @@ fn context_block(_id: Uuid, name: &str, template: &str) -> ContextBlockManifest 
 
 fn mcp_server(_id: Uuid, name: &str) -> McpServerManifest {
     McpServerManifest {
+        slug: nenjo::Slug::derive(name),
         name: name.into(),
-        display_name: name.into(),
         description: None,
         transport: "stdio".into(),
         command: Some("test-mcp".into()),
@@ -491,6 +605,7 @@ fn mcp_server(_id: Uuid, name: &str) -> McpServerManifest {
 
 fn domain(_id: Uuid, name: &str, prompt: &str) -> DomainManifest {
     DomainManifest {
+        slug: nenjo::Slug::derive(name),
         name: name.into(),
         path: String::new(),
         description: None,
@@ -670,6 +785,7 @@ fn command_inline_payload(id: Uuid, slug: &str, content: &str) -> serde_json::Va
     wrap_inline_payload(serde_json::json!({
         "id": id,
         "org_id": inline_org_id(),
+        "slug": slug,
         "name": slug,
         "path": "",
         "command": format!("/{slug}"),
@@ -851,13 +967,13 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 assert!(manifest.projects.iter().any(|item| item.slug == resource))
             }
             ResourceType::Council => {
-                assert!(manifest.councils.iter().any(|item| item.name == "council"))
+                assert!(manifest.councils.iter().any(|item| item.slug == resource))
             }
             ResourceType::Ability => {
                 let item = manifest
                     .abilities
                     .iter()
-                    .find(|item| Slug::derive(&item.name) == resource)
+                    .find(|item| item.slug == resource)
                     .unwrap();
                 assert_eq!(item.prompt_config.developer_prompt, "ability prompt");
             }
@@ -865,7 +981,7 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 let item = manifest
                     .commands
                     .iter()
-                    .find(|item| item.name == "command")
+                    .find(|item| item.slug == resource)
                     .unwrap();
                 assert_eq!(item.command, "/command");
                 assert_eq!(item.content, "command content");
@@ -874,7 +990,7 @@ async fn manifest_inline_upserts_each_provider_resource() {
                 let item = manifest
                     .context_blocks
                     .iter()
-                    .find(|item| Slug::derive(&item.name) == resource)
+                    .find(|item| item.slug == resource)
                     .unwrap();
                 assert_eq!(item.template, "template");
             }
@@ -883,14 +999,14 @@ async fn manifest_inline_upserts_each_provider_resource() {
                     manifest
                         .mcp_servers
                         .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
+                        .any(|item| item.slug == resource)
                 )
             }
             ResourceType::Domain => {
                 let item = manifest
                     .domains
                     .iter()
-                    .find(|item| Slug::derive(&item.name) == resource)
+                    .find(|item| item.slug == resource)
                     .unwrap();
                 assert_eq!(
                     item.prompt_config.developer_prompt_addon.as_deref(),
@@ -1026,30 +1142,20 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                 assert!(!manifest.projects.iter().any(|item| item.slug == resource))
             }
             ResourceType::Council => {
-                assert!(
-                    !manifest
-                        .councils
-                        .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
-                )
+                assert!(!manifest.councils.iter().any(|item| item.slug == resource))
             }
             ResourceType::Ability => {
-                assert!(
-                    !manifest
-                        .abilities
-                        .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
-                )
+                assert!(!manifest.abilities.iter().any(|item| item.slug == resource))
             }
             ResourceType::Command => {
-                assert!(!manifest.commands.iter().any(|item| item.name == "command"))
+                assert!(!manifest.commands.iter().any(|item| item.slug == resource))
             }
             ResourceType::ContextBlock => {
                 assert!(
                     !manifest
                         .context_blocks
                         .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
+                        .any(|item| item.slug == resource)
                 )
             }
             ResourceType::McpServer => {
@@ -1057,16 +1163,11 @@ async fn manifest_deletes_each_provider_resource_and_uses_remove_store_path() {
                     !manifest
                         .mcp_servers
                         .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
+                        .any(|item| item.slug == resource)
                 )
             }
             ResourceType::Domain => {
-                assert!(
-                    !manifest
-                        .domains
-                        .iter()
-                        .any(|item| Slug::derive(&item.name) == resource)
-                )
+                assert!(!manifest.domains.iter().any(|item| item.slug == resource))
             }
             ResourceType::ModelAssignment
             | ResourceType::ModelCapabilityDefault
@@ -1231,14 +1332,8 @@ async fn manifest_document_upsert_and_delete_use_document_store_side_effects() {
         env.store.removals.lock().unwrap().as_slice(),
         &["guide".to_string()]
     );
-    assert_eq!(
-        env.store.persisted.lock().unwrap().as_slice(),
-        &[ResourceType::Document]
-    );
-    assert_eq!(
-        env.store.removed.lock().unwrap().as_slice(),
-        &[ResourceType::Document]
-    );
+    assert!(env.store.persisted.lock().unwrap().is_empty());
+    assert!(env.store.removed.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

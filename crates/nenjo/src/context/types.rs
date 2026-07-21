@@ -15,7 +15,7 @@ pub struct AgentContext {
     #[serde(rename = "@slug")]
     pub slug: String,
     #[serde(rename = "@name")]
-    pub display_name: String,
+    pub name: String,
     #[serde(rename = "@llm_model_name")]
     pub model_name: String,
     #[serde(rename = "@description", skip_serializing_if = "Option::is_none")]
@@ -394,7 +394,7 @@ mod tests {
     fn test_agent_context_xml() {
         let agent = AgentContext {
             slug: "coder".into(),
-            display_name: "Cody".into(),
+            name: "Cody".into(),
             model_name: "gpt-4".into(),
             description: Some("Writes code".into()),
         };

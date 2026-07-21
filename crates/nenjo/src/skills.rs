@@ -278,7 +278,7 @@ pub fn available_skills_message(skills: &[SkillManifest]) -> String {
     skills
         .iter()
         .map(|skill| {
-            let name = skill_label(skill);
+            let name = skill.name.as_str();
             let description = skill.description.as_deref().unwrap_or("");
             if description.is_empty() {
                 format!("- {name}")
@@ -304,11 +304,7 @@ pub fn installed_skills_message(skills: &[SkillManifest]) -> String {
 }
 
 pub fn render_installed_skill(skill: &SkillManifest) -> String {
-    let label = skill_label(skill);
-    let mut line = format!("- {label}");
-    if skill.name != label {
-        line.push_str(&format!(" (name: {})", skill.name));
-    }
+    let mut line = format!("- {}", skill.name);
     if let Some(description) = skill
         .description
         .as_deref()
@@ -328,18 +324,14 @@ pub fn render_installed_skill(skill: &SkillManifest) -> String {
     line
 }
 
-pub fn skill_label(skill: &SkillManifest) -> &str {
-    skill.display_name.as_deref().unwrap_or(&skill.name)
-}
-
 pub fn skill_matches_selector(skill: &SkillManifest, selector: &str) -> bool {
     let selector = selector.trim();
     if selector.is_empty() {
         return false;
     }
     let selector_slug = Slug::derive(selector);
-    std::iter::once(skill.name.as_str())
-        .chain(skill.display_name.as_deref())
+    std::iter::once(skill.slug.as_str())
+        .chain(std::iter::once(skill.name.as_str()))
         .chain(skill.aliases.iter().map(String::as_str))
         .any(|candidate| candidate == selector || Slug::derive(candidate) == selector_slug)
 }
@@ -373,14 +365,11 @@ mod tests {
 
         async fn load_skill(&self, skill: &SkillManifest) -> Result<LoadedSkill> {
             Ok(LoadedSkill {
-                name: skill_label(skill).to_string(),
-                context: format!("# Skill: {}", skill_label(skill)),
+                name: skill.name.clone(),
+                context: format!("# Skill: {}", skill.name),
                 activation_env: vec![
                     ("CLAUDE_SKILL_DIR".to_string(), "/virtual/skill".to_string()),
-                    (
-                        "NENJO_ACTIVE_SKILLS".to_string(),
-                        skill_label(skill).to_string(),
-                    ),
+                    ("NENJO_ACTIVE_SKILLS".to_string(), skill.name.clone()),
                 ],
                 mcp_servers: skill.mcp_servers.clone(),
                 mcp_tools: skill
@@ -407,8 +396,8 @@ mod tests {
     fn skill_selector_matches_aliases_without_filesystem() {
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__review",
-            "display_name": "acme:review",
+            "slug": "acme-review",
+            "name": "acme:review",
             "aliases": ["review", "code-review"],
             "root_dir": "/tmp/acme/skills/review"
         }))
@@ -441,8 +430,8 @@ mod tests {
     async fn use_skill_activates_loaded_skill() {
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__review",
-            "display_name": "acme:review",
+            "slug": "acme-review",
+            "name": "acme:review",
             "aliases": ["review"],
             "description": "Review code changes.",
             "root_path": "skills/review",
@@ -473,8 +462,8 @@ mod tests {
     async fn use_skill_output_lists_active_skill_mcp_tools() {
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__review",
-            "display_name": "acme:review",
+            "slug": "acme-review",
+            "name": "acme:review",
             "root_dir": "/tmp/acme/skills/review",
             "mcp_servers": ["acme_review_mcp"]
         }))

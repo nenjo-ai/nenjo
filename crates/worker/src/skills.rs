@@ -7,9 +7,7 @@ use async_trait::async_trait;
 use nenjo::hooks::{ActiveHookScope, resolve_skill_hooks};
 use nenjo::manifest::HookManifest;
 use nenjo::manifest::SkillManifest;
-use nenjo::skills::{
-    LoadedSkill, SkillProvider, available_skills_message, skill_label, skill_matches_selector,
-};
+use nenjo::skills::{LoadedSkill, SkillProvider, available_skills_message, skill_matches_selector};
 use parking_lot::RwLock;
 
 use crate::external_mcp::ExternalMcpPool;
@@ -31,7 +29,7 @@ pub(crate) enum SkillToolSet {
 impl SkillRegistry {
     pub fn reconcile(&self, skills: &[SkillManifest], hooks: &[HookManifest]) {
         let mut next = skills.to_vec();
-        next.sort_by(|left, right| skill_label(left).cmp(skill_label(right)));
+        next.sort_by(|left, right| left.name.cmp(&right.name));
         *self.skills.write() = next;
 
         let mut hooks = hooks.to_vec();
@@ -140,7 +138,7 @@ impl SkillProvider for LocalSkillProvider {
             .with_context(|| format!("failed to read skill entry {}", entry_file.display()))?;
 
         let inventory = skill_inventory(&skill_root).await;
-        let name = skill_label(skill).to_string();
+        let name = skill.name.clone();
         let context = render_skill_context(
             skill,
             &self.security.workspace_dir,
@@ -301,7 +299,7 @@ fn render_skill_context(
          Assets:\n{assets}\n\
          \n\
          --- SKILL.md ---\n{skill_md}",
-        name = skill_label(skill),
+        name = skill.name,
         description = description,
         root = root,
         plugin_env = plugin_env,
@@ -335,6 +333,7 @@ mod tests {
         assert_eq!(registry.tool_set(), SkillToolSet::None);
 
         let plain_skill: SkillManifest = serde_json::from_value(json!({
+            "slug": "review",
             "name": "review",
             "root_dir": "/tmp/skills/review"
         }))
@@ -343,6 +342,7 @@ mod tests {
         assert_eq!(registry.tool_set(), SkillToolSet::Activation);
 
         let mcp_skill: SkillManifest = serde_json::from_value(json!({
+            "slug": "browser",
             "name": "browser",
             "root_dir": "/tmp/skills/browser",
             "mcp_servers": ["browser-server"]
@@ -356,8 +356,8 @@ mod tests {
     fn registry_resolves_plugin_skill_aliases() {
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__review",
-            "display_name": "acme:review",
+            "slug": "acme-review",
+            "name": "acme:review",
             "aliases": ["review", "code-review"],
             "root_dir": "/tmp/acme/skills/review"
         }))
@@ -365,15 +365,9 @@ mod tests {
         let registry = SkillRegistry::default();
         registry.reconcile(&[skill], &[]);
 
-        assert_eq!(
-            registry.resolve("acme:review").unwrap().name,
-            "acme__review"
-        );
-        assert_eq!(registry.resolve("review").unwrap().name, "acme__review");
-        assert_eq!(
-            registry.resolve("code-review").unwrap().name,
-            "acme__review"
-        );
+        assert_eq!(registry.resolve("acme:review").unwrap().name, "acme:review");
+        assert_eq!(registry.resolve("review").unwrap().name, "acme:review");
+        assert_eq!(registry.resolve("code-review").unwrap().name, "acme:review");
     }
 
     #[test]
@@ -396,14 +390,16 @@ mod tests {
     fn registry_resolves_skill_hook_scopes() {
         let skill: SkillManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__review",
+            "slug": "acme-review",
+            "name": "Acme Review",
             "root_dir": "/tmp/acme/skills/review",
-            "hooks": ["acme__stop_review"]
+            "hooks": ["acme-stop-review"]
         }))
         .unwrap();
         let hook: HookManifest = serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
-            "name": "acme__stop_review",
+            "slug": "acme-stop-review",
+            "name": "Acme Stop Review",
             "event": "Stop",
             "type": "command",
             "command": { "path": "scripts/stop.sh" }

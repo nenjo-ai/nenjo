@@ -74,10 +74,6 @@ impl DelegationContext {
 pub struct ActiveDomain {
     /// Unique ID for the active domain session.
     pub session_id: Uuid,
-    /// Slug of the domain manifest being used for this session.
-    pub domain_slug: Slug,
-    /// Human-readable domain name.
-    pub domain_name: String,
     /// Domain manifest applied to the active session.
     pub manifest: DomainManifest,
 }

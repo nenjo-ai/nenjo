@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nenjo::Slug;
 use nenjo::manifest::{KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestLoader};
 use nenjo_nenpm::{
-    LockedModule, NenpmLock, PackageInstallIndex, PackageSource,
-    package_install_path_in_packages_dir,
+    LockedModule, LockedPackage, NenpmLock, PackageContentPath, PackageCoordinates,
+    PackageInstallIndex, PackageSource, package_install_path_in_packages_dir,
+    package_runtime_slug_with_repository as shared_package_runtime_slug,
+    package_runtime_versioned_slug_with_repository as shared_package_runtime_versioned_slug,
 };
 use nenjo_packages::{
-    LocalPackageResolver, PackageKind, PackageResourceLogicalKey, ResolvedPackage, ResourceManifest,
+    GitHubRepositoryRef, LocalPackageResolver, PackageKind, PackageResourceLogicalKey,
+    PackageResourcePath, ResolvedPackage, ResourceManifest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -54,6 +56,7 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
     let lock = NenpmLock::load_file(root.join("nenpm.lock.yml"))?;
     let index = load_package_install_index(packages_dir)?;
     let mut manifest = Manifest::default();
+    let mut installed_packages = Vec::new();
 
     for package in lock.packages {
         let installed_package = materialized_package(root, packages_dir, index.as_ref(), &package);
@@ -68,7 +71,7 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
         }
         let resolved_install = resolve_installed_package_manifest(&installed_package, &package)?;
         let resolved = resolved_install.package;
-        let locked_source_paths = locked_module_source_paths(&package.modules);
+        let locked_module_metadata = locked_module_metadata(&package.modules);
         let locked_modules = locked_module_keys(&package.modules);
         let mut modules_by_key = BTreeMap::new();
         for (_, module) in resolved.modules {
@@ -78,24 +81,50 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
             }
         }
         let modules = modules_by_key.into_values().collect::<Vec<_>>();
-        let assignment_index = build_assignment_index(
-            &modules,
-            &locked_source_paths,
-            &package.name,
-            package.source.as_ref(),
-        );
-        for module in modules {
+        installed_packages.push(InstalledPackageResources {
+            package,
+            package_root: resolved_install.package_root,
+            modules,
+            locked_module_metadata,
+        });
+    }
+
+    let assignment_index = PackageAssignmentIndex::build(&installed_packages)?;
+    for installed in &installed_packages {
+        let assignment_context = PackageAssignmentContext {
+            package_name: &installed.package.name,
+            dependencies: &installed.package.resolved_dependencies,
+        };
+        for module in &installed.modules {
+            let locked = installed
+                .locked_module_metadata
+                .get(&(module.path.clone(), module.name().to_string()));
+            let source_path = locked
+                .and_then(|metadata| metadata.source_paths.first())
+                .map(String::as_str)
+                .unwrap_or(module.source_path.as_str());
+            let resource_path = locked
+                .and_then(|metadata| metadata.resource_path.as_ref())
+                .map(PackageResourcePath::as_str)
+                .unwrap_or(source_path);
             let mut resource = RuntimeResourceManifest::from_resource_manifest(&module.manifest)?;
-            resource.apply_package_assignments(module.kind, &assignment_index)?;
+            resource.apply_package_assignments(
+                module.kind,
+                &assignment_index,
+                assignment_context,
+            )?;
             push_package_resource(
                 &mut manifest,
                 PackageResourceContext {
-                    package_name: &package.name,
-                    package_version: package.version.as_str(),
-                    package_source: package.source.as_ref(),
-                    package_root: &resolved_install.package_root,
+                    package_name: &installed.package.name,
+                    package_version: installed.package.version.as_str(),
+                    package_repository: installed.package.repository.as_ref(),
+                    package_source: installed.package.source.as_ref(),
+                    package_root: &installed.package_root,
                     module_path: module.path.as_str(),
-                    source_path: module.source_path.as_str(),
+                    source_path,
+                    resource_path,
+                    logical_ref: locked.and_then(|metadata| metadata.logical_ref.as_ref()),
                     kind: module.kind,
                 },
                 resource,
@@ -103,7 +132,10 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
             .with_context(|| {
                 format!(
                     "failed to load package resource package={} version={} module={} source={}",
-                    package.name, package.version, module.path, module.source_path
+                    installed.package.name,
+                    installed.package.version,
+                    module.path,
+                    module.source_path
                 )
             })?;
         }
@@ -112,84 +144,228 @@ fn load_package_manifest(root: &Path, packages_dir: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-#[derive(Debug, Clone)]
-struct PackageAssignmentTarget {
-    kind: PackageKind,
-    name: String,
+struct InstalledPackageResources {
+    package: LockedPackage,
+    package_root: PathBuf,
+    modules: Vec<nenjo_packages::ResolvedModule>,
+    locked_module_metadata: BTreeMap<(String, String), LockedModuleMetadata>,
 }
 
-fn locked_module_source_paths(modules: &[LockedModule]) -> BTreeMap<(String, String), Vec<String>> {
-    let mut paths: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for module in modules {
-        paths
-            .entry((module.path.clone(), module.name.clone()))
-            .or_default()
-            .push(module.source_path.clone());
+#[derive(Default)]
+struct LockedModuleMetadata {
+    source_paths: Vec<String>,
+    resource_path: Option<PackageResourcePath>,
+    logical_ref: Option<PackageResourceLogicalKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageAssignmentTarget {
+    package_name: String,
+    module_path: String,
+    kind: PackageKind,
+    runtime_slug: nenjo::Slug,
+}
+
+#[derive(Clone, Copy)]
+struct PackageAssignmentContext<'a> {
+    package_name: &'a str,
+    dependencies: &'a BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct PackageAssignmentIndex {
+    targets_by_path: BTreeMap<String, Vec<PackageAssignmentTarget>>,
+}
+
+impl PackageAssignmentIndex {
+    fn build(packages: &[InstalledPackageResources]) -> Result<Self> {
+        let mut index = Self::default();
+        for package in packages {
+            for module in &package.modules {
+                let target = PackageAssignmentTarget {
+                    package_name: package.package.name.clone(),
+                    module_path: module.path.clone(),
+                    kind: module.kind,
+                    runtime_slug: nenjo::Slug::parse(match module.kind {
+                        PackageKind::Ability | PackageKind::Domain | PackageKind::McpServer => {
+                            package_runtime_slug(
+                                &package.package.name,
+                                package.package.repository.as_ref(),
+                                package.package.source.as_ref(),
+                                module.manifest.slug().unwrap_or_else(|| module.name()),
+                            )
+                        }
+                        PackageKind::ScriptTool => package_runtime_versioned_slug(
+                            &package.package.name,
+                            package.package.repository.as_ref(),
+                            package.package.source.as_ref(),
+                            module.manifest.slug().unwrap_or_else(|| module.name()),
+                            Some(package.package.version.as_str()),
+                        ),
+                        PackageKind::Agent
+                        | PackageKind::Routine
+                        | PackageKind::Knowledge
+                        | PackageKind::Skill
+                        | PackageKind::Plugin
+                        | PackageKind::ContextBlock
+                        | PackageKind::Model
+                        | PackageKind::Command
+                        | PackageKind::Hook => module
+                            .manifest
+                            .slug()
+                            .unwrap_or_else(|| module.name())
+                            .to_string(),
+                    })?,
+                };
+                index.insert(&module.path, target.clone());
+                index.insert(&module.source_path, target.clone());
+                index.insert(
+                    &format!("{}#{}", module.path, module.name()),
+                    target.clone(),
+                );
+                index.insert(
+                    &format!("{}#{}", module.source_path, module.name()),
+                    target.clone(),
+                );
+                if let Some(metadata) = package
+                    .locked_module_metadata
+                    .get(&(module.path.clone(), module.name().to_string()))
+                {
+                    if let Some(logical_ref) = metadata.logical_ref.as_ref() {
+                        index.insert(logical_ref.as_str(), target.clone());
+                    }
+                    for source_path in &metadata.source_paths {
+                        index.insert(source_path, target.clone());
+                        index.insert(
+                            &format!("{}#{}", source_path, module.name()),
+                            target.clone(),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(index)
     }
-    paths
+
+    fn insert(&mut self, path: &str, target: PackageAssignmentTarget) {
+        let path = normalize_assignment_ref(path);
+        if path.is_empty() {
+            return;
+        }
+        let targets = self.targets_by_path.entry(path).or_default();
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+
+    fn resolve(
+        &self,
+        reference: &str,
+        assignment_key: &str,
+        context: PackageAssignmentContext<'_>,
+    ) -> Result<&PackageAssignmentTarget> {
+        let mut candidates = self
+            .targets_by_path
+            .get(reference)
+            .map(|targets| targets.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|| {
+                self.targets_by_path
+                    .iter()
+                    .filter(|(path, _)| {
+                        reference.ends_with(&format!("/{path}"))
+                            || path.ends_with(&format!("/{reference}"))
+                    })
+                    .flat_map(|(_, targets)| targets)
+                    .fold(Vec::new(), |mut candidates, target| {
+                        if !candidates.contains(&target) {
+                            candidates.push(target);
+                        }
+                        candidates
+                    })
+            });
+
+        if candidates.is_empty() {
+            bail!(
+                "Assignment '{}' references package path '{}' that was not installed. Add it to package modules or imports.",
+                assignment_key,
+                reference
+            );
+        }
+
+        let own_package = candidates
+            .iter()
+            .copied()
+            .filter(|target| target.package_name == context.package_name)
+            .collect::<Vec<_>>();
+        if let [target] = own_package.as_slice() {
+            return Ok(target);
+        }
+        if own_package.len() > 1 {
+            candidates = own_package;
+        } else {
+            let dependencies = candidates
+                .iter()
+                .copied()
+                .filter(|target| context.dependencies.contains_key(&target.package_name))
+                .collect::<Vec<_>>();
+            if let [target] = dependencies.as_slice() {
+                return Ok(target);
+            }
+            if !dependencies.is_empty() {
+                candidates = dependencies;
+            } else {
+                let referenced_packages = candidates
+                    .iter()
+                    .map(|target| target.package_name.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "Assignment '{}' in package '{}' references package path '{}' from {}, but none is a declared dependency",
+                    assignment_key,
+                    context.package_name,
+                    reference,
+                    referenced_packages
+                );
+            }
+        }
+
+        match candidates.as_slice() {
+            [target] => Ok(target),
+            _ => bail!(
+                "Assignment '{}' references ambiguous package path '{}'",
+                assignment_key,
+                reference
+            ),
+        }
+    }
+}
+
+fn locked_module_metadata(
+    modules: &[LockedModule],
+) -> BTreeMap<(String, String), LockedModuleMetadata> {
+    let mut metadata = BTreeMap::new();
+    for module in modules {
+        let entry: &mut LockedModuleMetadata = metadata
+            .entry((module.path.clone(), module.resource.clone()))
+            .or_default();
+        entry.source_paths.push(module.source_path.clone());
+        if entry.resource_path.is_none() {
+            entry.resource_path = module.resource_path.clone();
+        }
+        if entry.logical_ref.is_none() {
+            entry.logical_ref = module.logical_ref.clone();
+        }
+    }
+    metadata
 }
 
 fn locked_module_keys(modules: &[LockedModule]) -> BTreeSet<(String, String)> {
     modules
         .iter()
-        .map(|module| (module.path.clone(), module.name.clone()))
+        .map(|module| (module.path.clone(), module.resource.clone()))
         .collect()
-}
-
-fn build_assignment_index(
-    modules: &[nenjo_packages::ResolvedModule],
-    locked_source_paths: &BTreeMap<(String, String), Vec<String>>,
-    package_name: &str,
-    package_source: Option<&PackageSource>,
-) -> BTreeMap<String, PackageAssignmentTarget> {
-    let mut index = BTreeMap::new();
-    for module in modules {
-        let target = PackageAssignmentTarget {
-            kind: module.kind,
-            name: match module.kind {
-                PackageKind::McpServer => {
-                    package_runtime_slug(package_name, package_source, module.name())
-                }
-                _ => module.name().to_string(),
-            },
-        };
-        insert_assignment_target(&mut index, &module.path, target.clone());
-        insert_assignment_target(&mut index, &module.source_path, target.clone());
-        insert_assignment_target(
-            &mut index,
-            &format!("{}#{}", module.path, module.name()),
-            target.clone(),
-        );
-        insert_assignment_target(
-            &mut index,
-            &format!("{}#{}", module.source_path, module.name()),
-            target.clone(),
-        );
-        if let Some(source_paths) =
-            locked_source_paths.get(&(module.path.clone(), module.name().to_string()))
-        {
-            for source_path in source_paths {
-                insert_assignment_target(&mut index, source_path, target.clone());
-                insert_assignment_target(
-                    &mut index,
-                    &format!("{}#{}", source_path, module.name()),
-                    target.clone(),
-                );
-            }
-        }
-    }
-    index
-}
-
-fn insert_assignment_target(
-    index: &mut BTreeMap<String, PackageAssignmentTarget>,
-    path: &str,
-    target: PackageAssignmentTarget,
-) {
-    let path = normalize_assignment_ref(path);
-    if !path.is_empty() {
-        index.insert(path, target);
-    }
 }
 
 struct MaterializedPackage {
@@ -318,6 +494,7 @@ fn package_root_from_index(root: &Path, packages_dir: &Path, indexed_root: &str)
 #[derive(Debug)]
 struct RuntimeResourceManifest {
     name: String,
+    resource_slug: Option<String>,
     selector: Option<String>,
     root_uri: Option<String>,
     fields: serde_json::Map<String, Value>,
@@ -330,6 +507,7 @@ impl RuntimeResourceManifest {
         fields.remove("name");
         Ok(Self {
             name,
+            resource_slug: resource.slug().map(str::to_string),
             selector: resource.selector().map(str::to_string),
             root_uri: resource.root_uri().map(str::to_string),
             fields,
@@ -339,22 +517,29 @@ impl RuntimeResourceManifest {
     fn into_value(self) -> Value {
         let mut fields = self.fields;
         fields.insert("name".to_string(), Value::String(self.name));
+        if let Some(resource_slug) = self.resource_slug {
+            fields
+                .entry("slug".to_string())
+                .or_insert(Value::String(resource_slug));
+        }
         Value::Object(fields)
     }
 
     fn apply_package_assignments(
         &mut self,
         kind: PackageKind,
-        index: &BTreeMap<String, PackageAssignmentTarget>,
+        index: &PackageAssignmentIndex,
+        context: PackageAssignmentContext<'_>,
     ) -> Result<()> {
         let Some(assignments) = self.fields.remove("assignments") else {
             return Ok(());
         };
         match kind {
             PackageKind::Agent => {
-                self.apply_name_assignments(
+                self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "abilities",
                     PackageKind::Ability,
                     "abilities",
@@ -362,6 +547,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "domains",
                     PackageKind::Domain,
                     "domains",
@@ -369,6 +555,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "mcp_servers",
                     PackageKind::McpServer,
                     "mcp_servers",
@@ -376,15 +563,17 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "script_tools",
                     PackageKind::ScriptTool,
                     "script_tools",
                 )?;
             }
             PackageKind::Domain => {
-                self.apply_name_assignments(
+                self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "abilities",
                     PackageKind::Ability,
                     "abilities",
@@ -392,6 +581,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "mcp_servers",
                     PackageKind::McpServer,
                     "mcp_servers",
@@ -399,6 +589,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "script_tools",
                     PackageKind::ScriptTool,
                     "script_tools",
@@ -408,6 +599,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "mcp_servers",
                     PackageKind::McpServer,
                     "mcp_servers",
@@ -415,6 +607,7 @@ impl RuntimeResourceManifest {
                 self.apply_slug_assignments(
                     &assignments,
                     index,
+                    context,
                     "script_tools",
                     PackageKind::ScriptTool,
                     "script_tools",
@@ -434,36 +627,18 @@ impl RuntimeResourceManifest {
         Ok(())
     }
 
-    fn apply_name_assignments(
-        &mut self,
-        assignments: &Value,
-        index: &BTreeMap<String, PackageAssignmentTarget>,
-        assignment_key: &str,
-        expected_kind: PackageKind,
-        output_key: &str,
-    ) -> Result<()> {
-        let names = resolve_assignment_names(assignments, index, assignment_key, expected_kind)?;
-        if !names.is_empty() {
-            self.fields
-                .insert(output_key.to_string(), serde_json::json!(names));
-        }
-        Ok(())
-    }
-
     fn apply_slug_assignments(
         &mut self,
         assignments: &Value,
-        index: &BTreeMap<String, PackageAssignmentTarget>,
+        index: &PackageAssignmentIndex,
+        context: PackageAssignmentContext<'_>,
         assignment_key: &str,
         expected_kind: PackageKind,
         output_key: &str,
     ) -> Result<()> {
-        let names = resolve_assignment_names(assignments, index, assignment_key, expected_kind)?;
-        if !names.is_empty() {
-            let slugs = names
-                .into_iter()
-                .map(|name| nenjo::Slug::derive(name).to_string())
-                .collect::<Vec<_>>();
+        let slugs =
+            resolve_assignment_slugs(assignments, index, context, assignment_key, expected_kind)?;
+        if !slugs.is_empty() {
             self.fields
                 .insert(output_key.to_string(), serde_json::json!(slugs));
         }
@@ -471,16 +646,17 @@ impl RuntimeResourceManifest {
     }
 }
 
-fn resolve_assignment_names(
+fn resolve_assignment_slugs(
     assignments: &Value,
-    index: &BTreeMap<String, PackageAssignmentTarget>,
+    index: &PackageAssignmentIndex,
+    context: PackageAssignmentContext<'_>,
     assignment_key: &str,
     expected_kind: PackageKind,
-) -> Result<Vec<String>> {
+) -> Result<Vec<nenjo::Slug>> {
     assignment_refs(assignments, assignment_key)?
         .into_iter()
         .map(|reference| {
-            let target = resolve_assignment_target(index, &reference, assignment_key)?;
+            let target = index.resolve(&reference, assignment_key, context)?;
             if target.kind != expected_kind {
                 bail!(
                     "Assignment '{}' references package path '{}' with kind {}, expected {}",
@@ -490,7 +666,7 @@ fn resolve_assignment_names(
                     expected_kind.as_str()
                 );
             }
-            Ok(target.name.clone())
+            Ok(target.runtime_slug.clone())
         })
         .collect()
 }
@@ -517,37 +693,6 @@ fn assignment_refs(assignments: &Value, assignment_key: &str) -> Result<Vec<Stri
         .collect()
 }
 
-fn resolve_assignment_target<'a>(
-    index: &'a BTreeMap<String, PackageAssignmentTarget>,
-    reference: &str,
-    assignment_key: &str,
-) -> Result<&'a PackageAssignmentTarget> {
-    if let Some(target) = index.get(reference) {
-        return Ok(target);
-    }
-
-    let matches = index
-        .iter()
-        .filter(|(path, _)| {
-            reference.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{reference}"))
-        })
-        .map(|(_, target)| target)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [target] => Ok(target),
-        [] => bail!(
-            "Assignment '{}' references package path '{}' that was not installed. Add it to package modules or imports.",
-            assignment_key,
-            reference
-        ),
-        _ => bail!(
-            "Assignment '{}' references ambiguous package path '{}'",
-            assignment_key,
-            reference
-        ),
-    }
-}
-
 fn normalize_assignment_ref(reference: impl AsRef<str>) -> String {
     reference
         .as_ref()
@@ -560,26 +705,23 @@ fn normalize_assignment_ref(reference: impl AsRef<str>) -> String {
 
 fn package_knowledge_selector_name(
     package_name: &str,
+    package_repository: Option<&GitHubRepositoryRef>,
     source: Option<&PackageSource>,
     pack_id: &str,
-) -> String {
-    let mut segments = package_selector_segments(package_name, source);
-    segments.push(knowledge_pack_leaf_segment(pack_id));
-    segments
-        .into_iter()
-        .filter(|segment| !segment.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(".")
+) -> Result<String> {
+    Ok(
+        PackageCoordinates::new(package_name, package_repository, source)?
+            .selector_with_leaf(knowledge_pack_leaf_segment(pack_id))?,
+    )
 }
 
-fn knowledge_pack_leaf_segment(pack_id: &str) -> String {
-    let leaf = pack_id
+fn knowledge_pack_leaf_segment(pack_id: &str) -> &str {
+    pack_id
         .trim()
         .rsplit(['.', '/'])
         .next()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("knowledge");
-    selector_segment(leaf)
+        .unwrap_or("knowledge")
 }
 
 fn push_package_resource(
@@ -589,7 +731,7 @@ fn push_package_resource(
 ) -> Result<()> {
     match context.kind {
         PackageKind::Knowledge => {
-            push_package_knowledge_resource(manifest, context, resource_manifest);
+            push_package_knowledge_resource(manifest, context, resource_manifest)?;
             return Ok(());
         }
         PackageKind::Routine | PackageKind::Plugin => return Ok(()),
@@ -605,26 +747,33 @@ fn push_package_resource(
         | PackageKind::ScriptTool => {}
     }
 
-    let id = PackageResourceLogicalKey::new(
-        context.package_name,
-        context.kind,
-        context.module_path,
-        &resource_manifest.name,
-    )?
-    .resource_id();
+    let id = match context.logical_ref {
+        Some(logical_ref) => logical_ref.resource_id(),
+        None => {
+            let resource_path = PackageResourcePath::parse(context.resource_path)?;
+            PackageResourceLogicalKey::legacy(
+                context.package_name,
+                context.kind,
+                context.module_path,
+                resource_path.identity_name().as_str(),
+            )?
+            .resource_id()
+        }
+    };
     let value = with_package_defaults(
         resource_manifest.into_value(),
         PackageDefaults {
             id,
             package_name: context.package_name,
             package_version: context.package_version,
+            package_repository: context.package_repository,
             package_source: context.package_source,
             module_path: context.module_path,
             source_path: context.source_path,
             kind: context.kind,
             package_root: context.package_root,
         },
-    );
+    )?;
     match context.kind {
         PackageKind::Model => manifest.models.push(deserialize_manifest(value)?),
         PackageKind::Agent => manifest.agents.push(deserialize_manifest(value)?),
@@ -647,15 +796,19 @@ fn push_package_knowledge_resource(
     manifest: &mut Manifest,
     context: PackageResourceContext<'_>,
     resource_manifest: RuntimeResourceManifest,
-) {
+) -> Result<()> {
     let pack_id = resource_manifest
         .fields
         .get("pack_id")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(resource_manifest.name.as_str());
-    let selector_name =
-        package_knowledge_selector_name(context.package_name, context.package_source, pack_id);
+    let selector_name = package_knowledge_selector_name(
+        context.package_name,
+        context.package_repository,
+        context.package_source,
+        pack_id,
+    )?;
     let selector = resource_manifest
         .selector
         .filter(|value| value.starts_with("pkg:") && !value.starts_with("pkg://"))
@@ -677,19 +830,19 @@ fn push_package_knowledge_resource(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| context.package_version.to_string());
-    // Versioned slug so multi-version packs coexist under the same logical selector.
-    let version_label = format!(
-        "v{}",
-        package_version
-            .trim()
-            .trim_start_matches(['v', 'V'])
-            .replace('.', "_")
+    // Versioned runtime slug so multi-version packs coexist while the logical
+    // selector remains stable.
+    let local_slug = resource_manifest
+        .resource_slug
+        .as_deref()
+        .unwrap_or(pack_id);
+    let slug = shared_package_runtime_versioned_slug(
+        context.package_name,
+        context.package_repository,
+        context.package_source,
+        local_slug,
+        Some(&package_version),
     );
-    let slug = Slug::derive(format!(
-        "{}-{}",
-        selector.trim_start_matches("pkg:"),
-        version_label
-    ));
 
     manifest.knowledge_packs.push(KnowledgePackManifest {
         slug,
@@ -715,16 +868,20 @@ fn push_package_knowledge_resource(
             }
         }),
     });
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
 struct PackageResourceContext<'a> {
     package_name: &'a str,
     package_version: &'a str,
+    package_repository: Option<&'a GitHubRepositoryRef>,
     package_source: Option<&'a PackageSource>,
     package_root: &'a Path,
     module_path: &'a str,
     source_path: &'a str,
+    resource_path: &'a str,
+    logical_ref: Option<&'a PackageResourceLogicalKey>,
     kind: PackageKind,
 }
 
@@ -736,6 +893,7 @@ struct PackageDefaults<'a> {
     id: uuid::Uuid,
     package_name: &'a str,
     package_version: &'a str,
+    package_repository: Option<&'a GitHubRepositoryRef>,
     package_source: Option<&'a PackageSource>,
     module_path: &'a str,
     source_path: &'a str,
@@ -743,9 +901,9 @@ struct PackageDefaults<'a> {
     package_root: &'a Path,
 }
 
-fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Value {
+fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Result<Value> {
     let Some(object) = value.as_object_mut() else {
-        return value;
+        return Ok(value);
     };
     object
         .entry("id")
@@ -787,10 +945,16 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .entry("native_tools")
                 .or_insert_with(|| serde_json::json!([]));
             let name = object
-                .get("name")
+                .get("slug")
+                .or_else(|| object.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or("package_model");
-            let slug = package_runtime_slug(defaults.package_name, defaults.package_source, name);
+            let slug = package_runtime_slug(
+                defaults.package_name,
+                defaults.package_repository,
+                defaults.package_source,
+                name,
+            );
             object.insert("name".to_string(), Value::String(slug.clone()));
             object.insert("slug".to_string(), Value::String(slug));
         }
@@ -815,15 +979,16 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| Value::Bool(true));
         }
         PackageKind::Ability => {
-            // Same pkg/<scope>/<version>/<package>/... convention as context blocks.
+            // Same pkg/<scope>/<package>/<version>/... convention as context blocks.
             object.insert(
                 "path".to_string(),
                 Value::String(derived_package_content_path(
                     defaults.package_name,
                     defaults.package_version,
+                    defaults.package_repository,
                     defaults.package_source,
                     defaults.module_path,
-                )),
+                )?),
             );
             object
                 .entry("activation_condition")
@@ -842,9 +1007,10 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 Value::String(derived_package_content_path(
                     defaults.package_name,
                     defaults.package_version,
+                    defaults.package_repository,
                     defaults.package_source,
                     defaults.module_path,
-                )),
+                )?),
             );
             object
                 .entry("command")
@@ -868,31 +1034,16 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 Value::String(derived_package_content_path(
                     defaults.package_name,
                     defaults.package_version,
+                    defaults.package_repository,
                     defaults.package_source,
                     defaults.module_path,
-                )),
+                )?),
             );
             object
                 .entry("template")
                 .or_insert_with(|| Value::String(String::new()));
         }
         PackageKind::McpServer => {
-            let name = object
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("package_mcp_server")
-                .to_string();
-            object
-                .entry("display_name")
-                .or_insert_with(|| Value::String(name.clone()));
-            object.insert(
-                "name".to_string(),
-                Value::String(package_runtime_slug(
-                    defaults.package_name,
-                    defaults.package_source,
-                    &name,
-                )),
-            );
             object
                 .entry("transport")
                 .or_insert_with(|| Value::String("stdio".to_string()));
@@ -977,22 +1128,6 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| serde_json::json!([]));
         }
         PackageKind::Hook => {
-            let name = object
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("package_hook")
-                .to_string();
-            object
-                .entry("display_name")
-                .or_insert_with(|| Value::String(name.clone()));
-            object.insert(
-                "name".to_string(),
-                Value::String(package_runtime_slug(
-                    defaults.package_name,
-                    defaults.package_source,
-                    &name,
-                )),
-            );
             if let Some(plugin_root_path) = skill_plugin_root_path(object) {
                 object
                     .entry("plugin_root_path")
@@ -1009,6 +1144,22 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
                 .or_insert_with(|| Value::String("*".to_string()));
         }
         PackageKind::ScriptTool => {
+            let local_name = object
+                .get("slug")
+                .or_else(|| object.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("package_script_tool")
+                .to_string();
+            object.insert(
+                "slug".to_string(),
+                Value::String(package_runtime_versioned_slug(
+                    defaults.package_name,
+                    defaults.package_repository,
+                    defaults.package_source,
+                    &local_name,
+                    Some(defaults.package_version),
+                )),
+            );
             let root_path = command_root_path(object, defaults.source_path);
             object
                 .entry("root_path")
@@ -1027,11 +1178,22 @@ fn with_package_defaults(mut value: Value, defaults: PackageDefaults<'_>) -> Val
         }
         PackageKind::Routine | PackageKind::Knowledge | PackageKind::Plugin => {}
     }
-    value
+    Ok(value)
 }
 
 fn ensure_slug(object: &mut serde_json::Map<String, Value>, defaults: &PackageDefaults<'_>) {
-    if !matches!(defaults.kind, PackageKind::Agent | PackageKind::Routine) {
+    if !matches!(
+        defaults.kind,
+        PackageKind::Agent
+            | PackageKind::Routine
+            | PackageKind::Ability
+            | PackageKind::Domain
+            | PackageKind::ContextBlock
+            | PackageKind::McpServer
+            | PackageKind::Skill
+            | PackageKind::Command
+            | PackageKind::Hook
+    ) {
         return;
     }
     let local = object
@@ -1043,6 +1205,7 @@ fn ensure_slug(object: &mut serde_json::Map<String, Value>, defaults: &PackageDe
         "slug".to_string(),
         Value::String(package_runtime_slug(
             defaults.package_name,
+            defaults.package_repository,
             defaults.package_source,
             local,
         )),
@@ -1062,6 +1225,7 @@ fn scope_hook_references(
         };
         *hook = Value::String(package_runtime_slug(
             defaults.package_name,
+            defaults.package_repository,
             defaults.package_source,
             &local_name,
         ));
@@ -1070,41 +1234,27 @@ fn scope_hook_references(
 
 fn package_runtime_slug(
     package_name: &str,
+    package_repository: Option<&GitHubRepositoryRef>,
     package_source: Option<&PackageSource>,
     local_name: &str,
 ) -> String {
-    let scope = package_runtime_scope(package_name, package_source);
-    let local = Slug::derive(local_name).into_string();
-    if local == scope || local.starts_with(&format!("{scope}-")) {
-        local
-    } else {
-        format!("{scope}-{local}")
-    }
+    shared_package_runtime_slug(package_name, package_repository, package_source, local_name)
+        .into_string()
 }
 
-fn package_runtime_scope(package_name: &str, package_source: Option<&PackageSource>) -> String {
-    let source_scope = package_source.and_then(|source| match source {
-        PackageSource::Git { url, .. } => github_owner_repo_from_url(url).map(|(owner, _)| owner),
-        PackageSource::Local {
-            scope: Some(scope), ..
-        } => scope.split('.').next().map(str::to_string),
-        PackageSource::Local { scope: None, .. }
-        | PackageSource::Artifact { .. }
-        | PackageSource::Remote { .. } => None,
-    });
-    let package_scope = package_name
-        .trim_start_matches('@')
-        .split_once('/')
-        .map(|(scope, _)| scope.to_string());
-    let fallback = package_name
-        .trim_start_matches('@')
-        .rsplit('/')
-        .next()
-        .unwrap_or("package");
-    Slug::derive(
-        source_scope
-            .or(package_scope)
-            .unwrap_or_else(|| fallback.to_string()),
+fn package_runtime_versioned_slug(
+    package_name: &str,
+    package_repository: Option<&GitHubRepositoryRef>,
+    package_source: Option<&PackageSource>,
+    local_name: &str,
+    version: Option<&str>,
+) -> String {
+    shared_package_runtime_versioned_slug(
+        package_name,
+        package_repository,
+        package_source,
+        local_name,
+        version,
     )
     .into_string()
 }
@@ -1385,133 +1535,26 @@ fn ensure_ability_prompt_config(object: &mut serde_json::Map<String, Value>) {
     }
 }
 
-fn package_selector_segments(package_name: &str, source: Option<&PackageSource>) -> Vec<String> {
-    let mut segments = package_source_path_segments(package_name, source);
-    let leaf = package_leaf_segment(package_name);
-    if segments.last().is_none_or(|segment| segment != &leaf) {
-        segments.push(leaf);
-    }
-    segments
-}
-
-/// Registry/source path segments without the package leaf (mirrors platform).
-fn package_source_path_segments(package_name: &str, source: Option<&PackageSource>) -> Vec<String> {
-    if let Some(segments) = source.and_then(package_source_selector_segments) {
-        return segments;
-    }
-    let mut segments = package_name
-        .trim_start_matches('@')
-        .split('/')
-        .filter(|segment| !segment.trim().is_empty())
-        .map(selector_segment)
-        .collect::<Vec<_>>();
-    // Drop package leaf so version is inserted before it.
-    if segments.len() > 1 {
-        segments.pop();
-    }
-    segments
-}
-
-/// Normalized version segment (`1.0.4` → `v1_0_4`).
-fn package_version_label(version: &str) -> Option<String> {
-    let version = version.trim();
-    if version.is_empty() {
-        return None;
-    }
-    Some(format!("v{}", selector_segment(version)))
-}
-
-fn package_source_selector_segments(source: &PackageSource) -> Option<Vec<String>> {
-    match source {
-        PackageSource::Git { url, .. } => github_owner_repo_from_url(url)
-            .map(|(owner, repo)| vec![selector_segment(&owner), selector_segment(&repo)]),
-        PackageSource::Local { scope, .. } => scope
-            .as_deref()
-            .map(|scope| scope.split('.').map(selector_segment).collect()),
-        PackageSource::Artifact { .. } | PackageSource::Remote { .. } => None,
-    }
-}
-
-fn github_owner_repo_from_url(url: &str) -> Option<(String, String)> {
-    let normalized = url.trim_end_matches(".git").trim_end_matches('/');
-    if let Some(ssh) = normalized.strip_prefix("git@github.com:") {
-        let (owner, repo) = ssh.split_once('/')?;
-        return Some((owner.to_string(), repo.to_string()));
-    }
-    let parts = normalized.rsplit('/').take(2).collect::<Vec<_>>();
-    if parts.len() == 2 {
-        Some((parts[1].to_string(), parts[0].to_string()))
-    } else {
-        None
-    }
-}
-
-fn selector_segment(value: &str) -> String {
-    value
-        .trim()
-        .trim_start_matches('@')
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .split('_')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-fn package_leaf_segment(package_name: &str) -> String {
-    package_name
-        .trim_start_matches('@')
-        .rsplit('/')
-        .next()
-        .map(selector_segment)
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or_else(|| "package".to_string())
-}
-
 /// Content path for package abilities/domains/context blocks.
 ///
-/// Shape: `pkg/<source>/<version>/<package>/<module-dir...>`
-/// e.g. `pkg/nenjo_ai/packages/v1_0_4/nenji/capabilities/build`
+/// Shape: `pkg/<source>/<package>/<version>/<module-dir...>`
+/// e.g. `pkg/nenjo_ai/packages/nenji/v1_0_4/capabilities/build`
 fn derived_package_content_path(
     package_name: &str,
     package_version: &str,
+    package_repository: Option<&GitHubRepositoryRef>,
     package_source: Option<&PackageSource>,
     module_path: &str,
-) -> String {
-    let mut segments = vec!["pkg".to_string()];
-    segments.extend(package_source_path_segments(package_name, package_source));
-    if let Some(version) = package_version_label(package_version) {
-        segments.push(version);
-    }
-    let leaf = package_leaf_segment(package_name);
-    if segments.last().is_none_or(|segment| segment != &leaf) {
-        segments.push(leaf.clone());
-    }
-    if let Some((dir, _)) = module_path.rsplit_once('/') {
-        let mut module_segments = dir
-            .split('/')
-            .filter(|segment| !segment.trim().is_empty())
-            .map(selector_segment)
-            .collect::<Vec<_>>();
-        // Some lockfiles carry paths relative to the registry root rather than
-        // the package root (for example `nenji/capabilities/build/...`). The
-        // package leaf is already part of the canonical pkg path above.
-        if module_segments
-            .first()
-            .is_some_and(|segment| segment == &leaf)
-        {
-            module_segments.remove(0);
-        }
-        segments.extend(module_segments);
-    }
-    segments.join("/")
+) -> Result<String> {
+    PackageContentPath::new(
+        package_name,
+        package_version,
+        package_repository,
+        package_source,
+        module_path,
+    )
+    .map(PackageContentPath::into_string)
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1545,6 +1588,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/core",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "context/guide.yaml",
@@ -1552,9 +1596,9 @@ mod tests {
                 kind: PackageKind::ContextBlock,
             },
         );
-        let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
+        let block: ContextBlockManifest = serde_json::from_value(value.unwrap()).unwrap();
         assert_eq!(block.name, "guide");
-        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core/context");
+        assert_eq!(block.path, "pkg/nenjo/core/v0_1_0/context");
         assert_eq!(block.template, "Use the guide.");
     }
 
@@ -1570,6 +1614,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/core",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "context/shared/guide.yaml",
@@ -1577,8 +1622,8 @@ mod tests {
                 kind: PackageKind::ContextBlock,
             },
         );
-        let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core/context/shared");
+        let block: ContextBlockManifest = serde_json::from_value(value.unwrap()).unwrap();
+        assert_eq!(block.path, "pkg/nenjo/core/v0_1_0/context/shared");
     }
 
     #[test]
@@ -1597,6 +1642,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo-ai/context",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: Some(&source),
                 package_root: Path::new("/package-root"),
                 module_path: "memory/remembrance.yml",
@@ -1604,8 +1650,8 @@ mod tests {
                 kind: PackageKind::ContextBlock,
             },
         );
-        let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo_ai/packages/v0_1_0/context/memory");
+        let block: ContextBlockManifest = serde_json::from_value(value.unwrap()).unwrap();
+        assert_eq!(block.path, "pkg/nenjo_ai/packages/context/v0_1_0/memory");
     }
 
     #[test]
@@ -1619,6 +1665,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/nenji",
                 package_version: "0.2.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "nenji/abilities/design/agent.yml",
@@ -1626,10 +1673,10 @@ mod tests {
                 kind: PackageKind::Ability,
             },
         );
-        let ability: AbilityManifest = serde_json::from_value(value).unwrap();
+        let ability: AbilityManifest = serde_json::from_value(value.unwrap()).unwrap();
         assert_eq!(
             ability.path.as_deref(),
-            Some("pkg/nenjo/v0_2_0/nenji/abilities/design")
+            Some("pkg/nenjo/nenji/v0_2_0/abilities/design")
         );
         assert!(ability.read_only);
         assert_eq!(ability.source_type, "package");
@@ -1647,6 +1694,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/nenji",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "nenji/domains/creator.yml",
@@ -1654,24 +1702,47 @@ mod tests {
                 kind: PackageKind::Domain,
             },
         );
-        let domain: DomainManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(domain.path, "pkg/nenjo/v0_1_0/nenji/domains");
+        let domain: DomainManifest = serde_json::from_value(value.unwrap()).unwrap();
+        assert_eq!(domain.path, "pkg/nenjo/nenji/v0_1_0/domains");
     }
 
     #[test]
-    fn package_content_path_inserts_version_after_scope() {
+    fn package_content_path_inserts_version_after_package() {
         assert_eq!(
             derived_package_content_path(
                 "@nenjo-ai/nenji",
                 "1.0.4",
+                None,
                 Some(&PackageSource::Git {
                     url: "https://github.com/nenjo-ai/packages.git".to_string(),
                     reference: "main".to_string(),
                     manifest_path: "packages.yaml".to_string(),
                 }),
                 "nenji/capabilities/build/build_ability.yaml",
-            ),
-            "pkg/nenjo_ai/packages/v1_0_4/nenji/capabilities/build"
+            )
+            .unwrap(),
+            "pkg/nenjo_ai/packages/nenji/v1_0_4/capabilities/build"
+        );
+    }
+
+    #[test]
+    fn knowledge_selector_uses_explicit_repository_over_local_mirror_source() {
+        let repository = GitHubRepositoryRef::parse("@nenjo-ai/packages").unwrap();
+        let local_mirror = PackageSource::Local {
+            root: PathBuf::from("/tmp/packages"),
+            manifest_path: "packages.yaml".into(),
+            scope: Some("local.mirror".into()),
+        };
+
+        assert_eq!(
+            package_knowledge_selector_name(
+                "@nenjo-ai/nenji",
+                Some(&repository),
+                Some(&local_mirror),
+                "coding-guides",
+            )
+            .unwrap(),
+            "nenjo_ai.packages.nenji.coding_guides"
         );
     }
 
@@ -1686,6 +1757,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/core-knowledge",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "guide.yml",
@@ -1693,8 +1765,8 @@ mod tests {
                 kind: PackageKind::ContextBlock,
             },
         );
-        let block: ContextBlockManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(block.path, "pkg/nenjo/v0_1_0/core_knowledge");
+        let block: ContextBlockManifest = serde_json::from_value(value.unwrap()).unwrap();
+        assert_eq!(block.path, "pkg/nenjo/core_knowledge/v0_1_0");
     }
 
     #[test]
@@ -1708,6 +1780,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/skills",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "skills/review",
@@ -1715,7 +1788,7 @@ mod tests {
                 kind: PackageKind::Skill,
             },
         );
-        let skill: SkillManifest = serde_json::from_value(value).unwrap();
+        let skill: SkillManifest = serde_json::from_value(value.unwrap()).unwrap();
         assert_eq!(skill.entry_path, "SKILL.md");
         assert_eq!(skill.root_path, "skills/review");
         assert_eq!(
@@ -1738,6 +1811,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/nenji",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "commands/design.yaml",
@@ -1745,7 +1819,7 @@ mod tests {
                 kind: PackageKind::Command,
             },
         );
-        let command: CommandManifest = serde_json::from_value(value).unwrap();
+        let command: CommandManifest = serde_json::from_value(value.unwrap()).unwrap();
         assert_eq!(command.entry_path, "command.md");
         assert_eq!(command.root_path, "commands/design");
         assert_eq!(
@@ -1760,8 +1834,7 @@ mod tests {
     fn package_defaults_create_plugin_skill_runtime_paths() {
         let value = with_package_defaults(
             serde_json::json!({
-                "name": "acme__review",
-                "display_name": "acme:review",
+                "name": "Acme: Review",
                 "aliases": ["review"],
                 "description": "Review code.",
                 "plugin_root_path": "."
@@ -1770,6 +1843,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@claude-plugin/acme",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "skills/review",
@@ -1777,9 +1851,8 @@ mod tests {
                 kind: PackageKind::Skill,
             },
         );
-        let skill: SkillManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(skill.name, "acme__review");
-        assert_eq!(skill.display_name.as_deref(), Some("acme:review"));
+        let skill: SkillManifest = serde_json::from_value(value.unwrap()).unwrap();
+        assert_eq!(skill.name, "Acme: Review");
         assert_eq!(skill.aliases, vec!["review"]);
         assert_eq!(
             skill.root_dir,
@@ -1800,14 +1873,18 @@ mod tests {
             PackageResourceContext {
                 package_name: "@nenjo-ai/knowledge",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "core/manifest.yaml",
                 source_path: "nenjo/knowledge/core/manifest.yaml",
+                resource_path: "nenjo/knowledge/core/manifest.yaml",
+                logical_ref: None,
                 kind: PackageKind::Knowledge,
             },
             RuntimeResourceManifest {
                 name: "Nenjo Core".to_string(),
+                resource_slug: None,
                 selector: Some("pkg://nenjo.core/".to_string()),
                 root_uri: Some("pkg://nenjo/core/".to_string()),
                 fields: serde_json::Map::new(),
@@ -1843,14 +1920,18 @@ mod tests {
                 PackageResourceContext {
                     package_name: "@nenjo-ai/knowledge",
                     package_version: version,
+                    package_repository: None,
                     package_source: None,
                     package_root: Path::new("/package-root"),
                     module_path: "core/manifest.yaml",
                     source_path: "nenjo/knowledge/core/manifest.yaml",
+                    resource_path: "nenjo/knowledge/core/manifest.yaml",
+                    logical_ref: None,
                     kind: PackageKind::Knowledge,
                 },
                 RuntimeResourceManifest {
                     name: "Nenjo Core".to_string(),
+                    resource_slug: None,
                     selector: Some("pkg:nenjo_ai.knowledge.core".to_string()),
                     root_uri: Some("pkg://nenjo/core/".to_string()),
                     fields: serde_json::Map::new(),
@@ -1880,6 +1961,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name,
                 package_version,
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "agent.yaml",
@@ -1887,7 +1969,7 @@ mod tests {
                 kind: PackageKind::Agent,
             },
         );
-        let _: AgentManifest = serde_json::from_value(agent).unwrap();
+        let _: AgentManifest = serde_json::from_value(agent.unwrap()).unwrap();
 
         let ability = with_package_defaults(
             serde_json::json!({ "name": "ability" }),
@@ -1895,6 +1977,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name,
                 package_version,
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "abilities/ability.yaml",
@@ -1902,7 +1985,7 @@ mod tests {
                 kind: PackageKind::Ability,
             },
         );
-        let _: AbilityManifest = serde_json::from_value(ability).unwrap();
+        let _: AbilityManifest = serde_json::from_value(ability.unwrap()).unwrap();
 
         let domain = with_package_defaults(
             serde_json::json!({ "name": "domain" }),
@@ -1910,6 +1993,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name,
                 package_version,
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "domains/domain.yaml",
@@ -1917,7 +2001,7 @@ mod tests {
                 kind: PackageKind::Domain,
             },
         );
-        let _: DomainManifest = serde_json::from_value(domain).unwrap();
+        let _: DomainManifest = serde_json::from_value(domain.unwrap()).unwrap();
 
         let context_block = with_package_defaults(
             serde_json::json!({ "name": "context" }),
@@ -1925,6 +2009,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name,
                 package_version,
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "context/context.yaml",
@@ -1932,7 +2017,7 @@ mod tests {
                 kind: PackageKind::ContextBlock,
             },
         );
-        let _: ContextBlockManifest = serde_json::from_value(context_block).unwrap();
+        let _: ContextBlockManifest = serde_json::from_value(context_block.unwrap()).unwrap();
 
         let mcp_server = with_package_defaults(
             serde_json::json!({ "name": "mcp" }),
@@ -1940,6 +2025,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name,
                 package_version,
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "mcp/mcp.yaml",
@@ -1947,7 +2033,7 @@ mod tests {
                 kind: PackageKind::McpServer,
             },
         );
-        let _: McpServerManifest = serde_json::from_value(mcp_server).unwrap();
+        let _: McpServerManifest = serde_json::from_value(mcp_server.unwrap()).unwrap();
     }
 
     #[test]
@@ -1968,6 +2054,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@claude-plugin/acme",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: ".mcp.json",
@@ -1975,6 +2062,7 @@ mod tests {
                 kind: PackageKind::McpServer,
             },
         );
+        let value = value.unwrap();
         assert_eq!(value["metadata"]["runtime"]["cwd"], "/package-root");
         let _: McpServerManifest = serde_json::from_value(value).unwrap();
     }
@@ -1983,8 +2071,7 @@ mod tests {
     fn package_defaults_preserve_managed_connector_declarations() {
         let value = with_package_defaults(
             serde_json::json!({
-                "name": "agent_browser",
-                "display_name": "Agent Browser",
+                "name": "Agent Browser",
                 "transport": "stdio",
                 "metadata": {
                     "nenjo": {
@@ -1996,6 +2083,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "connectors",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "connectors/agent-browser.yaml",
@@ -2004,12 +2092,14 @@ mod tests {
             },
         );
 
+        let value = value.unwrap();
         assert_eq!(
             value.pointer("/metadata/nenjo/managed_connector"),
             Some(&serde_json::json!("agent_browser"))
         );
         let manifest: McpServerManifest = serde_json::from_value(value).unwrap();
-        assert_eq!(manifest.name, "connectors-agent_browser");
+        assert_eq!(manifest.name, "Agent Browser");
+        assert_eq!(manifest.slug.as_str(), "connectors-agent-browser");
     }
 
     #[test]
@@ -2031,6 +2121,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 package_name: "@nenjo/nenji",
                 package_version: "0.1.0",
+                package_repository: None,
                 package_source: None,
                 package_root: Path::new("/package-root"),
                 module_path: "agent.yaml",
@@ -2038,7 +2129,7 @@ mod tests {
                 kind: PackageKind::Agent,
             },
         );
-        let agent: nenjo::manifest::AgentManifest = serde_json::from_value(value).unwrap();
+        let agent: nenjo::manifest::AgentManifest = serde_json::from_value(value.unwrap()).unwrap();
         assert_eq!(
             agent.prompt_config.memory_profile.core_focus,
             vec!["user preferences"]
@@ -2048,6 +2139,42 @@ mod tests {
             vec!["project architecture"]
         );
         assert!(agent.prompt_config.memory_profile.shared_focus.is_empty());
+    }
+
+    #[test]
+    fn package_loader_uses_source_path_for_agent_identity_and_preserves_name() {
+        let mut manifest = Manifest::default();
+
+        push_package_resource(
+            &mut manifest,
+            PackageResourceContext {
+                package_name: "@0xkr8os/agenticauto",
+                package_version: "0.1.0",
+                package_repository: None,
+                package_source: None,
+                package_root: Path::new("/package-root"),
+                module_path: "agents/shop-manager-agent.yaml",
+                source_path: "agents/shop-manager-agent.yaml",
+                resource_path: "agents/shop-manager-agent.yaml",
+                logical_ref: None,
+                kind: PackageKind::Agent,
+            },
+            RuntimeResourceManifest {
+                name: "Shop Manager".to_string(),
+                resource_slug: Some("shop-manager".to_string()),
+                selector: None,
+                root_uri: None,
+                fields: serde_json::Map::new(),
+            },
+        )
+        .expect("display names are not package identity names");
+
+        assert_eq!(manifest.agents.len(), 1);
+        assert_eq!(manifest.agents[0].name, "Shop Manager");
+        assert_eq!(
+            manifest.agents[0].slug.as_str(),
+            package_runtime_slug("@0xkr8os/agenticauto", None, None, "Shop Manager")
+        );
     }
 
     #[test]
@@ -2126,9 +2253,151 @@ manifest:
         assert_eq!(manifest.agents.len(), 1);
         assert_eq!(manifest.domains.len(), 1);
         assert_eq!(manifest.domains[0].name, "creator");
+        assert_eq!(manifest.domains[0].slug.as_str(), "nenji-creator");
         assert_eq!(
             manifest.agents[0].domains,
-            vec![nenjo::Slug::derive("creator")]
+            vec![nenjo::Slug::derive("nenji-creator")]
+        );
+    }
+
+    #[test]
+    fn package_loader_resolves_assignments_from_declared_scoped_dependency() {
+        fn write_ability_package(packages_dir: &Path, package_name: &str, ability_name: &str) {
+            let package_root =
+                package_install_path_in_packages_dir(packages_dir, package_name, "1.2.0");
+            std::fs::create_dir_all(package_root.join("capabilities/build")).unwrap();
+            std::fs::write(
+                package_root.join("nenjo.package.yaml"),
+                r#"
+schema: nenjo.package.v1
+name: nenji
+version: "1.2.0"
+modules:
+  - capabilities/build/manage_tasks.yaml
+"#,
+            )
+            .unwrap();
+            std::fs::write(
+                package_root.join("capabilities/build/manage_tasks.yaml"),
+                format!(
+                    r#"
+schema: nenjo.ability.v1
+slug: manage-tasks
+manifest:
+  name: {ability_name}
+  description: Manage task execution.
+  activation_condition: When managing tasks.
+  prompt_config:
+    developer_prompt: Manage tasks carefully.
+"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let packages_dir = root.join(".nenjo").join("packages");
+        write_ability_package(&packages_dir, "@other/nenji", "other_manage_tasks");
+        write_ability_package(&packages_dir, "@nenjo-ai/nenji", "manage_tasks");
+
+        let app_root =
+            package_install_path_in_packages_dir(&packages_dir, "@0xkr8os/agenticauto", "0.1.0");
+        std::fs::create_dir_all(app_root.join("agents")).unwrap();
+        std::fs::write(
+            app_root.join("nenjo.package.yaml"),
+            r#"
+schema: nenjo.package.v1
+name: agenticauto
+version: "0.1.0"
+dependencies:
+  "@nenjo-ai/nenji": "1.2.0"
+modules:
+  - agents/automation.yaml
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_root.join("agents/automation.yaml"),
+            r#"
+schema: nenjo.agent.v1
+slug: automation
+manifest:
+  name: automation
+  assignments:
+    abilities:
+      - pkg:@nenjo-ai/packages:nenji:ability:manage-tasks
+  prompt_config:
+    system_prompt: Automate agentic work.
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            root.join("nenpm.lock.yml"),
+            r#"
+schema: nenjo.lock.v1
+packages:
+  - name: "@other/nenji"
+    version: "1.2.0"
+    repository: "@other/packages"
+    manifest_path: nenjo.package.yaml
+    hash: other
+    modules:
+      - path: capabilities/build/manage_tasks.yaml
+        resource: other_manage_tasks
+        source_path: nenjo/nenji/capabilities/build/manage_tasks.yaml
+        resource_slug: manage-tasks
+        logical_ref: "pkg:@other/packages:nenji:ability:manage-tasks"
+        schema: nenjo.ability.v1
+        kind: ability
+        name: other_manage_tasks
+        hash: other
+  - name: "@nenjo-ai/nenji"
+    version: "1.2.0"
+    repository: "@nenjo-ai/packages"
+    manifest_path: nenjo.package.yaml
+    hash: nenji
+    modules:
+      - path: capabilities/build/manage_tasks.yaml
+        resource: manage_tasks
+        source_path: nenjo/nenji/capabilities/build/manage_tasks.yaml
+        resource_slug: manage-tasks
+        logical_ref: "pkg:@nenjo-ai/packages:nenji:ability:manage-tasks"
+        schema: nenjo.ability.v1
+        kind: ability
+        name: manage_tasks
+        hash: nenji
+  - name: "@0xkr8os/agenticauto"
+    version: "0.1.0"
+    repository: "@0xkr8os/agenticauto"
+    manifest_path: nenjo.package.yaml
+    hash: agenticauto
+    dependencies:
+      "@nenjo-ai/nenji": "1.2.0"
+    resolved_dependencies:
+      "@nenjo-ai/nenji": "1.2.0"
+    modules:
+      - path: agents/automation.yaml
+        resource: automation
+        source_path: agenticauto/agents/automation.yaml
+        resource_slug: automation
+        logical_ref: "pkg:@0xkr8os/agenticauto:agenticauto:agent:automation"
+        schema: nenjo.agent.v1
+        kind: agent
+        name: automation
+        hash: agenticauto
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_package_manifest(root, &packages_dir).unwrap();
+
+        assert_eq!(manifest.agents.len(), 1);
+        assert_eq!(manifest.abilities.len(), 2);
+        assert_eq!(
+            manifest.agents[0].abilities,
+            vec![nenjo::Slug::derive("nenjo-ai-packages-manage-tasks")]
         );
     }
 
@@ -2218,7 +2487,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
 
         assert_eq!(manifest.commands.len(), 1);
         let command = &manifest.commands[0];
-        assert_eq!(command.name, "ralph_loop__ralph_loop");
+        assert_eq!(command.name, "Ralph Loop: ralph-loop");
         assert_eq!(command.command, "/ralph-loop");
         assert_eq!(
             command
@@ -2226,13 +2495,12 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"]
+            vec!["ralph-loop-plugin-ralph_loop-hook-stop_ralph_loop_stop"]
         );
 
         assert_eq!(manifest.skills.len(), 1);
         let skill = &manifest.skills[0];
-        assert_eq!(skill.name, "ralph_loop__ralph_loop");
-        assert_eq!(skill.display_name.as_deref(), Some("ralph_loop:ralph_loop"));
+        assert_eq!(skill.name, "Ralph Loop: ralph-loop");
         assert_eq!(skill.root_dir, package_root.join("skills/ralph-loop"));
         assert_eq!(
             skill.plugin_root_dir.as_deref(),
@@ -2244,14 +2512,15 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"]
+            vec!["ralph-loop-plugin-ralph_loop-hook-stop_ralph_loop_stop"]
         );
 
         assert_eq!(manifest.hooks.len(), 1);
         let hook = &manifest.hooks[0];
+        assert_eq!(hook.name, "Ralph Loop: Stop_ralph-loop-stop");
         assert_eq!(
-            hook.name,
-            "ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"
+            hook.slug.as_str(),
+            "ralph-loop-plugin-ralph_loop-hook-stop_ralph_loop_stop"
         );
         assert_eq!(hook.event, "Stop");
         assert_eq!(
@@ -2363,34 +2632,54 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         let agent = &manifest.agents[0];
         assert_eq!(agent.name, "native_coder");
         assert!(agent.prompt_locked);
-        assert_eq!(agent.abilities, vec!["review_changes"]);
-        assert_eq!(agent.domains, vec![nenjo::Slug::derive("creator")]);
+        assert_eq!(
+            agent.abilities,
+            vec![nenjo::Slug::derive("native_tools-review_changes")]
+        );
+        assert_eq!(
+            agent.domains,
+            vec![nenjo::Slug::derive("native_tools-creator")]
+        );
         assert_eq!(
             agent.mcp_servers,
-            vec![nenjo::Slug::derive("native_tools-review_server")]
+            vec![nenjo::Slug::derive("native_tools-review-server")]
         );
-        assert_eq!(agent.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
+        assert_eq!(
+            agent.script_tools,
+            vec![nenjo::Slug::derive("native_tools-copy-repo-v0_1_0")]
+        );
 
         assert_eq!(manifest.abilities.len(), 1);
         let ability = &manifest.abilities[0];
         assert_eq!(ability.name, "review_changes");
+        assert_eq!(ability.slug.as_str(), "native_tools-review_changes");
         assert_eq!(ability.source_type, "package");
         assert!(ability.read_only);
         assert_eq!(
             ability.mcp_servers,
-            vec![nenjo::Slug::derive("native_tools-review_server")]
+            vec![nenjo::Slug::derive("native_tools-review-server")]
         );
-        assert_eq!(ability.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
+        assert_eq!(
+            ability.script_tools,
+            vec![nenjo::Slug::derive("native_tools-copy-repo-v0_1_0")]
+        );
 
         assert_eq!(manifest.domains.len(), 1);
         let domain = &manifest.domains[0];
         assert_eq!(domain.name, "creator");
-        assert_eq!(domain.abilities, vec!["review_changes"]);
+        assert_eq!(domain.slug.as_str(), "native_tools-creator");
+        assert_eq!(
+            domain.abilities,
+            vec![nenjo::Slug::derive("native_tools-review_changes")]
+        );
         assert_eq!(
             domain.mcp_servers,
-            vec![nenjo::Slug::derive("native_tools-review_server")]
+            vec![nenjo::Slug::derive("native_tools-review-server")]
         );
-        assert_eq!(domain.script_tools, vec![nenjo::Slug::derive("copy_repo")]);
+        assert_eq!(
+            domain.script_tools,
+            vec![nenjo::Slug::derive("native_tools-copy-repo-v0_1_0")]
+        );
 
         assert_eq!(manifest.context_blocks.len(), 1);
         let block = &manifest.context_blocks[0];
@@ -2398,24 +2687,26 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
         assert_eq!(block.template, "# Guide\nUse the native package guide.");
         assert_eq!(
             block.path,
-            "pkg/native_tools/v0_1_0/native_tools/context_blocks"
+            "pkg/native_tools/native_tools/v0_1_0/context_blocks"
         );
 
         assert_eq!(manifest.mcp_servers.len(), 1);
         let mcp = &manifest.mcp_servers[0];
-        assert_eq!(mcp.name, "native_tools-review_server");
+        assert_eq!(mcp.name, "Review Server");
+        assert_eq!(mcp.slug.as_str(), "native_tools-review-server");
         assert_eq!(mcp.source_type, "package");
         assert!(mcp.read_only);
 
         assert_eq!(manifest.script_tools.len(), 1);
         let script_tool = &manifest.script_tools[0];
-        assert_eq!(script_tool.name, "copy_repo");
+        assert_eq!(script_tool.name, "Copy Repo");
+        assert_eq!(script_tool.slug.as_str(), "native_tools-copy-repo-v0_1_0");
         assert_eq!(script_tool.root_dir, native_root.join("script_tools"));
         assert_eq!(script_tool.command.path, "scripts/copy-repo.sh");
 
         assert_eq!(manifest.commands.len(), 1);
         let command = &manifest.commands[0];
-        assert_eq!(command.name, "ralph_loop__ralph_loop");
+        assert_eq!(command.name, "Ralph Loop: ralph-loop");
         assert_eq!(command.command, "/ralph-loop");
         assert_eq!(
             command.plugin_root_dir.as_deref(),
@@ -2424,7 +2715,7 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
 
         assert_eq!(manifest.skills.len(), 1);
         let skill = &manifest.skills[0];
-        assert_eq!(skill.name, "ralph_loop__ralph_loop");
+        assert_eq!(skill.name, "Ralph Loop: ralph-loop");
         assert_eq!(skill.root_dir, plugin_root.join("skills/ralph-loop"));
         assert_eq!(
             skill.plugin_root_dir.as_deref(),
@@ -2433,9 +2724,10 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
 
         assert_eq!(manifest.hooks.len(), 1);
         let hook = &manifest.hooks[0];
+        assert_eq!(hook.name, "Ralph Loop: Stop_ralph-loop-stop");
         assert_eq!(
-            hook.name,
-            "ralph-loop-plugin-ralph_loop_stop_ralph_loop_stop"
+            hook.slug.as_str(),
+            "ralph-loop-plugin-ralph_loop-hook-stop_ralph_loop_stop"
         );
         assert_eq!(hook.event, "Stop");
         assert_eq!(hook.plugin_root_dir.as_deref(), Some(plugin_root.as_path()));
@@ -2507,6 +2799,7 @@ manifest:
 
         assert_eq!(manifest.abilities.len(), 1);
         assert_eq!(manifest.abilities[0].name, "build_agent");
+        assert_eq!(manifest.abilities[0].slug.as_str(), "nenji-build_agent");
     }
 
     #[test]
@@ -2840,8 +3133,7 @@ manifest:
             r#"
 schema: nenjo.mcp_server.v1
 manifest:
-  name: review_server
-  display_name: Review Server
+  name: Review Server
   transport: stdio
   command: node
   args:
@@ -2854,8 +3146,7 @@ manifest:
             r#"
 schema: nenjo.script_tool.v1
 manifest:
-  name: copy_repo
-  display_name: Copy Repo
+  name: Copy Repo
   command:
     path: scripts/copy-repo.sh
 "#,
@@ -2883,6 +3174,7 @@ manifest:
                 LockedPackage {
                     name: "native_tools".to_string(),
                     version: "0.1.0".to_string(),
+                    repository: None,
                     manifest_path: "package.yaml".to_string(),
                     hash: "sha256:native".to_string(),
                     source: None,
@@ -2894,6 +3186,7 @@ manifest:
                 LockedPackage {
                     name: "ralph-loop-plugin".to_string(),
                     version: "0.1.0".to_string(),
+                    repository: None,
                     manifest_path: "package.yaml".to_string(),
                     hash: "sha256:ralph-loop".to_string(),
                     source: None,
@@ -2976,14 +3269,14 @@ manifest:
                 "mcp/review-server.yaml",
                 "nenjo.mcp_server.v1",
                 PackageKind::McpServer,
-                "review_server",
+                "Review Server",
             ),
             locked_module(
                 "script_tools/copy-repo.yaml",
                 "script_tools/copy-repo.yaml",
                 "nenjo.script_tool.v1",
                 PackageKind::ScriptTool,
-                "copy_repo",
+                "Copy Repo",
             ),
         ]
     }
@@ -3012,11 +3305,14 @@ manifest:
     ) -> LockedModule {
         LockedModule {
             path: path.to_string(),
-            resource: Some(name.to_string()),
+            resource: name.to_string(),
             source_path: source_path.to_string(),
+            resource_path: None,
+            resource_slug: None,
+            logical_ref: None,
+            instance_key: None,
             schema: schema.to_string(),
             kind,
-            name: name.to_string(),
             hash: "sha256:test".to_string(),
             imports: Vec::new(),
             files: Vec::new(),
@@ -3037,11 +3333,14 @@ manifest:
             .iter()
             .map(|resource| LockedModule {
                 path: resource.path.clone(),
-                resource: Some(resource.manifest.name().unwrap().to_string()),
+                resource: resource.manifest.name().unwrap().to_string(),
                 source_path: resource.source_path.clone(),
+                resource_path: None,
+                resource_slug: None,
+                logical_ref: None,
+                instance_key: None,
                 schema: resource.manifest.schema.clone(),
                 kind: resource.kind,
-                name: resource.manifest.name().unwrap().to_string(),
                 hash: "sha256:test".to_string(),
                 imports: Vec::new(),
                 files: Vec::new(),
@@ -3053,6 +3352,7 @@ manifest:
             packages: vec![LockedPackage {
                 name: package_name.to_string(),
                 version: version.to_string(),
+                repository: None,
                 manifest_path: "package.yaml".to_string(),
                 hash: "sha256:test".to_string(),
                 source: None,
@@ -3179,7 +3479,7 @@ manifest:
     }
 
     #[test]
-    fn package_runtime_slugs_are_scoped_and_not_versioned() {
+    fn package_runtime_slugs_include_registry_without_package_name() {
         let source = PackageSource::Git {
             url: "https://github.com/acme/runtime.git".to_string(),
             reference: "main".to_string(),
@@ -3187,16 +3487,90 @@ manifest:
         };
 
         assert_eq!(
-            package_runtime_slug("@acme/runtime", Some(&source), "Review Server"),
-            "acme-review-server"
+            package_runtime_slug("@acme/runtime", None, Some(&source), "Review Server"),
+            "acme-runtime-review-server"
         );
         assert_eq!(
-            package_runtime_slug("@acme/runtime", Some(&source), "review-server"),
-            "acme-review-server"
+            package_runtime_slug("@acme/runtime", None, Some(&source), "review-server"),
+            "acme-runtime-review-server"
         );
         assert_eq!(
-            package_runtime_slug("@acme/runtime", None, "review-server"),
+            package_runtime_slug("@acme/runtime", None, None, "review-server"),
             "acme-review-server"
+        );
+    }
+
+    #[test]
+    fn package_defaults_scope_assignment_targets_by_canonical_repository() {
+        fn render(
+            package_name: &str,
+            repository: &GitHubRepositoryRef,
+            kind: PackageKind,
+        ) -> Value {
+            with_package_defaults(
+                serde_json::json!({
+                    "name": "Shared Resource",
+                    "slug": "shared-resource"
+                }),
+                PackageDefaults {
+                    id: uuid::Uuid::nil(),
+                    package_name,
+                    package_version: "1.2.0",
+                    package_repository: Some(repository),
+                    package_source: None,
+                    package_root: Path::new("/package-root"),
+                    module_path: "resources/shared.yaml",
+                    source_path: "resources/shared.yaml",
+                    kind,
+                },
+            )
+            .unwrap()
+        }
+
+        let nenjo_repository = GitHubRepositoryRef::parse("@nenjo-ai/packages").unwrap();
+        let other_repository = GitHubRepositoryRef::parse("@other/packages").unwrap();
+
+        for kind in [PackageKind::Ability, PackageKind::Domain] {
+            assert_eq!(
+                render("@nenjo-ai/nenji", &nenjo_repository, kind)["name"],
+                "Shared Resource"
+            );
+            assert_eq!(
+                render("@other/nenji", &other_repository, kind)["name"],
+                "Shared Resource"
+            );
+            assert_eq!(
+                render("@nenjo-ai/nenji", &nenjo_repository, kind)["slug"],
+                "nenjo-ai-packages-shared-resource"
+            );
+            assert_eq!(
+                render("@other/nenji", &other_repository, kind)["slug"],
+                "other-packages-shared-resource"
+            );
+        }
+        assert_eq!(
+            render(
+                "@nenjo-ai/nenji",
+                &nenjo_repository,
+                PackageKind::ScriptTool,
+            )["name"],
+            "Shared Resource"
+        );
+        assert_eq!(
+            render("@other/nenji", &other_repository, PackageKind::ScriptTool,)["name"],
+            "Shared Resource"
+        );
+        assert_eq!(
+            render(
+                "@nenjo-ai/nenji",
+                &nenjo_repository,
+                PackageKind::ScriptTool,
+            )["slug"],
+            "nenjo-ai-packages-shared-resource-v1_2_0"
+        );
+        assert_eq!(
+            render("@other/nenji", &other_repository, PackageKind::ScriptTool,)["slug"],
+            "other-packages-shared-resource-v1_2_0"
         );
     }
 

@@ -27,8 +27,16 @@ impl nenjo_harness::ModelProvider for TestModelProvider {
         _temperature: f64,
     ) -> anyhow::Result<nenjo_models::ChatResponse> {
         Ok(nenjo_models::ChatResponse {
-            text: Some("ok".to_string()),
-            tool_calls: Vec::new(),
+            text: None,
+            tool_calls: vec![nenjo_models::ToolCall {
+                id: "test-response".into(),
+                name: "respond_to_user".into(),
+                arguments: serde_json::json!({
+                    "message": "ok",
+                    "status": "completed"
+                })
+                .to_string(),
+            }],
             provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
         })

@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Default upper bound for model turns in an agent execution.
+pub const DEFAULT_AGENT_MAX_TURNS: usize = 100;
+
 /// Per-agent configuration that controls turn loop behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -34,7 +37,7 @@ fn default_max_model_request_payload_bytes() -> usize {
 }
 
 fn default_agent_max_turns() -> usize {
-    50
+    DEFAULT_AGENT_MAX_TURNS
 }
 
 fn default_agent_max_history_messages() -> usize {
@@ -57,5 +60,18 @@ impl Default for AgentConfig {
             tool_dispatcher: default_agent_tool_dispatcher(),
             max_delegation_depth: default_max_delegation_depth(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::TurnLoopConfig;
+
+    #[test]
+    fn agent_and_turn_loop_defaults_share_the_hundred_turn_limit() {
+        assert_eq!(AgentConfig::default().max_turns, 100);
+        assert_eq!(TurnLoopConfig::default().max_turns, 100);
+        assert_eq!(DEFAULT_AGENT_MAX_TURNS, 100);
     }
 }

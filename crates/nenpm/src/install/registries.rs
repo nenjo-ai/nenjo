@@ -76,8 +76,15 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
         (Ok(left), Ok(right)) => left.cmp(&right),
         (Ok(_), Err(_)) => Ordering::Greater,
         (Err(_), Ok(_)) => Ordering::Less,
-        (Err(_), Err(_)) => left.cmp(&right),
+        (Err(_), Err(_)) => left.cmp(right),
     }
+}
+
+pub(crate) fn is_registry_manifest_path(path: &str) -> bool {
+    path == "packages.yaml"
+        || path == "packages.yml"
+        || path.ends_with(".registry.yaml")
+        || path.ends_with(".registry.yml")
 }
 
 #[cfg(test)]
@@ -122,11 +129,4 @@ mod tests {
 
         assert_eq!(resolved.version, "1.3.0");
     }
-}
-
-pub(crate) fn is_registry_manifest_path(path: &str) -> bool {
-    path == "packages.yaml"
-        || path == "packages.yml"
-        || path.ends_with(".registry.yaml")
-        || path.ends_with(".registry.yml")
 }

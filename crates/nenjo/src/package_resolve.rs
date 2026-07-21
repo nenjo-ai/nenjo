@@ -29,7 +29,7 @@ pub struct VersionedCandidate {
     pub package_name: Option<String>,
     /// Package version when known (`1.0.4` or path segment `v1_0_4`).
     pub package_version: Option<String>,
-    /// Versioned storage path (e.g. `pkg/nenjo_ai/packages/v1_0_4/context/tools`).
+    /// Versioned storage path (e.g. `pkg/nenjo_ai/packages/context/v1_0_4/tools`).
     pub path: String,
     /// Resource leaf name (context block name, ability name, …).
     pub name: String,
@@ -53,7 +53,7 @@ impl VersionedCandidate {
         self.package_name
             .as_deref()
             .map(package_name_leaf)
-            .or_else(|| package_leaf_from_path(&self.path))
+            .or_else(|| package_name_from_path(&self.path))
     }
 }
 
@@ -99,6 +99,25 @@ pub fn version_label_from_path(path: &str) -> Option<String> {
         })
 }
 
+/// Extract the package segment from a canonical package content path.
+///
+/// Canonical paths place the package immediately before the version:
+/// `pkg/<source...>/<package>/<version>/<module...>`.
+pub fn package_name_from_path(path: &str) -> Option<String> {
+    let parts = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if parts.first().copied() != Some("pkg") {
+        return None;
+    }
+    let version_index = parts
+        .iter()
+        .position(|segment| is_version_segment(segment))?;
+    let package_index = version_index.checked_sub(1)?;
+    (package_index > 0).then(|| parts[package_index].to_ascii_lowercase())
+}
+
 /// Parse a semver-like string into comparable numeric parts.
 pub fn parse_semver_rank(version: &str) -> Vec<u64> {
     let cleaned = version.trim().trim_start_matches(['v', 'V']);
@@ -134,27 +153,6 @@ pub fn package_name_leaf(package_name: &str) -> String {
         .next()
         .unwrap_or(package_name)
         .to_ascii_lowercase()
-}
-
-fn package_leaf_from_path(path: &str) -> Option<String> {
-    // pkg/<scope...>/<version?>/<package_leaf>/...
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.first().copied() != Some("pkg") {
-        return None;
-    }
-    let mut i = 1usize;
-    // skip scope segments until version or package leaf heuristics
-    while i < parts.len() && !is_version_segment(parts[i]) {
-        // stop before module-ish dirs if we already have scope+leaf
-        i += 1;
-        if i >= 3 {
-            break;
-        }
-    }
-    if i < parts.len() && is_version_segment(parts[i]) {
-        i += 1;
-    }
-    parts.get(i).map(|s| s.to_ascii_lowercase())
 }
 
 fn package_names_match(candidate: &str, lock_key: &str) -> bool {
@@ -338,13 +336,22 @@ mod tests {
     #[test]
     fn strips_version_segment_from_path() {
         assert_eq!(
-            logical_path("pkg/nenjo_ai/packages/v1_0_4/context/tools"),
+            logical_path("pkg/nenjo_ai/packages/context/v1_0_4/tools"),
             "pkg/nenjo_ai/packages/context/tools"
         );
         assert_eq!(
-            logical_dotted_key("pkg/nenjo_ai/packages/v1_0_4/context/tools", "tool_usage"),
+            logical_dotted_key("pkg/nenjo_ai/packages/context/v1_0_4/tools", "tool_usage"),
             "pkg.nenjo_ai.packages.context.tools.tool_usage"
         );
+    }
+
+    #[test]
+    fn extracts_package_immediately_before_version() {
+        assert_eq!(
+            package_name_from_path("pkg/nenjo_ai/packages/context/v1_0_4/tools").as_deref(),
+            Some("context")
+        );
+        assert_eq!(package_name_from_path("native/context"), None);
     }
 
     #[test]
@@ -353,7 +360,7 @@ mod tests {
             (
                 "old",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                     "tool_usage",
                     Some("context"),
                     Some("1.0.3"),
@@ -362,7 +369,7 @@ mod tests {
             (
                 "new",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                     "tool_usage",
                     Some("context"),
                     Some("1.0.4"),
@@ -380,7 +387,7 @@ mod tests {
             (
                 "old",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                     "tool_usage",
                     Some("@nenjo-ai/context"),
                     Some("1.0.3"),
@@ -389,7 +396,7 @@ mod tests {
             (
                 "new",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                     "tool_usage",
                     Some("@nenjo-ai/context"),
                     Some("1.0.4"),
@@ -409,7 +416,7 @@ mod tests {
             (
                 "old",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                     "tool_usage",
                     Some("context"),
                     Some("1.0.3"),
@@ -418,7 +425,7 @@ mod tests {
             (
                 "new",
                 cand(
-                    "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                     "tool_usage",
                     Some("context"),
                     Some("1.0.4"),
@@ -461,14 +468,14 @@ mod tests {
         let items = vec![
             (
                 0usize,
-                cand("pkg/acme/v1_0_0/abilities/review", "review", None, None),
+                cand("pkg/acme/review/v1_0_0/abilities", "review", None, None),
             ),
             (
                 1usize,
-                cand("pkg/acme/v2_0_0/abilities/review", "review", None, None),
+                cand("pkg/acme/review/v2_0_0/abilities", "review", None, None),
             ),
         ];
-        let key = logical_dotted_key("pkg/acme/v2_0_0/abilities/review", "review");
+        let key = logical_dotted_key("pkg/acme/review/v2_0_0/abilities", "review");
         assert_eq!(
             resolve_logical_key(&key, &items, &PkgResolvePolicy::HighestSemver),
             Some(1)

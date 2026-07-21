@@ -32,8 +32,9 @@ fn council_member_create_schema() -> serde_json::Value {
 fn council_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "leader_agent", "members"],
+        "required": ["slug", "name", "leader_agent", "members"],
         "properties": {
+            "slug": { "type": "string", "description": "Stable council slug." },
             "name": { "type": "string", "description": "Display name for the council." },
             "description": { "type": ["string", "null"], "description": "Optional council description." },
             "leader_agent": {

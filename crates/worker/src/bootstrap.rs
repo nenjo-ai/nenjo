@@ -21,7 +21,7 @@ use crate::crypto::decrypt_text_with_provider;
 use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
-    CommandManifest, ContextBlockManifest, HasManifestSlug, Manifest, ManifestLoader,
+    CommandManifest, ContextBlockManifest, Manifest, ManifestIdentity, ManifestLoader,
     ManifestResource, ManifestResourceKind,
 };
 use nenjo::{LocalManifestStore, ManifestReader, ManifestWriter};
@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::config::MediaProviderConfig;
-use crate::handlers::manifest::ManifestStore;
+use crate::handlers::manifest::{ManifestCacheMutation, ManifestStore};
 use crate::media::{AgentModelAssignments, ModelRuntimeConfig};
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -263,7 +263,7 @@ struct BootstrapAgentManifest {
     #[serde(default)]
     media: Vec<nenjo::manifest::MediaRequirement>,
     #[serde(default)]
-    abilities: Vec<String>,
+    abilities: Vec<Slug>,
     #[serde(default)]
     prompt_locked: bool,
     #[serde(default)]
@@ -295,6 +295,7 @@ struct BootstrapDomainManifest {
 #[derive(Debug, Deserialize)]
 struct BootstrapContextBlockManifest {
     id: Uuid,
+    slug: Slug,
     name: String,
     #[serde(default)]
     path: String,
@@ -445,6 +446,7 @@ impl ManifestLoader for LocalManifestLoader {
                 }
                 let template = std::fs::read_to_string(&path)?;
                 blocks.push(ContextBlockManifest {
+                    slug: Slug::derive(&name),
                     name,
                     path: "local".to_string(),
                     description: None,
@@ -664,7 +666,7 @@ async fn hydrate_bootstrap_manifest(
         manifest.prompt_config = prompt_config;
         resource_ids.insert(
             PlatformResourceKind::Domain,
-            &manifest.manifest_slug(),
+            manifest.manifest_slug(),
             domain.id,
         );
         domains.push(manifest);
@@ -677,7 +679,7 @@ async fn hydrate_bootstrap_manifest(
         manifest.prompt_config = prompt_config;
         resource_ids.insert(
             PlatformResourceKind::Ability,
-            &manifest.manifest_slug(),
+            manifest.manifest_slug(),
             ability.id,
         );
         abilities.push(manifest);
@@ -687,6 +689,7 @@ async fn hydrate_bootstrap_manifest(
     for block in bootstrap.context_blocks {
         let template = resolve_bootstrap_context_block_template(&block, state_dir).await?;
         let context_block = ContextBlockManifest {
+            slug: block.slug,
             name: block.name,
             path: block.path,
             description: block.description,
@@ -694,7 +697,7 @@ async fn hydrate_bootstrap_manifest(
         };
         resource_ids.insert(
             PlatformResourceKind::ContextBlock,
-            &context_block.manifest_slug(),
+            context_block.manifest_slug(),
             block.id,
         );
         context_blocks.push(context_block);
@@ -707,7 +710,7 @@ async fn hydrate_bootstrap_manifest(
         manifest.content = content;
         resource_ids.insert(
             PlatformResourceKind::Command,
-            &manifest.manifest_slug(),
+            manifest.manifest_slug(),
             command.id,
         );
         commands.push(manifest);
@@ -1256,48 +1259,6 @@ impl WorkerManifestCache {
         atomic_write_json(&self.manifests_dir, "capability_defaults.json", &defaults)
     }
 
-    fn persist_manifest_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()> {
-        let manifests_dir = &self.manifests_dir;
-        match resource_type {
-            ResourceType::Model => Ok(()),
-            ResourceType::Agent => self.persist_agents(manifest),
-            ResourceType::Routine => {
-                atomic_write_json(manifests_dir, "routines.json", &manifest.routines)
-            }
-            ResourceType::Project => {
-                atomic_write_json(manifests_dir, "projects.json", &manifest.projects)
-            }
-            ResourceType::Council => {
-                atomic_write_json(manifests_dir, "councils.json", &manifest.councils)
-            }
-            ResourceType::Ability => {
-                sync_tree(&manifests_dir.join("abilities"), &manifest.abilities)
-            }
-            ResourceType::Command => {
-                atomic_write_json(manifests_dir, "commands.json", &manifest.commands)
-            }
-            ResourceType::ContextBlock => sync_tree(
-                &manifests_dir.join("context_blocks"),
-                &manifest.context_blocks,
-            ),
-            ResourceType::McpServer => {
-                atomic_write_json(manifests_dir, "mcp_servers.json", &manifest.mcp_servers)
-            }
-            ResourceType::Domain => sync_tree(&manifests_dir.join("domains"), &manifest.domains),
-            ResourceType::ModelAssignment | ResourceType::ModelCapabilityDefault => Ok(()),
-            ResourceType::Document => Ok(()),
-            ResourceType::KnowledgePack => atomic_write_json(
-                manifests_dir,
-                "knowledge_packs.json",
-                &manifest.knowledge_packs,
-            ),
-        }
-    }
-
     /// Apply the resource-specific portion of a manifest event to the
     /// canonical bootstrap cache.
     ///
@@ -1424,31 +1385,68 @@ impl WorkerManifestCache {
         self.persist_capability_default_snapshot(defaults)
     }
 
-    fn persist_agents(&self, manifest: &nenjo::Manifest) -> Result<()> {
-        let existing =
+    fn persist_agent_cache_mutation(&self, mutation: &ManifestCacheMutation) -> Result<()> {
+        let mut agents =
             load_cached_json_vec::<CachedAgentManifest>(&self.manifests_dir, "agents.json");
-        let ids = PlatformResourceIdStore::new(&self.manifests_dir).load()?;
-        let agents = manifest
-            .agents
+        let matches_slug = |agent: &CachedAgentManifest| {
+            agent.manifest.slug == *mutation.slug()
+                || mutation
+                    .previous_slug()
+                    .is_some_and(|slug| agent.manifest.slug == *slug)
+        };
+
+        if mutation.is_delete() {
+            agents.retain(|agent| {
+                mutation.resource_id().is_none_or(|id| agent.id != id) && !matches_slug(agent)
+            });
+            return atomic_write_json(&self.manifests_dir, "agents.json", &agents);
+        }
+
+        let Some(ManifestResource::Agent(manifest)) = mutation.resource() else {
+            anyhow::bail!("agent cache upsert is missing its agent snapshot");
+        };
+        let id = mutation
+            .resource_id()
+            .context("agent cache upsert is missing its platform id")?;
+        let model_assignments = agents
             .iter()
-            .map(|manifest| {
-                let existing = existing
-                    .iter()
-                    .find(|agent| agent.manifest.slug == manifest.slug);
-                let id = existing
-                    .map(|agent| agent.id)
-                    .or_else(|| ids.get(PlatformResourceKind::Agent, &manifest.slug))
-                    .ok_or_else(|| anyhow!("agent '{}' is missing a platform id", manifest.slug))?;
-                Ok(CachedAgentManifest {
-                    id,
-                    manifest: manifest.clone(),
-                    model_assignments: existing
-                        .map(|agent| agent.model_assignments.clone())
-                        .unwrap_or_default(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .find(|agent| agent.id == id)
+            .or_else(|| agents.iter().find(|agent| matches_slug(agent)))
+            .map(|agent| agent.model_assignments.clone())
+            .unwrap_or_default();
+
+        agents.retain(|agent| agent.id != id && !matches_slug(agent));
+        agents.push(CachedAgentManifest {
+            id,
+            manifest: manifest.clone(),
+            model_assignments,
+        });
         atomic_write_json(&self.manifests_dir, "agents.json", &agents)
+    }
+
+    async fn persist_cache_mutation(&self, mutation: &ManifestCacheMutation) -> Result<()> {
+        match mutation.kind() {
+            ManifestResourceKind::Agent => return self.persist_agent_cache_mutation(mutation),
+            // Configured models use `CachedModelManifest`, which includes
+            // platform-only routing metadata and is updated from the event payload.
+            ManifestResourceKind::Model => return Ok(()),
+            _ => {}
+        }
+
+        let store = LocalManifestStore::new(&self.manifests_dir);
+        let mut canonical = store.load_manifest().await?;
+        if let Some(previous_slug) = mutation.previous_slug() {
+            canonical.delete_resource(mutation.kind(), previous_slug);
+        }
+        if mutation.is_delete() {
+            canonical.delete_resource(mutation.kind(), mutation.slug());
+        } else {
+            let resource = mutation
+                .resource()
+                .context("manifest cache upsert is missing its resource snapshot")?;
+            canonical.upsert_resource(resource.clone());
+        }
+        store.persist_resource_kind(&canonical, mutation.kind())
     }
 
     pub async fn full_refresh(&self, api: &ApiClient) -> Result<nenjo::Manifest> {
@@ -1479,21 +1477,8 @@ impl WorkerManifestCache {
 
 #[async_trait::async_trait]
 impl ManifestStore for WorkerManifestCache {
-    async fn persist_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-    ) -> Result<()> {
-        self.persist_manifest_resource(manifest, resource_type)
-    }
-
-    async fn remove_resource(
-        &self,
-        manifest: &nenjo::Manifest,
-        resource_type: ResourceType,
-        _resource: &nenjo::Slug,
-    ) -> Result<()> {
-        self.persist_manifest_resource(manifest, resource_type)
+    async fn persist_change(&self, mutation: &ManifestCacheMutation) -> Result<()> {
+        self.persist_cache_mutation(mutation).await
     }
 
     async fn cleanup_deleted_resource(
@@ -1515,6 +1500,10 @@ impl ManifestStore for WorkerManifestCache {
                 )
             })?;
         }
+        let store = LocalManifestStore::new(&self.manifests_dir);
+        let mut manifest = store.load_manifest().await?;
+        manifest.delete_resource(ManifestResourceKind::KnowledgePack, resource);
+        store.persist_resource_kind(&manifest, ManifestResourceKind::KnowledgePack)?;
         PlatformResourceIdStore::new(&self.manifests_dir).remove_knowledge_pack(resource)?;
         Ok(())
     }
@@ -1534,6 +1523,14 @@ impl ManifestStore for WorkerManifestCache {
             Some(id) => store.upsert(kind, resource, id),
             None => store.remove(kind, resource),
         }
+    }
+
+    async fn platform_resource_slug_for_id(
+        &self,
+        kind: PlatformResourceKind,
+        resource_id: Uuid,
+    ) -> Result<Option<nenjo::Slug>> {
+        PlatformResourceIdStore::new(&self.manifests_dir).slug_for(kind, resource_id)
     }
 
     async fn remove_platform_resource_id_by_id(
@@ -1622,7 +1619,11 @@ impl ManifestStore for WorkerManifestCache {
         }
     }
 
-    async fn sync_knowledge_pack(&self, client: &ApiClient, pack: &nenjo::Slug) -> Result<()> {
+    async fn sync_knowledge_pack(
+        &self,
+        client: &ApiClient,
+        pack: &nenjo::Slug,
+    ) -> Result<Option<nenjo::manifest::KnowledgePackManifest>> {
         crate::local_documents::sync_pack_by_slug(
             client,
             &self.config_dir,
@@ -2375,6 +2376,197 @@ mod tests {
         let defaults = load_cached_capability_defaults(&cache.manifests_dir);
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].model_id, Uuid::from_u128(6));
+    }
+
+    #[tokio::test]
+    async fn event_scoped_agent_upsert_preserves_unrelated_cache_and_assignments() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let target_id = Uuid::from_u128(10);
+        let other_id = Uuid::from_u128(20);
+        let target_assignments = vec![ModelAssignmentBinding {
+            capability: "chat".into(),
+            model_id: Uuid::from_u128(30),
+            assignment_source: "local".into(),
+        }];
+        atomic_write_json(
+            &cache.manifests_dir,
+            "agents.json",
+            &vec![
+                cached_agent(target_id, "old-shop-manager", target_assignments.clone()),
+                cached_agent(other_id, "unrelated-agent", Vec::new()),
+            ],
+        )
+        .unwrap();
+
+        let updated = cached_agent(target_id, "shop-manager", Vec::new()).manifest;
+        let mutation = ManifestCacheMutation::upsert(
+            Some(target_id),
+            Some(Slug::derive("old-shop-manager")),
+            ManifestResource::Agent(updated),
+        )
+        .unwrap();
+        cache.persist_change(&mutation).await.unwrap();
+
+        let agents =
+            load_cached_json_vec::<CachedAgentManifest>(&cache.manifests_dir, "agents.json");
+        assert_eq!(agents.len(), 2);
+        assert!(
+            agents.iter().any(|agent| agent.id == other_id
+                && agent.manifest.slug == Slug::derive("unrelated-agent"))
+        );
+        let target = agents.iter().find(|agent| agent.id == target_id).unwrap();
+        assert_eq!(target.manifest.slug, Slug::derive("shop-manager"));
+        assert_eq!(target.model_assignments, target_assignments);
+        assert!(
+            agents
+                .iter()
+                .all(|agent| agent.manifest.slug != Slug::derive("old-shop-manager"))
+        );
+    }
+
+    #[tokio::test]
+    async fn event_scoped_agent_delete_prefers_platform_id_over_a_stale_slug() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let target_id = Uuid::from_u128(10);
+        let other_id = Uuid::from_u128(20);
+        atomic_write_json(
+            &cache.manifests_dir,
+            "agents.json",
+            &vec![
+                cached_agent(target_id, "renamed-agent", Vec::new()),
+                cached_agent(other_id, "unrelated-agent", Vec::new()),
+            ],
+        )
+        .unwrap();
+
+        cache
+            .persist_change(&ManifestCacheMutation::delete(
+                ManifestResourceKind::Agent,
+                Some(target_id),
+                Slug::derive("stale-agent-slug"),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let agents =
+            load_cached_json_vec::<CachedAgentManifest>(&cache.manifests_dir, "agents.json");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, other_id);
+    }
+
+    #[tokio::test]
+    async fn event_scoped_project_changes_preserve_unrelated_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let store = LocalManifestStore::new(&cache.manifests_dir);
+        let canonical = Manifest {
+            projects: vec![nenjo::manifest::ProjectManifest {
+                name: "Retained".into(),
+                slug: Slug::derive("retained"),
+                description: None,
+                settings: serde_json::Value::Null,
+            }],
+            ..Default::default()
+        };
+        store
+            .persist_resource_kind(&canonical, ManifestResourceKind::Project)
+            .unwrap();
+
+        cache
+            .persist_change(
+                &ManifestCacheMutation::upsert(
+                    None,
+                    None,
+                    ManifestResource::Project(nenjo::manifest::ProjectManifest {
+                        name: "Added".into(),
+                        slug: Slug::derive("added"),
+                        description: None,
+                        settings: serde_json::Value::Null,
+                    }),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        cache
+            .persist_change(&ManifestCacheMutation::delete(
+                ManifestResourceKind::Project,
+                None,
+                Slug::derive("added"),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let manifest = store.load_manifest().await.unwrap();
+        assert_eq!(manifest.projects.len(), 1);
+        assert_eq!(manifest.projects[0].slug, Slug::derive("retained"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_pack_cleanup_removes_only_the_deleted_pack() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+        let knowledge_pack = |slug: &str| nenjo::manifest::KnowledgePackManifest {
+            slug: Slug::derive(slug),
+            name: slug.into(),
+            description: None,
+            source_type: nenjo::manifest::KnowledgePackSource::Library,
+            selector: format!("lib:{slug}"),
+            version: None,
+            root_uri: format!("library://{slug}/"),
+            root_path: Some(cache.config_dir.join("library").join(slug)),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+        let canonical = Manifest {
+            knowledge_packs: vec![knowledge_pack("obsolete"), knowledge_pack("retained")],
+            ..Default::default()
+        };
+        let store = LocalManifestStore::new(&cache.manifests_dir);
+        store
+            .persist_resource_kind(&canonical, ManifestResourceKind::KnowledgePack)
+            .unwrap();
+        let obsolete_dir = cache.config_dir.join("library/obsolete");
+        fs::create_dir_all(&obsolete_dir).unwrap();
+
+        cache
+            .cleanup_deleted_resource(
+                ResourceType::KnowledgePack,
+                &Slug::derive("obsolete"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let manifest = store.load_manifest().await.unwrap();
+        assert_eq!(manifest.knowledge_packs.len(), 1);
+        assert_eq!(manifest.knowledge_packs[0].slug, Slug::derive("retained"));
+        assert!(!obsolete_dir.exists());
     }
 
     #[test]

@@ -391,13 +391,12 @@ pub fn claude_plugin_resource_manifest(
 ) -> ResourceManifest {
     ResourceManifest {
         schema: "nenjo.plugin.v1".to_string(),
-        slug: None,
+        slug: Some(plugin.slug.clone()),
         root_uri: None,
         selector: Some(format!("claude-plugin:{}", plugin.slug)),
         imports: BTreeMap::new(),
         manifest: json!({
-            "name": plugin.slug,
-            "display_name": plugin.display_name.as_deref().unwrap_or(&plugin.name),
+            "name": plugin.display_name.as_deref().unwrap_or(&plugin.name),
             "description": plugin.description,
             "version": plugin.version,
             "dependencies": plugin.dependencies,
@@ -419,12 +418,12 @@ pub fn claude_skill_resource_manifest(
     plugin_root_path: &str,
 ) -> Result<ResourceManifest> {
     let plugin_root_path = normalize_plugin_root_path(plugin_root_path)?;
-    let internal_name = format!("{}__{}", plugin.slug, skill.slug);
-    let display_name = format!("{}:{}", plugin.slug, skill.slug);
+    let slug = format!("{}-skill-{}", plugin.slug, skill.slug);
+    let name = format!("{}: {}", plugin.name, skill.name);
     let hook_refs = skill_hook_refs(plugin, skill, hooks);
     Ok(ResourceManifest {
         schema: "nenjo.skill.v1".to_string(),
-        slug: None,
+        slug: Some(slug),
         root_uri: None,
         selector: Some(format!(
             "claude-plugin:{}:skill:{}",
@@ -432,8 +431,7 @@ pub fn claude_skill_resource_manifest(
         )),
         imports: BTreeMap::new(),
         manifest: json!({
-            "name": internal_name,
-            "display_name": display_name,
+            "name": name,
             "aliases": skill_aliases(plugin, skill),
             "description": skill.description,
             "entry_path": skill.entry_path,
@@ -468,14 +466,15 @@ pub fn claude_command_resource_manifest(
     plugin_root_path: &str,
 ) -> Result<ResourceManifest> {
     let plugin_root_path = normalize_plugin_root_path(plugin_root_path)?;
-    let internal_name = format!("{}__{}", plugin.slug, command.slug);
+    let slug = format!("{}-command-{}", plugin.slug, command.slug);
+    let name = format!("{}: {}", plugin.name, command.name);
     let hook_refs = hooks
         .iter()
-        .map(|hook| format!("{}__{}", plugin.slug, hook.slug))
+        .map(|hook| format!("{}-hook-{}", plugin.slug, hook.slug))
         .collect::<Vec<_>>();
     Ok(ResourceManifest {
         schema: "nenjo.command.v1".to_string(),
-        slug: None,
+        slug: Some(slug),
         root_uri: None,
         selector: Some(format!(
             "claude-plugin:{}:command:{}",
@@ -483,9 +482,8 @@ pub fn claude_command_resource_manifest(
         )),
         imports: BTreeMap::new(),
         manifest: json!({
-            "name": internal_name,
+            "name": name,
             "path": format!("plugins/{}", plugin.slug.replace('-', "_")),
-            "display_name": format!("{}:{}", plugin.slug, command.slug),
             "command": command.command,
             "description": command.description,
             "entry_path": command.entry_path,
@@ -520,16 +518,16 @@ pub fn claude_hook_resource_manifest(
     plugin_root_path: &str,
 ) -> Result<ResourceManifest> {
     let plugin_root_path = normalize_plugin_root_path(plugin_root_path)?;
-    let internal_name = format!("{}__{}", plugin.slug, hook.slug);
+    let slug = format!("{}-hook-{}", plugin.slug, hook.slug);
+    let name = format!("{}: {}", plugin.name, hook.name);
     Ok(ResourceManifest {
         schema: "nenjo.hook.v1".to_string(),
-        slug: None,
+        slug: Some(slug),
         root_uri: None,
         selector: Some(format!("claude-plugin:{}:hook:{}", plugin.slug, hook.slug)),
         imports: BTreeMap::new(),
         manifest: json!({
-            "name": internal_name,
-            "display_name": format!("{}:{}", plugin.slug, hook.slug),
+            "name": name,
             "event": hook.event,
             "matcher": hook.matcher,
             "type": hook.hook_type,
@@ -561,18 +559,17 @@ pub fn claude_mcp_server_resource_manifest(
     plugin_root_path: &str,
 ) -> Result<ResourceManifest> {
     let plugin_root_path = normalize_plugin_root_path(plugin_root_path)?;
-    let internal_name = format!("{}__{}", plugin.slug, server.slug);
-    let display_name = format!("{}:{}", plugin.slug, server.slug);
+    let slug = format!("{}-mcp-server-{}", plugin.slug, server.slug);
+    let name = format!("{}: {}", plugin.name, server.name);
     let (env_schema, runtime_env) = mcp_env_fields(&server.env);
     Ok(ResourceManifest {
         schema: "nenjo.mcp_server.v1".to_string(),
-        slug: None,
+        slug: Some(slug),
         root_uri: None,
         selector: Some(format!("claude-plugin:{}:mcp:{}", plugin.slug, server.slug)),
         imports: BTreeMap::new(),
         manifest: json!({
-            "name": internal_name,
-            "display_name": display_name,
+            "name": name,
             "description": plugin.description,
             "transport": server.transport,
             "command": server.command,
@@ -851,7 +848,7 @@ fn skill_hook_refs(
             })
             .map(|hook| hook.slug.as_str())
             .unwrap_or(normalized_ref.as_str());
-        refs.insert(format!("{}__{}", plugin.slug, hook_slug));
+        refs.insert(format!("{}-hook-{}", plugin.slug, hook_slug));
     }
     refs.into_iter().collect()
 }
@@ -1063,8 +1060,8 @@ Use $CLAUDE_SKILL_DIR/scripts/review.sh.
         let manifest = claude_skill_resource_manifest(&plugin, &skill, &[], ".").unwrap();
 
         assert_eq!(manifest.schema, "nenjo.skill.v1");
-        assert_eq!(manifest.manifest["name"], "acme_tools__code_review");
-        assert_eq!(manifest.manifest["display_name"], "acme_tools:code_review");
+        assert_eq!(manifest.manifest["name"], "Acme Tools: Code Review");
+        assert!(manifest.manifest.get("display_name").is_none());
         assert_eq!(manifest.manifest["root_path"], "skills/review");
         assert_eq!(manifest.manifest["plugin_root_path"], ".");
         assert!(
@@ -1104,7 +1101,7 @@ Use $CLAUDE_SKILL_DIR/scripts/review.sh.
         assert_eq!(skill.hooks, vec!["Stop review-stop"]);
         assert_eq!(
             manifest.manifest["hooks"][0],
-            "acme_tools__stop_review_stop"
+            "acme_tools-hook-stop_review_stop"
         );
     }
 
@@ -1127,7 +1124,7 @@ Use $CLAUDE_SKILL_DIR/scripts/review.sh.
         let manifest = claude_mcp_server_resource_manifest(&plugin, &servers[0], ".").unwrap();
 
         assert_eq!(manifest.schema, "nenjo.mcp_server.v1");
-        assert_eq!(manifest.manifest["name"], "acme__review_server");
+        assert_eq!(manifest.manifest["name"], "Acme: review-server");
         assert_eq!(manifest.manifest["transport"], "stdio");
         assert_eq!(manifest.manifest["metadata"]["runtime"]["cwd_path"], ".");
         assert_eq!(
@@ -1185,14 +1182,14 @@ Run scripts/ralph-loop.sh.
 
         assert_eq!(command.name, "ralph-loop");
         assert_eq!(manifest.schema, "nenjo.command.v1");
-        assert_eq!(manifest.manifest["name"], "ralph_loop__ralph_loop");
+        assert_eq!(manifest.manifest["name"], "Ralph Loop: ralph-loop");
         assert_eq!(manifest.manifest["path"], "plugins/ralph_loop");
         assert_eq!(manifest.manifest["command"], "/ralph-loop");
         assert_eq!(manifest.manifest["entry_path"], "ralph-loop.md");
         assert_eq!(manifest.manifest["root_path"], "commands");
         assert_eq!(
             manifest.manifest["hooks"][0],
-            "ralph_loop__stop_ralph_loop_stop"
+            "ralph_loop-hook-stop_ralph_loop_stop"
         );
     }
 
@@ -1221,7 +1218,7 @@ Run scripts/ralph-loop.sh.
         assert_eq!(manifest.schema, "nenjo.hook.v1");
         assert_eq!(
             manifest.manifest["name"],
-            "ralph_loop__stop_ralph_loop_stop"
+            "Ralph Loop: Stop_ralph-loop-stop"
         );
         assert_eq!(manifest.manifest["event"], "Stop");
         assert_eq!(manifest.manifest["matcher"], "*");

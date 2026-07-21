@@ -38,8 +38,8 @@ pub mod types;
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{
     AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, ExecutionHandle,
-    StartAsyncOperation, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnOutput,
-    current_async_operation_runtime,
+    StartAsyncOperation, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnLoopError,
+    TurnOutput, current_async_operation_runtime,
 };
 pub use arguments::{
     ArgumentName, ArgumentScope, ArgumentSelector, ArgumentValue, ArgumentValueType,
@@ -58,9 +58,9 @@ pub use manifest::{
     store::{ManifestReader, ManifestWriter},
 };
 pub use package_resolve::{
-    PkgResolvePolicy, VersionedCandidate, logical_dotted_key, logical_path, pick_version_winner,
-    policy_from_agent_metadata, prefer_highest_semver, resolve_all_logical_winners,
-    resolve_logical_key,
+    PkgResolvePolicy, VersionedCandidate, logical_dotted_key, logical_path, package_name_from_path,
+    pick_version_winner, policy_from_agent_metadata, prefer_highest_semver,
+    resolve_all_logical_winners, resolve_logical_key,
 };
 pub use provider::{
     ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,

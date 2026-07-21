@@ -40,8 +40,8 @@ pub fn find_command_manifest<'a>(
     commands.iter().find(|command| {
         command.command.trim() == requested
             || command.command.trim().trim_start_matches('/') == requested_name
-            || command.name == requested
-            || command.name == requested_name
+            || command.slug.as_str() == requested
+            || command.slug.as_str() == requested_name
     })
 }
 
@@ -81,6 +81,7 @@ mod tests {
         serde_json::from_value(json!({
             "id": uuid::Uuid::nil(),
             "name": name,
+            "slug": name,
             "path": "",
             "command": slash,
             "entry_path": "command.md",

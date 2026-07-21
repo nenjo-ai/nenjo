@@ -359,7 +359,7 @@ fn synthetic_vars() -> HashMap<String, String> {
     let mut ctx = RenderContextVars {
         _self: AgentContext {
             slug: "validator".into(),
-            display_name: "Validator".into(),
+            name: "Validator".into(),
             model_name: "validation-model".into(),
             description: Some("Package validation fixture".into()),
         },
