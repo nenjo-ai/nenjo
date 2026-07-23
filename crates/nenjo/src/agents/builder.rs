@@ -1,10 +1,9 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::ability_sessions::AbilitySessionStore;
 use super::async_ops::AsyncOpManager;
 use super::instance::{
     AgentExecutionMode, AgentInstance, AgentModel, AgentPromptState, AgentRuntime,
@@ -51,7 +50,6 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     pending_routine_context: Option<RoutineContext>,
     pending_step_context: Option<RoutineStepContext>,
     tool_current_session_id: Option<Uuid>,
-    ability_histories: BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
     // For DelegateToTool construction, set when a provider creates the builder.
     provider_runtime: Option<P>,
     child_delegation_ctx: Option<crate::types::DelegationContext>,
@@ -79,7 +77,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_routine_context: None,
             pending_step_context: None,
             tool_current_session_id: None,
-            ability_histories: BTreeMap::new(),
             provider_runtime: Some(params.provider_runtime),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -108,7 +105,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             pending_routine_context: None,
             pending_step_context: None,
             tool_current_session_id: None,
-            ability_histories: BTreeMap::new(),
             provider_runtime: Some(provider),
             child_delegation_ctx: None,
             execution_mode: AgentExecutionMode::Parent,
@@ -217,16 +213,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Set the current transcript session id for tool-emitted side effects.
     pub fn with_tool_current_session_id(mut self, current_session_id: Uuid) -> Self {
         self.tool_current_session_id = Some(current_session_id);
-        self
-    }
-
-    /// Seed ability conversations reconstructed from the parent transcript.
-    #[doc(hidden)]
-    pub fn with_ability_histories(
-        mut self,
-        histories: BTreeMap<String, Vec<nenjo_models::ChatMessage>>,
-    ) -> Self {
-        self.ability_histories = histories;
         self
     }
 
@@ -390,11 +376,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
 
         let execution_cancel = tokio_util::sync::CancellationToken::new();
         let async_ops = AsyncOpManager::with_cancel(execution_cancel.clone());
-        let ability_sessions = Arc::new(AbilitySessionStore::default());
-        if let Some(parent_session_id) = self.tool_current_session_id {
-            ability_sessions.hydrate(parent_session_id, self.ability_histories);
-        }
-
         let instance = AgentInstance {
             manifest: agent,
             model_manifest,
@@ -416,7 +397,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 execution_mode: self.execution_mode,
                 hook_runtime: self.hook_runtime,
                 current_session_id: self.tool_current_session_id,
-                ability_sessions,
             },
         };
 

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -536,35 +535,6 @@ pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatM
         .collect()
 }
 
-/// Reconstruct each ability's conversation from its parent session transcript.
-pub fn replay_ability_histories(
-    events: &[SessionTranscriptEvent],
-) -> BTreeMap<String, Vec<ChatMessage>> {
-    let mut histories = BTreeMap::<String, Vec<ChatMessage>>::new();
-    for event in events {
-        match &event.payload {
-            SessionTranscriptEventPayload::AbilityStarted {
-                ability_name,
-                task_input,
-                ..
-            } => histories
-                .entry(ability_name.clone())
-                .or_default()
-                .push(ChatMessage::user(task_input)),
-            SessionTranscriptEventPayload::AbilityCompleted {
-                ability_name,
-                final_output,
-                ..
-            } => histories
-                .entry(ability_name.clone())
-                .or_default()
-                .push(ChatMessage::assistant(final_output)),
-            _ => {}
-        }
-    }
-    histories
-}
-
 #[derive(Debug, Clone)]
 pub struct TurnEventContext {
     pub session_id: Uuid,
@@ -1032,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_ability_histories_groups_exchanges_by_ability() {
+    fn ability_events_are_audit_only_and_not_replayed_as_chat_history() {
         let session_id = Uuid::new_v4();
         let recorded_at = Utc::now();
         let payloads = vec![
@@ -1065,14 +1035,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let histories = replay_ability_histories(&events);
-
-        assert_eq!(histories["research"].len(), 2);
-        assert_eq!(histories["research"][0].role, "user");
-        assert_eq!(histories["research"][0].content, "find the source");
-        assert_eq!(histories["research"][1].role, "assistant");
-        assert_eq!(histories["research"][1].content, "found it");
-        assert_eq!(histories["writer"].len(), 1);
+        assert!(replay_transcript_history(&events).is_empty());
     }
 
     #[test]

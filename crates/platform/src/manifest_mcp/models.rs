@@ -18,8 +18,9 @@ fn string_list_schema(description: &str) -> serde_json::Value {
 fn model_create_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "required": ["name", "model"],
+        "required": ["slug", "name", "model"],
         "properties": {
+            "slug": { "type": "string", "description": "Stable slug for this model config." },
             "name": { "type": "string", "description": "Display name for this model config." },
             "description": { "type": ["string", "null"], "description": "Optional model description." },
             "model": { "type": "string", "description": "Provider model identifier, such as `gpt-4o`." },
@@ -77,7 +78,7 @@ pub fn model_tools() -> Vec<ToolSpec> {
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["name", "model"],
+                "required": ["slug", "name", "model"],
                 "properties": model_create_schema()["properties"].clone(),
                 "additionalProperties": false
             }),

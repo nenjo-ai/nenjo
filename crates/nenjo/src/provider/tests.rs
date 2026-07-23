@@ -174,7 +174,8 @@ async fn manifest_index_uses_agent_slug_not_name_when_present() {
 async fn manifest_index_finds_abilities_and_domains_without_scanning() {
     let mut manifest = test_manifest();
     let ability = AbilityManifest {
-        name: "Code Review".into(),
+        slug: Slug::derive("code-review"),
+        name: "Senior Code Review".into(),
         path: Some("review".into()),
         description: None,
         activation_condition: "when code needs review".into(),
@@ -190,6 +191,7 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         metadata: serde_json::Value::Null,
     };
     let domain = DomainManifest {
+        slug: Slug::derive("creator"),
         name: "creator".into(),
         path: "nenjo".into(),
         description: None,
@@ -213,8 +215,13 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
         .await
         .unwrap();
 
+    assert!(
+        provider
+            .find_ability(&Slug::derive("Senior Code Review"))
+            .is_none()
+    );
     assert_eq!(
-        provider.find_ability("Code Review").unwrap().name,
+        provider.find_ability(&ability.slug).unwrap().name,
         ability.name
     );
     assert_eq!(
@@ -782,6 +789,7 @@ async fn multiple_loaders_merge() {
 
     let local = Manifest {
         context_blocks: vec![ContextBlockManifest {
+            slug: Slug::derive("local-block"),
             name: "local_block".into(),
             path: "local".into(),
             description: None,
@@ -812,6 +820,7 @@ async fn multiple_loaders_merge() {
 async fn provider_argument_binding_renders_before_context_blocks() {
     let mut manifest = test_manifest();
     manifest.context_blocks.push(ContextBlockManifest {
+        slug: Slug::derive("company"),
         name: "company".into(),
         path: String::new(),
         description: None,
@@ -1056,7 +1065,8 @@ async fn multi_version_abilities_coexist_and_resolve_under_policy() {
 
     let mut manifest = test_manifest();
     let old = AbilityManifest {
-        name: "code_review".into(),
+        slug: Slug::derive("code-review"),
+        name: "Code Review".into(),
         path: Some("pkg/nenjo_ai/abilities/v1_0_0".into()),
         description: Some("old".into()),
         activation_condition: "review".into(),
@@ -1074,7 +1084,8 @@ async fn multi_version_abilities_coexist_and_resolve_under_policy() {
         }),
     };
     let new = AbilityManifest {
-        name: "code_review".into(),
+        slug: Slug::derive("code-review"),
+        name: "Code Review".into(),
         path: Some("pkg/nenjo_ai/abilities/v1_0_1".into()),
         description: Some("new".into()),
         activation_condition: "review".into(),
@@ -1091,8 +1102,8 @@ async fn multi_version_abilities_coexist_and_resolve_under_policy() {
             "package": { "name": "@nenjo-ai/abilities", "version": "1.0.1" }
         }),
     };
-    // Path-based slugs allow both versions to coexist.
-    assert_ne!(old.slug(), new.slug());
+    // Package versions share one stable logical slug and coexist as candidates.
+    assert_eq!(old.slug(), new.slug());
     manifest.abilities.push(old);
     manifest.abilities.push(new);
     assert_eq!(manifest.abilities.len(), 2);
@@ -1108,7 +1119,7 @@ async fn multi_version_abilities_coexist_and_resolve_under_policy() {
     // Default lookup prefers highest semver.
     assert_eq!(
         provider
-            .find_ability("code_review")
+            .find_ability(&Slug::derive("code-review"))
             .unwrap()
             .description
             .as_deref(),
@@ -1120,7 +1131,7 @@ async fn multi_version_abilities_coexist_and_resolve_under_policy() {
     let policy = PkgResolvePolicy::DependencyLock(lock);
     assert_eq!(
         provider
-            .find_ability_with_policy("code_review", &policy)
+            .find_ability_with_policy(&Slug::derive("code-review"), &policy)
             .unwrap()
             .description
             .as_deref(),

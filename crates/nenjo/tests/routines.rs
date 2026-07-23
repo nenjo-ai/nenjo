@@ -2585,6 +2585,7 @@ async fn council_decompose() {
         projects: vec![project()],
         routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
+            slug: Slug::derive("test-council"),
             name: "test-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Decompose,
             leader_agent: Slug::derive("leader"),
@@ -2658,6 +2659,7 @@ async fn council_broadcast() {
         projects: vec![project()],
         routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
+            slug: Slug::derive("broadcast-council"),
             name: "broadcast-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Broadcast,
             leader_agent: Slug::derive("leader"),
@@ -2737,6 +2739,7 @@ async fn council_round_robin() {
         projects: vec![project()],
         routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
+            slug: Slug::derive("round-robin-council"),
             name: "round-robin-council".into(),
             delegation_strategy: CouncilDelegationStrategy::RoundRobin,
             leader_agent: Slug::derive("leader"),
@@ -2816,6 +2819,7 @@ async fn council_vote() {
         projects: vec![project()],
         routines: vec![canonical_routine(routine)],
         councils: vec![CouncilManifest {
+            slug: Slug::derive("vote-council"),
             name: "vote-council".into(),
             delegation_strategy: CouncilDelegationStrategy::Vote,
             leader_agent: Slug::derive("leader"),

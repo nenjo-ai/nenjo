@@ -188,6 +188,62 @@ struct JsonRpcError {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpToolCallResponse {
+    #[serde(default)]
+    content: Vec<McpContentBlock>,
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    structured_content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpContentBlock {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum McpToolCallOutcome {
+    Success(String),
+    Failure(String),
+}
+
+impl McpToolCallOutcome {
+    fn parse(value: serde_json::Value) -> anyhow::Result<Self> {
+        let response: McpToolCallResponse = serde_json::from_value(value)?;
+        let mut output = response
+            .content
+            .into_iter()
+            .filter_map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if output.is_empty()
+            && let Some(structured_content) = response.structured_content
+        {
+            output = serde_json::to_string(&structured_content)?;
+        }
+
+        if response.is_error {
+            if output.is_empty() {
+                output = "MCP tool reported an error without diagnostic content".to_string();
+            }
+            Ok(Self::Failure(output))
+        } else {
+            Ok(Self::Success(output))
+        }
+    }
+
+    fn into_result(self) -> anyhow::Result<String> {
+        match self {
+            Self::Success(output) => Ok(output),
+            Self::Failure(error) => anyhow::bail!("{error}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MCP tool definition (from tools/list response)
 // ---------------------------------------------------------------------------
@@ -386,6 +442,7 @@ struct ConnectedServer {
     tools: Vec<ExternalMcpToolDef>,
     _egress_proxy: Option<ConnectorEgressProxy>,
     _runtime_config: Option<tempfile::NamedTempFile>,
+    _runtime_socket_dir: Option<tempfile::TempDir>,
 }
 
 impl ConnectedServer {
@@ -409,6 +466,7 @@ impl ConnectedServer {
 
         let mut egress_proxy = None;
         let mut runtime_config = None;
+        let mut runtime_socket_dir = None;
         let mut transport = match def.transport.as_str() {
             "http" => {
                 let base_url = def
@@ -518,6 +576,7 @@ impl ConnectedServer {
                         }
                         ServerRuntime::AgentBrowser => {
                             let config = agent_browser_config(&proxy)?;
+                            let socket_dir = agent_browser_socket_dir()?;
                             child_cmd
                                 .env_remove("AGENT_BROWSER_ALLOWED_DOMAINS")
                                 .env_remove("AGENT_BROWSER_PROVIDER")
@@ -539,6 +598,7 @@ impl ConnectedServer {
                                 .env_remove("AGENT_BROWSER_SESSION_NAME")
                                 .env_remove("AGENT_BROWSER_STATE")
                                 .env("AGENT_BROWSER_CONFIG", config.path())
+                                .env("AGENT_BROWSER_SOCKET_DIR", socket_dir.path())
                                 .env("AGENT_BROWSER_PROXY", proxy.url())
                                 // Chromium otherwise bypasses proxies for loopback hosts.
                                 .env("AGENT_BROWSER_PROXY_BYPASS", "<-loopback>")
@@ -550,6 +610,7 @@ impl ConnectedServer {
                                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                                 );
                             runtime_config = Some(config);
+                            runtime_socket_dir = Some(socket_dir);
                         }
                     }
                     egress_proxy = Some(proxy);
@@ -643,7 +704,7 @@ impl ConnectedServer {
         apply_tool_schema_policy(&mut tools, policy.tools);
 
         info!(
-            server = %def.display_name,
+            server = %def.name,
             transport = %def.transport,
             tools = tools.len(),
             "External MCP server connected"
@@ -657,6 +718,7 @@ impl ConnectedServer {
             tools,
             _egress_proxy: egress_proxy,
             _runtime_config: runtime_config,
+            _runtime_socket_dir: runtime_socket_dir,
         })
     }
 
@@ -680,17 +742,7 @@ impl ConnectedServer {
         });
         let resp = self.transport.send_rpc("tools/call", Some(params)).await?;
 
-        // Extract text content from MCP response
-        let text = resp
-            .get("content")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|item| item.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        Ok(text)
+        McpToolCallOutcome::parse(resp)?.into_result()
     }
 }
 
@@ -709,6 +761,18 @@ fn agent_browser_config(proxy: &ConnectorEgressProxy) -> anyhow::Result<tempfile
     )?;
     file.flush()?;
     Ok(file)
+}
+
+fn agent_browser_socket_dir() -> anyhow::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    let root = std::path::PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let root = std::env::temp_dir();
+
+    tempfile::Builder::new()
+        .prefix("nab-")
+        .tempdir_in(&root)
+        .map_err(Into::into)
 }
 
 fn apply_tool_schema_policy(tools: &mut [ExternalMcpToolDef], policy: ToolPolicy) {
@@ -1048,7 +1112,7 @@ impl ExternalMcpPool {
         let desired = self.desired_specs(desired);
         let desired_slugs: HashSet<Slug> = desired
             .iter()
-            .map(|server| Slug::derive(&server.manifest.name))
+            .map(|server| server.manifest.slug.clone())
             .collect();
 
         // Remove servers no longer desired
@@ -1067,7 +1131,7 @@ impl ExternalMcpPool {
 
         // Connect new or changed servers.
         for spec in desired {
-            let server_slug = Slug::derive(&spec.manifest.name);
+            let server_slug = spec.manifest.slug.clone();
             let existing = {
                 let servers = self.servers.read().await;
                 servers.get(&server_slug).cloned()
@@ -1275,7 +1339,7 @@ impl ExternalMcpPool {
         for server in servers {
             let server = server.lock().await;
             info.push((
-                server.server_def.display_name.clone(),
+                server.server_def.name.clone(),
                 server.server_def.description.clone().unwrap_or_default(),
             ));
         }
@@ -1316,6 +1380,65 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn mcp_tool_call_outcome_preserves_all_text_blocks() {
+        let outcome = McpToolCallOutcome::parse(json!({
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(outcome, McpToolCallOutcome::Success("first\nsecond".into()));
+    }
+
+    #[tokio::test]
+    async fn mcp_is_error_becomes_a_failed_tool_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("error-server.sh");
+        tokio::fs::write(&script, mcp_error_fixture_script())
+            .await
+            .unwrap();
+        let manifest = fixture_manifest(&script, "error-server");
+        let pool = Arc::new(ExternalMcpPool::new());
+
+        pool.reconcile(std::slice::from_ref(&manifest)).await;
+        let tools = pool
+            .tools_for_agent(std::slice::from_ref(&manifest.slug), None, "test-agent")
+            .await;
+        let result = tools[0].execute(json!({})).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.is_empty());
+        assert_eq!(result.error.as_deref(), Some("browser connection failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_browser_socket_directory_uses_a_short_unix_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let socket_dir = agent_browser_socket_dir().unwrap();
+        let path = socket_dir.path();
+
+        assert!(path.starts_with("/tmp"));
+        assert!(
+            path.as_os_str().as_bytes().len() <= 32,
+            "{}",
+            path.display()
+        );
+        let longest_runtime_socket = path.join(format!(
+            "nenjo-ephemeral-{}-default.sock",
+            uuid::Uuid::nil()
+        ));
+        assert!(
+            longest_runtime_socket.as_os_str().as_bytes().len() <= 103,
+            "{}",
+            longest_runtime_socket.display()
+        );
+    }
+
     #[tokio::test]
     async fn claude_plugin_mcp_runtime_uses_plugin_cwd_and_env() {
         let temp = tempfile::tempdir().unwrap();
@@ -1327,8 +1450,8 @@ mod tests {
             .unwrap();
 
         let server = McpServerManifest {
-            name: "ralph_loop__review_server".to_string(),
-            display_name: "ralph_loop:review_server".to_string(),
+            slug: nenjo::Slug::derive("ralph-loop-review-server"),
+            name: "Ralph Loop: Review Server".to_string(),
             description: Some("Review server".to_string()),
             transport: "stdio".to_string(),
             command: Some("bash".to_string()),
@@ -1362,7 +1485,7 @@ mod tests {
         pool.reconcile(std::slice::from_ref(&server)).await;
 
         let tools = pool
-            .tools_for_agent(&[Slug::derive(&server.name)], None, "test-agent")
+            .tools_for_agent(std::slice::from_ref(&server.slug), None, "test-agent")
             .await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "mcp_review");
@@ -1383,7 +1506,7 @@ mod tests {
             .await
             .unwrap();
         let manifest = fixture_manifest(&script, "global-browser");
-        let slug = Slug::derive(&manifest.name);
+        let slug = manifest.slug.clone();
         let connected = ConnectedServer::connect(ServerSpec {
             manifest,
             runtime: ServerRuntime::Manifest,
@@ -1534,8 +1657,8 @@ mod tests {
 
     fn fixture_manifest(script: &std::path::Path, name: &str) -> McpServerManifest {
         McpServerManifest {
+            slug: nenjo::Slug::derive(name),
             name: name.to_string(),
-            display_name: name.to_string(),
             description: None,
             transport: "stdio".to_string(),
             command: Some("bash".to_string()),
@@ -1564,6 +1687,31 @@ while IFS= read -r line; do
     *'"method":"tools/call"'*)
       text="cwd=$(pwd);mode=${MODE:-};sentinel=${PLUGIN_SENTINEL:-}"
       printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$text"
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown method"}}'
+      ;;
+  esac
+done
+"#
+        .to_string()
+    }
+
+    fn mcp_error_fixture_script() -> String {
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"0.1.0"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"review","description":"Review","inputSchema":{"type":"object","properties":{}}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"browser connection failed"}],"isError":true}}'
       ;;
     *)
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown method"}}'

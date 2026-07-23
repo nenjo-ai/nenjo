@@ -11,8 +11,8 @@ use nenjo::manifest::AgentManifest;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
     AbilityManifest, CommandManifest, ContextBlockManifest, CouncilDelegationStrategy,
-    CouncilManifest, DomainManifest, Manifest, McpServerManifest, ModelManifest, ProjectManifest,
-    RoutineManifest, RoutineMetadata, SkillManifest,
+    CouncilManifest, DomainManifest, Manifest, ManifestResource, McpServerManifest, ModelManifest,
+    ProjectManifest, RoutineManifest, RoutineMetadata, SkillManifest,
 };
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_events::{EncryptedPayload, ModelAssignmentBinding};
@@ -216,6 +216,7 @@ async fn worker_factory_exposes_activation_tools_without_mcp_proxy_for_plain_ski
     let registry = Arc::new(crate::skills::SkillRegistry::default());
     let skill: SkillManifest = serde_json::from_value(serde_json::json!({
         "name": "review",
+        "slug": "review",
         "root_dir": root.join("skills/review")
     }))
     .unwrap();
@@ -543,8 +544,8 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         ..Default::default()
     };
     let server = McpServerManifest {
-        name: "mcp_skill__review_server".to_string(),
-        display_name: "mcp-skill:review-server".to_string(),
+        slug: Slug::derive("mcp-skill-review-server"),
+        name: "MCP Skill: Review Server".to_string(),
         description: None,
         transport: "stdio".to_string(),
         command: Some("bash".to_string()),
@@ -564,7 +565,7 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
     };
     let skill = SkillManifest {
         name: "mcp-skill".to_string(),
-        display_name: None,
+        slug: Slug::derive("mcp-skill"),
         aliases: Vec::new(),
         description: Some("Skill with MCP".to_string()),
         entry_path: "SKILL.md".to_string(),
@@ -575,7 +576,7 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         scripts: Vec::new(),
         references: Vec::new(),
         assets: Vec::new(),
-        mcp_servers: vec![Slug::derive(&server.name)],
+        mcp_servers: vec![server.slug.clone()],
         hooks: Vec::new(),
         source_type: "package".to_string(),
         read_only: true,
@@ -649,6 +650,71 @@ async fn worker_factory_skill_mcp_proxy_requires_skill_activation() {
         .unwrap();
     assert!(after.success);
     assert_eq!(after.output, "review-ok:skill");
+}
+
+#[tokio::test]
+async fn worker_factory_resolves_assigned_mcp_server_by_canonical_slug() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let script = root.join("server.sh");
+    tokio::fs::write(&script, skill_mcp_fixture_script())
+        .await
+        .unwrap();
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: root.join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let server = McpServerManifest {
+        slug: Slug::derive("nenjo-ai-packages-agent-browser"),
+        name: "Agent Browser".to_string(),
+        description: None,
+        transport: "stdio".to_string(),
+        command: Some("bash".to_string()),
+        args: Some(vec![script.to_string_lossy().into_owned()]),
+        url: None,
+        env_schema: serde_json::json!([]),
+        source_type: "package".to_string(),
+        read_only: true,
+        metadata: serde_json::json!({
+            "runtime": { "env": { "MODE": "agent" } }
+        }),
+    };
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    external_mcp.reconcile(std::slice::from_ref(&server)).await;
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+    let agent = AgentManifest {
+        name: "Parts Agent".into(),
+        slug: Slug::derive("0xkr8os-agenticauto-parts-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![server.slug],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        source_type: Some("package".into()),
+        metadata: serde_json::json!({}),
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let browser = tools
+        .iter()
+        .find(|tool| tool.name() == "mcp_review")
+        .expect("assigned canonical MCP slug should expose its tools");
+    let result = browser.execute(serde_json::json!({})).await.unwrap();
+    assert!(result.success);
+    assert_eq!(result.output, "review-ok:agent");
 }
 
 fn skill_mcp_fixture_script() -> String {
@@ -726,6 +792,7 @@ async fn scoped_backend() -> (
     };
 
     let visible_ability = AbilityManifest {
+        slug: Slug::derive("visible-ability"),
         name: "visible-ability".into(),
         path: None,
         description: None,
@@ -742,6 +809,7 @@ async fn scoped_backend() -> (
         metadata: serde_json::Value::Null,
     };
     let hidden_ability = AbilityManifest {
+        slug: Slug::derive("hidden-ability"),
         name: "hidden-ability".into(),
         path: None,
         description: None,
@@ -759,6 +827,7 @@ async fn scoped_backend() -> (
     };
 
     let visible_domain = DomainManifest {
+        slug: Slug::derive("visible-domain"),
         name: "visible-domain".into(),
         path: String::new(),
         description: None,
@@ -771,6 +840,7 @@ async fn scoped_backend() -> (
         prompt_config: nenjo::types::DomainPromptConfig::default(),
     };
     let hidden_domain = DomainManifest {
+        slug: Slug::derive("hidden-domain"),
         name: "hidden-domain".into(),
         path: String::new(),
         description: None,
@@ -1220,7 +1290,7 @@ async fn platform_manifest_backend_does_not_filter_read_results_by_resource_scop
     );
     let agent = backend
         .get_agent(AgentsGetParams {
-            agent: Slug::derive(&hidden_agent.name),
+            agent: hidden_agent.slug.clone(),
         })
         .await
         .unwrap()
@@ -1243,7 +1313,7 @@ async fn platform_manifest_backend_does_not_filter_read_results_by_resource_scop
     );
     let ability = backend
         .get_ability(AbilitiesGetParams {
-            ability: Slug::derive(&hidden_ability.name),
+            ability: hidden_ability.slug.clone(),
         })
         .await
         .unwrap()
@@ -1281,6 +1351,7 @@ async fn platform_manifest_backend_reads_package_overlay_abilities() {
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
     let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
     let package_ability = AbilityManifest {
+        slug: Slug::derive("build-routine"),
         name: "build_routine".into(),
         path: Some("build".into()),
         description: Some("Build routines".into()),
@@ -1310,7 +1381,7 @@ async fn platform_manifest_backend_reads_package_overlay_abilities() {
 
     let ability = backend
         .get_ability(AbilitiesGetParams {
-            ability: Slug::derive("build_routine"),
+            ability: package_ability.slug.clone(),
         })
         .await
         .unwrap()
@@ -1343,6 +1414,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         metadata: serde_json::json!({}),
     };
     let package_ability = AbilityManifest {
+        slug: Slug::derive("package-ability"),
         name: "package_ability".into(),
         path: None,
         description: None,
@@ -1360,9 +1432,9 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
     };
     let package_command = CommandManifest {
         name: "package_command".into(),
+        slug: Slug::derive("package-command"),
         path: String::new(),
         command: "/package-command".into(),
-        display_name: None,
         description: Some("Package command".into()),
         entry_path: "command.md".into(),
         content: "package command content".into(),
@@ -1376,6 +1448,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         metadata: serde_json::Value::Null,
     };
     let package_domain = DomainManifest {
+        slug: Slug::derive("package-domain"),
         name: "package domain".into(),
         path: String::new(),
         description: None,
@@ -1413,17 +1486,25 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         native_tools: vec![],
     };
     let package_council = CouncilManifest {
+        slug: Slug::derive("package-council"),
         name: "Package Council".into(),
         delegation_strategy: CouncilDelegationStrategy::Decompose,
         leader_agent: package_agent.slug.clone(),
         members: vec![],
     };
     let package_context_block = ContextBlockManifest {
+        slug: Slug::derive("package-block"),
         name: "package block".into(),
         path: String::new(),
         description: None,
         template: "package context".into(),
     };
+    let mut configured_agent = package_agent.clone();
+    configured_agent.model = Some(Slug::derive("assigned-model"));
+    store
+        .upsert_resource(&ManifestResource::Agent(configured_agent))
+        .await
+        .unwrap();
 
     let client = PlatformManifestClient::new("http://localhost:3001", "test-api-key").unwrap();
     let backend =
@@ -1454,11 +1535,24 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
             .name,
         package_agent.name
     );
+    assert_eq!(
+        backend
+            .get_agent(AgentsGetParams {
+                agent: package_agent.slug.clone(),
+            })
+            .await
+            .unwrap()
+            .agent
+            .summary
+            .model,
+        Some(Slug::derive("assigned-model")),
+        "platform configuration must override the package overlay"
+    );
     assert_eq!(backend.list_abilities().await.unwrap().abilities.len(), 1);
     assert_eq!(
         backend
             .get_ability(AbilitiesGetParams {
-                ability: Slug::derive(&package_ability.name),
+                ability: package_ability.slug.clone(),
             })
             .await
             .unwrap()
@@ -1535,7 +1629,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
     assert_eq!(
         backend
             .get_council(CouncilsGetParams {
-                council: Slug::derive(&package_council.name),
+                council: package_council.slug.clone(),
             })
             .await
             .unwrap()
@@ -1575,6 +1669,7 @@ async fn platform_manifest_backend_returns_package_overlay_abilities_regardless_
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
     let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
     let package_ability = AbilityManifest {
+        slug: Slug::derive("build-routine"),
         name: "build_routine".into(),
         path: Some("build".into()),
         description: Some("Build routines".into()),
@@ -1603,7 +1698,7 @@ async fn platform_manifest_backend_returns_package_overlay_abilities_regardless_
     assert_eq!(abilities.abilities[0].name, "build_routine");
     let ability = backend
         .get_ability(AbilitiesGetParams {
-            ability: Slug::derive("build_routine"),
+            ability: Slug::derive("build-routine"),
         })
         .await
         .unwrap()
@@ -1618,6 +1713,7 @@ async fn platform_manifest_backend_prefers_local_ability_over_package_overlay() 
     let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
     let store = Arc::new(LocalManifestStore::new(root.join("manifests")));
     let mut local_ability = AbilityManifest {
+        slug: Slug::derive("build-routine-local"),
         name: "build_routine".into(),
         path: Some("build".into()),
         description: Some("Local build routine".into()),
@@ -1656,7 +1752,7 @@ async fn platform_manifest_backend_prefers_local_ability_over_package_overlay() 
     assert_eq!(abilities.abilities.len(), 1);
     let ability = backend
         .get_ability(AbilitiesGetParams {
-            ability: Slug::derive("build_routine"),
+            ability: Slug::derive("build-routine-local"),
         })
         .await
         .unwrap()

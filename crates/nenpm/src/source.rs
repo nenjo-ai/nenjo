@@ -8,8 +8,8 @@ use crate::Result;
 use anyhow::Context;
 use flate2::read::GzDecoder;
 use nenjo_packages::{
-    ClaudePluginCommand, ClaudePluginHook, ModulePackageManifest, PackageModule,
-    claude_plugin_resources, detect_unsupported_claude_plugin_components,
+    ClaudePluginCommand, ClaudePluginHook, GitHubRepositoryRef, ModulePackageManifest,
+    PackageModule, claude_plugin_resources, detect_unsupported_claude_plugin_components,
     parse_claude_plugin_command, parse_claude_plugin_hooks, parse_claude_plugin_manifest,
     parse_claude_plugin_mcp_servers, parse_claude_plugin_skill, sha256_hex,
 };
@@ -322,6 +322,18 @@ pub fn package_source_scope(source: &PackageSource) -> Option<String> {
         PackageSource::Artifact { .. } | PackageSource::Remote { .. } => None,
         PackageSource::Local { scope, .. } => scope.clone(),
     }
+}
+
+/// Return the canonical GitHub repository coordinate for a package source.
+///
+/// Local overrides and non-GitHub mirrors intentionally return `None`; callers
+/// must preserve the upstream coordinate rather than inventing a local one.
+pub fn package_source_github_repository(source: &PackageSource) -> Option<GitHubRepositoryRef> {
+    let PackageSource::Git { url, .. } = source else {
+        return None;
+    };
+    let (owner, repository) = parse_github_url(url)?;
+    GitHubRepositoryRef::from_owner_repo(&owner, &repository).ok()
 }
 
 fn validate_local_scope(scope: &str) -> Result<()> {
@@ -1525,6 +1537,28 @@ mod tests {
     }
 
     #[test]
+    fn github_source_urls_normalize_to_one_repository_coordinate() {
+        for url in [
+            "https://github.com/nenjo-ai/packages.git",
+            "git@github.com:nenjo-ai/packages.git",
+            "ssh://git@github.com/nenjo-ai/packages.git",
+        ] {
+            assert_eq!(
+                package_source_github_repository(&git_source(url))
+                    .unwrap()
+                    .as_str(),
+                "@nenjo-ai/packages"
+            );
+        }
+        assert!(
+            package_source_github_repository(&git_source(
+                "https://gitlab.com/nenjo-ai/packages.git"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
     fn derives_scope_from_gitlab_namespace() {
         assert_eq!(
             package_source_scope(&git_source("https://gitlab.com/acme/packages.git")),
@@ -1911,7 +1945,7 @@ Show help for the requested topic.
             ".nenjo/generated/claude-plugin/commands/help.yaml",
         );
         assert_eq!(command.kind().unwrap(), PackageKind::Command);
-        assert_eq!(command.manifest["name"], "command_pack__help");
+        assert_eq!(command.manifest["name"], "Command Pack: help");
         assert_eq!(command.manifest["command"], "/help");
         assert_eq!(command.manifest["root_path"], "commands");
         assert_eq!(command.manifest["entry_path"], "help.md");
@@ -2034,7 +2068,7 @@ Use `scripts/root.sh` for the workflow.
             ".nenjo/generated/claude-plugin/skills/root_skill.yaml",
         );
         assert_eq!(skill.kind().unwrap(), PackageKind::Skill);
-        assert_eq!(skill.manifest["name"], "root_skill_tools__root_skill");
+        assert_eq!(skill.manifest["name"], "Root Skill Tools: Root Skill");
         assert_eq!(skill.manifest["root_path"], ".");
         assert_eq!(skill.manifest["entry_path"], "SKILL.md");
 
@@ -2043,7 +2077,7 @@ Use `scripts/root.sh` for the workflow.
             ".nenjo/generated/claude-plugin/mcp/review_server.yaml",
         );
         assert_eq!(server.kind().unwrap(), PackageKind::McpServer);
-        assert_eq!(server.manifest["name"], "root_skill_tools__review_server");
+        assert_eq!(server.manifest["name"], "Root Skill Tools: review-server");
         assert_eq!(server.manifest["metadata"]["runtime"]["cwd_path"], ".");
         assert_eq!(
             server.manifest["metadata"]["runtime"]["env"]["MODE"],
@@ -2129,7 +2163,7 @@ Follow the runbook.
         assert_eq!(deploy.kind().unwrap(), PackageKind::Skill);
         assert_eq!(
             deploy.manifest["hooks"],
-            json!(["workflow_pack__pretooluse_deploy_pre"])
+            json!(["workflow_pack-hook-pretooluse_deploy_pre"])
         );
 
         let command = read_resource_manifest(
@@ -2140,8 +2174,8 @@ Follow the runbook.
         assert_eq!(
             command.manifest["hooks"],
             json!([
-                "workflow_pack__pretooluse_deploy_pre",
-                "workflow_pack__stop_runbook_stop"
+                "workflow_pack-hook-pretooluse_deploy_pre",
+                "workflow_pack-hook-stop_runbook_stop"
             ])
         );
 

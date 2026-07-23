@@ -406,10 +406,11 @@ async fn assigned_ability_tool_with_real_llm() {
         "You are a senior software developer. \
          When asked to review code, use the code_review ability.",
     );
-    agent.abilities = vec!["code_review".into()];
+    agent.abilities = vec![Slug::derive("code_review")];
 
     // The ability: code review with specific instructions
     let ability = AbilityManifest {
+        slug: Slug::derive("code_review"),
         name: "code_review".into(),
         path: None,
         description: Some("Reviews code for bugs, style issues, and improvements".into()),
@@ -549,6 +550,7 @@ async fn domain_expansion_with_real_llm() {
 
     // The PRD domain with specific prompt overlay and guidelines
     let domain = DomainManifest {
+        slug: Slug::derive("prd"),
         name: "prd".into(),
         path: String::new(),
         description: Some("Write product requirements documents".into()),
@@ -596,7 +598,7 @@ async fn domain_expansion_with_real_llm() {
     // Verify the domain is active on the instance
     let active = &prd_runner.instance().prompt_context().active_domain;
     assert!(active.is_some(), "should have active domain");
-    assert_eq!(active.as_ref().unwrap().domain_name, "prd");
+    assert_eq!(active.as_ref().unwrap().manifest.name, "prd");
 
     // Ask the agent to write a PRD — the domain's prompt overlay should
     // guide it to produce structured output

@@ -39,10 +39,11 @@ pub use claude_plugin::{
 pub use error::{PackageError, Result};
 pub use github::{GitHubFetcher, GitHubSource};
 pub use identity::{
-    PackageLock, PackageLockResource, PackageResourceInstanceKey, PackageResourceLogicalKey,
-    package_entry_path, package_module_source_path, parse_json_or_yaml, parse_json_or_yaml_as,
-    sha256_hex, validate_package_name, validate_package_slug, validate_source_path,
-    version_satisfies,
+    GitHubRepositoryRef, PackageLock, PackageLockResource, PackageResourceIdentity,
+    PackageResourceIdentityName, PackageResourceInstanceKey, PackageResourceLogicalKey,
+    PackageResourceLogicalRef, PackageResourcePath, PackageResourceSlug, package_entry_path,
+    package_module_source_path, parse_json_or_yaml, parse_json_or_yaml_as, sha256_hex,
+    validate_package_name, validate_package_slug, validate_source_path, version_satisfies,
 };
 pub(crate) use identity::{validate_relative_module_import_path, validate_resource_name};
 pub use local::LocalPackageResolver;

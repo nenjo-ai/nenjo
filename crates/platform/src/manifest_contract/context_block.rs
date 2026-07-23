@@ -1,7 +1,7 @@
 //! Context block wire records.
 
 use chrono::{DateTime, Utc};
-use nenjo::manifest::{ContextBlockManifest, context_block_slug};
+use nenjo::manifest::ContextBlockManifest;
 use nenjo_events::EncryptedPayload;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -50,6 +50,7 @@ impl ContextBlockRecord {
     pub fn from_parts(
         org_id: Uuid,
         id: Uuid,
+        slug: String,
         name: String,
         path: String,
         description: Option<String>,
@@ -60,7 +61,6 @@ impl ContextBlockRecord {
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
     ) -> Self {
-        let slug = context_block_slug(&path, &name).to_string();
         Self {
             id,
             org_id,
@@ -79,6 +79,8 @@ impl ContextBlockRecord {
 
     pub fn to_manifest(&self, template: String) -> ContextBlockManifest {
         ContextBlockManifest {
+            slug: nenjo::Slug::parse(&self.slug)
+                .unwrap_or_else(|_| nenjo::Slug::derive(&self.slug)),
             name: self.name.clone(),
             path: self.path.clone(),
             description: self.description.clone(),
@@ -91,7 +93,7 @@ impl ContextBlockRecord {
             summary: crate::manifest_mcp::ContextBlockSummary {
                 name: self.name.clone(),
                 slug: nenjo::Slug::derive(&self.slug),
-                selector: self.slug.clone(),
+                selector: format!("{{{{ {} }}}}", self.slug),
                 path: self.path.clone(),
                 description: self.description.clone(),
             },

@@ -76,7 +76,7 @@ where
                     .prompt_context()
                     .active_domain
                     .as_ref()
-                    .map(|d| d.domain_name.clone())
+                    .map(|d| d.manifest.name.clone())
                     .unwrap_or_else(|| session.domain_command.clone());
 
                 if let Some(chat_session_id) = chat_session_id {

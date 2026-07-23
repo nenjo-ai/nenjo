@@ -45,8 +45,6 @@ pub use watch::{
     RuntimeExecutionWatcher, WatchExecutionRunTool, start_runtime_execution_watch,
 };
 
-const DEFAULT_ROUTINE_STEP_MAX_TURNS: usize = 50;
-
 pub(crate) fn with_routine_step_max_turns<P>(
     builder: AgentBuilder<P>,
     step: &RoutineStepManifest,
@@ -64,7 +62,7 @@ where
         })
         .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ROUTINE_STEP_MAX_TURNS);
+        .unwrap_or(crate::config::DEFAULT_AGENT_MAX_TURNS);
 
     builder.with_max_turns(configured)
 }

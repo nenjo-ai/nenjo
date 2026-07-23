@@ -1,10 +1,12 @@
 schema: nenjo.modules.v1
 resources:
   - schema: nenjo.context_block.v1
+    slug: methodology
     manifest:
       name: methodology
       template: Think clearly.
   - schema: nenjo.context_block.v1
+    slug: tool-usage
     imports:
       context:
         - "#methodology"

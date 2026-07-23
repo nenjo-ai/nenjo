@@ -1,8 +1,6 @@
 //! Agent building blocks: instance, builder, runner, prompts.
 
 pub mod abilities;
-#[doc(hidden)]
-pub mod ability_sessions;
 pub(crate) mod async_ops;
 pub mod builder;
 pub(crate) mod delegation;
@@ -23,6 +21,6 @@ pub(crate) use instance::AgentExecutionMode;
 pub use instance::AgentInstance;
 pub use runner::types::{
     AsyncOperationTranscriptEvent, SubAgentTranscriptEvent, ToolCall, TurnEvent, TurnLoopConfig,
-    TurnOutput,
+    TurnLoopError, TurnOutput,
 };
 pub use runner::{AgentRunner, ExecutionHandle};

@@ -28,8 +28,8 @@ use crate::arguments::ResolvedArgumentBinding;
 use crate::config::AgentConfig;
 use crate::context::ContextRenderer;
 use crate::manifest::{
-    AbilityManifest, AgentManifest, DomainManifest, HasManifestSlug, KnowledgePackManifest,
-    KnowledgePackSource, Manifest, ModelManifest, ProjectManifest,
+    AbilityManifest, AgentManifest, DomainManifest, KnowledgePackManifest, KnowledgePackSource,
+    Manifest, ManifestIdentity, ModelManifest, ProjectManifest,
 };
 use crate::memory::Memory;
 use crate::tools::Tool;
@@ -81,7 +81,7 @@ pub(crate) struct ProviderInner<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, M
 pub(crate) struct ManifestIndex {
     manifest: Arc<Manifest>,
     agents_by_slug: HashMap<Slug, usize>,
-    abilities_by_name: HashMap<String, usize>,
+    abilities_by_slug: HashMap<Slug, usize>,
     domains_by_slug: HashMap<Slug, usize>,
     domains_by_command: HashMap<String, usize>,
     models_by_slug: HashMap<Slug, usize>,
@@ -94,7 +94,7 @@ impl ManifestIndex {
     fn new(manifest: Arc<Manifest>) -> Self {
         Self {
             agents_by_slug: index_by_manifest_slug(&manifest.agents),
-            abilities_by_name: index_abilities_by_name(&manifest.abilities),
+            abilities_by_slug: index_abilities_by_slug(&manifest.abilities),
             domains_by_slug: index_domains_by_slug(&manifest.domains),
             domains_by_command: index_domains_by_command(&manifest.domains),
             models_by_slug: index_by_manifest_slug(&manifest.models),
@@ -111,9 +111,9 @@ impl ManifestIndex {
             .map(|index| &self.manifest.agents[*index])
     }
 
-    fn ability(&self, name: &str) -> Option<&AbilityManifest> {
-        self.abilities_by_name
-            .get(name)
+    fn ability(&self, slug: &Slug) -> Option<&AbilityManifest> {
+        self.abilities_by_slug
+            .get(slug)
             .map(|index| &self.manifest.abilities[*index])
     }
 
@@ -149,10 +149,12 @@ impl ManifestIndex {
     }
 }
 
-fn index_by_manifest_slug<T: HasManifestSlug>(items: &[T]) -> HashMap<Slug, usize> {
+fn index_by_manifest_slug<T: ManifestIdentity>(items: &[T]) -> HashMap<Slug, usize> {
     let mut index = HashMap::new();
     for (position, item) in items.iter().enumerate() {
-        index.entry(item.manifest_slug()).or_insert(position);
+        index
+            .entry(item.manifest_slug().clone())
+            .or_insert(position);
     }
     index
 }
@@ -218,42 +220,42 @@ fn knowledge_pack_version_candidate(
     }
 }
 
-fn index_abilities_by_name(items: &[AbilityManifest]) -> HashMap<String, usize> {
+fn index_abilities_by_slug(items: &[AbilityManifest]) -> HashMap<Slug, usize> {
     use crate::package_resolve::{PkgResolvePolicy, pick_version_winner};
-    let mut by_name: HashMap<String, Vec<(usize, crate::package_resolve::VersionedCandidate)>> =
+    let mut by_slug: HashMap<Slug, Vec<(usize, crate::package_resolve::VersionedCandidate)>> =
         HashMap::new();
     for (position, item) in items.iter().enumerate() {
-        by_name
-            .entry(item.name.clone())
+        by_slug
+            .entry(item.manifest_slug().clone())
             .or_default()
             .push((position, ability_version_candidate(item)));
     }
     let mut index = HashMap::new();
-    for (name, group) in by_name {
+    for (slug, group) in by_slug {
         if let Some(pos) = pick_version_winner(&group, &PkgResolvePolicy::HighestSemver) {
-            index.insert(name, pos);
+            index.insert(slug, pos);
         }
     }
     index
 }
 
-/// Resolve one ability by logical name under a multi-version policy.
-pub(crate) fn resolve_ability_by_name<'a>(
+/// Resolve one ability by canonical slug under a multi-version policy.
+pub(crate) fn resolve_ability_by_slug<'a>(
     abilities: &'a [AbilityManifest],
-    name: &str,
+    slug: &Slug,
     policy: &crate::package_resolve::PkgResolvePolicy,
 ) -> Option<&'a AbilityManifest> {
     use crate::package_resolve::pick_version_winner;
-    let matching: Vec<(usize, crate::package_resolve::VersionedCandidate)> = abilities
+    let slug_matching: Vec<(usize, crate::package_resolve::VersionedCandidate)> = abilities
         .iter()
         .enumerate()
-        .filter(|(_, ability)| ability.name == name)
+        .filter(|(_, ability)| ability.manifest_slug() == slug)
         .map(|(idx, ability)| (idx, ability_version_candidate(ability)))
         .collect();
-    pick_version_winner(&matching, policy).map(|idx| &abilities[idx])
+    pick_version_winner(&slug_matching, policy).map(|idx| &abilities[idx])
 }
 
-/// Resolve a domain by name/slug/command under a multi-version policy.
+/// Resolve a domain by canonical slug or authored command under a multi-version policy.
 pub(crate) fn resolve_domain_by_selector<'a>(
     domains: &'a [DomainManifest],
     selector: &str,
@@ -264,12 +266,7 @@ pub(crate) fn resolve_domain_by_selector<'a>(
     let matching: Vec<(usize, VersionedCandidate)> = domains
         .iter()
         .enumerate()
-        .filter(|(_, domain)| {
-            domain.command == selector
-                || domain.slug() == want
-                || Slug::derive(&domain.name) == want
-                || domain.name == selector
-        })
+        .filter(|(_, domain)| domain.command == selector || domain.slug() == want)
         .map(|(idx, domain)| {
             (
                 idx,
@@ -287,7 +284,7 @@ pub(crate) fn resolve_domain_by_selector<'a>(
 
 fn index_domains_by_slug(items: &[DomainManifest]) -> HashMap<Slug, usize> {
     use crate::package_resolve::{VersionedCandidate, prefer_highest_semver};
-    // Prefer highest version when multiple domains share a logical slug/name.
+    // Prefer highest version when multiple domains share a logical slug.
     let mut by_key: HashMap<Slug, Vec<(usize, VersionedCandidate)>> = HashMap::new();
     for (position, item) in items.iter().enumerate() {
         let cand = VersionedCandidate {
@@ -297,11 +294,7 @@ fn index_domains_by_slug(items: &[DomainManifest]) -> HashMap<Slug, usize> {
             name: item.name.clone(),
         };
         by_key
-            .entry(item.manifest_slug())
-            .or_default()
-            .push((position, cand.clone()));
-        by_key
-            .entry(Slug::derive(&item.name))
+            .entry(item.manifest_slug().clone())
             .or_default()
             .push((position, cand));
     }
@@ -724,8 +717,8 @@ where
         self.inner.manifest.agent(slug)
     }
 
-    pub(crate) fn find_ability(&self, name: &str) -> Option<&AbilityManifest> {
-        self.inner.manifest.ability(name)
+    pub(crate) fn find_ability(&self, slug: &Slug) -> Option<&AbilityManifest> {
+        self.inner.manifest.ability(slug)
     }
 
     pub(crate) fn find_domain(&self, selector: &str) -> Option<&DomainManifest> {
@@ -1045,8 +1038,8 @@ where
         Provider::find_agent_manifest(self, slug)
     }
 
-    fn find_ability(&self, name: &str) -> Option<&AbilityManifest> {
-        Provider::find_ability(self, name)
+    fn find_ability(&self, slug: &Slug) -> Option<&AbilityManifest> {
+        Provider::find_ability(self, slug)
     }
 
     fn find_domain(&self, selector: &str) -> Option<&DomainManifest> {
@@ -1070,10 +1063,10 @@ where
 
     fn find_ability_with_policy(
         &self,
-        name: &str,
+        slug: &Slug,
         policy: &crate::package_resolve::PkgResolvePolicy,
     ) -> Option<&AbilityManifest> {
-        resolve_ability_by_name(&self.inner.manifest.manifest.abilities, name, policy)
+        resolve_ability_by_slug(&self.inner.manifest.manifest.abilities, slug, policy)
     }
 
     fn find_domain_with_policy(

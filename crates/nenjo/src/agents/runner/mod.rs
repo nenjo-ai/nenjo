@@ -14,7 +14,7 @@ use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
-use super::async_ops::AsyncOpChildHandle;
+use super::async_ops::{AsyncOpChildHandle, AsyncOpManager};
 use super::delegation::{DELEGATE_TO_TOOL_NAME, build_delegation_tools, delegation_child_tools};
 use super::respond::RespondToUserTool;
 use super::sub_agents::{
@@ -24,12 +24,12 @@ use super::sub_agents::{
 use anyhow::Context;
 use nenjo_models::ModelProvider;
 
-use super::instance::AgentInstance;
+use super::instance::{AgentExecutionMode, AgentInstance};
 use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, ChatInput, TaskInput};
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, MemoryScope};
-use crate::provider::{ErasedProvider, ProviderRuntime};
+use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 use crate::types::ActiveDomain;
 use types::{TurnEvent, TurnOutput};
 
@@ -144,6 +144,22 @@ pub(crate) fn build_instruction_messages(
     }
 }
 
+fn ensure_respond_to_user_tool(
+    tools: &mut Vec<Arc<dyn crate::tools::Tool>>,
+    async_ops: &AsyncOpManager,
+    execution_mode: AgentExecutionMode,
+) {
+    if !execution_mode.can_respond_to_user() {
+        return;
+    }
+    if !tools
+        .iter()
+        .any(|tool| tool.name() == super::respond::RESPOND_TO_USER_TOOL_NAME)
+    {
+        tools.push(Arc::new(RespondToUserTool::new(async_ops.clone())));
+    }
+}
+
 /// Wraps an [`AgentInstance`] and provides the execution API.
 ///
 /// Created via [`AgentBuilder::build()`](super::builder::AgentBuilder::build).
@@ -199,13 +215,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .tools
                 .extend(build_delegation_tools(base_instance));
         }
-        if instance.runtime.execution_mode.can_respond_to_user()
-            && !instance.runtime.tools.iter().any(|tool| tool.is_terminal())
-        {
-            instance.runtime.tools.push(Arc::new(RespondToUserTool::new(
-                instance.runtime.async_ops.clone(),
-            )));
-        }
+        ensure_respond_to_user_tool(
+            &mut instance.runtime.tools,
+            &instance.runtime.async_ops,
+            instance.runtime.execution_mode,
+        );
 
         let instance = Arc::new(instance);
 
@@ -308,18 +322,49 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         // Build the active domain session state.
         let active_domain = ActiveDomain {
             session_id: Uuid::new_v4(),
-            domain_slug: domain.slug().clone(),
-            domain_name: domain.name.clone(),
             manifest: session_manifest.clone(),
         };
 
         // Clone the instance and apply domain expansion.
         let mut instance = (*self.instance).clone();
         instance.prompt.context.active_domain = Some(active_domain);
-        for requirement in &session_manifest.media {
-            if !instance.manifest.media.contains(requirement) {
-                instance.manifest.media.push(requirement.clone());
-            }
+        extend_unique(
+            &mut instance.manifest.platform_scopes,
+            &session_manifest.platform_scopes,
+        );
+        extend_unique(
+            &mut instance.manifest.mcp_servers,
+            &session_manifest.mcp_servers,
+        );
+        extend_unique(&mut instance.manifest.media, &session_manifest.media);
+
+        // Re-run host tool construction against the effective domain manifest.
+        // Existing tools are retained, while newly authorized scope/MCP tools
+        // are added by name.
+        if instance.runtime.execution_mode.has_own_capability_surface() {
+            let project_slug = active_project_slug(&instance);
+            let domain_tools = provider
+                .tool_factory()
+                .create_tools_with_context(
+                    &instance.manifest,
+                    instance.runtime.security.clone(),
+                    ToolContext {
+                        project_slug,
+                        current_session_id: instance.runtime.current_session_id,
+                    },
+                )
+                .await;
+            let mut tool_names = instance
+                .runtime
+                .tools
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<std::collections::HashSet<_>>();
+            instance.runtime.tools.extend(
+                domain_tools
+                    .into_iter()
+                    .filter(|tool| tool_names.insert(tool.name().to_string())),
+            );
         }
 
         let active_abilities =
@@ -544,7 +589,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .context
             .active_domain
             .as_ref()
-            .map(|d| d.domain_name.as_str());
+            .map(|d| d.manifest.name.as_str());
 
         info!(
             agent = inst.name(),
@@ -603,14 +648,18 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         let cancel = inst.runtime.execution_cancel.clone();
         let join = tokio::spawn(async move {
-            let require_respond_to_user = matches!(run.kind, AgentRunKind::Chat(_));
+            let completion = if matches!(run.kind, AgentRunKind::Chat(_)) {
+                turn_loop::TurnCompletion::RequireTool(super::respond::RESPOND_TO_USER_TOOL_NAME)
+            } else {
+                turn_loop::TurnCompletion::Natural
+            };
             let mut output = turn_loop::run(
                 &inst,
                 messages,
                 Some(events_tx),
                 Some(loop_pause),
                 Some(turn_input_rx),
-                require_respond_to_user,
+                completion,
             )
             .await?;
             output.task_id = task_id;
@@ -643,11 +692,39 @@ fn raw_user_message(run: &AgentRun) -> String {
 }
 
 fn domain_is_assigned(assigned_domains: &[Slug], domain: &DomainManifest) -> bool {
-    let manifest_slug = domain.slug();
-    let name_slug = Slug::derive(&domain.name);
     assigned_domains
         .iter()
-        .any(|assigned| assigned == &manifest_slug || assigned == &name_slug)
+        .any(|assigned| assigned == &domain.slug())
+}
+
+fn extend_unique<T: Clone + PartialEq>(target: &mut Vec<T>, additions: &[T]) {
+    for addition in additions {
+        if !target.contains(addition) {
+            target.push(addition.clone());
+        }
+    }
+}
+
+fn active_project_slug<P: ProviderRuntime>(instance: &AgentInstance<P>) -> Option<String> {
+    let slug = if instance
+        .prompt
+        .context
+        .render_ctx_extra
+        .project
+        .slug
+        .is_empty()
+    {
+        instance.prompt.context.current_project.slug.as_str()
+    } else {
+        instance
+            .prompt
+            .context
+            .render_ctx_extra
+            .project
+            .slug
+            .as_str()
+    };
+    (!slug.is_empty()).then(|| slug.to_string())
 }
 
 fn resolve_active_abilities<P: ProviderRuntime>(
@@ -682,7 +759,82 @@ fn resolve_active_abilities<P: ProviderRuntime>(
 
 #[cfg(test)]
 mod tests {
-    use super::build_instruction_messages;
+    use std::sync::Arc;
+
+    use anyhow::Result;
+
+    use super::{build_instruction_messages, ensure_respond_to_user_tool};
+    use crate::agents::AgentExecutionMode;
+    use crate::agents::abilities::FINISH_ABILITY_TOOL_NAME;
+    use crate::agents::async_ops::AsyncOpManager;
+    use crate::agents::respond::RESPOND_TO_USER_TOOL_NAME;
+    use crate::tools::{Tool, ToolCategory, ToolResult};
+
+    struct OtherTerminalTool;
+
+    struct FinishTerminalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for OtherTerminalTool {
+        fn name(&self) -> &str {
+            "other_terminal"
+        }
+
+        fn description(&self) -> &str {
+            "test terminal"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Read
+        }
+
+        fn is_terminal(&self) -> bool {
+            true
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: "other".into(),
+                error: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for FinishTerminalTool {
+        fn name(&self) -> &str {
+            FINISH_ABILITY_TOOL_NAME
+        }
+
+        fn description(&self) -> &str {
+            "test ability completion"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Write
+        }
+
+        fn is_terminal(&self) -> bool {
+            true
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: "finished".into(),
+                error: None,
+            })
+        }
+    }
 
     #[test]
     fn instruction_messages_use_developer_when_supported() {
@@ -698,5 +850,37 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "system");
         assert_eq!(messages[0].content, "root\n\napp rules");
+    }
+
+    #[test]
+    fn respond_to_user_is_registered_when_an_unrelated_terminal_tool_exists() {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(OtherTerminalTool)];
+
+        ensure_respond_to_user_tool(
+            &mut tools,
+            &AsyncOpManager::new(),
+            AgentExecutionMode::Parent,
+        );
+
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
+        );
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[test]
+    fn respond_to_user_is_not_registered_when_finish_owns_completion() {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FinishTerminalTool)];
+
+        ensure_respond_to_user_tool(
+            &mut tools,
+            &AsyncOpManager::new(),
+            AgentExecutionMode::Ability,
+        );
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), FINISH_ABILITY_TOOL_NAME);
     }
 }

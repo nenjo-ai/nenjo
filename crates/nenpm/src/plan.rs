@@ -64,7 +64,7 @@ impl InstallPlan {
                         root_uri: None,
                         selector: None,
                         imports: BTreeMap::new(),
-                        manifest: serde_json::json!({ "name": module.name }),
+                        manifest: serde_json::json!({ "name": module.resource }),
                     },
                     imports: module.imports.clone(),
                     files: module

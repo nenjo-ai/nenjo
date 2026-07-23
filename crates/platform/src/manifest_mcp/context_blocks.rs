@@ -10,8 +10,12 @@ fn context_block_ref_schema() -> serde_json::Value {
 fn configure_metadata_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Context block metadata patch. Required on create because metadata.name is required when context_block is omitted. On update, omitted fields are unchanged.",
+        "description": "Context block metadata patch. metadata.slug and metadata.name are required when creating; omitted fields are unchanged on update.",
         "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Stable context block slug. Required when creating a new context block."
+            },
             "name": {
                 "type": "string",
                 "description": "Context block runtime/display name. Required when creating a new context block."
@@ -59,7 +63,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_context_block".to_string(),
-            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.name and template are required. Omitted fields are unchanged on update. Returns `context_block: ContextBlockDocument`."
+            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.slug, metadata.name, and template are required. Omitted fields are unchanged on update. Returns `context_block: ContextBlockDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

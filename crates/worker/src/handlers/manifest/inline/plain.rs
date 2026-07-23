@@ -1,6 +1,6 @@
 use nenjo::Manifest;
 use nenjo::Slug;
-use nenjo::manifest::{CommandManifest, HasManifestSlug, context_block_slug};
+use nenjo::manifest::{CommandManifest, ManifestIdentity};
 use nenjo_events::ResourceType;
 use nenjo_platform::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, CouncilRecord, DomainPromptRecord,
@@ -42,7 +42,7 @@ fn apply_agent_inline(manifest: &mut Manifest, rt: ResourceType, data: &serde_js
         return false;
     };
 
-    let slug = Slug::derive(&record.slug);
+    let slug = Slug::parse(&record.slug).unwrap_or_else(|_| Slug::derive(&record.slug));
     let item = if record.prompt_config.is_some() {
         record.to_manifest(record.resolved_prompt_config())
     } else {
@@ -138,14 +138,15 @@ fn apply_ability_inline(
         return false;
     };
 
-    let slug = Slug::derive(&record.ability.slug);
+    let slug =
+        Slug::parse(&record.ability.slug).unwrap_or_else(|_| Slug::derive(&record.ability.slug));
     let item = if record.prompt_config.is_some() {
         record.to_manifest()
     } else {
         let existing_prompt = manifest
             .abilities
             .iter()
-            .find(|ability| ability.manifest_slug() == slug)
+            .find(|ability| ability.manifest_slug() == &slug)
             .map(|ability| ability.prompt_config.clone())
             .unwrap_or_default();
         record.ability.to_manifest(existing_prompt)
@@ -181,12 +182,12 @@ fn apply_context_block_inline(
         return false;
     };
 
-    let slug = context_block_slug(&record.block.path, &record.block.name);
+    let slug = Slug::parse(&record.block.slug).unwrap_or_else(|_| Slug::derive(&record.block.slug));
     let template = record.template.clone().unwrap_or_else(|| {
         manifest
             .context_blocks
             .iter()
-            .find(|block| block.manifest_slug() == slug)
+            .find(|block| block.manifest_slug() == &slug)
             .map(|block| block.template.clone())
             .unwrap_or_default()
     });
@@ -224,14 +225,15 @@ fn apply_domain_inline(
         return false;
     };
 
-    let slug = nenjo::manifest::domain_slug(&record.domain.path, &record.domain.name);
+    let slug =
+        Slug::parse(&record.domain.slug).unwrap_or_else(|_| Slug::derive(&record.domain.slug));
     let item = if record.prompt_config.is_some() {
         record.to_manifest()
     } else {
         let existing_prompt = manifest
             .domains
             .iter()
-            .find(|domain| domain.manifest_slug() == slug)
+            .find(|domain| domain.manifest_slug() == &slug)
             .map(|domain| domain.prompt_config.clone())
             .unwrap_or_default();
         record.domain.to_manifest(existing_prompt)
@@ -244,7 +246,7 @@ fn apply_domain_inline(
 
 pub(super) fn upsert_by_slug<T>(items: &mut Vec<T>, item: T)
 where
-    T: HasManifestSlug,
+    T: ManifestIdentity,
 {
     let slug = item.manifest_slug();
     if let Some(pos) = items

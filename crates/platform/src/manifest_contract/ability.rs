@@ -74,6 +74,7 @@ impl AbilityRecord {
 
     pub fn to_manifest(&self, prompt_config: AbilityPromptConfig) -> AbilityManifest {
         AbilityManifest {
+            slug: slug_from_str(&self.slug),
             name: self.name.clone(),
             path: if self.path.is_empty() {
                 None
@@ -147,8 +148,8 @@ mod tests {
         );
         // Multi-version packages get distinct slugs for the same ability name.
         assert_ne!(
-            AbilityRecord::slug_for_path_name("pkg/acme/v1_0_0/abilities", "review"),
-            AbilityRecord::slug_for_path_name("pkg/acme/v1_0_1/abilities", "review")
+            AbilityRecord::slug_for_path_name("pkg/acme/review/v1_0_0/abilities", "review"),
+            AbilityRecord::slug_for_path_name("pkg/acme/review/v1_0_1/abilities", "review")
         );
     }
 }

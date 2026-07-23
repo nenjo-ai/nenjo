@@ -23,8 +23,8 @@ pub struct PromptContext {
     pub argument_bindings: Vec<ResolvedArgumentBinding>,
 }
 pub fn render_context_block(b: &ContextBlockManifest) -> RenderContextBlock {
-    use crate::package_resolve::version_label_from_path;
-    let package_name = package_name_from_context_path(&b.path);
+    use crate::package_resolve::{package_name_from_path, version_label_from_path};
+    let package_name = package_name_from_path(&b.path);
     let package_version = version_label_from_path(&b.path);
     RenderContextBlock {
         name: b.name.clone(),
@@ -33,23 +33,4 @@ pub fn render_context_block(b: &ContextBlockManifest) -> RenderContextBlock {
         package_name,
         package_version,
     }
-}
-
-fn package_name_from_context_path(path: &str) -> Option<String> {
-    // pkg/<scope...>/<v?version>/<package_leaf>/...
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.first().copied() != Some("pkg") || parts.len() < 3 {
-        return None;
-    }
-    let mut i = 1usize;
-    while i < parts.len() && !crate::package_resolve::is_version_segment(parts[i]) {
-        i += 1;
-        if i >= 4 {
-            break;
-        }
-    }
-    if i < parts.len() && crate::package_resolve::is_version_segment(parts[i]) {
-        i += 1;
-    }
-    parts.get(i).map(|s| (*s).to_string())
 }

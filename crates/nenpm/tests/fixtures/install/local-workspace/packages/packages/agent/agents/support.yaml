@@ -1,4 +1,5 @@
 schema: nenjo.agent.v1
+slug: support-agent
 imports:
   abilities:
     - ../abilities/design.yaml#design_agent

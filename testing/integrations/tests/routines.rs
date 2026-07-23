@@ -124,7 +124,7 @@ async fn single_step_routine_with_real_llm() {
             name: "respond".into(),
             step_type: RoutineStepType::Agent,
             council: None,
-            agent: Some(Slug::derive(&agent.name)),
+            agent: Some(agent.slug.clone()),
             config: serde_json::json!({}),
             order_index: 0,
         }],

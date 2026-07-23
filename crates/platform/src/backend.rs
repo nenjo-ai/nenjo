@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, CouncilManifest,
-    DomainManifest, HasManifestSlug, Manifest, ManifestResource, ManifestResourceKind,
+    DomainManifest, Manifest, ManifestIdentity, ManifestResource, ManifestResourceKind,
     ModelManifest, ProjectManifest, RoutineManifest, context_block_slug, domain_slug,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
@@ -46,6 +46,7 @@ fn local_agent_from_record(agent: AgentRecord) -> AgentManifest {
 
 fn local_ability_from_document(ability: AbilityDocument) -> AbilityManifest {
     AbilityManifest {
+        slug: ability.summary.slug,
         name: ability.summary.name,
         path: string_to_manifest_path(ability.summary.path),
         description: ability.summary.description,
@@ -63,6 +64,7 @@ fn local_ability_from_document(ability: AbilityDocument) -> AbilityManifest {
 
 fn local_domain_from_document(domain: DomainDocument) -> DomainManifest {
     DomainManifest {
+        slug: domain.summary.slug,
         name: domain.summary.name,
         path: domain.summary.path,
         description: domain.summary.description,
@@ -78,6 +80,7 @@ fn local_domain_from_document(domain: DomainDocument) -> DomainManifest {
 
 fn local_council_from_document(council: &CouncilDocument) -> CouncilManifest {
     CouncilManifest {
+        slug: council.summary.slug.clone(),
         name: council.summary.name.clone(),
         leader_agent: council.summary.leader_agent.clone(),
         members: council
@@ -134,33 +137,33 @@ fn routine_encrypted_payload_object_id(payload: Option<&serde_json::Value>) -> O
 }
 
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
-    command.name == command_ref
+    command.manifest_slug().as_str() == command_ref
         || command.command == command_ref
         || command.command.trim_start_matches('/') == command_ref
 }
 
 fn ability_matches_ref(ability: &AbilityManifest, ability_ref: &Slug) -> bool {
-    ability.manifest_slug() == *ability_ref || Slug::derive(&ability.name) == *ability_ref
+    ability.manifest_slug() == ability_ref
 }
 
 fn agent_matches_ref(agent: &AgentManifest, agent_ref: &Slug) -> bool {
-    agent.manifest_slug() == *agent_ref || Slug::derive(&agent.name) == *agent_ref
+    agent.manifest_slug() == agent_ref
 }
 
 fn domain_matches_ref(domain: &DomainManifest, domain_ref: &Slug) -> bool {
-    domain.slug() == *domain_ref || Slug::derive(&domain.name) == *domain_ref
+    domain.slug() == *domain_ref
 }
 
 fn routine_matches_ref(routine: &RoutineManifest, routine_ref: &Slug) -> bool {
-    routine.manifest_slug() == *routine_ref || Slug::derive(&routine.name) == *routine_ref
+    routine.manifest_slug() == routine_ref
 }
 
 fn model_matches_ref(model: &ModelManifest, model_ref: &Slug) -> bool {
-    model.manifest_slug() == *model_ref || Slug::derive(&model.name) == *model_ref
+    model.manifest_slug() == model_ref
 }
 
 fn council_matches_ref(council: &CouncilManifest, council_ref: &Slug) -> bool {
-    council.manifest_slug() == *council_ref
+    council.manifest_slug() == council_ref
 }
 
 fn context_block_matches_ref(
@@ -171,7 +174,7 @@ fn context_block_matches_ref(
 }
 
 fn project_matches_ref(project: &ProjectManifest, project_ref: &Slug) -> bool {
-    project.manifest_slug() == *project_ref
+    project.manifest_slug() == project_ref
 }
 
 fn configure_name_slug(name: Option<&String>) -> Option<Slug> {
@@ -564,6 +567,7 @@ where
         };
 
         let hydrated = AbilityManifest {
+            slug: remote.summary.slug,
             name: remote.summary.name,
             path: string_to_manifest_path(remote.summary.path),
             description: remote.summary.description,
@@ -589,7 +593,7 @@ where
             .list_agents()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *agent || Slug::derive(&item.name) == *agent))
+            .find(|item| item.manifest_slug() == agent))
     }
 
     async fn cached_routine(&self, routine: &Slug) -> Result<RoutineManifest> {
@@ -597,7 +601,7 @@ where
             .list_routines()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *routine || Slug::derive(&item.name) == *routine)
+            .find(|item| item.manifest_slug() == routine)
             .ok_or_else(|| anyhow!("routine not found in local manifest: {routine}"))
     }
 
@@ -607,7 +611,7 @@ where
             .list_routines()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *routine || Slug::derive(&item.name) == *routine))
+            .find(|item| item.manifest_slug() == routine))
     }
 
     async fn cached_council(&self, council: &Slug) -> Result<CouncilManifest> {
@@ -615,7 +619,7 @@ where
             .list_councils()
             .await?
             .into_iter()
-            .find(|item| Slug::derive(&item.name) == *council)
+            .find(|item| item.manifest_slug() == council)
             .ok_or_else(|| anyhow!("council not found in local manifest: {council}"))
     }
 
@@ -624,7 +628,7 @@ where
             .list_models()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *model || Slug::derive(&item.name) == *model)
+            .find(|item| item.manifest_slug() == model)
             .ok_or_else(|| anyhow!("model not found in local manifest: {model}"))
     }
 
@@ -679,9 +683,7 @@ where
             .list_domains()
             .await?
             .into_iter()
-            .find(|item| {
-                item.manifest_slug() == *domain_ref || Slug::derive(&item.name) == *domain_ref
-            }))
+            .find(|item| item.manifest_slug() == domain_ref))
     }
 
     async fn cached_local_ability(&self, ability_ref: &Slug) -> Result<Option<AbilityManifest>> {
@@ -837,7 +839,7 @@ where
             )
             && let Some(existing) = self.cached_local_agent(&agent).await?
         {
-            data.agent = Some(existing.manifest_slug());
+            data.agent = Some(existing.manifest_slug().clone());
         }
 
         let existing_agent = if let Some(agent) = data.agent.as_ref() {
@@ -893,6 +895,14 @@ where
             .upsert_resource(&ManifestResource::Agent(local_agent))
             .await?;
 
+        if let Some(old_slug) = old_slug.as_ref()
+            && old_slug != &new_slug
+        {
+            self.local_store
+                .delete_resource(ManifestResourceKind::Agent, old_slug)
+                .await?;
+        }
+
         if let Some(old_slug) = old_slug.as_ref() {
             self.move_platform_object_id(PlatformResourceKind::Agent, old_slug, &new_slug)?;
         }
@@ -942,7 +952,7 @@ where
             )
             && let Some(existing) = self.cached_local_ability(&ability).await?
         {
-            data.ability = Some(existing.manifest_slug());
+            data.ability = Some(existing.manifest_slug().clone());
         }
 
         let existing_ability = if let Some(ability) = data.ability.as_ref() {
@@ -951,7 +961,7 @@ where
             None
         };
         if let Some(existing) = existing_ability.as_ref() {
-            data.ability = Some(existing.manifest_slug());
+            data.ability = Some(existing.manifest_slug().clone());
         }
 
         let old_slug = data.ability.clone();
@@ -995,7 +1005,7 @@ where
             local_ability.read_only = existing_ability.read_only;
             local_ability.metadata = existing_ability.metadata;
         }
-        let new_slug = local_ability.manifest_slug();
+        let new_slug = local_ability.manifest_slug().clone();
         let ability_document = AbilityDocument::from(local_ability.clone());
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
@@ -1069,7 +1079,7 @@ where
 
         let old_slug = existing_command
             .as_ref()
-            .map(|command| command.manifest_slug());
+            .map(|command| command.manifest_slug().clone());
         let mut data = params.data;
         if data.command_ref.is_none() && data.content.is_none() {
             return Err(anyhow!("content is required when creating a command"));
@@ -1122,12 +1132,12 @@ where
             self.move_platform_object_id(
                 PlatformResourceKind::Command,
                 old_slug,
-                &local_command.manifest_slug(),
+                local_command.manifest_slug(),
             )?;
         }
         self.record_platform_object_id(
             PlatformResourceKind::Command,
-            &local_command.manifest_slug(),
+            local_command.manifest_slug(),
             configured_id,
         )?;
 
@@ -1178,7 +1188,7 @@ where
             let path = metadata.path.as_deref().unwrap_or_default();
             let domain = domain_slug(path, name);
             if let Some(existing) = self.cached_local_domain(&domain).await? {
-                data.domain = Some(existing.manifest_slug());
+                data.domain = Some(existing.manifest_slug().clone());
             }
         }
 
@@ -1188,7 +1198,7 @@ where
             None
         };
         if let Some(existing) = existing_domain.as_ref() {
-            data.domain = Some(existing.manifest_slug());
+            data.domain = Some(existing.manifest_slug().clone());
         }
 
         let old_slug = data.domain.clone();
@@ -1227,7 +1237,7 @@ where
         } else if let Some(existing_domain) = existing_domain {
             local_domain.prompt_config = existing_domain.prompt_config;
         }
-        let new_slug = local_domain.manifest_slug();
+        let new_slug = local_domain.manifest_slug().clone();
         let domain_document = DomainDocument::from(local_domain.clone());
         self.local_store
             .upsert_resource(&ManifestResource::Domain(local_domain))
@@ -1335,7 +1345,7 @@ where
             .delete_project_document(&params.project)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Project, &existing.manifest_slug())
+            .delete_resource(ManifestResourceKind::Project, existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1568,6 +1578,7 @@ where
         params: RoutineConfigureParams,
     ) -> Result<RoutineConfigureResult> {
         let mut data = params.data;
+        let old_slug = data.routine.clone();
         if data.routine.is_none()
             && data
                 .metadata
@@ -1586,7 +1597,7 @@ where
             )
             && let Some(existing) = self.cached_local_routine(&routine).await?
         {
-            data.routine = Some(existing.manifest_slug());
+            data.routine = Some(existing.manifest_slug().clone());
         }
 
         if data.id.is_none() {
@@ -1658,6 +1669,14 @@ where
             .upsert_resource(&ManifestResource::Routine(local_routine))
             .await?;
         let new_slug = Slug::derive(&configured.slug);
+        if let Some(old_slug) = old_slug.as_ref()
+            && old_slug != &new_slug
+        {
+            self.local_store
+                .delete_resource(ManifestResourceKind::Routine, old_slug)
+                .await?;
+            self.move_platform_object_id(PlatformResourceKind::Routine, old_slug, &new_slug)?;
+        }
         self.record_platform_object_id(PlatformResourceKind::Routine, &new_slug, configured.id)?;
         Ok(RoutineConfigureResult {
             routine: routine_document,
@@ -1671,7 +1690,7 @@ where
             .delete_routine_document(&params.slug)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Routine, &existing.manifest_slug())
+            .delete_resource(ManifestResourceKind::Routine, existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1714,10 +1733,7 @@ where
             .await?;
         let local_model = ModelManifest {
             name: created.summary.name.clone(),
-            slug: nenjo::manifest::model_manifest_slug(
-                &created.summary.model_provider,
-                &created.summary.model,
-            ),
+            slug: created.summary.slug.clone(),
             description: created.summary.description.clone(),
             model: created.summary.model.clone(),
             model_provider: created.summary.model_provider.clone(),
@@ -1766,10 +1782,7 @@ where
             .await?;
         let local_model = ModelManifest {
             name: updated.summary.name.clone(),
-            slug: nenjo::manifest::model_manifest_slug(
-                &updated.summary.model_provider,
-                &updated.summary.model,
-            ),
+            slug: updated.summary.slug.clone(),
             description: updated.summary.description.clone(),
             model: updated.summary.model.clone(),
             model_provider: updated.summary.model_provider.clone(),
@@ -1790,7 +1803,7 @@ where
             .delete_model_document(&params.model)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Model, &existing.manifest_slug())
+            .delete_resource(ManifestResourceKind::Model, existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -1837,6 +1850,7 @@ where
             });
         }
         let body = CouncilCreateApiBody {
+            slug: params.data.slug,
             name: params.data.name,
             description: params.data.description,
             leader_agent: params.data.leader_agent,
@@ -1941,7 +1955,7 @@ where
             .delete_council_document(&params.council)
             .await?;
         self.local_store
-            .delete_resource(ManifestResourceKind::Council, &existing.manifest_slug())
+            .delete_resource(ManifestResourceKind::Council, existing.manifest_slug())
             .await?;
         Ok(DeleteResult { deleted: true })
     }
@@ -2001,7 +2015,7 @@ where
             let path = metadata.path.as_deref().unwrap_or_default();
             let context_block = context_block_slug(path, name);
             if let Some(existing) = self.cached_local_context_block(&context_block).await? {
-                data.context_block = Some(existing.manifest_slug());
+                data.context_block = Some(existing.manifest_slug().clone());
             }
         }
 
@@ -2011,7 +2025,7 @@ where
             None
         };
         if let Some(existing) = existing_context_block.as_ref() {
-            data.context_block = Some(existing.manifest_slug());
+            data.context_block = Some(existing.manifest_slug().clone());
         }
 
         let old_slug = data.context_block.clone();
@@ -2058,12 +2072,13 @@ where
             }
         });
         let local_context_block = ContextBlockManifest {
+            slug: configured.summary.slug.clone(),
             name: configured.summary.name.clone(),
             path: configured.summary.path.clone(),
             description: configured.summary.description.clone(),
             template,
         };
-        let new_slug = local_context_block.manifest_slug();
+        let new_slug = local_context_block.manifest_slug().clone();
         let context_block_document = ContextBlockDocument::from(local_context_block.clone());
         self.local_store
             .upsert_resource(&ManifestResource::ContextBlock(local_context_block))
@@ -2096,6 +2111,26 @@ mod tests {
     use nenjo::{ManifestResource, ManifestWriter};
 
     use super::*;
+
+    #[test]
+    fn domain_reference_requires_canonical_manifest_slug() {
+        let domain = DomainManifest {
+            slug: Slug::derive("nenjo-ai-packages-browser-domain"),
+            name: "Browser Domain".to_string(),
+            path: String::new(),
+            description: None,
+            command: "#browser".to_string(),
+            platform_scopes: Vec::new(),
+            abilities: Vec::new(),
+            mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
+            media: Vec::new(),
+            prompt_config: Default::default(),
+        };
+
+        assert!(domain_matches_ref(&domain, &domain.slug));
+        assert!(!domain_matches_ref(&domain, &Slug::derive(&domain.name)));
+    }
 
     #[derive(Debug)]
     struct RecordedRequest {
@@ -2547,6 +2582,7 @@ mod tests {
                 data: AgentConfigureDocument {
                     metadata: Some(AgentConfigureMetadata {
                         name: Some("Reviewer".to_string()),
+                        slug: None,
                         description: None,
                         color: None,
                         model: None,
@@ -2619,6 +2655,7 @@ mod tests {
             .configure_ability(AbilityConfigureParams {
                 data: AbilityConfigureDocument {
                     metadata: Some(AbilityConfigureMetadata {
+                        slug: Some(Slug::derive("review-code")),
                         name: Some("review_code".to_string()),
                         path: None,
                         description: None,
@@ -2645,13 +2682,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_path_scoped_ability_canonicalizes_short_ref_before_prompt_update() {
+    async fn configure_path_scoped_ability_uses_canonical_slug_for_prompt_update() {
         let temp = tempdir().unwrap();
         let manifests_dir = temp.path().join("manifests");
         let store = Arc::new(LocalManifestStore::new(&manifests_dir));
         let org_id = Uuid::new_v4();
         let ability_id = Uuid::new_v4();
         let existing = AbilityManifest {
+            slug: Slug::derive("review-code"),
             name: "review_code".to_string(),
             path: Some("testing/e2e".to_string()),
             description: Some("Review code".to_string()),
@@ -2667,7 +2705,7 @@ mod tests {
             read_only: false,
             metadata: json!({}),
         };
-        let canonical_slug = existing.manifest_slug();
+        let canonical_slug = existing.manifest_slug().clone();
         store
             .upsert_resource(&ManifestResource::Ability(existing))
             .await
@@ -2710,7 +2748,7 @@ mod tests {
         backend
             .configure_ability(AbilityConfigureParams {
                 data: AbilityConfigureDocument {
-                    ability: Some(Slug::derive("review_code")),
+                    ability: Some(canonical_slug.clone()),
                     prompt_config: Some(nenjo::manifest::AbilityPromptConfig {
                         developer_prompt: "Updated prompt".to_string(),
                     }),
@@ -2762,6 +2800,7 @@ mod tests {
             .configure_context_block(ContextBlockConfigureParams {
                 data: ContextBlockConfigureDocument {
                     metadata: Some(ContextBlockConfigureMetadata {
+                        slug: Some(Slug::derive("repo-guidance")),
                         name: Some("repo_guidance".to_string()),
                         path: None,
                         description: None,
@@ -2837,6 +2876,7 @@ mod tests {
             .configure_ability(AbilityConfigureParams {
                 data: AbilityConfigureDocument {
                     metadata: Some(AbilityConfigureMetadata {
+                        slug: Some(Slug::derive("mcp-payload-smoke-ability")),
                         name: Some("mcp_payload_smoke_ability".to_string()),
                         path: None,
                         description: None,
@@ -2854,7 +2894,7 @@ mod tests {
 
         let result = backend
             .get_ability(AbilitiesGetParams {
-                ability: Slug::derive("mcp_payload_smoke_ability"),
+                ability: Slug::derive("mcp-payload-smoke-ability"),
             })
             .await
             .unwrap();
@@ -2881,6 +2921,7 @@ mod tests {
             .configure_domain(DomainConfigureParams {
                 data: DomainConfigureDocument {
                     metadata: Some(DomainConfigureMetadata {
+                        slug: Some(Slug::derive("build-domain")),
                         name: Some("Build Domain".to_string()),
                         path: None,
                         description: None,
@@ -2947,6 +2988,7 @@ mod tests {
             .configure_context_block(ContextBlockConfigureParams {
                 data: ContextBlockConfigureDocument {
                     metadata: Some(ContextBlockConfigureMetadata {
+                        slug: Some(Slug::derive("mcp-payload-smoke-context")),
                         name: Some("mcp_payload_smoke_context".to_string()),
                         path: Some("smoke".to_string()),
                         description: None,
@@ -2961,7 +3003,7 @@ mod tests {
 
         let result = backend
             .get_context_block(ContextBlocksGetParams {
-                context_block: Slug::derive("smoke-mcp_payload_smoke_context"),
+                context_block: Slug::derive("smoke-mcp-payload-smoke-context"),
             })
             .await
             .unwrap();
@@ -3020,6 +3062,7 @@ mod tests {
                     routine: Some(Slug::derive("brand-design-workflow")),
                     metadata: Some(RoutineConfigureMetadata {
                         name: Some("Brand Design Workflow".to_string()),
+                        slug: None,
                         description: Some(Some("Updated workflow".to_string())),
                         project_id: None,
                         is_active: Some(true),
@@ -3089,6 +3132,7 @@ mod tests {
                     agent: Some(Slug::derive("brand-designer")),
                     metadata: Some(AgentConfigureMetadata {
                         name: Some("Brand Designer".to_string()),
+                        slug: None,
                         description: Some(Some("Updated agent".to_string())),
                         color: None,
                         model: None,
@@ -3144,6 +3188,7 @@ mod tests {
                 data: AbilityConfigureDocument {
                     ability: Some(Slug::derive("brand_review")),
                     metadata: Some(AbilityConfigureMetadata {
+                        slug: None,
                         name: Some("brand_review".to_string()),
                         path: None,
                         description: Some(Some("Updated ability".to_string())),
@@ -3201,6 +3246,7 @@ mod tests {
                 data: DomainConfigureDocument {
                     domain: Some(Slug::derive("brand-domain")),
                     metadata: Some(DomainConfigureMetadata {
+                        slug: None,
                         name: Some("Brand Domain".to_string()),
                         path: None,
                         description: Some(Some("Updated domain".to_string())),
@@ -3254,6 +3300,7 @@ mod tests {
                 data: ContextBlockConfigureDocument {
                     context_block: Some(Slug::derive("brand-guidance")),
                     metadata: Some(ContextBlockConfigureMetadata {
+                        slug: None,
                         name: Some("Brand Guidance".to_string()),
                         path: None,
                         description: Some(Some("Updated context".to_string())),
@@ -3395,6 +3442,7 @@ mod tests {
                     id: None,
                     domain: None,
                     metadata: Some(DomainConfigureMetadata {
+                        slug: Some(Slug::derive("build-domain")),
                         name: Some("Build Domain".to_string()),
                         path: None,
                         description: None,

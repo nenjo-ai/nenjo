@@ -220,7 +220,7 @@ The crate also exposes small helpers used by importers:
 
 - `validate_source_path` normalizes safe repository-relative paths.
 - `package_entry_path` resolves a descriptor-relative entry filename.
-- `version_satisfies` checks exact and caret-major version requirements.
+- `version_satisfies` checks exact and standard SemVer caret requirements (including `0.x` compatibility rules).
 - `parse_json_or_yaml` and `parse_json_or_yaml_as` support either JSON or YAML.
 - `sha256_hex` returns `sha256:<hex>` content hashes for lockfiles.
 

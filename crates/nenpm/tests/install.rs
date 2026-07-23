@@ -6,6 +6,7 @@ use nenjo_nenpm::{
     DependencyManifest, FetchMode, InstallOptions, NenpmLock, PackageInstallIndex, PackageSource,
     ResolveOptions, install, package_install_path, package_instance_key, resolve,
 };
+use nenjo_packages::{PackageResourceInstanceKey, PackageResourceLogicalKey};
 
 use support::{copy_dir, fixture, temp_workspace, write_file};
 
@@ -40,13 +41,40 @@ fn install_resolves_local_repository_override_and_writes_lockfile() {
     assert_eq!(lock.packages[1].name, "agent");
     assert_eq!(lock.packages[0].modules.len(), 2);
     assert_eq!(lock.packages[1].modules.len(), 3);
-    assert!(
-        lock.packages[1]
-            .modules
-            .iter()
-            .any(|module| module.path == "agents/support.yaml"
-                && module.resource.as_deref() == Some("support_agent")
-                && module.imports.len() == 1)
+    let support_agent = lock.packages[1]
+        .modules
+        .iter()
+        .find(|module| module.path == "agents/support.yaml")
+        .expect("support agent should be locked");
+    assert_eq!(support_agent.resource, "support_agent");
+    assert_eq!(support_agent.imports.len(), 1);
+    let identity_name = support_agent
+        .resource_path
+        .as_ref()
+        .expect("resource path should be locked")
+        .identity_name();
+    let expected_logical_ref = PackageResourceLogicalKey::legacy(
+        "agent",
+        support_agent.kind,
+        &support_agent.path,
+        identity_name.as_str(),
+    )
+    .unwrap();
+    let expected_instance_key = PackageResourceInstanceKey::legacy(
+        "agent",
+        "0.1.0",
+        support_agent.kind,
+        &support_agent.path,
+        identity_name.as_str(),
+    )
+    .unwrap();
+    assert_eq!(
+        support_agent.logical_ref.as_ref(),
+        Some(&expected_logical_ref)
+    );
+    assert_eq!(
+        support_agent.instance_key.as_ref(),
+        Some(&expected_instance_key)
     );
     let agent_install = package_install_path(&project, "agent", "0.1.0");
     assert!(agent_install.join("nenjo.package.yaml").exists());
@@ -137,11 +165,11 @@ Run $CLAUDE_SKILL_DIR/scripts/review.sh when useful.
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Skill
-                && module.name == "acme_tools__review")
+                && module.resource == "Acme Tools: review")
     );
     assert!(package.modules.iter().any(|module| module.kind
         == nenjo_packages::PackageKind::McpServer
-        && module.name == "acme_tools__review_server"));
+        && module.resource == "Acme Tools: review-server"));
 
     let install_root = package_install_path(&project, "acme_tools", "0.1.0");
     assert!(install_root.join("package.yaml").exists());
@@ -283,14 +311,14 @@ Run $CLAUDE_SKILL_DIR/scripts/review.sh when useful.
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Agent
-                && module.name == "support_agent")
+                && module.resource == "support_agent")
     );
     assert!(
         agent_package
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Ability
-                && module.name == "design_agent")
+                && module.resource == "design_agent")
     );
 
     let plugin_package = report
@@ -305,32 +333,32 @@ Run $CLAUDE_SKILL_DIR/scripts/review.sh when useful.
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Plugin
-                && module.name == "acme_tools")
+                && module.resource == "Acme Tools")
     );
     assert!(
         plugin_package
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Skill
-                && module.name == "acme_tools__review")
+                && module.resource == "Acme Tools: review")
     );
     assert!(
         plugin_package
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Command
-                && module.name == "acme_tools__audit")
+                && module.resource == "Acme Tools: audit")
     );
     assert!(
         plugin_package
             .modules
             .iter()
             .any(|module| module.kind == nenjo_packages::PackageKind::Hook
-                && module.name == "acme_tools__stop_audit_stop")
+                && module.resource == "Acme Tools: Stop_audit-stop")
     );
     assert!(plugin_package.modules.iter().any(|module| module.kind
         == nenjo_packages::PackageKind::McpServer
-        && module.name == "acme_tools__review_server"));
+        && module.resource == "Acme Tools: review-server"));
 
     let agent_install = package_install_path(&project, "agent", "0.1.0");
     assert!(agent_install.join("agents/support.yaml").exists());
@@ -698,7 +726,7 @@ fn install_resolves_registry_dependency_and_writes_lockfile() {
         report.lockfile.packages[1]
             .modules
             .iter()
-            .any(|module| module.name == "support_agent" && module.imports.is_empty())
+            .any(|module| module.resource == "support_agent" && module.imports.is_empty())
     );
     let package_root = package_install_path(&project, "agent", "0.2.0");
     assert!(package_root.join("nenjo.package.yaml").exists());
@@ -714,6 +742,89 @@ fn install_resolves_registry_dependency_and_writes_lockfile() {
     assert_eq!(entry.root, ".nenjo/packages/agent@0.2.0");
     assert_eq!(entry.manifest_path, "nenjo.package.yaml");
 
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn install_accumulates_constraints_before_finalizing_registry_version() {
+    let workspace = temp_workspace("registry-constraint-aggregation");
+    let project = workspace.join("project");
+    let registry = workspace.join("registry");
+    let packages = workspace.join("packages");
+    write_file(
+        &project,
+        "nenpm.yml",
+        r#"schema: nenjo.dependencies.v1
+
+dependencies:
+  app_a: "1.0.0"
+  app_b: "1.0.0"
+
+registries:
+  - ../registry/registry.yaml
+"#,
+    );
+    write_file(
+        &registry,
+        "registry.yaml",
+        r#"schema: nenjo.registry.v1
+packages:
+  core:
+    - version: "1.2.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: core-v120/nenjo.package.yaml
+    - version: "1.9.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: core-v190/nenjo.package.yaml
+  app_a:
+    - version: "1.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: app-a/nenjo.package.yaml
+      dependencies:
+        core: "1.2.0"
+  app_b:
+    - version: "1.0.0"
+      source:
+        kind: local
+        root: ../packages
+        manifest_path: app-b/nenjo.package.yaml
+      dependencies:
+        core: "^1.0.0"
+"#,
+    );
+    for (path, name, version, dependency) in [
+        ("core-v120", "core", "1.2.0", None),
+        ("core-v190", "core", "1.9.0", None),
+        ("app-a", "app_a", "1.0.0", Some("1.2.0")),
+        ("app-b", "app_b", "1.0.0", Some("^1.0.0")),
+    ] {
+        let dependencies = dependency.map_or_else(String::new, |requirement| {
+            format!("dependencies:\n  core: \"{requirement}\"\n")
+        });
+        write_file(
+            &packages,
+            &format!("{path}/nenjo.package.yaml"),
+            &format!(
+                "schema: nenjo.package.v1\nname: {name}\nversion: \"{version}\"\n{dependencies}"
+            ),
+        );
+    }
+
+    let report = install(InstallOptions::new(&project).dry_run(true)).unwrap();
+    let core = report
+        .lockfile
+        .packages
+        .iter()
+        .find(|package| package.name == "core")
+        .expect("core is resolved");
+
+    assert_eq!(core.version, "1.2.0");
     fs::remove_dir_all(workspace).unwrap();
 }
 

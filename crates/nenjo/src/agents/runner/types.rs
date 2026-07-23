@@ -355,11 +355,22 @@ pub struct TurnOutput {
     pub messages: Vec<ChatMessage>,
 }
 
+/// Terminal failures produced by the agent turn loop.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TurnLoopError {
+    /// The caller required a completion tool that is not present as a terminal tool.
+    #[error("required completion tool '{tool}' is unavailable or is not terminal")]
+    RequiredCompletionToolUnavailable { tool: &'static str },
+    /// The model used every permitted turn without producing a final response.
+    #[error("turn loop reached the maximum of {max_turns} turns without a final response")]
+    MaxTurnsReached { max_turns: usize },
+}
+
 /// Configuration for the turn loop.
 #[derive(Debug, Clone)]
 pub struct TurnLoopConfig {
-    /// Maximum number of LLM call iterations before forcing a stop.
-    pub max_turns: u32,
+    /// Maximum number of LLM call iterations before failing the execution.
+    pub max_turns: usize,
     /// Whether to execute multiple tool calls in parallel.
     pub parallel_tools: bool,
 }
@@ -367,7 +378,7 @@ pub struct TurnLoopConfig {
 impl Default for TurnLoopConfig {
     fn default() -> Self {
         Self {
-            max_turns: 50,
+            max_turns: crate::config::DEFAULT_AGENT_MAX_TURNS,
             parallel_tools: true,
         }
     }

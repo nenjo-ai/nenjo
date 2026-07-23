@@ -1165,10 +1165,10 @@ mod tests {
     #[test]
     fn package_command_template_strips_frontmatter_and_expands_arguments() {
         let command = CommandManifest {
-            name: "ralph-loop".to_string(),
+            name: "Ralph Loop".to_string(),
+            slug: Slug::derive("ralph-loop"),
             path: "plugins/ralph_loop".to_string(),
             command: "/ralph-loop".to_string(),
-            display_name: Some("Ralph Loop".to_string()),
             description: None,
             entry_path: "command.md".to_string(),
             content: String::new(),
@@ -1203,9 +1203,9 @@ mod tests {
     fn native_command_template_keeps_content_unmodified_except_arguments() {
         let command = CommandManifest {
             name: "design".to_string(),
+            slug: Slug::derive("design"),
             path: String::new(),
             command: "/design".to_string(),
-            display_name: None,
             description: None,
             entry_path: "command.md".to_string(),
             content: String::new(),
@@ -1239,9 +1239,9 @@ mod tests {
     async fn load_command_prefers_inline_content_over_runtime_file_paths() {
         let command = CommandManifest {
             name: "design".to_string(),
+            slug: Slug::derive("design"),
             path: String::new(),
             command: "/design".to_string(),
-            display_name: None,
             description: None,
             entry_path: "command.md".to_string(),
             content: "Inline command body.".to_string(),
@@ -1482,7 +1482,7 @@ Original user message: {{ chat.message }}
 
         let skill = SkillManifest {
             name: "ralph-loop".to_string(),
-            display_name: Some("ralph-loop".to_string()),
+            slug: Slug::derive("ralph-loop"),
             aliases: vec!["ralph".to_string()],
             description: Some("Loop until completion.".to_string()),
             entry_path: "SKILL.md".to_string(),
@@ -1500,8 +1500,8 @@ Original user message: {{ chat.message }}
             metadata: Value::Null,
         };
         let hook = HookManifest {
-            name: "ralph-loop-stop".to_string(),
-            display_name: Some("Ralph Loop Stop".to_string()),
+            name: "Ralph Loop Stop".to_string(),
+            slug: Slug::derive("ralph-loop-stop"),
             description: None,
             event: "Stop".to_string(),
             matcher: Some("*".to_string()),
@@ -1709,7 +1709,7 @@ Original user message: {{ chat.message }}
 
         let skill = SkillManifest {
             name: "ralph-loop".to_string(),
-            display_name: Some("ralph-loop".to_string()),
+            slug: Slug::derive("ralph-loop"),
             aliases: vec!["ralph".to_string()],
             description: Some("Loop until completion.".to_string()),
             entry_path: "SKILL.md".to_string(),
@@ -2258,7 +2258,7 @@ Original user message: {{ chat.message }}
         let mcp_server = skill_mcp_server_manifest(&plugin_dir);
         let skill = SkillManifest {
             name: "mcp-skill".to_string(),
-            display_name: Some("mcp-skill".to_string()),
+            slug: Slug::derive("mcp-skill"),
             aliases: Vec::new(),
             description: Some("Skill with MCP tools.".to_string()),
             entry_path: "SKILL.md".to_string(),
@@ -2269,7 +2269,7 @@ Original user message: {{ chat.message }}
             scripts: Vec::new(),
             references: Vec::new(),
             assets: Vec::new(),
-            mcp_servers: vec![Slug::derive(&mcp_server.name)],
+            mcp_servers: vec![mcp_server.slug.clone()],
             hooks: Vec::new(),
             source_type: "package".to_string(),
             read_only: true,
@@ -2651,7 +2651,7 @@ Original user message: {{ chat.message }}
     }
 
     #[tokio::test]
-    async fn stop_hook_request_next_turn_is_bounded_by_max_turns() {
+    async fn stop_hook_request_next_turn_fails_at_max_turns() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_dir = temp.path().join("workspace");
         let project_work_dir = workspace_dir.join("demo-project");
@@ -2710,7 +2710,7 @@ Original user message: {{ chat.message }}
             state_dir: state_dir.clone(),
         };
 
-        harness
+        let error = harness
             .handle_chat_command(
                 &ctx,
                 ChatSlashCommandRequest {
@@ -2727,7 +2727,13 @@ Original user message: {{ chat.message }}
                 },
             )
             .await
-            .unwrap();
+            .expect_err("max-turn exhaustion should fail the chat run");
+
+        assert!(
+            format!("{error:#}")
+                .contains("turn loop reached the maximum of 2 turns without a final response"),
+            "the max-turn failure should propagate through the harness: {error:#}"
+        );
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
@@ -2745,8 +2751,14 @@ Original user message: {{ chat.message }}
             "Stop hook should request continuation before the cap is reached"
         );
         assert!(
-            done_output_contains(&responses, "draft-2"),
-            "cap fallback should return the last assistant response"
+            !responses.iter().any(|response| matches!(
+                response,
+                Response::AgentResponse {
+                    payload: StreamEvent::Done { .. },
+                    ..
+                }
+            )),
+            "max-turn exhaustion must not emit a successful Done output"
         );
 
         let requests = model_requests.lock().unwrap();
@@ -2805,10 +2817,10 @@ Original user message: {{ chat.message }}
                 settings: Value::Null,
             }],
             commands: vec![CommandManifest {
-                name: "ralph-loop".to_string(),
+                name: "Ralph Loop".to_string(),
+                slug: Slug::derive("ralph-loop"),
                 path: "plugins/ralph_loop".to_string(),
                 command: "/ralph-loop".to_string(),
-                display_name: Some("Ralph Loop".to_string()),
                 description: None,
                 entry_path: "command.md".to_string(),
                 content: String::new(),
@@ -2822,8 +2834,8 @@ Original user message: {{ chat.message }}
                 metadata: Value::Null,
             }],
             hooks: vec![HookManifest {
-                name: "ralph-loop-stop".to_string(),
-                display_name: Some("Ralph Loop Stop".to_string()),
+                name: "Ralph Loop Stop".to_string(),
+                slug: Slug::derive("ralph-loop-stop"),
                 description: None,
                 event: hook_event.to_string(),
                 matcher: Some("*".to_string()),
@@ -2898,7 +2910,7 @@ Original user message: {{ chat.message }}
     ) -> SkillManifest {
         SkillManifest {
             name: "ralph-loop".to_string(),
-            display_name: Some("ralph-loop".to_string()),
+            slug: Slug::derive("ralph-loop"),
             aliases: vec!["ralph".to_string()],
             description: Some("Loop until completion.".to_string()),
             entry_path: "SKILL.md".to_string(),
@@ -2939,8 +2951,8 @@ Original user message: {{ chat.message }}
         matcher: &str,
     ) -> HookManifest {
         HookManifest {
-            name: name.to_string(),
-            display_name: Some("Ralph Loop Stop".to_string()),
+            name: "Ralph Loop Stop".to_string(),
+            slug: Slug::derive(name),
             description: None,
             event: event.to_string(),
             matcher: Some(matcher.to_string()),
@@ -2960,8 +2972,8 @@ Original user message: {{ chat.message }}
 
     fn skill_mcp_server_manifest(plugin_dir: &Path) -> McpServerManifest {
         McpServerManifest {
-            name: "mcp_skill__review_server".to_string(),
-            display_name: "mcp-skill:review-server".to_string(),
+            slug: nenjo::Slug::derive("mcp-skill-review-server"),
+            name: "MCP Skill: Review Server".to_string(),
             description: Some("Review MCP server".to_string()),
             transport: "stdio".to_string(),
             command: Some("bash".to_string()),

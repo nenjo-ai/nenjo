@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use nenjo::Slug;
-use nenjo::manifest::{Manifest, ProjectManifest};
+use nenjo::manifest::{Manifest, ManifestResource, ProjectManifest};
 use nenjo_models::{ChatRequest, ChatResponse, TokenUsage};
 use nenjo_sessions::{
     CheckpointRecord, SessionCheckpoint, SessionRuntimeEvent, SessionStatus, SessionStore,
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use nenjo_worker::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_worker::bootstrap::WorkerManifestCache;
-use nenjo_worker::handlers::manifest::ManifestStore;
+use nenjo_worker::handlers::manifest::{ManifestCacheMutation, ManifestStore};
 use nenjo_worker::sessions::{WorkerSessionRuntime, WorkerSessionStores};
 
 struct TestModelProvider;
@@ -116,8 +116,16 @@ async fn worker_manifest_stores_keep_file_locations_worker_owned() {
     let config_dir = cache.config_dir.clone();
 
     let manifest = harness.provider().manifest_snapshot();
+    let project = manifest.projects[0].clone();
     cache
-        .persist_resource(&manifest, nenjo_events::ResourceType::Project)
+        .persist_change(
+            &ManifestCacheMutation::upsert(
+                Some(project_id),
+                None,
+                ManifestResource::Project(project),
+            )
+            .unwrap(),
+        )
         .await
         .expect("persist project manifest cache");
     assert!(manifests_dir.join("projects.json").exists());

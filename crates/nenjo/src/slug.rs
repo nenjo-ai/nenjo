@@ -20,7 +20,8 @@ pub enum SlugError {
 }
 
 impl Slug {
-    pub const MAX_LEN: usize = 64;
+    /// Matches the platform's persisted `varchar(255)` slug boundary.
+    pub const MAX_LEN: usize = 255;
 
     pub fn parse(value: impl AsRef<str>) -> Result<Self, SlugError> {
         let value = value.as_ref();
@@ -208,6 +209,11 @@ mod tests {
     #[test]
     fn parses_valid_slug() {
         assert_eq!(Slug::parse("core_pack-1").unwrap().as_str(), "core_pack-1");
+        assert!(Slug::parse("a".repeat(Slug::MAX_LEN)).is_ok());
+        assert_eq!(
+            Slug::parse("a".repeat(Slug::MAX_LEN + 1)),
+            Err(SlugError::TooLong { max: Slug::MAX_LEN })
+        );
     }
 
     #[test]
@@ -245,7 +251,7 @@ mod tests {
 
     #[test]
     fn appends_suffix_with_max_length_preserved() {
-        let slug = Slug::derive("a".repeat(64)).with_slug_suffix("ABC 123");
+        let slug = Slug::derive("a".repeat(Slug::MAX_LEN)).with_slug_suffix("ABC 123");
         assert_eq!(slug.as_str().len(), Slug::MAX_LEN);
         assert!(slug.as_str().ends_with("-abc-123"));
     }

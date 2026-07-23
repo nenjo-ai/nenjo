@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nenjo::manifest::{HasManifestSlug, context_block_slug, domain_slug};
+use nenjo::manifest::{ManifestResource, ManifestResourceKind, manifest_by_slug};
 use nenjo::{Manifest, Slug};
 use nenjo_events::{EncryptedPayload, ManifestResourcePayload, ResourceAction, ResourceType};
 use nenjo_platform::api_client::ApiClient;
@@ -11,7 +11,7 @@ use super::fetch::apply_upsert;
 use super::inline::{apply_decrypted_manifest_upsert, apply_inline_upsert};
 use super::knowledge::{document_edges_source, parse_knowledge_document_payload};
 use super::payload::parse_decrypted_manifest_payload;
-use super::services::{ManifestStore, McpRuntime};
+use super::services::{ManifestCacheMutation, ManifestStore, McpRuntime};
 use nenjo_platform::PlatformResourceKind;
 
 use crate::bootstrap::WorkerManifestCache;
@@ -155,6 +155,28 @@ where
         });
     }
 
+    let previous_resource = if action != ResourceAction::Deleted {
+        if let (Some(kind), Some(id)) = (platform_resource_kind(resource_type), resource_id) {
+            match store.platform_resource_slug_for_id(kind, id).await {
+                Ok(previous) => previous.filter(|previous| previous != &resource),
+                Err(error) => {
+                    warn!(
+                        %resource_type,
+                        %resource,
+                        resource_id = %id,
+                        error = %error,
+                        "Failed to resolve prior platform resource slug"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if let Some(kind) = platform_resource_kind(resource_type) {
         let sidecar_result = if action == ResourceAction::Deleted {
             if let Some(id) = resource_id {
@@ -209,6 +231,16 @@ where
     }
 
     let mut manifest = current.clone();
+    if let Some(previous_resource) = previous_resource.as_ref() {
+        apply_delete(&mut manifest, resource_type, previous_resource, resource_id);
+        debug!(
+            %resource_type,
+            old_resource = %previous_resource,
+            new_resource = %resource,
+            resource_id = ?resource_id,
+            "Removed stale resource slug before applying rename"
+        );
+    }
     let mut source = ManifestApplySource::Ignored;
     let mut applied_inline = false;
     let mut fetched_payload = None;
@@ -314,10 +346,16 @@ where
             .await;
         }
         ResourceType::KnowledgePack => {
-            if action != ResourceAction::Deleted
-                && let Err(error) = store.sync_knowledge_pack(client, &resource).await
-            {
-                warn!(pack = %resource, error = %error, "Knowledge pack sync failed");
+            if action != ResourceAction::Deleted {
+                match store.sync_knowledge_pack(client, &resource).await {
+                    Ok(Some(pack)) => {
+                        manifest.upsert_resource(ManifestResource::KnowledgePack(pack))
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(pack = %resource, error = %error, "Knowledge pack sync failed");
+                    }
+                }
             }
         }
         ResourceType::Project => {}
@@ -336,15 +374,23 @@ where
         );
     }
 
-    let persist_result = if action == ResourceAction::Deleted {
-        store
-            .remove_resource(&manifest, resource_type, &resource)
-            .await
-    } else {
-        store.persist_resource(&manifest, resource_type).await
-    };
-    if let Err(error) = persist_result {
-        warn!(%error, rt = %resource_type, "Failed to persist resource cache");
+    match manifest_cache_mutation(
+        &manifest,
+        resource_type,
+        action,
+        resource_id,
+        &resource,
+        previous_resource,
+    ) {
+        Ok(Some(mutation)) => {
+            if let Err(error) = store.persist_change(&mutation).await {
+                warn!(%error, rt = %resource_type, "Failed to persist resource cache mutation");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(%error, rt = %resource_type, "Failed to build resource cache mutation");
+        }
     }
 
     debug!(?source, %resource_type, %resource, resource_id = ?resource_id, "Manifest change applied");
@@ -404,6 +450,56 @@ fn platform_resource_kind(resource_type: ResourceType) -> Option<PlatformResourc
         | ResourceType::Document
         | ResourceType::KnowledgePack => None,
     }
+}
+
+fn manifest_cache_kind(resource_type: ResourceType) -> Option<ManifestResourceKind> {
+    match resource_type {
+        ResourceType::Agent => Some(ManifestResourceKind::Agent),
+        ResourceType::Model => Some(ManifestResourceKind::Model),
+        ResourceType::Routine => Some(ManifestResourceKind::Routine),
+        ResourceType::Project => Some(ManifestResourceKind::Project),
+        ResourceType::Council => Some(ManifestResourceKind::Council),
+        ResourceType::Ability => Some(ManifestResourceKind::Ability),
+        ResourceType::Command => Some(ManifestResourceKind::Command),
+        ResourceType::ContextBlock => Some(ManifestResourceKind::ContextBlock),
+        ResourceType::McpServer => Some(ManifestResourceKind::McpServer),
+        ResourceType::Domain => Some(ManifestResourceKind::Domain),
+        // Knowledge-pack synchronization owns both its library content and its
+        // canonical manifest entry. Mixing it into the generic mutation path
+        // can reinterpret a not-yet-loaded snapshot as a deletion.
+        ResourceType::KnowledgePack => None,
+        ResourceType::ModelAssignment
+        | ResourceType::ModelCapabilityDefault
+        | ResourceType::Document => None,
+    }
+}
+
+fn manifest_cache_mutation(
+    manifest: &Manifest,
+    resource_type: ResourceType,
+    action: ResourceAction,
+    resource_id: Option<Uuid>,
+    resource: &Slug,
+    previous_slug: Option<Slug>,
+) -> Result<Option<ManifestCacheMutation>> {
+    let Some(kind) = manifest_cache_kind(resource_type) else {
+        return Ok(None);
+    };
+    if action == ResourceAction::Deleted {
+        return Ok(Some(ManifestCacheMutation::delete(
+            kind,
+            resource_id,
+            resource.clone(),
+            previous_slug,
+        )));
+    }
+
+    let Some(snapshot) = manifest.resource_snapshot(kind, resource) else {
+        anyhow::bail!(
+            "{resource_type} '{resource}' was not present after a non-delete manifest event"
+        );
+    };
+    ManifestCacheMutation::upsert(resource_id, previous_slug, snapshot).map(Some)
 }
 
 struct DocumentSideEffectContext<'a, StoreRt>
@@ -530,59 +626,116 @@ fn resource_id_from_manifest(
     resource: &Slug,
 ) -> Option<Uuid> {
     match resource_type {
-        ResourceType::Agent => manifest
-            .agents
-            .iter()
-            .find(|item| item.slug == *resource)
+        ResourceType::Agent => manifest_by_slug(&manifest.agents, resource)
             .map(|item| crate::resource_resolver::stable_resource_id("agent", &item.slug)),
-        ResourceType::Model => manifest
-            .models
-            .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
+        ResourceType::Model => manifest_by_slug(&manifest.models, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("model", resource)),
-        ResourceType::Routine => manifest
-            .routines
-            .iter()
-            .find(|item| item.slug == *resource)
+        ResourceType::Routine => manifest_by_slug(&manifest.routines, resource)
             .map(|item| crate::resource_resolver::stable_resource_id("routine", &item.slug)),
-        ResourceType::Project => manifest
-            .projects
-            .iter()
-            .find(|item| item.slug == *resource)
+        ResourceType::Project => manifest_by_slug(&manifest.projects, resource)
             .map(|item| crate::resource_resolver::stable_resource_id("project", &item.slug)),
-        ResourceType::Council => manifest
-            .councils
-            .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
+        ResourceType::Council => manifest_by_slug(&manifest.councils, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("council", resource)),
-        ResourceType::Ability => manifest
-            .abilities
-            .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
+        ResourceType::Ability => manifest_by_slug(&manifest.abilities, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("ability", resource)),
-        ResourceType::Command => manifest
-            .commands
-            .iter()
-            .find(|item| item.manifest_slug() == *resource)
+        ResourceType::Command => manifest_by_slug(&manifest.commands, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("command", resource)),
-        ResourceType::ContextBlock => manifest
-            .context_blocks
-            .iter()
-            .find(|item| context_block_slug(&item.path, &item.name) == *resource)
+        ResourceType::ContextBlock => manifest_by_slug(&manifest.context_blocks, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("context_block", resource)),
-        ResourceType::McpServer => manifest
-            .mcp_servers
-            .iter()
-            .find(|item| Slug::derive(&item.name) == *resource)
+        ResourceType::McpServer => manifest_by_slug(&manifest.mcp_servers, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("mcp_server", resource)),
-        ResourceType::Domain => manifest
-            .domains
-            .iter()
-            .find(|item| domain_slug(&item.path, &item.name) == *resource)
+        ResourceType::Domain => manifest_by_slug(&manifest.domains, resource)
             .map(|_| crate::resource_resolver::stable_resource_id("domain", resource)),
         ResourceType::ModelAssignment
         | ResourceType::ModelCapabilityDefault
         | ResourceType::Document
         | ResourceType::KnowledgePack => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nenjo::agents::prompts::PromptConfig;
+
+    fn agent(slug: &str) -> nenjo::manifest::AgentManifest {
+        nenjo::manifest::AgentManifest {
+            name: slug.to_string(),
+            slug: Slug::derive(slug),
+            description: None,
+            prompt_config: PromptConfig::default(),
+            color: None,
+            model: None,
+            domains: Vec::new(),
+            platform_scopes: Vec::new(),
+            mcp_servers: Vec::new(),
+            script_tools: Vec::new(),
+            media: Vec::new(),
+            abilities: Vec::new(),
+            prompt_locked: false,
+            source_type: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn agent_cache_mutation_contains_only_the_event_target() {
+        let target_id = Uuid::from_u128(1);
+        let target = Slug::derive("shop-manager");
+        let package_overlay = Slug::derive("bay-agent");
+        let manifest = Manifest {
+            agents: vec![agent(target.as_str()), agent(package_overlay.as_str())],
+            ..Default::default()
+        };
+
+        let mutation = manifest_cache_mutation(
+            &manifest,
+            ResourceType::Agent,
+            ResourceAction::Updated,
+            Some(target_id),
+            &target,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(mutation.kind(), ManifestResourceKind::Agent);
+        assert_eq!(mutation.resource_id(), Some(target_id));
+        assert_eq!(mutation.slug(), &target);
+        let Some(ManifestResource::Agent(snapshot)) = mutation.resource() else {
+            panic!("expected an agent cache snapshot")
+        };
+        assert_eq!(snapshot.slug, target);
+        assert_ne!(snapshot.slug, package_overlay);
+    }
+
+    #[test]
+    fn missing_snapshot_on_non_delete_event_is_not_a_delete() {
+        let error = manifest_cache_mutation(
+            &Manifest::default(),
+            ResourceType::Agent,
+            ResourceAction::Updated,
+            Some(Uuid::from_u128(1)),
+            &Slug::derive("missing-agent"),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("was not present"));
+    }
+
+    #[test]
+    fn knowledge_pack_events_are_not_generic_cache_mutations() {
+        let mutation = manifest_cache_mutation(
+            &Manifest::default(),
+            ResourceType::KnowledgePack,
+            ResourceAction::Updated,
+            Some(Uuid::from_u128(1)),
+            &Slug::derive("product-guides"),
+            None,
+        )
+        .unwrap();
+
+        assert!(mutation.is_none());
     }
 }

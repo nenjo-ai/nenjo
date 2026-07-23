@@ -3,7 +3,7 @@ use nenjo::{ToolCategory, ToolSpec};
 fn ability_ref_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "Existing ability slug. Use `name` from list_abilities or get_ability. For configure_ability, omit `ability` to create a new ability."
+        "description": "Existing ability slug. Use `slug` from list_abilities or get_ability. For configure_ability, omit `ability` to create a new ability."
     })
 }
 
@@ -32,8 +32,12 @@ fn prompt_config_schema() -> serde_json::Value {
 fn configure_metadata_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Ability metadata patch. Required on create because metadata.name is required when ability is omitted. On update, omitted fields are unchanged.",
+        "description": "Ability metadata patch. metadata.slug and metadata.name are required when creating; omitted fields are unchanged on update.",
         "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Stable ability slug. Required when creating a new ability."
+            },
             "name": {
                 "type": "string",
                 "description": "Ability runtime/display name. Required when creating a new ability."
@@ -72,7 +76,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "list_abilities".to_string(),
-            description: "List visible abilities as prompt-free summaries. Use a returned `name` as the `ability` value in get_ability or configure_ability. This does not include prompt_config; call get_ability for the full ability document."
+            description: "List visible abilities as prompt-free summaries. Use a returned `slug` as the `ability` value in get_ability or configure_ability. This does not include prompt_config; call get_ability for the full ability document."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -97,7 +101,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_ability".to_string(),
-            description: "Create or update one ability in a single backend-owned sequence. Omit `ability` to create; include `ability` to update by slug. On create, metadata.name and prompt_config.developer_prompt are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `ability: AbilityDocument`."
+            description: "Create or update one ability in a single backend-owned sequence. Omit `ability` to create; include `ability` to update by slug. On create, metadata.slug, metadata.name, and prompt_config.developer_prompt are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `ability: AbilityDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

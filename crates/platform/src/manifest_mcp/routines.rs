@@ -184,11 +184,15 @@ fn routine_graph_field_schema(description: &str) -> Value {
 fn configure_metadata_schema() -> Value {
     json!({
         "type": "object",
-        "description": "Routine metadata patch. Required on create because metadata.name is required when routine is omitted. On update, omitted fields are unchanged and null description clears the description.",
+        "description": "Routine metadata patch. Required on create because metadata.name is required when routine is omitted. On update, omitted fields are unchanged, changing name preserves slug, and null description clears the description.",
         "properties": {
             "name": {
                 "type": "string",
                 "description": "Routine display name. Required when creating a routine."
+            },
+            "slug": {
+                "type": "string",
+                "description": "Stable routine locator. Optional on create (derived from name when omitted). On update, omit to preserve it or set it explicitly to rename a dashboard-authored routine."
             },
             "description": {
                 "type": ["string", "null"],

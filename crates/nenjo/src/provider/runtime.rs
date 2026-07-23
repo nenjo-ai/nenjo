@@ -106,22 +106,22 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     /// Find an agent manifest by slug.
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest>;
 
-    /// Find an ability manifest by exact assigned ability name.
+    /// Find an ability manifest by canonical slug.
     ///
     /// Default index uses highest-semver when multiple package versions coexist.
-    fn find_ability(&self, name: &str) -> Option<&AbilityManifest>;
+    fn find_ability(&self, slug: &Slug) -> Option<&AbilityManifest>;
 
     /// Find an ability under a multi-version package content policy.
     fn find_ability_with_policy(
         &self,
-        name: &str,
+        slug: &Slug,
         policy: &crate::package_resolve::PkgResolvePolicy,
     ) -> Option<&AbilityManifest> {
         let _ = policy;
-        self.find_ability(name)
+        self.find_ability(slug)
     }
 
-    /// Find a domain manifest by slug, name, or command selector.
+    /// Find a domain manifest by slug or authored command selector.
     fn find_domain(&self, selector: &str) -> Option<&DomainManifest>;
 
     /// Find a domain under a multi-version package content policy.

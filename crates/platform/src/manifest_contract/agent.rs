@@ -44,7 +44,7 @@ pub struct AgentRecord {
     #[serde(default)]
     pub script_tools: Vec<String>,
     #[serde(default)]
-    pub abilities: Vec<String>,
+    pub abilities: Vec<Slug>,
     #[serde(default)]
     pub prompt_locked: bool,
     #[serde(default = "default_agent_source_type")]

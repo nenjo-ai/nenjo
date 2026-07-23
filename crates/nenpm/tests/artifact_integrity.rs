@@ -45,7 +45,10 @@ packages:
 
     assert_eq!(report.lockfile.packages[0].name, "core");
     assert_eq!(report.lockfile.packages[1].name, "agent");
-    assert_eq!(report.lockfile.packages[1].modules[0].name, "support_agent");
+    assert_eq!(
+        report.lockfile.packages[1].modules[0].resource,
+        "support_agent"
+    );
     assert!(report.lockfile.packages[1].source.is_some());
 
     fs::remove_dir_all(workspace).unwrap();

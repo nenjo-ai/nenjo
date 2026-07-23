@@ -1,4 +1,4 @@
-use nenjo::manifest::{HasManifestSlug, context_block_slug, domain_slug};
+use nenjo::manifest::ManifestIdentity;
 use nenjo::{Manifest, Slug};
 use nenjo_events::ResourceType;
 use tracing::{debug, info};
@@ -13,27 +13,15 @@ pub(super) fn apply_delete(
 ) {
     match rt {
         ResourceType::Agent => manifest.agents.retain(|r| r.slug != *resource),
-        ResourceType::Model => manifest
-            .models
-            .retain(|r| Slug::derive(&r.name) != *resource),
+        ResourceType::Model => manifest.models.retain(|r| r.slug != *resource),
         ResourceType::Routine => manifest.routines.retain(|r| r.slug != *resource),
         ResourceType::Project => manifest.projects.retain(|r| r.slug != *resource),
-        ResourceType::Council => manifest
-            .councils
-            .retain(|r| Slug::derive(&r.name) != *resource),
-        ResourceType::Ability => manifest
-            .abilities
-            .retain(|r| Slug::derive(&r.name) != *resource),
-        ResourceType::Command => manifest.commands.retain(|r| r.manifest_slug() != *resource),
-        ResourceType::ContextBlock => manifest
-            .context_blocks
-            .retain(|r| context_block_slug(&r.path, &r.name) != *resource),
-        ResourceType::McpServer => manifest
-            .mcp_servers
-            .retain(|r| Slug::derive(&r.name) != *resource),
-        ResourceType::Domain => manifest
-            .domains
-            .retain(|r| domain_slug(&r.path, &r.name) != *resource),
+        ResourceType::Council => manifest.councils.retain(|r| r.slug != *resource),
+        ResourceType::Ability => manifest.abilities.retain(|r| r.slug != *resource),
+        ResourceType::Command => manifest.commands.retain(|r| r.manifest_slug() != resource),
+        ResourceType::ContextBlock => manifest.context_blocks.retain(|r| r.slug != *resource),
+        ResourceType::McpServer => manifest.mcp_servers.retain(|r| r.slug != *resource),
+        ResourceType::Domain => manifest.domains.retain(|r| r.slug != *resource),
         ResourceType::ModelAssignment
         | ResourceType::ModelCapabilityDefault
         | ResourceType::Document => {

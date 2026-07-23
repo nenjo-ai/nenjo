@@ -332,14 +332,14 @@ mod tests {
     fn unversioned_selector_prefers_highest_semver() {
         let renderer = ContextRenderer::from_blocks(&[
             versioned_block(
-                "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                 "tool_usage",
                 "BODY-V103",
                 "context",
                 "1.0.3",
             ),
             versioned_block(
-                "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                 "tool_usage",
                 "BODY-V104",
                 "context",
@@ -360,14 +360,14 @@ mod tests {
         let renderer = ContextRenderer::from_blocks_with_policy(
             &[
                 versioned_block(
-                    "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                     "tool_usage",
                     "BODY-V103",
                     "@nenjo-ai/context",
                     "1.0.3",
                 ),
                 versioned_block(
-                    "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                    "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                     "tool_usage",
                     "BODY-V104",
                     "@nenjo-ai/context",
@@ -387,14 +387,14 @@ mod tests {
     fn versioned_selector_still_targets_exact_instance() {
         let renderer = ContextRenderer::from_blocks(&[
             versioned_block(
-                "pkg/nenjo_ai/packages/v1_0_3/context/tools",
+                "pkg/nenjo_ai/packages/context/v1_0_3/tools",
                 "tool_usage",
                 "BODY-V103",
                 "context",
                 "1.0.3",
             ),
             versioned_block(
-                "pkg/nenjo_ai/packages/v1_0_4/context/tools",
+                "pkg/nenjo_ai/packages/context/v1_0_4/tools",
                 "tool_usage",
                 "BODY-V104",
                 "context",
@@ -402,7 +402,7 @@ mod tests {
             ),
         ]);
         let rendered = renderer.render_template(
-            "{{ pkg.nenjo_ai.packages.v1_0_3.context.tools.tool_usage }}",
+            "{{ pkg.nenjo_ai.packages.context.v1_0_3.tools.tool_usage }}",
             &HashMap::new(),
         );
         assert_eq!(rendered.trim(), "BODY-V103");

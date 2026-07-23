@@ -40,12 +40,9 @@ pub struct CouncilRecord {
 }
 
 impl CouncilRecord {
-    pub fn slug_for_name(name: &str) -> String {
-        Slug::derive(name).into_string()
-    }
-
     pub fn to_manifest(&self) -> CouncilManifest {
         CouncilManifest {
+            slug: slug_from_str(&self.slug),
             name: self.name.clone(),
             delegation_strategy: parse_delegation_strategy(&self.delegation_strategy),
             leader_agent: slug_from_str(&self.leader_agent),

@@ -8,7 +8,7 @@ use tracing::warn;
 use super::store::{ManifestReader, ManifestWriter};
 use super::{
     AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest, DomainManifest,
-    HasManifestSlug, KnowledgePackManifest, Manifest, ManifestLoader, ManifestResource,
+    KnowledgePackManifest, Manifest, ManifestIdentity, ManifestLoader, ManifestResource,
     ManifestResourceKind, McpServerManifest, ModelManifest, ProjectManifest, RoutineManifest,
 };
 use crate::Slug;
@@ -139,7 +139,7 @@ impl ManifestReader for LocalManifestStore {
             .list_agents()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelManifest>> {
@@ -151,7 +151,7 @@ impl ManifestReader for LocalManifestStore {
             .list_models()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_routines(&self) -> Result<Vec<RoutineManifest>> {
@@ -163,7 +163,7 @@ impl ManifestReader for LocalManifestStore {
             .list_routines()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_projects(&self) -> Result<Vec<ProjectManifest>> {
@@ -175,7 +175,7 @@ impl ManifestReader for LocalManifestStore {
             .list_projects()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn get_project_by_slug(&self, slug: &str) -> Result<Option<ProjectManifest>> {
@@ -195,7 +195,7 @@ impl ManifestReader for LocalManifestStore {
             .list_councils()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_domains(&self) -> Result<Vec<DomainManifest>> {
@@ -207,7 +207,7 @@ impl ManifestReader for LocalManifestStore {
             .list_domains()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServerManifest>> {
@@ -219,7 +219,7 @@ impl ManifestReader for LocalManifestStore {
             .list_mcp_servers()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_abilities(&self) -> Result<Vec<AbilityManifest>> {
@@ -231,7 +231,7 @@ impl ManifestReader for LocalManifestStore {
             .list_abilities()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_context_blocks(&self) -> Result<Vec<ContextBlockManifest>> {
@@ -243,7 +243,7 @@ impl ManifestReader for LocalManifestStore {
             .list_context_blocks()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 
     async fn list_knowledge_packs(&self) -> Result<Vec<KnowledgePackManifest>> {
@@ -255,7 +255,7 @@ impl ManifestReader for LocalManifestStore {
             .list_knowledge_packs()
             .await?
             .into_iter()
-            .find(|item| item.manifest_slug() == *slug))
+            .find(|item| item.manifest_slug() == slug))
     }
 }
 
@@ -505,6 +505,7 @@ mod tests {
         };
 
         let ability = AbilityManifest {
+            slug: Slug::derive("research"),
             name: "research".into(),
             path: Some("team/core".into()),
             description: None,

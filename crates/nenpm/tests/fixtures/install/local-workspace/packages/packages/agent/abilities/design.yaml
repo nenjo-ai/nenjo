@@ -1,12 +1,14 @@
 schema: nenjo.modules.v1
 resources:
   - schema: nenjo.ability.v1
+    slug: design-agent
     manifest:
       name: design_agent
       tool_name: design_agent
       prompt_config:
         developer_prompt: Design the agent.
   - schema: nenjo.ability.v1
+    slug: diagnose-failure
     manifest:
       name: diagnose_failure
       tool_name: diagnose_failure

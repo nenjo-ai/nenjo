@@ -32,8 +32,12 @@ fn prompt_config_schema() -> serde_json::Value {
 fn configure_metadata_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Domain metadata patch. Required on create because metadata.name and metadata.command are required when domain is omitted. On update, omitted fields are unchanged.",
+        "description": "Domain metadata patch. metadata.slug, metadata.name, and metadata.command are required when creating; omitted fields are unchanged on update.",
         "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Stable domain slug. Required when creating a new domain."
+            },
             "name": {
                 "type": "string",
                 "description": "Domain runtime/display name. Required when creating a new domain."
@@ -98,7 +102,7 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_domain".to_string(),
-            description: "Create or update one domain in a single backend-owned sequence. Omit `domain` to create; include `domain` to update by slug. On create, metadata.name and metadata.command are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `domain: DomainDocument`."
+            description: "Create or update one domain in a single backend-owned sequence. Omit `domain` to create; include `domain` to update by slug. On create, metadata.slug, metadata.name, and metadata.command are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `domain: DomainDocument`."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

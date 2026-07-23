@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use apply::{ManifestChange, apply_manifest_change};
 pub use knowledge::DocumentEdgesSource;
-pub use services::{ManifestStore, McpRuntime, NoopManifestStore, NoopMcpRuntime};
+pub use services::{
+    ManifestCacheMutation, ManifestStore, McpRuntime, NoopManifestStore, NoopMcpRuntime,
+};
 
 use crate::api_client::ApiClient;
 
